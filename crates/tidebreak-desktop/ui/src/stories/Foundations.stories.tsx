@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { ArrowRight, Trash2 } from "lucide-react";
+import { ArrowRight, Trash2, X } from "lucide-react";
 import { expect, userEvent, within } from "storybook/test";
 
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +26,9 @@ function Foundations() {
           <Button variant="destructive">
             <Trash2 aria-hidden="true" /> Delete
           </Button>
+          <Button variant="ghost-destructive">
+            <X aria-hidden="true" /> Stop
+          </Button>
         </div>
       </section>
 
@@ -45,6 +48,7 @@ function Foundations() {
           <Badge variant="merged">Merged</Badge>
           <Badge variant="live">Working</Badge>
           <Badge variant="outline">Neutral</Badge>
+          <Badge variant="destructive">Deleted</Badge>
         </div>
       </section>
 
@@ -93,5 +97,27 @@ export const FocusOutlineLayering: Story = {
     await userEvent.tab();
     await expect(native).toHaveFocus();
     await expect(getComputedStyle(native).outlineStyle).toBe("solid");
+  },
+};
+
+/**
+ * The destructive button with keyboard focus. It takes the standard ring like
+ * every other control: a red wash could not reach 3:1 against the canvas.
+ */
+export const DestructiveFocus: Story = {
+  render: () => (
+    <div className="flex flex-wrap items-center gap-3 p-6">
+      <Button variant="destructive">
+        <Trash2 aria-hidden="true" /> Delete workspace
+      </Button>
+      <Button variant="outline">Cancel</Button>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.tab();
+    await expect(
+      canvas.getByRole("button", { name: "Delete workspace" }),
+    ).toHaveFocus();
   },
 };

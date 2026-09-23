@@ -121,7 +121,7 @@ export function BrowserViewportControl({
                   {label}
                 </span>
                 {widthText && (
-                  <span className="shrink-0 text-muted-foreground/70">
+                  <span className="shrink-0 text-muted-foreground">
                     {widthText}
                   </span>
                 )}
@@ -321,7 +321,7 @@ function CustomWidthField({
           onBlur={() => commitDraft()}
           onFocus={(event) => event.currentTarget.select()}
         />
-        <span className="text-2xs text-muted-foreground/70">px</span>
+        <span className="text-2xs text-muted-foreground">px</span>
       </div>
       {error && (
         <p
@@ -332,7 +332,7 @@ function CustomWidthField({
           {error}
         </p>
       )}
-      <p className="mt-1 text-2xs text-muted-foreground/60">
+      <p className="mt-1 text-2xs text-muted-foreground">
         {MIN_CUSTOM_WIDTH}–{MAX_CUSTOM_WIDTH} px
       </p>
     </form>

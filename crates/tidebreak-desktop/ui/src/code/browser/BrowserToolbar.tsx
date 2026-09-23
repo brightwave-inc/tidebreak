@@ -614,7 +614,7 @@ function BrowserAgentAccessControl({
       >
         <Pause className="size-3 shrink-0" />
         <span className="shrink-0">Agent paused</span>
-        <span className="hidden max-w-28 truncate opacity-75 2xl:inline">
+        <span className="hidden max-w-28 truncate font-normal 2xl:inline">
           {originLabel}
         </span>
         {onShare && (
@@ -668,7 +668,7 @@ function BrowserAgentAccessControl({
         <span className="max-w-28 truncate">{sharedLabel}</span>
         {textOnly && (
           <WithTooltip label="Screenshots are not shared. Choose Share with agent to review the screenshot permission.">
-            <span className="shrink-0 opacity-75">· text only</span>
+            <span className="shrink-0 font-normal">· text only</span>
           </WithTooltip>
         )}
         {textOnly && onShare && (
@@ -853,9 +853,7 @@ export function BrowserAgentControlRow({
       </span>
       <span className="min-w-0 flex-1">
         <span className="font-medium text-foreground">{status}</span>
-        <span className="ml-2 hidden truncate text-xs opacity-80 sm:inline">
-          {detail}
-        </span>
+        <span className="ml-2 hidden truncate text-xs sm:inline">{detail}</span>
       </span>
       {!halted && onStop && (
         <Button

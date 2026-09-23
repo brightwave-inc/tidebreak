@@ -49,6 +49,19 @@ const TONES = [
 
 const ICONS = ["blue", "cyan", "violet", "amber", "rose", "green"] as const;
 
+/** Text inks on the grounds they must stay readable on (4.5:1 or better). */
+const INKS: [string, string][] = [
+  ["text-foreground", "foreground"],
+  ["text-muted-foreground", "muted-foreground"],
+  ["text-critical", "critical, as error ink"],
+];
+
+const GROUNDS: [string, string][] = [
+  ["bg-page-background", "page-background"],
+  ["bg-background", "background"],
+  ["bg-muted", "muted, hovered rows"],
+];
+
 function Palette() {
   return (
     <div className="grid max-w-3xl gap-10">
@@ -69,10 +82,35 @@ function Palette() {
 
       <section className="grid gap-3">
         <div>
+          <h2 className="text-base font-medium">Text on its grounds</h2>
+          <p className="text-sm text-muted-foreground">
+            Each ink clears 4.5:1 on every ground it lands on, in both themes.
+            colorContrast.test.ts checks the ratios; this shows them.
+          </p>
+        </div>
+        <div className="grid grid-cols-3 overflow-hidden rounded-md border border-border">
+          {GROUNDS.map(([ground, groundName]) => (
+            <div key={ground} className={`grid gap-1.5 p-3 ${ground}`}>
+              <p className="font-mono text-2xs text-muted-foreground">
+                {groundName}
+              </p>
+              {INKS.map(([ink, inkName]) => (
+                <p key={ink} className={`text-sm ${ink}`}>
+                  {inkName}
+                </p>
+              ))}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="grid gap-3">
+        <div>
           <h2 className="text-base font-medium">Status tones</h2>
           <p className="text-sm text-muted-foreground">
-            Six tones, each a five-member quad. Code mode picks rungs through
-            statusTone.ts, never by hand. Live is the one accent that is
+            Six tones, each a five-member quad: the mark, the chip (tint and
+            muted text), label text, and the outline. Code mode picks rungs
+            through statusTone.ts, never by hand. Live is the one accent that is
             Tidebreak&apos;s own; ration it to things running this second.
           </p>
         </div>
@@ -88,6 +126,11 @@ function Palette() {
               </span>
               <span className={`text-sm text-${tone}-foreground`}>
                 Label text
+              </span>
+              <span
+                className={`rounded-md border border-${tone}-border bg-${tone}-background px-2 py-0.5 text-xs text-${tone}-foreground`}
+              >
+                Outlined
               </span>
               <span className="ml-2 text-xs text-muted-foreground">
                 {meaning}

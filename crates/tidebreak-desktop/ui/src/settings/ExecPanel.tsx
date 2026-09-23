@@ -418,7 +418,7 @@ function EgressEnforcementDisclosure({
 }
 
 function codeExecutionState(config: ExecConfigInfo | null): {
-  kind: "disabled" | "ready" | "not-configured";
+  kind: "neutral" | "ready" | "warning";
   label: string;
   description: string;
 } {
@@ -428,7 +428,7 @@ function codeExecutionState(config: ExecConfigInfo | null): {
     // the list below are the whole story.
     const usable = config?.providers.some((row) => row.available) ?? true;
     return {
-      kind: "disabled",
+      kind: "neutral",
       label: usable ? "Disabled" : "No execution provider configured",
       description: usable
         ? "No code-execution provider is selected."
@@ -446,7 +446,7 @@ function codeExecutionState(config: ExecConfigInfo | null): {
     };
   }
   return {
-    kind: "not-configured",
+    kind: "warning",
     label: "Unavailable",
     description: `${codeExecutionProviderLabel(config.provider)} is selected but cannot run: ${
       config.unavailable_reason

@@ -44,7 +44,9 @@
   --secondary-foreground: oklch(0.205 0.01 240);
 
   --muted: oklch(0.968 0.004 240);
-  --muted-foreground: oklch(0.556 0.014 240);
+  /* Secondary text. Dark enough to clear 4.5:1 on the canvas, on muted
+     regions, and on hovered rows (colorContrast.test.ts). */
+  --muted-foreground: oklch(0.525 0.014 240);
 
   --accent: oklch(0.968 0.004 240);
   --accent-foreground: oklch(0.205 0.01 240);
@@ -55,33 +57,44 @@
   --popover: oklch(0.997 0.002 240);
   --popover-foreground: oklch(0.145 0.008 240);
 
-  --destructive: oklch(0.577 0.245 27.325);
+  /* shadcn's name for the critical tone: errors and destructive actions share
+     one red, so `text-destructive` reads as text wherever `text-critical`
+     does. */
+  --destructive: var(--critical);
   --destructive-foreground: oklch(0.984 0.003 247.858);
 
-  /* Semantic status */
-  --success: oklch(0.627 0.194 149.214);
+  /* Semantic status. Each tone is a quad of rungs, and colorContrast.test.ts
+     holds every rung to its job in both themes:
+       --x                  the mark: glyphs, dots, fills. 3:1 on any ground.
+       --x-foreground       the text rung. 4.5:1 on any ground and on its tint.
+       --x-foreground-muted the text rung at 90%, for chips. Still 4.5:1.
+       --x-background       a quiet tint near the canvas.
+       --x-border           the tone's outline. */
+  --success: oklch(0.61 0.189 149.214);
   --success-foreground: oklch(0.393 0.095 152.535);
   --success-foreground-muted: color-mix(
     in oklch,
-    var(--success-foreground) 75%,
+    var(--success-foreground) 90%,
     transparent
   );
   --success-background: oklch(0.962 0.044 156.743);
   --success-border: oklch(0.393 0.095 152.535);
-  --warning: oklch(0.666 0.179 58.318);
+  --warning: oklch(0.65 0.175 58.318);
   --warning-foreground: oklch(0.414 0.112 45.904);
   --warning-foreground-muted: color-mix(
     in oklch,
-    var(--warning-foreground) 75%,
+    var(--warning-foreground) 90%,
     transparent
   );
   --warning-background: oklch(0.962 0.059 95.617);
   --warning-border: oklch(0.414 0.112 45.904);
-  --critical: oklch(0.577 0.245 27.325);
+  /* The critical mark doubles as error ink, so it clears 4.5:1 as text on
+     every surface and row, not only 3:1 as a mark. */
+  --critical: oklch(0.555 0.236 27.325);
   --critical-foreground: oklch(0.396 0.141 25.723);
   --critical-foreground-muted: color-mix(
     in oklch,
-    var(--critical-foreground) 75%,
+    var(--critical-foreground) 90%,
     transparent
   );
   --critical-background: oklch(0.936 0.032 17.717);
@@ -90,7 +103,7 @@
   --info-foreground: oklch(0.391 0.09 240.876);
   --info-foreground-muted: color-mix(
     in oklch,
-    var(--info-foreground) 75%,
+    var(--info-foreground) 90%,
     transparent
   );
   --info-background: oklch(0.951 0.026 236.824);
@@ -102,7 +115,7 @@
   --merged-foreground: oklch(0.432 0.232 292.759);
   --merged-foreground-muted: color-mix(
     in oklch,
-    var(--merged-foreground) 75%,
+    var(--merged-foreground) 90%,
     transparent
   );
   --merged-background: oklch(0.943 0.029 294.588);
@@ -116,7 +129,7 @@
   --live-foreground: oklch(0.4 0.08 196);
   --live-foreground-muted: color-mix(
     in oklch,
-    var(--live-foreground) 75%,
+    var(--live-foreground) 90%,
     transparent
   );
   --live-background: oklch(0.952 0.03 194);
@@ -220,64 +233,69 @@
   --popover: oklch(0.206 0.008 240);
   --popover-foreground: oklch(0.985 0.003 240);
 
-  --destructive: oklch(0.55 0.21 27.325);
-  --destructive-foreground: oklch(0.95 0.005 247.858);
+  /* Destructive is the critical red. The dark fill is light, so the ink on it
+     is dark, as on the primary button. */
+  --destructive: var(--critical);
+  --destructive-foreground: oklch(0.206 0.008 240);
 
-  /* Semantic status — dark */
+  /* Semantic status — dark. Each quad is derived, not the light quad swapped:
+     text at L 0.80 keeps its hue (the light tints read near-white here), the
+     tint sits just above the canvas at L 0.28 instead of a saturated slab,
+     and the outline is the mark at 60%. All share the mark's hue. */
   --success: oklch(0.792 0.209 151.711);
-  --success-foreground: oklch(0.962 0.044 156.743);
+  --success-foreground: oklch(0.8 0.13 151.711);
   --success-foreground-muted: color-mix(
     in oklch,
-    var(--success-foreground) 75%,
+    var(--success-foreground) 90%,
     transparent
   );
-  --success-background: oklch(0.393 0.095 152.535);
-  --success-border: oklch(0.792 0.209 151.711);
+  --success-background: oklch(0.28 0.045 151.711);
+  --success-border: color-mix(in oklch, var(--success) 60%, transparent);
   --warning: oklch(0.828 0.189 84.429);
-  --warning-foreground: oklch(0.962 0.059 95.617);
+  --warning-foreground: oklch(0.8 0.13 84.429);
   --warning-foreground-muted: color-mix(
     in oklch,
-    var(--warning-foreground) 75%,
+    var(--warning-foreground) 90%,
     transparent
   );
-  --warning-background: oklch(0.414 0.112 45.904);
-  --warning-border: oklch(0.828 0.189 84.429);
+  --warning-background: oklch(0.28 0.045 84.429);
+  --warning-border: color-mix(in oklch, var(--warning) 60%, transparent);
   --critical: oklch(0.704 0.191 22.216);
-  --critical-foreground: oklch(0.936 0.032 17.717);
+  --critical-foreground: oklch(0.8 0.11 22.216);
   --critical-foreground-muted: color-mix(
     in oklch,
-    var(--critical-foreground) 75%,
+    var(--critical-foreground) 90%,
     transparent
   );
-  --critical-background: oklch(0.396 0.141 25.723);
-  --critical-border: oklch(0.704 0.191 22.216);
+  --critical-background: oklch(0.28 0.045 22.216);
+  --critical-border: color-mix(in oklch, var(--critical) 60%, transparent);
   --info: oklch(0.746 0.16 232.661);
-  --info-foreground: oklch(0.951 0.026 236.824);
+  --info-foreground: oklch(0.8 0.11 232.661);
   --info-foreground-muted: color-mix(
     in oklch,
-    var(--info-foreground) 75%,
+    var(--info-foreground) 90%,
     transparent
   );
-  --info-background: oklch(0.391 0.09 240.876);
-  --info-border: oklch(0.746 0.16 232.661);
+  --info-background: oklch(0.28 0.045 232.661);
+  --info-border: color-mix(in oklch, var(--info) 60%, transparent);
   --merged: oklch(0.702 0.183 293.541);
-  --merged-foreground: oklch(0.943 0.029 294.588);
+  --merged-foreground: oklch(0.8 0.11 293.541);
   --merged-foreground-muted: color-mix(
     in oklch,
-    var(--merged-foreground) 75%,
+    var(--merged-foreground) 90%,
     transparent
   );
-  --merged-background: oklch(0.432 0.232 292.759);
-  --merged-border: oklch(0.702 0.183 293.541);
+  --merged-background: oklch(0.28 0.045 293.541);
+  --merged-border: color-mix(in oklch, var(--merged) 60%, transparent);
   --live: oklch(0.75 0.13 195);
-  --live-foreground: oklch(0.952 0.03 194);
+  --live-foreground: oklch(0.8 0.12 195);
   --live-foreground-muted: color-mix(
     in oklch,
-    var(--live-foreground) 75%,
+    var(--live-foreground) 90%,
     transparent
   );
-  --live-background: oklch(0.4 0.08 196);
-  --live-border: oklch(0.75 0.13 195);
+  --live-background: oklch(0.28 0.04 195);
+  --live-border: color-mix(in oklch, var(--live) 60%, transparent);
 
   --brand-accent: oklch(0.32 0.01 240);
   --citation-mark: oklch(0.34 0.01 240);
@@ -2062,6 +2080,9 @@ body {
     gap: 0.5rem;
   }
 
+  /* A notice (see DESIGN.md): a neutral surface, with the tone on a thin
+     leading edge and on the icon. A `notice-*` class sets the tone; without
+     one the status is neutral and the edge stays a hairline. */
   .settings-status {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
@@ -2069,6 +2090,7 @@ body {
     align-items: start;
     padding: 0.75rem;
     border: 1px solid var(--line);
+    border-inline-start: 2px solid var(--notice-tone, var(--line));
     border-radius: 8px;
     color: var(--muted-foreground);
     background: color-mix(in oklch, var(--page-background) 72%, transparent);
@@ -2080,6 +2102,7 @@ body {
     width: 1rem;
     height: 1rem;
     margin-top: 0.1rem;
+    color: var(--notice-tone, var(--muted-foreground));
   }
 
   .settings-status-copy {
@@ -2092,26 +2115,6 @@ body {
   .settings-status strong {
     color: var(--ink);
     font-size: 0.8125rem;
-  }
-
-  .settings-status.is-ready {
-    border-color: color-mix(in srgb, var(--success) 55%, var(--line));
-  }
-
-  .settings-status.is-ready .settings-status-icon {
-    color: var(--success);
-  }
-
-  .settings-status.is-not-configured {
-    border-color: color-mix(in srgb, var(--destructive) 30%, var(--line));
-  }
-
-  .settings-status.is-not-configured .settings-status-icon {
-    color: var(--destructive);
-  }
-
-  .settings-status.is-disabled .settings-status-icon {
-    color: var(--muted-foreground);
   }
 
   /* ---------- Boot screen ---------- */

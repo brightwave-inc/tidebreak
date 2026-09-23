@@ -337,7 +337,7 @@ function providerLabel(provider: WebSearchProviderKind): string {
 }
 
 function webSearchState(config: WebSearchConfigInfo | null): {
-  kind: "disabled" | "ready" | "not-configured";
+  kind: "neutral" | "ready" | "warning";
   label: string;
   description: string;
 } {
@@ -345,7 +345,7 @@ function webSearchState(config: WebSearchConfigInfo | null): {
   // Only the two modes that can reach a host provider report on one.
   if (config?.mode === "off") {
     return {
-      kind: "disabled",
+      kind: "neutral",
       label: "Off",
       description: "Work cannot search the web.",
     };
@@ -367,7 +367,7 @@ function webSearchState(config: WebSearchConfigInfo | null): {
             "No provider is selected here, so work searches through the model it is running on. Claude, GPT, and Gemini models can.",
         }
       : {
-          kind: "disabled",
+          kind: "neutral",
           label: "Disabled",
           description: "No web-search provider is selected.",
         };
@@ -393,7 +393,7 @@ function webSearchState(config: WebSearchConfigInfo | null): {
   return {
     // Automatic still searches: it falls back to the model's own provider
     // rather than leaving work with a tool nothing answers.
-    kind: config.mode === "automatic" ? "ready" : "not-configured",
+    kind: config.mode === "automatic" ? "ready" : "warning",
     label: config.mode === "automatic" ? "Built-in search" : "Not configured",
     description:
       config.mode === "automatic"

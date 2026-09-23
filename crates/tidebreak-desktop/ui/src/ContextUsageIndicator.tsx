@@ -3,6 +3,7 @@ import {
   contextUsagePercent,
   formatTokenCount,
 } from "./ContextUsage";
+import { STATUS_MARK, STATUS_TEXT } from "./code/statusTone";
 import { WithTooltip } from "./components/ui/tooltip";
 import { cn } from "./lib/utils";
 
@@ -50,7 +51,9 @@ export type ContextUsageReading = {
  * the reading moves the moment the selection does.
  *
  * Lives in the composer's send cluster as a ring, not a labeled chip: the
- * magnitude is a glance, and the numbers wait on hover.
+ * magnitude is a glance, and the numbers wait on hover. Once the window is
+ * filling, at warning and critical, the ring also prints its percent, so it
+ * reads as a meter rather than a spinner.
  */
 export function ContextUsageIndicator({
   contextTokens,
@@ -107,8 +110,11 @@ export function ContextUsageIndicator({
               <div
                 className={cn(
                   "h-full rounded-full",
+                  // The tooltip inverts the theme, so the critical fill leans
+                  // a quarter of the way to the tooltip's own ink. That keeps
+                  // it red and 3:1 against the tooltip in both themes.
                   level === "critical"
-                    ? "bg-destructive"
+                    ? "bg-[color-mix(in_oklab,var(--critical),var(--primary-foreground)_25%)]"
                     : "bg-primary-foreground/90",
                 )}
                 style={{ width: `${percent}%` }}
@@ -138,7 +144,7 @@ export function ContextUsageIndicator({
               {/* Labeled, because these are not the ring's numbers: they sum
                   every model call the turn made, and on a long turn they run
                   well past what the window ever held. */}
-              <p className="text-2xs uppercase tracking-wide opacity-60">
+              <p className="text-2xs uppercase tracking-wide opacity-70">
                 Turn spend
               </p>
               <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 text-xs leading-relaxed">
@@ -162,10 +168,14 @@ export function ContextUsageIndicator({
       <button
         type="button"
         className={cn(
-          "inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
-          level === "critical" && "text-destructive hover:text-destructive",
-          level === "warning" &&
-            "text-warning-foreground hover:text-warning-foreground",
+          "inline-flex h-7 min-w-7 shrink-0 items-center justify-center gap-1 rounded-full text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+          // The ring is a mark, so it takes the full-strength tone. The label
+          // beside it is text and takes the readable rung.
+          level !== "normal" && [
+            "pl-1 pr-1.5",
+            STATUS_MARK[level],
+            level === "critical" ? "hover:text-critical" : "hover:text-warning",
+          ],
         )}
         // A graphic with a text alternative rather than a live region: this
         // updates on every turn, and it is reference material, not an
@@ -179,6 +189,16 @@ export function ContextUsageIndicator({
         }
       >
         <ContextUsageRing percent={metered ? percent : null} />
+        {level !== "normal" && (
+          <span
+            className={cn(
+              "text-2xs font-medium tabular-nums",
+              STATUS_TEXT[level],
+            )}
+          >
+            {percent}%
+          </span>
+        )}
       </button>
     </WithTooltip>
   );

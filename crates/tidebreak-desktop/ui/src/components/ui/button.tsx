@@ -9,9 +9,13 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default: "bg-primary text-primary-foreground hover:bg-primary/80",
+        // The critical tint and the ink built for it: 4.5:1 at rest and on
+        // hover in both themes. Focus keeps the standard ring, which a red
+        // wash cannot match against the canvas.
         destructive:
-          "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20",
-        "ghost-destructive": "hover:bg-critical-background hover:text-critical",
+          "bg-critical-background text-critical-foreground hover:bg-[color-mix(in_oklch,var(--critical-background),var(--critical-foreground)_10%)]",
+        "ghost-destructive":
+          "hover:bg-critical-background hover:text-critical-foreground",
         outline:
           "border-border bg-background hover:bg-muted hover:text-foreground",
         secondary:

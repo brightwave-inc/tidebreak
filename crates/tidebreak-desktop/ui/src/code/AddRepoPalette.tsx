@@ -1777,7 +1777,7 @@ function Hint({ keys, label }: { keys: string[]; label: string }) {
       {keys.map((key) => (
         <kbd
           key={key}
-          className="inline-flex h-5 min-w-5 items-center justify-center rounded border bg-muted/60 px-1 font-sans text-2xs leading-none font-medium text-foreground/80"
+          className="inline-flex h-5 min-w-5 items-center justify-center rounded border bg-muted/60 px-1 font-sans text-2xs leading-none font-medium text-foreground"
         >
           {key}
         </kbd>

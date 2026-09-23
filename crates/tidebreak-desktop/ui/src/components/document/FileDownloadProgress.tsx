@@ -34,7 +34,7 @@ export function FileDownloadProgressIndicator({
           <p>Downloading document…</p>
           <div className="flex items-center gap-2 text-sm">
             <span className="tabular-nums">{Math.round(percentage)}%</span>
-            <span className="text-muted-foreground/70 tabular-nums">
+            <span className="text-muted-foreground tabular-nums">
               ({megabytes(progress.loaded)} / {megabytes(progress.total)} MB)
             </span>
           </div>

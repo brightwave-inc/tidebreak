@@ -1144,7 +1144,7 @@ function PeopleGroup({
 /** The one separator this sheet uses between metadata facts. */
 function MetaDot() {
   return (
-    <span aria-hidden className="text-muted-foreground/50">
+    <span aria-hidden className="text-foreground-subtle">
       ·
     </span>
   );
@@ -2173,7 +2173,7 @@ export function StackMap({
           <span key={member.number} className="flex items-center gap-1">
             {index > 0 && (
               <span
-                className="text-muted-foreground/70 text-xs"
+                className="text-muted-foreground text-xs"
                 aria-label="stacked on"
               >
                 ←

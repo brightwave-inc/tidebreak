@@ -1444,7 +1444,7 @@ function ComposerView({
                     ) : willQueue ? (
                       <>
                         Queue · Enter
-                        <span className="mt-1 block font-normal text-primary-foreground/80">
+                        <span className="mt-1 block font-normal text-primary-foreground">
                           Steer · {modEnter}
                         </span>
                       </>

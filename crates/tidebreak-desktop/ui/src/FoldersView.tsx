@@ -382,7 +382,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
                           key={capability}
                           className="flex items-center justify-between gap-3"
                         >
-                          <span className="text-sm text-muted-foreground/60">
+                          <span className="text-sm text-muted-foreground">
                             {verbLabel({ kind: "capability", capability })}
                           </span>
                           <Button
