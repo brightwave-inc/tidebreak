@@ -1,6 +1,6 @@
 ---
 title: Models and providers
-description: Add provider credentials, pick the model each chat runs on, and switch models mid-conversation.
+description: Add provider credentials, add or find the models you want, pick the model each chat runs on, and switch models mid-conversation.
 ---
 
 Tidebreak has no model of its own and no hosted inference. You bring
@@ -17,12 +17,12 @@ Open **Settings → Providers**. Each provider is its own section: turn on
 | Anthropic | API key |
 | OpenAI | A ChatGPT subscription (**Sign in with ChatGPT**) or a platform API key |
 | Google Gemini | Gemini Developer API key |
-| xAI | API key, plus the model IDs you want to use |
+| xAI | API key |
 | Fireworks AI | API key; Tidebreak uses `https://api.fireworks.ai/inference/v1` |
 | Together AI | API key; Tidebreak uses `https://api.together.ai/v1` |
-| OpenRouter | API key; Tidebreak uses `https://openrouter.ai/api/v1`, plus the model IDs you want to use |
-| Ollama | No key for a local daemon. Defaults to `http://127.0.0.1:11434/v1`, plus the model IDs you have already pulled |
-| OpenAI-compatible | Base URL, optional key, plus the model IDs you want to use |
+| OpenRouter | API key; Tidebreak uses `https://openrouter.ai/api/v1`. Add the models you want to use |
+| Ollama | No key for a local daemon. Defaults to `http://127.0.0.1:11434/v1`. Add the models you have pulled |
+| OpenAI-compatible | Base URL and an optional key. Add the models the endpoint serves |
 
 **Google Gemini** is the direct Gemini Developer API path and accepts a Gemini
 API key.
@@ -33,8 +33,7 @@ The panel never shows a saved key back to you. It shows a status —
 confirmation.
 
 API keys go to your operating system's credential store, not to the database
-and not to a config file. Base URLs and configured model rows are non-secret
-settings.
+and not to a config file. Base URLs and custom models are non-secret settings.
 
 <Callout>
 If you would rather not store anything, the server also reads
@@ -43,13 +42,14 @@ If you would rather not store anything, the server also reads
 environment as fallbacks when no credential is saved.
 </Callout>
 
-## Curated models
+## Built-in models
 
-Anthropic, OpenAI, Gemini, Fireworks, and Together ship with a curated list of
-models. Fireworks and Together keep their host-specific model IDs and
+Anthropic, OpenAI, xAI, Gemini, Fireworks, and Together ship with a list of
+built-in models. Fireworks and Together keep their host-specific model IDs and
 capabilities. Nothing to configure — once the provider has a credential, its
 models appear in the picker. The list is versioned with the app and refreshed
-as providers ship new models.
+as providers ship new models. Each provider card names its built-in models
+under **Models**.
 
 Each entry carries what the app actually knows about it: context window,
 maximum output, whether it accepts images, whether it produces a reasoning
@@ -57,46 +57,99 @@ stream, and which reasoning-effort levels it accepts. Those flags gate
 behavior, not just labels — a model is only offered an image attachment if the
 path that carries images is wired for it.
 
-Hosted Kimi K3, K2.7, and K2.6 rows preserve their native
-`reasoning_content` only when history returns to the same provider and model,
-including tool continuations. A provider or model switch drops that native
-field under the same flatten-on-switch rule used for other reasoning artifacts.
-Kimi K3 exposes its documented **Low**, **High**, and **Max** effort choices.
-
-Models the project has not exercised end to end are marked in the picker as
-unverified. They still run; the badge says tool calling and streaming have not
-been confirmed on that exact provider/model pair.
+Hosted Kimi K3 rows preserve their native `reasoning_content` only when
+history returns to the same provider and model, including tool continuations.
+A provider or model switch drops that native field under the same
+flatten-on-switch rule used for other reasoning artifacts. Kimi K3 exposes its
+documented **Low**, **High**, and **Max** effort choices.
 
 ## Custom models
 
-**xAI**, **OpenRouter**, **Ollama**, and **OpenAI-compatible** do not come with
-a curated list. Add rows under the provider's **Models** section: a model ID,
-an optional display name, and context and max-output token counts. For xAI,
-you also declare whether the model takes image input, whether it is a
-reasoning model, and which reasoning-effort levels it accepts.
+Every provider except the Model Gateway also takes models you add yourself:
+a model the provider ships before Tidebreak lists it, a fine-tune, or anything
+OpenRouter, Ollama, or your own endpoint serves. OpenRouter, Ollama, and
+OpenAI-compatible endpoints have no built-in list, so custom models are how
+you use them.
 
-**OpenRouter** is a hosted aggregator on the same OpenAI-compatible
-chat-completions path. Enable it, paste an API key, and add each model id
-you want to use (`anthropic/claude-sonnet-4` is the usual `vendor/model`
-shape). Requests always go to `https://openrouter.ai/api/v1`.
+To add one, open the provider in **Settings → Providers** and press
+**Add model** under **Models**. The form takes:
 
-**Ollama** talks to a local daemon over the same OpenAI-compatible
-chat-completions path. Enable it, add a model you have already pulled
+- **Model ID**, exactly as the provider's API spells it. OpenRouter IDs take
+  the `vendor/model` shape, such as `anthropic/claude-sonnet-5`.
+- **Display name**. Optional; pickers show the model ID when it is blank.
+- **Context window** and **Max output**, in tokens. A blank field uses 32,768
+  and 4,096.
+- **Accepts images**, so attached images go to the model.
+- **Supports tools**. Turn it off to run a chat-only model that never calls
+  tools.
+- **Reasons**, and the effort levels the model accepts. The form offers only
+  the levels that provider's route sends. Leave every level clear to use the
+  provider's default effort.
+
+Each custom model appears in its provider card with **Edit** and **Remove**,
+and in the model picker beside the built-in rows. When you remove one, pickers
+stop offering it, and a chat that used it needs another model before its next
+turn.
+
+A few rules keep a custom model honest:
+
+- A model ID the provider already has built in is refused; use the built-in
+  row instead. If a later release builds in a model you added, the built-in
+  row takes over.
+- Anthropic reasoning needs a Claude 4.6 or later model ID.
+- Custom OpenAI models need an API key. ChatGPT sign-in runs only the
+  built-in models Codex accepts.
+
+For every field you fill in, you are asserting the provider's contract
+yourself. Get it wrong and turns fail at the provider rather than being caught
+locally.
+
+**Ollama** talks to a local daemon over the OpenAI-compatible chat-completions
+path. Enable it, add a model you have already pulled
 (`ollama pull qwen3:0.6b` is a small tool-calling option for a first test),
 and leave the base URL at `http://127.0.0.1:11434/v1` unless the daemon is
 somewhere else. A key is optional — only remote or locked-down Ollama
 installs need one.
 
-The generic OpenAI-compatible slot still points at any other endpoint that
-speaks the same API, including LM Studio or vLLM:
+The generic OpenAI-compatible slot points at any other endpoint that speaks
+the same API, including LM Studio or vLLM:
 
 ```text
 base URL: http://127.0.0.1:1234/v1
 ```
 
-For configurable capability fields, you are asserting the provider contract
-yourself. Get it wrong and turns fail at the provider rather than being caught
-locally.
+## Find models
+
+**Find models** asks the provider which chat models you can use, so you do not
+have to type IDs by hand. Tidebreak sends the request from your machine with
+the key you saved. The answer carries model details only, never the key.
+
+The list leaves out embedding, image, speech, and other models that cannot
+hold a chat, and marks the ones that are **Built in** or already **Added**.
+Pick the models you want, then review them. Each one arrives with the limits
+the provider reported, which you can change. Fill in what the provider left
+out, or leave a limit blank to use the default. Nothing is added until you
+confirm.
+
+Each provider reports different facts about its models:
+
+| Provider | What its listing reports |
+| --- | --- |
+| Anthropic | Context window, max output, images, reasoning, and effort levels |
+| OpenAI | Model IDs only |
+| xAI | Context window, images, reasoning, and effort levels |
+| Google Gemini | Context window, max output, and whether the model thinks |
+| Fireworks AI | Serverless models with their context window, images, and tools |
+| Together AI | Context window |
+| OpenRouter | Context window, max output, images, tools, and reasoning |
+| Ollama | Context window, images, tools, and reasoning for each pulled model |
+| OpenAI-compatible | Context window, when the server reports one (vLLM does) |
+
+Find models needs an API key. An OpenAI-compatible endpoint also needs its
+base URL, and a local Ollama daemon needs no key at all. ChatGPT sign-in
+cannot list OpenAI models, so save an API key to use it. The request gives up
+after 10 seconds and says what went wrong: a rejected key, an endpoint it
+could not reach, or a listing it could not read.
 
 ## Choose the default model
 
