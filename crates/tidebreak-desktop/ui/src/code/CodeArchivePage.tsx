@@ -37,6 +37,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
+import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { listArchivedWorkspaces, isPutAway } from "./workspaceCards";
 import { workspaceCommandsForAccess } from "./workspaceAccess";
@@ -270,7 +271,10 @@ function CodeArchiveBody() {
 
   return (
     <div className="flex size-full min-h-0 flex-col bg-background">
-      <header className="shrink-0 border-b border-border-subtle px-5 py-4">
+      <header
+        className="shrink-0 border-b border-border-subtle px-5 py-4"
+        {...paneHeaderDragRegion()}
+      >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">

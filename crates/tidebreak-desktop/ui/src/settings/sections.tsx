@@ -269,6 +269,13 @@ export type SettingsSectionDef = {
   /** The path segment under `/settings`, and its address. */
   path: string;
   label: string;
+  /**
+   * Words a reader might search for that the label does not say: the names
+   * of the things inside the section, and what people call them. The command
+   * palette matches on these, so "dark" finds Appearance and "mcp" finds
+   * Connected apps. Earlier words rank higher, so the likeliest go first.
+   */
+  keywords: string;
   group: SettingsSectionGroupId;
   icon: ComponentType<{ size?: number; className?: string }>;
   iconClass: string;
@@ -299,6 +306,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "providers",
     label: "Providers",
+    keywords:
+      "API key credentials Ollama Anthropic OpenAI Gemini xAI OpenRouter local models endpoint",
     group: "models",
     icon: KeyRound,
     iconClass: "text-icon-amber",
@@ -309,6 +318,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "gateway",
     label: "Model Gateway",
+    keywords: "sign in account organization managed remote machine",
     group: "models",
     icon: Waypoints,
     iconClass: "text-icon-cyan",
@@ -317,6 +327,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "models",
     label: "Models",
+    keywords: "default model prompt caching reasoning",
     group: "models",
     icon: Cpu,
     iconClass: "text-icon-violet",
@@ -328,6 +339,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "context",
     label: "Context",
+    keywords: "compaction context window summarize tokens",
     group: "models",
     icon: Gauge,
     iconClass: "text-icon-blue",
@@ -336,6 +348,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "agents",
     label: "Agents",
+    keywords: "subagents delegated recaps queue steer",
     group: "models",
     icon: Bot,
     iconClass: "text-icon-violet",
@@ -344,6 +357,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "voice-transcription",
     label: "Voice input",
+    keywords: "voice microphone dictation speech transcription",
     group: "capabilities",
     icon: Mic,
     iconClass: "text-icon-rose",
@@ -352,6 +366,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "web-search",
     label: "Web search",
+    keywords: "internet Brave Tavily Exa Firecrawl SearXNG keys",
     group: "capabilities",
     icon: Globe,
     iconClass: "text-icon-cyan",
@@ -360,6 +375,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "code-execution",
     label: "Code execution",
+    keywords: "sandbox Docker E2B Daytona container network keys",
     group: "capabilities",
     icon: SquareTerminal,
     iconClass: "text-icon-green",
@@ -368,6 +384,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "coding-harnesses",
     label: "Coding engines",
+    keywords: "Claude Code Codex opencode Grok worktree editor",
     group: "capabilities",
     icon: Terminal,
     iconClass: "text-icon-amber",
@@ -376,6 +393,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "quick-actions",
     label: "Quick actions",
+    keywords: "prompts create PR workspace actions",
     group: "capabilities",
     icon: Zap,
     iconClass: "text-icon-violet",
@@ -384,6 +402,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "channels",
     label: "Channels",
+    keywords: "Slack people workspaces",
     group: "capabilities",
     icon: MessagesSquare,
     iconClass: "text-icon-green",
@@ -397,6 +416,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "connected-apps",
     label: "Connected apps",
+    keywords: "MCP servers tools integrations REST OpenAPI",
     group: "capabilities",
     icon: Blocks,
     iconClass: "text-icon-blue",
@@ -405,6 +425,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "git-source-control",
     label: "Git & source control",
+    keywords: "git branches branch prefix fetch",
     group: "application",
     icon: GitBranch,
     iconClass: "text-icon-blue",
@@ -413,6 +434,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "permissions",
     label: "Permissions",
+    keywords:
+      "approvals allow consent folders computer use accessibility screen recording",
     group: "application",
     icon: ShieldCheck,
     iconClass: "text-icon-green",
@@ -421,6 +444,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "appearance",
     label: "Appearance",
+    keywords: "theme dark mode light system notifications",
     group: "application",
     icon: Palette,
     iconClass: "text-icon-rose",
@@ -429,6 +453,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "updates",
     label: "Updates",
+    keywords: "update version release restart",
     group: "application",
     icon: RefreshCw,
     iconClass: "text-icon-green",
@@ -437,6 +462,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "memory",
     label: "Memory",
+    keywords: "remember memories learned",
     group: "application",
     icon: Brain,
     iconClass: "text-icon-violet",
@@ -447,6 +473,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "instructions",
     label: "Instructions",
+    keywords:
+      "custom instructions personal project preferences system prompt style tone",
     group: "application",
     icon: ScrollText,
     iconClass: "text-icon-amber",

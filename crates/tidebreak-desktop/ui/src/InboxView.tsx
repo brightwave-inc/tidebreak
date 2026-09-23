@@ -24,6 +24,7 @@ import {
   EmptyTitle,
 } from "./components/ui/empty";
 import { useInbox } from "./Inbox";
+import { PaneDragBand } from "./WindowDragStrip";
 
 /** How each kind reads, and what it is answered by. */
 const KIND_PRESENTATION: Record<
@@ -78,7 +79,8 @@ export function InboxView() {
 
   if (entries.length === 0) {
     return (
-      <Empty className="h-full">
+      <Empty className="relative h-full">
+        <PaneDragBand />
         <EmptyHeader>
           <EmptyMedia variant="icon" className="text-success">
             <CircleCheck aria-hidden="true" />
@@ -96,7 +98,8 @@ export function InboxView() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-6">
+    <div className="relative flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-6">
+      <PaneDragBand />
       <h1 className="text-lg font-medium">Inbox</h1>
       <ul className="flex flex-col gap-2">
         {entries.map((entry) => (

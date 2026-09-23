@@ -10,6 +10,7 @@ import type { CodeSessionSnapshot, ModelInfo } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { friendlyErrorMessage } from "@/lib/utils";
+import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { codeClientGeneration } from "./CodeClientGeneration";
 import { SessionLifecycleIndicator } from "./SessionLifecycleIndicator";
 import { CodeSessionPane } from "./workspace/CodeSessionPane";
@@ -114,7 +115,10 @@ export function CodeSessionContent({
   }
   return (
     <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-      <div className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-4">
+      <div
+        className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-4"
+        {...paneHeaderDragRegion()}
+      >
         <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{title}</h1>
         {session && (
           <SessionLifecycleIndicator

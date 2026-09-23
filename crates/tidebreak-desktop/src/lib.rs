@@ -76,6 +76,7 @@ mod trusted_folders;
 mod updater;
 mod voice_transcription;
 mod whisper_install;
+mod window_state;
 mod workspace_config;
 
 /// Connection details the webview needs to reach the API it is attached to.
@@ -881,6 +882,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(window_state::plugin())
         .manage(state)
         .manage(deep_link::PairingStore::new(store_rx))
         .manage(documents::PendingLibraryDrop::default())
@@ -958,6 +960,7 @@ pub fn run() {
             deep_link::install(&handle);
             #[cfg(target_os = "macos")]
             menu::install_app_menu(app)?;
+            window_state::keep_minimum_size(app);
             updater::spawn_update_loop(handle.clone());
             let data = data_dir(&handle)?;
             // Before anything that can warn: the embedded server's tracing

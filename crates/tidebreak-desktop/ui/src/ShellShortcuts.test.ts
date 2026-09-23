@@ -63,7 +63,9 @@ describe("shell shortcut resolution", () => {
       [{ key: "l", code: "KeyL" }, "focus-composer"],
       [{ key: "/", code: "Slash" }, "show-shortcuts"],
       [{ key: "0", code: "Digit0" }, "zoom-reset"],
-      [{ key: "r", code: "KeyR" }, "reload-app"],
+      [{ key: ",", code: "Comma" }, "open-settings"],
+      [{ key: "[", code: "BracketLeft" }, "history-back"],
+      [{ key: "]", code: "BracketRight" }, "history-forward"],
     ];
     for (const [event, id] of cases) {
       const resolved = resolveShellShortcut(keyEvent(event), context());
@@ -138,14 +140,12 @@ describe("shell shortcut resolution", () => {
 
   it("separates the shifted Ship chords from their unshifted neighbours", () => {
     // Cmd+P opens a file and Cmd+Shift+P opens a pull request; Cmd+W closes a
-    // tab and Cmd+Shift+W starts a watch; Cmd+R reloads and Cmd+Shift+R
-    // rebases. Shift is the only thing between each pair, so a shift the
-    // matcher ignored would make three chords do the wrong, sometimes
-    // destructive, thing.
+    // tab and Cmd+Shift+W starts a watch. Shift is the only thing between each
+    // pair, so a shift the matcher ignored would make the chords do the wrong,
+    // sometimes destructive, thing.
     const pairs: Array<[string, ShellShortcutAction, ShellShortcutAction]> = [
       ["KeyP", "code-quick-open", "code-create-pr"],
       ["KeyW", "close-tab", "code-watch-pr"],
-      ["KeyR", "reload-app", "code-update-branch"],
     ];
     for (const [code, plain, shifted] of pairs) {
       const context_ = context({ mode: "code" });
@@ -156,6 +156,56 @@ describe("shell shortcut resolution", () => {
         resolveShellShortcut(keyEvent({ code, shiftKey: true }), context_)?.id,
       ).toBe(shifted);
     }
+  });
+
+  it("leaves Cmd+R free, so a missed Shift on the rebase chord does nothing", () => {
+    // Cmd+R used to reload the whole window, one key away from Cmd+Shift+R.
+    // Reload lives on in the View menu, where nothing sits next to it.
+    for (const mode of ["chat", "code"] as ShellShortcutMode[]) {
+      expect(
+        resolveShellShortcut(
+          keyEvent({ key: "r", code: "KeyR" }),
+          context({ mode }),
+        ),
+      ).toBeNull();
+    }
+    expect(
+      resolveShellShortcut(
+        keyEvent({ key: "R", code: "KeyR", shiftKey: true }),
+        context({ mode: "code" }),
+      )?.id,
+    ).toBe("code-update-branch");
+  });
+
+  it("keeps Cmd+[ and Cmd+] for history, and their shifted forms for tabs", () => {
+    // Back and forward take the chords from the text field too, which is the
+    // point of adding them beside Alt+Arrow. Shift turns them into the tab
+    // chords, and only in code mode, where there is a tab strip.
+    const back = keyEvent({ key: "[", code: "BracketLeft" });
+    const previousTab = keyEvent({
+      key: "{",
+      code: "BracketLeft",
+      shiftKey: true,
+    });
+    expect(resolveShellShortcut(back, context({ mode: "code" }))?.id).toBe(
+      "history-back",
+    );
+    expect(
+      resolveShellShortcut(previousTab, context({ mode: "code" }))?.id,
+    ).toBe("code-prev-tab");
+    expect(resolveShellShortcut(previousTab, context())).toBeNull();
+    // Ctrl+[ on a Mac is the terminal's Escape, not a way back.
+    expect(
+      resolveShellShortcut(
+        keyEvent({
+          key: "[",
+          code: "BracketLeft",
+          metaKey: false,
+          ctrlKey: true,
+        }),
+        context(),
+      ),
+    ).toBeNull();
   });
 
   it("keeps the Ship chords out of chat, where there is nothing to ship", () => {

@@ -4,6 +4,7 @@ import { Archive, GitPullRequest, Plus, Terminal } from "lucide-react";
 
 import { CommandPaletteList } from "@/CommandPaletteList";
 import { rankPaletteRows, type PaletteRow } from "@/CommandPalette";
+import { settingsPaletteRows } from "@/settingsPaletteRows";
 
 /**
  * The Cmd+K palette's list.
@@ -285,6 +286,22 @@ export const Settings: Story = {
         })),
       ],
       "settings",
+    ),
+  },
+};
+
+/**
+ * A settings section is found by what it holds, not only by its name: "mcp"
+ * lands on Connected apps, whose label never says it. These are the rows the
+ * palette really builds, so the words that match are the ones that ship.
+ */
+export const SettingsByContents: Story = {
+  args: {
+    mode: "chat",
+    query: "mcp",
+    groups: rankPaletteRows(
+      [...chatRows, ...settingsPaletteRows({ managed: false, navigate: fn() })],
+      "mcp",
     ),
   },
 };

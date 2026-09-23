@@ -35,11 +35,11 @@ export type ShellShortcutAction =
   | "code-archive-workspace"
   | "close-tab"
   | "open-command-palette"
+  | "open-settings"
   | "focus-composer"
   | "zoom-in"
   | "zoom-out"
   | "zoom-reset"
-  | "reload-app"
   | "show-shortcuts";
 
 /**
@@ -137,6 +137,26 @@ export type ShellShortcutDef = ShellShortcutBinding & {
 };
 
 export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
+  {
+    // Cmd+[ and Cmd+] are back and forward in Safari, Finder, and every editor
+    // this app sits beside. Chorded, so unlike Alt+Arrow below they are safe
+    // in the composer, which is where the reader usually is. Listed first so
+    // anything that names one chord for the action names this one.
+    id: "history-back",
+    keys: ["["],
+    mod: true,
+    description: "Go back",
+    group: "Navigation",
+    allowInEditable: true,
+  },
+  {
+    id: "history-forward",
+    keys: ["]"],
+    mod: true,
+    description: "Go forward",
+    group: "Navigation",
+    allowInEditable: true,
+  },
   {
     id: "history-back",
     keys: ["arrowleft"],
@@ -439,6 +459,15 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     allowInModal: true,
   },
   {
+    // The chord every Mac app opens its settings with.
+    id: "open-settings",
+    keys: [","],
+    mod: true,
+    description: "Open settings",
+    group: "Navigation",
+    allowInEditable: true,
+  },
+  {
     // Cmd+L, next to the palette's Cmd+K and matching what the editors this
     // app sits beside use to reach their agent. It takes the chord from
     // Monaco's expand-line-selection, which is reachable with Home and
@@ -481,14 +510,6 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     codes: ["Digit0", "Numpad0"],
     mod: true,
     description: "Reset the interface size",
-    group: "View",
-    allowInEditable: true,
-  },
-  {
-    id: "reload-app",
-    codes: ["KeyR"],
-    mod: true,
-    description: "Reload the app",
     group: "View",
     allowInEditable: true,
   },
@@ -721,12 +742,13 @@ export function numberedTabIndex(code: string, count: number): number | null {
  *
  * The event is passed rather than swallowed because one definition can stand
  * for a family of chords: Cmd+1 through Cmd+9 are one action whose argument is
- * the digit, and only the event knows which key was struck. Returning `false`
+ * the digit, and only the event knows which key was struck. It is `null` when
+ * a native menu item raised the action instead of a key. Returning `false`
  * declines the key and lets it through to whatever is focused.
  */
 export type ShellShortcutHandlers = Record<
   ShellShortcutAction,
-  (event: KeyboardEvent) => boolean | void
+  (event: KeyboardEvent | null) => boolean | void
 >;
 
 /**

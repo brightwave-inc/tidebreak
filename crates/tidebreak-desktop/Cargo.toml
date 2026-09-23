@@ -57,6 +57,7 @@ tauri-plugin-dialog = "=2.7.3"
 tauri-plugin-notification = "=2.4.0"
 tauri-plugin-shell = "=2.3.6"
 tauri-plugin-updater = "=2.11.0"
+tauri-plugin-window-state = "=2.4.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

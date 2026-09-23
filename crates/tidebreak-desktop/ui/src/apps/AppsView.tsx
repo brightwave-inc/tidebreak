@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { AppSummary } from "@/api";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
+import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -72,7 +73,11 @@ export function AppsView({
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
-      <PanelSecondaryHeader showBorder={false} className="pr-1 pl-4">
+      <PanelSecondaryHeader
+        showBorder={false}
+        className="pr-1 pl-4"
+        {...paneHeaderDragRegion()}
+      >
         <h1 className="text-lg font-medium">Apps</h1>
         <span className="grow" />
         <div className="pr-2">

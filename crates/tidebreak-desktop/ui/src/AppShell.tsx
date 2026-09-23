@@ -8,8 +8,6 @@ import {
 import { Outlet, useNavigate, useRouter } from "@tanstack/react-router";
 import { DocumentTitle } from "./DocumentTitle";
 import { getVersion } from "@tauri-apps/api/app";
-import { isTauri } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 
 import {
@@ -104,6 +102,13 @@ import { useInterfaceZoom } from "./InterfaceZoom";
 import { BootBrand } from "./Logomark";
 import { ManagedGate } from "./ManagedGate";
 import { resolvedRoleKey } from "./ModelSelection";
+import {
+  DOCUMENTATION_URL,
+  MENU_COMMAND_EVENT,
+  useNativeHostEvent,
+  useShellMenuCommands,
+} from "./nativeMenu";
+import { openInBrowser } from "./openInBrowser";
 import { SidebarExpandStrip } from "./sidebar/SidebarExpandStrip";
 import { Titlebar } from "./Titlebar";
 import { WindowDragStrip } from "./WindowDragStrip";
@@ -135,32 +140,6 @@ import { UpdateReadyCard } from "./UpdateReadyCard";
 const CLOSE_TAB_REQUESTED_EVENT = "desktop-close-tab-requested";
 const DISMISSED_UPDATE_VERSION_KEY = "tidebreak.dismissed-update-version";
 const UNKNOWN_UPDATE_VERSION = "unknown";
-
-/**
- * Run `handler` whenever the native host raises `event`.
- *
- * The handler is read through a ref so the listener registers once for the
- * shell's lifetime instead of being torn down and rebound every time a
- * callback changes identity between renders. Outside the desktop app there is
- * no host to raise anything, so nothing is registered at all.
- */
-function useNativeHostEvent(event: string, handler: () => void): void {
-  const handlerRef = useRef(handler);
-  handlerRef.current = handler;
-  useEffect(() => {
-    if (!isTauri()) return;
-    let cancelled = false;
-    let unlisten: UnlistenFn | undefined;
-    void listen(event, () => handlerRef.current()).then((stop) => {
-      if (cancelled) stop();
-      else unlisten = stop;
-    });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [event]);
-}
 
 /** Move focus to whichever composer the current route has on screen. */
 function focusComposer(): void {
@@ -234,6 +213,7 @@ function GatedShellHooks({
   useChatPromptWatcher(client, chatId);
   useAgentNotifications(client);
   useShellShortcuts(shortcuts, shortcutMode);
+  useShellMenuCommands(shortcuts, shortcutMode);
   return <CodeDeliveryMonitor client={client} />;
 }
 
@@ -324,6 +304,13 @@ export function AppShell() {
       .finally(() => setExplicitUpdateCheckOpen(false));
   });
 
+  // Help > Documentation. Listened for here rather than beside the shortcuts
+  // the other menu items run: those wait behind the sign-in gate, and the
+  // documentation matters most when the app has not got that far.
+  useNativeHostEvent(MENU_COMMAND_EVENT, (command) => {
+    if (command === "documentation") void openInBrowser(DOCUMENTATION_URL);
+  });
+
   /**
    * Put the workspace's layout through one change and write it back.
    *
@@ -409,10 +396,14 @@ export function AppShell() {
   // on whichever half of the app the route is in. They are installed below the
   // gate, by GatedShellHooks.
   const shellShortcuts: ShellShortcutHandlers = {
+    // Inside a file, Cmd+[ and Cmd+] outdent and indent the line, which is
+    // what the reader means there. Declining hands the chord to the editor.
     "history-back": () => {
+      if (isMonacoFocused()) return false;
       if (desktopNavigation.canGoBack) desktopNavigation.goBack();
     },
     "history-forward": () => {
+      if (isMonacoFocused()) return false;
       if (desktopNavigation.canGoForward) desktopNavigation.goForward();
     },
     "toggle-sidebar": () => useUiStore.getState().toggleSidebar(),
@@ -471,11 +462,14 @@ export function AppShell() {
     },
     "code-prev-tab": () => applyCodeLayout((l) => stepCenterTab(l, -1)),
     "code-next-tab": () => applyCodeLayout((l) => stepCenterTab(l, 1)),
-    "code-select-tab": (event) =>
-      applyCodeLayout((layout) => {
+    "code-select-tab": (event) => {
+      // Only a key names a tab. No menu item raises this one.
+      if (!event) return false;
+      return applyCodeLayout((layout) => {
         const position = numberedTabIndex(event.code, centerTabCount(layout));
         return position === null ? layout : selectCenterTab(layout, position);
-      }),
+      });
+    },
     "code-split-editor": () => applyCodeLayout(splitFocusedEditor),
     "close-tab": closeTab,
     "open-command-palette": () => {
@@ -487,11 +481,17 @@ export function AppShell() {
       else if (hasOpenModalDialog(document)) return false;
       else ui.setCommandPaletteOpen(true);
     },
+    "open-settings": () => {
+      // Settings keeps its section in the address, so the chord pressed from
+      // inside it leaves the reader where they are instead of sending them
+      // back to the first section.
+      if (router.state.location.pathname.startsWith("/settings")) return;
+      void navigate({ to: "/settings" });
+    },
     "focus-composer": focusComposer,
     "zoom-in": zoom.zoomIn,
     "zoom-out": zoom.zoomOut,
     "zoom-reset": zoom.resetZoom,
-    "reload-app": () => window.location.reload(),
     "show-shortcuts": () => setShortcutsOpen(true),
   };
 

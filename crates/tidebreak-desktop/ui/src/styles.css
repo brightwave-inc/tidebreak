@@ -1902,6 +1902,7 @@ body {
   .settings-panel {
     container-name: settings-panel;
     container-type: inline-size;
+    position: relative;
     height: 100%;
     min-height: 0;
     overflow-y: auto;
@@ -2511,6 +2512,17 @@ body {
   right: 0;
   height: var(--window-chrome-height);
   z-index: 50;
+}
+
+/* The top band of a pane with no header of its own (see PaneDragBand). It
+   sits over the pane's top padding inside the scroll container, so it covers
+   no content at rest and scrolls away with the page. */
+.pane-drag-band {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--window-chrome-height);
 }
 
 /* A collapsed sidebar leaves no rail, so this full-width row takes over the

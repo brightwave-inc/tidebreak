@@ -25,6 +25,7 @@ import { RouteFrame } from "./RouteFrame";
 import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
 import { AppSidebar } from "./sidebar/AppSidebar";
+import { PaneDragBand } from "./WindowDragStrip";
 import {
   CodeDeliveryPage,
   codeDeliverySearchFrom,
@@ -219,7 +220,8 @@ function ProjectRouteComponent() {
   }, [projectId]);
   return (
     <RouteFrame sidebar={<AppSidebar />}>
-      <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-auto">
+      <div className="content-container relative min-h-0 w-full min-w-0 flex-1 overflow-auto">
+        <PaneDragBand />
         <ProjectFilesView projectId={projectId} />
       </div>
     </RouteFrame>

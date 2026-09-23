@@ -86,6 +86,7 @@ import { useDeliverableCatalog } from "./useDeliverableCatalog";
 import { backgroundAgentSpawnKeys, useAgentRuns } from "./useAgentRuns";
 import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
 import { useVoiceInputStore, voiceSelectionReady } from "./VoiceInputStore";
+import { paneHeaderDragRegion } from "./WindowDragStrip";
 import { messageWithPastedText, type PastedTextAttachment } from "./PastedText";
 
 const CodeBrowserTab = lazy(async () => {
@@ -1033,9 +1034,19 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   return (
     <RouteFrame sidebar={<AppSidebar chat={chat} />}>
       <div className="relative mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="window-chrome-row mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 pr-1">
+        {/* Padded rather than offset from the top, so the band above the
+            title belongs to the header and drags the window with it. */}
+        <header
+          className="window-chrome-row flex h-11 w-full shrink-0 items-center justify-between gap-2 pt-2 pr-1"
+          {...paneHeaderDragRegion()}
+        >
           <ChatHeaderTitle chat={chat} />
-          <div className="relative z-20 flex shrink-0 items-center gap-2 self-start">
+          {/* The activity card hangs from the header over the transcript. It
+              is content, not chrome, so it never drags the window. */}
+          <div
+            className="relative z-20 flex shrink-0 items-center gap-2 self-start"
+            data-tauri-drag-region="false"
+          >
             <ChatStatusChip
               compact={layout.tabs.length > 0}
               outputCount={deliverables.length}

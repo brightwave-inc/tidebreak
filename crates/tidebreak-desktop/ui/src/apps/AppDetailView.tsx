@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import type { AppDetail, AppGrantState } from "@/api";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
+import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { Button } from "@/components/ui/button";
 import { useManagedPolicy } from "@/managedPolicy";
 import { openInBrowser } from "@/openInBrowser";
@@ -305,7 +306,11 @@ export function AppDetailView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <PanelSecondaryHeader showBorder={false} className="pr-1 pl-2">
+      <PanelSecondaryHeader
+        showBorder={false}
+        className="pr-1 pl-2"
+        {...paneHeaderDragRegion()}
+      >
         <Button variant="ghost" size="icon-sm" onClick={onBack}>
           <ChevronLeft className="size-4" />
           <span className="sr-only">Back to apps</span>

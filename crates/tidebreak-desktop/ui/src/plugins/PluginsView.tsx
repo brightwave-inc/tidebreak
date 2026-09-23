@@ -27,6 +27,7 @@ import {
   useHostToolProvisioning,
 } from "./useHostToolProvisioning";
 import type { PluginCatalogState } from "./usePluginCatalog";
+import { PaneDragBand } from "@/WindowDragStrip";
 
 /**
  * The Plugins library, as the panel addressed `plugins`.
@@ -113,7 +114,8 @@ export function PluginsView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <PaneDragBand />
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 pt-10 pb-12">
           <header className="flex flex-col items-center gap-4 text-center">
             <div className="flex flex-col gap-1.5">

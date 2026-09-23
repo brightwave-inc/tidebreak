@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { MiddleTruncate } from "./MiddleTruncate";
 
 /**
@@ -68,6 +69,7 @@ export function WorkspaceHeader({
         className,
       )}
       data-testid="workspace-header"
+      {...paneHeaderDragRegion()}
     >
       <div className="min-w-0 flex-1 py-1 min-[1100px]:py-2">
         {loading ? (
