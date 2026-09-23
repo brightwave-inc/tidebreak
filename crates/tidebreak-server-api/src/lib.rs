@@ -19,10 +19,10 @@ pub(crate) use core::{
     agent_control_tools, agent_run_scratch_reaper, approvals, auth, chat_titling, chatgpt_runtime,
     code, connected_apps, diagnostics, document_decode, engine, error, event_projection,
     exec_write_snapshot, extract, gateway_drafts, gateway_runtime, image_attachment, instructions,
-    managed_policy, mcp_config, mcp_curated, mcp_oauth_runtime, memory_sweep, model_registry,
-    model_roles, obo_gateway, openapi_discovery, plugin_install, plugin_state, principal,
-    providers, runtime_settings, scoped_memory, scoped_store, server_version, state, ui_bundle,
-    view_frames,
+    managed_policy, mcp_config, mcp_curated, mcp_oauth_runtime, memory_sweep, model_discovery,
+    model_registry, model_roles, obo_gateway, openapi_discovery, plugin_install, plugin_state,
+    principal, providers, runtime_settings, scoped_memory, scoped_store, server_version, state,
+    ui_bundle, view_frames,
 };
 #[cfg(test)]
 pub(crate) use core::{
@@ -368,6 +368,12 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/providers/{kind}/credential",
             axum::routing::delete(routes::delete_provider_credential),
+        )
+        // Discovery spends the saved credential, so it sits with the other
+        // credential routes on the deployment plane.
+        .route(
+            "/providers/{kind}/models/discover",
+            post(routes::post_provider_models_discover),
         )
         .route(
             "/providers/openai/chatgpt/sign-in",

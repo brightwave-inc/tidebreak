@@ -2050,9 +2050,9 @@ export type CredentialRefusalReason = "connection_ended" | "not_connected" | "fo
 /**
  * User-inspectable routing limits and capabilities for one configured model.
  *
- * OpenAI-compatible rows are validated to the conservative text-only shape.
- * xAI rows may opt into the capabilities its first-party Responses adapter
- * actually carries end to end.
+ * The reader declares what the model accepts. Validation holds each
+ * declaration to what the provider's adapter carries end to end: image input
+ * on every direct route, and only the reasoning levels that route sends.
  */
 export type CustomModelConfig = {
 /**
@@ -2094,13 +2094,22 @@ max_output_tokens: number,
  */
 input_modalities: Array<InputModality>,
 /**
- * Whether the model uses xAI's reasoning request shape.
+ * Whether the model reasons, so Tidebreak sends its provider's
+ * reasoning request shape.
  */
 supports_reasoning: boolean,
 /**
  * Reasoning-effort levels accepted by the model, ascending.
  */
-reasoning_efforts: Array<ReasoningEffort>, };
+reasoning_efforts: Array<ReasoningEffort>,
+/**
+ * Whether the model accepts function tools. A model without them runs
+ * as a chat-only model: Tidebreak sends it no tool schemas.
+ *
+ * Defaults to on, which is how every configured row behaved before the
+ * field existed.
+ */
+supports_tools: boolean, };
 
 /**
  * Wire mirror of the admission gate's typed denial reasons
@@ -2148,6 +2157,68 @@ deletions: number,
  * True when the underlying diff was truncated.
  */
 truncated: boolean, };
+
+/**
+ * One chat model a provider reported.
+ *
+ * A field the provider's listing does not report is absent rather than
+ * guessed, so a form built from this row can fall back to its own default.
+ */
+export type DiscoveredModel = {
+/**
+ * Exact model id the provider accepts.
+ */
+id: string,
+/**
+ * The provider's own name for the model.
+ */
+display_name?: string,
+/**
+ * Context window in tokens.
+ */
+context_window?: number,
+/**
+ * Maximum output in tokens.
+ */
+max_output_tokens?: number,
+/**
+ * Whether the model accepts image input.
+ */
+image_input?: boolean,
+/**
+ * Whether the model reasons in a way this provider's route can request.
+ */
+supports_reasoning?: boolean,
+/**
+ * Reasoning-effort levels the provider reports, limited to the ones this
+ * provider's route sends, ascending.
+ */
+reasoning_efforts?: Array<ReasoningEffort>,
+/**
+ * Whether the model accepts function tools.
+ */
+supports_tools?: boolean,
+/**
+ * A built-in model already covers this id.
+ */
+built_in: boolean,
+/**
+ * A custom model with this id is already saved.
+ */
+added: boolean, };
+
+/**
+ * Response for `POST /providers/{kind}/models/discover`.
+ */
+export type DiscoveredModels = {
+/**
+ * The provider that was asked.
+ */
+provider: ProviderKind,
+/**
+ * The chat models the provider reported, sorted by id.
+ */
+models: Array<DiscoveredModel>, };
 
 /**
  * Identifies an authoritative source document.
@@ -4414,7 +4485,13 @@ auth_mode?: ProviderAuthMode,
 /**
  * Explicit configured model entries for this endpoint.
  */
-models: Array<CustomModelConfig>, };
+models: Array<CustomModelConfig>,
+/**
+ * The reasoning-effort levels a configured row on this provider may
+ * list, ascending: what the provider's adapter actually sends. Empty for
+ * the gateway, whose rows come from its own catalog.
+ */
+custom_reasoning_efforts: Array<ReasoningEffort>, };
 
 /**
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without

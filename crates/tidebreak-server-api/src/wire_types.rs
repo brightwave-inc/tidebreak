@@ -433,6 +433,7 @@ mod tests {
         generate::collect_from::<crate::routes::ChatTranscript>(&cfg, &mut out);
         generate::collect_from::<crate::providers::ProviderInfo>(&cfg, &mut out);
         generate::collect_from::<crate::providers::ProviderAuthMode>(&cfg, &mut out);
+        generate::collect_from::<crate::model_discovery::DiscoveredModels>(&cfg, &mut out);
         generate::collect_from::<crate::chatgpt_runtime::ChatGptSignInStatus>(&cfg, &mut out);
         generate::collect_from::<crate::web_search::WebSearchConfigInfo>(&cfg, &mut out);
         generate::collect_from::<crate::web_search::WebSearchCredentialReadiness>(&cfg, &mut out);
@@ -1565,6 +1566,9 @@ mod tests {
                     has_credential: true,
                     auth_mode: Some(ProviderAuthMode::ApiKey),
                     models: Vec::new(),
+                    custom_reasoning_efforts: ProviderKind::Anthropic
+                        .custom_reasoning_efforts()
+                        .to_vec(),
                 },
                 ProviderInfo {
                     kind: ProviderKind::OpenaiCompatible,
@@ -1577,6 +1581,9 @@ mod tests {
                         display_name: Some("Llama".into()),
                         ..CustomModelConfig::default()
                     }],
+                    custom_reasoning_efforts: ProviderKind::OpenaiCompatible
+                        .custom_reasoning_efforts()
+                        .to_vec(),
                 },
             ],
         };

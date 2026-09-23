@@ -71,6 +71,13 @@
       "providers": [
         {
           "auth_mode": "api_key",
+          "custom_reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
           "enabled": true,
           "has_credential": true,
           "kind": "anthropic",
@@ -78,6 +85,13 @@
         },
         {
           "base_url": "http://localhost:11434/v1",
+          "custom_reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
           "enabled": false,
           "has_credential": false,
           "kind": "openai_compatible",
@@ -91,7 +105,8 @@
               ],
               "max_output_tokens": 4096,
               "reasoning_efforts": [],
-              "supports_reasoning": false
+              "supports_reasoning": false,
+              "supports_tools": true
             }
           ]
         }

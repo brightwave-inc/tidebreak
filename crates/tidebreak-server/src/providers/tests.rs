@@ -1146,35 +1146,328 @@ fn custom_model_validation_is_conservative_and_rejects_duplicates() {
 }
 
 #[test]
-fn xai_configured_models_carry_only_supported_capabilities() {
-    let model = CustomModelConfig {
-        id: "grok-account-model".into(),
-        display_name: Some("Grok account model".into()),
-        context_window: 500_000,
-        max_output_tokens: 32_768,
+fn configured_models_declare_only_what_each_route_carries() {
+    fn row(id: &str) -> CustomModelConfig {
+        CustomModelConfig {
+            id: id.into(),
+            context_window: 200_000,
+            max_output_tokens: 32_000,
+            ..Default::default()
+        }
+    }
+    fn reasoning(mut model: CustomModelConfig, efforts: &[ReasoningEffort]) -> CustomModelConfig {
+        model.supports_reasoning = true;
+        model.reasoning_efforts = efforts.to_vec();
+        model
+    }
+    fn images(mut model: CustomModelConfig) -> CustomModelConfig {
+        model.input_modalities = vec![InputModality::Text, InputModality::Image];
+        model
+    }
+    use ReasoningEffort::{High, Low, Max, Medium, None as Off, XHigh};
+
+    // Every direct adapter carries image bytes, so image input is the row's
+    // own claim on every direct provider.
+    for &kind in ProviderKind::ALL {
+        if !kind.accepts_configured_models() {
+            continue;
+        }
+        let model = images(row("vendor-model-next"));
+        validate_configured_models(kind, std::slice::from_ref(&model)).unwrap();
+        let policy = ResolvedModelPolicy::custom_for(kind, &model);
+        assert_eq!(
+            policy.input_modalities,
+            [InputModality::Text, InputModality::Image],
+            "{kind}"
+        );
+        assert_eq!(policy.verification, VerificationTier::Unverified, "{kind}");
+        assert!(policy.recommended, "{kind}");
+    }
+    assert!(!ProviderKind::ModelGateway.accepts_configured_models());
+
+    // Each route takes only the levels its adapter sends.
+    for (kind, accepted, refused) in [
+        (
+            ProviderKind::Anthropic,
+            &[Low, Medium, High, XHigh, Max][..],
+            Off,
+        ),
+        (
+            ProviderKind::Openai,
+            &[Off, Low, Medium, High, XHigh, Max][..],
+            XHigh,
+        ),
+        (ProviderKind::Xai, &[Low, Medium, High, XHigh][..], Off),
+        (ProviderKind::Gemini, &[Off, Low, Medium, High][..], XHigh),
+        (ProviderKind::Fireworks, &[Low, High, Max][..], Off),
+        (ProviderKind::Together, &[Low, Medium, High][..], Off),
+        (
+            ProviderKind::Openrouter,
+            &[Low, Medium, High, XHigh, Max][..],
+            Off,
+        ),
+        (ProviderKind::Ollama, &[Low, High][..], Off),
+        (ProviderKind::OpenaiCompatible, &[Low, Max][..], Off),
+    ] {
+        // Anthropic reads the reasoning shape from the id, so the row needs
+        // an id the adapter sends a thinking block to.
+        let model = reasoning(row("claude-sonnet-5-5"), accepted);
+        validate_configured_models(kind, std::slice::from_ref(&model))
+            .unwrap_or_else(|error| panic!("{kind}: {}", error.message()));
+        let policy = ResolvedModelPolicy::custom_for(kind, &model);
+        assert!(policy.supports_reasoning, "{kind}");
+        assert_eq!(policy.reasoning_efforts, accepted, "{kind}");
+
+        if kind != ProviderKind::Openai {
+            let mut refused_row = model.clone();
+            refused_row.reasoning_efforts.push(refused);
+            refused_row.reasoning_efforts.sort_unstable();
+            let error = validate_configured_models(kind, &[refused_row]).unwrap_err();
+            assert!(
+                error.message().contains("does not send"),
+                "{kind}: {}",
+                error.message()
+            );
+        }
+    }
+    // A level above what OpenAI takes today cannot be declared either.
+    let error = validate_configured_models(
+        ProviderKind::Openai,
+        &[reasoning(row("gpt-next"), &[Low, ReasoningEffort::Ultra])],
+    )
+    .unwrap_err();
+    assert!(error.message().contains("does not send"));
+
+    // An Anthropic id the adapter never asks to think cannot claim reasoning,
+    // though the same row without the claim is fine.
+    let error = validate_configured_models(
+        ProviderKind::Anthropic,
+        &[reasoning(row("claude-3-7-sonnet-20250219"), &[High])],
+    )
+    .unwrap_err();
+    assert!(error.message().contains("Claude 4.6 and later"));
+    validate_configured_models(
+        ProviderKind::Anthropic,
+        &[row("claude-3-7-sonnet-20250219")],
+    )
+    .unwrap();
+
+    // A stored row from an older build can still hold a level the route no
+    // longer takes. Resolution drops it rather than sending it.
+    let stale = reasoning(row("grok-account-model"), &[Off, Low, High]);
+    assert_eq!(
+        ResolvedModelPolicy::custom_for(ProviderKind::Xai, &stale).reasoning_efforts,
+        [Low, High]
+    );
+
+    // Tools are the row's own claim; strict structured output is the route's.
+    let mut chat_only = row("vendor-chat-only");
+    chat_only.supports_tools = false;
+    for &kind in ProviderKind::ALL {
+        if !kind.accepts_configured_models() {
+            continue;
+        }
+        let policy = ResolvedModelPolicy::custom_for(kind, &chat_only);
+        assert!(!policy.supports_tools, "{kind}");
+        assert_eq!(
+            policy.supports_structured_output,
+            matches!(
+                kind,
+                ProviderKind::Anthropic
+                    | ProviderKind::Openai
+                    | ProviderKind::Gemini
+                    | ProviderKind::Fireworks
+            ),
+            "{kind}"
+        );
+        assert!(!policy.supports_vendor_web_search, "{kind}");
+        assert!(!policy.supports_search_subrequest, "{kind}");
+    }
+
+    // A configured row may not shadow a curated id of its own provider, but
+    // another provider may serve the same name.
+    let shadow = row("claude-opus-5-5");
+    assert!(
+        validate_configured_models(ProviderKind::Anthropic, std::slice::from_ref(&shadow))
+            .unwrap_err()
+            .message()
+            .contains("conflicts with a curated anthropic model")
+    );
+    validate_configured_models(ProviderKind::Openrouter, &[shadow]).unwrap();
+}
+
+/// A row saved before the tools flag existed keeps the behavior every
+/// configured row had then: tools on.
+#[test]
+fn a_configured_row_without_the_tools_flag_keeps_tools_on() {
+    let parsed: CustomModelConfig = serde_json::from_str(
+        r#"{"id":"local/model","context_window":32768,"max_output_tokens":4096}"#,
+    )
+    .unwrap();
+    assert!(parsed.supports_tools);
+    assert!(ResolvedModelPolicy::custom_for(ProviderKind::Ollama, &parsed).supports_tools);
+}
+
+#[tokio::test]
+async fn custom_models_on_a_curated_provider_reach_the_catalog_beside_its_rows() {
+    let (store, _directory) = provider_test_store().await;
+    let secrets = TestSecrets::default();
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let custom = CustomModelConfig {
+        id: "claude-sonnet-5-5".into(),
+        display_name: Some("Claude Sonnet 5.5".into()),
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
         input_modalities: vec![InputModality::Text, InputModality::Image],
         supports_reasoning: true,
-        reasoning_efforts: vec![
-            ReasoningEffort::None,
-            ReasoningEffort::Low,
-            ReasoningEffort::Medium,
-            ReasoningEffort::High,
-            ReasoningEffort::XHigh,
-        ],
+        reasoning_efforts: vec![ReasoningEffort::Low, ReasoningEffort::High],
         ..Default::default()
     };
-    validate_configured_models(ProviderKind::Xai, std::slice::from_ref(&model)).unwrap();
 
-    let policy = ResolvedModelPolicy::custom_for(ProviderKind::Xai, &model);
-    assert_eq!(policy.provider, ProviderKind::Xai);
-    assert_eq!(policy.input_modalities, model.input_modalities);
-    assert!(policy.supports_reasoning);
-    assert_eq!(policy.reasoning_efforts, model.reasoning_efforts);
+    let info = update_provider(
+        &store,
+        &secrets,
+        ProviderKind::Anthropic,
+        ProviderUpdate {
+            enabled: Some(true),
+            base_url: None,
+            credential: Some(ProviderCredential::api_key("sk-ant-test")),
+            models: Some(vec![custom.clone()]),
+        },
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .expect("Anthropic accepts configured models");
+    assert_eq!(info.models, [custom.clone()]);
+    assert_eq!(
+        info.custom_reasoning_efforts,
+        ProviderKind::Anthropic.custom_reasoning_efforts()
+    );
 
-    let mut unsupported = model.clone();
-    unsupported.reasoning_efforts.push(ReasoningEffort::Max);
-    assert!(validate_configured_models(ProviderKind::Xai, &[unsupported]).is_err());
-    assert!(validate_configured_models(ProviderKind::OpenaiCompatible, &[model]).is_err());
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
+    let catalog = catalog_models(&store, &secrets, &policy, None)
+        .await
+        .unwrap();
+    let row = catalog
+        .iter()
+        .find(|model| model.policy.key == "anthropic::claude-sonnet-5-5")
+        .expect("the custom row joins its provider's catalog");
+    assert!(row.available);
+    assert_eq!(row.policy.provider, ProviderKind::Anthropic);
+    assert_eq!(row.policy.display_name, "Claude Sonnet 5.5");
+    assert!(row.policy.supports_reasoning);
+    assert!(row.policy.supports_structured_output);
+    assert!(catalog
+        .iter()
+        .any(|model| model.policy.key == "anthropic::claude-opus-5-5"));
+
+    let resolved = resolve_model_policy(&store, "anthropic::claude-sonnet-5-5", false, None)
+        .await
+        .unwrap()
+        .expect("the stored selection resolves");
+    assert_eq!(resolved.id, "claude-sonnet-5-5");
+    // A bare id with one configured owner resolves to it.
+    assert_eq!(
+        resolve_model_policy(&store, "claude-sonnet-5-5", false, None)
+            .await
+            .unwrap()
+            .map(|policy| policy.key),
+        Some("anthropic::claude-sonnet-5-5".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn a_configured_row_a_catalog_update_curated_gives_way_to_the_curated_row() {
+    let (store, _directory) = provider_test_store().await;
+    let secrets = TestSecrets::default();
+    secrets
+        .set_secret(
+            &ProviderKind::Anthropic.credential_key(),
+            &serde_json::to_string(&ProviderCredential::api_key("sk-ant-test")).unwrap(),
+        )
+        .await
+        .unwrap();
+    // Saved while the id was not curated, as a later release then curated it.
+    write_config(
+        &store,
+        ProviderKind::Anthropic,
+        &ProviderConfig {
+            enabled: true,
+            base_url: None,
+            models: vec![CustomModelConfig {
+                id: "claude-opus-5-5".into(),
+                display_name: Some("My Opus".into()),
+                ..Default::default()
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    let policy = crate::managed_policy::resolve(
+        &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .unwrap();
+
+    let catalog = catalog_models(&store, &secrets, &policy, None)
+        .await
+        .unwrap();
+    let rows: Vec<_> = catalog
+        .iter()
+        .filter(|model| model.policy.key == "anthropic::claude-opus-5-5")
+        .collect();
+    assert_eq!(rows.len(), 1, "one selection key, one row");
+    assert_eq!(rows[0].policy.display_name, "Claude Opus 5.5");
+
+    // The bare id stays unambiguous: the inert row is not a second owner.
+    assert_eq!(
+        resolve_model_policy(&store, "claude-opus-5-5", false, None)
+            .await
+            .unwrap()
+            .map(|policy| policy.display_name),
+        Some("Claude Opus 5.5".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn chatgpt_sign_in_leaves_custom_openai_rows_unavailable() {
+    let (store, _directory) = provider_test_store().await;
+    let secrets = TestSecrets::default();
+    store_chatgpt_session(&secrets).await;
+    write_config(
+        &store,
+        ProviderKind::Openai,
+        &ProviderConfig {
+            enabled: true,
+            base_url: None,
+            models: vec![CustomModelConfig {
+                id: "gpt-next-preview".into(),
+                ..Default::default()
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    let policy = crate::managed_policy::resolve(
+        &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .unwrap();
+
+    let catalog = catalog_models(&store, &secrets, &policy, None)
+        .await
+        .unwrap();
+    let custom = catalog
+        .iter()
+        .find(|model| model.policy.key == "openai::gpt-next-preview")
+        .expect("the row stays listed");
+    // The Codex backend serves only the curated ids it agreed to.
+    assert!(!custom.available);
+    assert!(catalog
+        .iter()
+        .any(|model| model.policy.key == "openai::gpt-5.6-sol" && model.available));
 }
 
 #[test]

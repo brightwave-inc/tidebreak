@@ -425,8 +425,12 @@ fn the_fable_5_1_contract_follows_family_and_generation() {
         "claude-mythos-5-1",
         "claude-fable-6",
         "us.anthropic.claude-fable-5-1",
+        // Opus adopted the contract with 5.5.
+        "claude-opus-5-5",
+        "anthropic.claude-opus-5-5",
+        "claude-opus-6",
     ] {
-        assert!(fable_5_1_or_later(id), "{id}");
+        assert!(on_fable_5_1_contract(id), "{id}");
     }
     for id in [
         "claude-fable-5",
@@ -436,8 +440,41 @@ fn the_fable_5_1_contract_follows_family_and_generation() {
         "claude-opus-4-8",
         "some-gateway-alias",
     ] {
-        assert!(!fable_5_1_or_later(id), "{id}");
+        assert!(!on_fable_5_1_contract(id), "{id}");
     }
+}
+
+/// Opus 5.5 answers a forced `tool_choice` and a disabled thinking block with
+/// a 400, like Fable 5.1, and binds its thinking blocks to the prompt prefix.
+/// On the Opus 5 request shape, utility work (a forced output tool) would fail
+/// on every call.
+#[test]
+fn opus_5_5_takes_the_fable_5_1_request_shape() {
+    let mut req = reasoning_request("claude-opus-5-5", Some(ReasoningEffort::Medium));
+    req.response_format = Some(ResponseFormat::JsonSchema {
+        name: "note".into(),
+        schema: json!({
+            "type": "object",
+            "properties": { "body": { "type": "string" } },
+            "required": ["body"],
+        }),
+    });
+    let body = build_request_json(&req).unwrap();
+    assert!(body.get("tool_choice").is_none());
+    assert!(body.get("tools").is_none());
+    assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+    assert_eq!(body["output_config"]["effort"], "medium");
+    assert_eq!(body["thinking"]["type"], "adaptive");
+    assert_eq!(
+        body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+        "drop_block"
+    );
+
+    let mut req = reasoning_request("claude-opus-5-5", None);
+    req.tool_choice = Some(ToolChoice::Required);
+    let err = build_request_json(&req).unwrap_err().to_string();
+    assert!(err.contains("claude-opus-5-5"), "{err}");
+    assert!(err.contains("forced tool choice"), "{err}");
 }
 
 #[test]

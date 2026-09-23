@@ -1,0 +1,42 @@
+{
+  "data": [
+    {
+      "id": "grok-4.7",
+      "aliases": ["grok-4.7-latest"],
+      "context_length": 500000,
+      "created": 1790208000,
+      "object": "model",
+      "owned_by": "xai",
+      "prompt_text_token_price": 20000,
+      "cached_prompt_text_token_price": 5000,
+      "prompt_image_token_price": 20000,
+      "completion_text_token_price": 60000,
+      "capabilities": {
+        "reasoning_effort": ["low", "medium", "high", "xhigh"],
+        "default_reasoning_effort": "high"
+      }
+    },
+    {
+      "id": "grok-420-non-reasoning",
+      "aliases": [],
+      "context_length": 256000,
+      "created": 1768003200,
+      "object": "model",
+      "owned_by": "xai",
+      "prompt_text_token_price": 20000,
+      "cached_prompt_text_token_price": 2000,
+      "prompt_image_token_price": 0,
+      "completion_text_token_price": 80000
+    },
+    {
+      "id": "grok-imagine-image",
+      "aliases": [],
+      "context_length": 1024,
+      "created": 1769472000,
+      "object": "model",
+      "owned_by": "xai",
+      "image_price": 200000000
+    }
+  ],
+  "object": "list"
+}

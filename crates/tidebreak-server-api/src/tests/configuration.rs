@@ -1841,7 +1841,7 @@ async fn xai_settings_publish_curated_and_explicit_model_capabilities() {
                             "max_output_tokens": 32768,
                             "input_modalities": ["text", "image"],
                             "supports_reasoning": true,
-                            "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"]
+                            "reasoning_efforts": ["low", "medium", "high", "xhigh"]
                         }]
                     })
                     .to_string(),
@@ -1871,13 +1871,14 @@ async fn xai_settings_publish_curated_and_explicit_model_capabilities() {
         .filter(|model| model["provider"] == "xai")
         .filter_map(|model| model["id"].as_str())
         .collect();
+    assert!(grok_ids.contains(&"grok-4.7"));
     assert!(grok_ids.contains(&"grok-4.6"));
     assert!(grok_ids.contains(&"grok-4.5"));
     let grok = catalog["models"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|model| model["key"] == "xai::grok-4.6")
+        .find(|model| model["key"] == "xai::grok-4.7")
         .unwrap();
     assert!(grok["available"].as_bool().unwrap());
     let model = catalog["models"]
@@ -1893,7 +1894,7 @@ async fn xai_settings_publish_curated_and_explicit_model_capabilities() {
     );
     assert_eq!(
         model["reasoning_efforts"],
-        serde_json::json!(["none", "low", "medium", "high", "xhigh"])
+        serde_json::json!(["low", "medium", "high", "xhigh"])
     );
     assert!(model["supports_reasoning"].as_bool().unwrap());
     assert!(model["available"].as_bool().unwrap());
@@ -1942,7 +1943,10 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, tidebreak_router::RouteKind::Xai);
     assert_eq!(routes[0].base_url, None);
-    assert_eq!(routes[0].curated_models, ["grok-4.6", "grok-4.5"]);
+    assert_eq!(
+        routes[0].curated_models,
+        ["grok-4.7", "grok-4.6", "grok-4.5"]
+    );
 
     let grok = providers::resolve_model_policy(&*store, "grok-4.5", false, None)
         .await
@@ -1963,6 +1967,115 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
     assert_eq!(
         router.select_for(Some(&tidebreak_core::ProviderId::new("openai")), "grok-4.5"),
         None
+    );
+}
+
+/// The discovery route reads a provider's model list with the key saved for
+/// it, marks what is already added, and never hands the key back.
+#[tokio::test]
+async fn provider_discovery_lists_models_with_the_saved_key_and_never_returns_it() {
+    // Built at run time so no literal here reads like a real key.
+    let key = ["stand-in", "discovery", "credential"].join("-");
+    let key = key.as_str();
+    let seen_authorization = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let endpoint = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get({
+            let seen_authorization = seen_authorization.clone();
+            move |headers: axum::http::HeaderMap| {
+                let seen_authorization = seen_authorization.clone();
+                async move {
+                    seen_authorization.lock().unwrap().push(
+                        headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                    axum::Json(serde_json::json!({
+                        "object": "list",
+                        "data": [
+                            { "id": "vendor/chat-model", "object": "model", "max_model_len": 65536 },
+                            { "id": "vendor/new-chat-model", "object": "model" },
+                            { "id": "vendor/text-embedding-large", "object": "model" }
+                        ]
+                    }))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, endpoint).await;
+    });
+    let base_url = format!("http://{address}/v1");
+    providers::allow_test_loopback_provider_base_url(&base_url);
+
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let saved = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/openai_compatible")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": true,
+                        "base_url": base_url,
+                        "credential": { "type": "api_key", "key": key },
+                        "models": [{
+                            "id": "vendor/chat-model",
+                            "context_window": 65536,
+                            "max_output_tokens": 8192
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/providers/openai_compatible/models/discover")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!text.contains(key), "the key reached the client: {text}");
+    let found: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(found["provider"], "openai_compatible");
+    assert_eq!(
+        found["models"],
+        serde_json::json!([
+            {
+                "id": "vendor/chat-model",
+                "context_window": 65536,
+                "built_in": false,
+                "added": true
+            },
+            { "id": "vendor/new-chat-model", "built_in": false, "added": false }
+        ])
+    );
+    assert_eq!(
+        *seen_authorization.lock().unwrap(),
+        [format!("Bearer {key}")],
+        "discovery sends the saved key to the provider, once"
     );
 }
 
@@ -2348,8 +2461,8 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     let catalog: serde_json::Value = json_body(catalog_response).await;
     for id in [
         "moonshotai/Kimi-K3",
-        "moonshotai/Kimi-K2.7-Code",
-        "moonshotai/Kimi-K2.6",
+        "zai-org/GLM-5.3",
+        "zai-org/GLM-5.3-Flash",
     ] {
         let model = catalog["models"]
             .as_array()
@@ -2378,7 +2491,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
 
     let incompatible = put_role(
         "utility",
-        serde_json::json!({"selection": "together::thinkingmachines/Inkling-Small"}),
+        serde_json::json!({"selection": "together::Qwen/Qwen3.7-Plus"}),
     )
     .await;
     assert_eq!(incompatible.status(), StatusCode::CONFLICT);

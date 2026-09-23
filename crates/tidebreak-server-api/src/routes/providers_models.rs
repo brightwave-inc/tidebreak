@@ -192,7 +192,7 @@ fn unknown_model_message(value: &str) -> String {
             format!("model selection `{value}` names an unknown provider or model")
         }
         None => format!(
-            "model `{value}` is not registered; configure custom models under OpenAI-compatible settings first"
+            "model `{value}` is not registered; add it as a custom model under its provider in Settings > Providers first"
         ),
     }
 }
@@ -420,6 +420,25 @@ pub async fn delete_provider_credential(
         providers::clear_chatgpt_reconnect_required(&*state.store).await?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /providers/{kind}/models/discover` — list the chat models a provider
+/// serves, read with the credential already saved for it.
+///
+/// Adds nothing: the reader picks what to keep, and saving goes through
+/// `PUT /providers/{kind}` and its ordinary validation. The key never leaves
+/// the server.
+pub async fn post_provider_models_discover(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+) -> Result<Json<crate::model_discovery::DiscoveredModels>, ServerError> {
+    let kind = ProviderKind::parse(&kind)
+        .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
+    let policy = state.managed_policy()?;
+    Ok(Json(
+        crate::model_discovery::discover_models(&*state.store, &*state.secrets, kind, &policy)
+            .await?,
+    ))
 }
 
 /// `POST /providers/openai/chatgpt/sign-in` — start ChatGPT OAuth; returns the

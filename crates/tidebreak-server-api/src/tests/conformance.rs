@@ -681,6 +681,7 @@ fn deployment_plane_routes() -> Vec<(&'static str, &'static str)> {
         ("POST", "/gateway/models/sync"),
         ("PUT", "/providers/anthropic"),
         ("DELETE", "/providers/anthropic/credential"),
+        ("POST", "/providers/openai_compatible/models/discover"),
         ("POST", "/providers/openai/chatgpt/sign-in"),
         ("POST", "/providers/openai/chatgpt/sign-out"),
         ("PUT", "/voice-transcription"),

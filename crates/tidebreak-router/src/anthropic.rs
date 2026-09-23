@@ -27,7 +27,7 @@ use crate::sse::{
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-/// The beta that unlocks `thinking.block_binding` — see [`fable_5_1_or_later`].
+/// The beta that unlocks `thinking.block_binding` — see [`on_fable_5_1_contract`].
 const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
@@ -114,7 +114,7 @@ impl ModelProvider for AnthropicProvider {
         // tool to read back.
         let output_tool = match &req.response_format {
             Some(ResponseFormat::JsonSchema { name, .. })
-                if !fable_5_1_or_later(req.request_shaping_model()) =>
+                if !on_fable_5_1_contract(req.request_shaping_model()) =>
             {
                 Some(name.clone())
             }
@@ -483,7 +483,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
                         "response format {name} has no strict JSON Schema form"
                     ))
                 })?;
-            if fable_5_1_or_later(shaping_model) {
+            if on_fable_5_1_contract(shaping_model) {
                 // Fable 5.1 rejects the forced call below, and it has the
                 // native constraint the forced tool stood in for: the text
                 // channel itself carries the schema-valid answer, so there is no
@@ -520,7 +520,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
                 // A forced choice is the caller's explicit ask; on a model that
                 // returns 400 for it, failing here names the cause instead of
                 // relaying the provider's rejection as a generic fault.
-                if fable_5_1_or_later(shaping_model)
+                if on_fable_5_1_contract(shaping_model)
                     && matches!(choice, ToolChoice::Required | ToolChoice::Tool { .. })
                 {
                     return Err(AgentError::Provider(format!(
@@ -589,7 +589,7 @@ fn finish_request(
         // replay below keep the raw blocks whole rather than filtering on
         // `type == "thinking"`.
         body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
-        if fable_5_1_or_later(req.request_shaping_model()) {
+        if on_fable_5_1_contract(req.request_shaping_model()) {
             // Fable 5.1 signs each thinking block against the prefix that
             // produced it and rejects a replayed block whose prefix has since
             // changed. This host does rewrite earlier turns — compaction and
@@ -811,7 +811,7 @@ fn is_cache_markable(block: &Value) -> bool {
 /// A response format forces the synthetic output tool everywhere except on a
 /// model with the native constraint, where nothing on the wire is forced.
 fn forces_a_tool(req: &ChatRequest) -> bool {
-    (req.response_format.is_some() && !fable_5_1_or_later(req.request_shaping_model()))
+    (req.response_format.is_some() && !on_fable_5_1_contract(req.request_shaping_model()))
         || matches!(
             req.tool_choice,
             Some(ToolChoice::Required | ToolChoice::Tool { .. })
@@ -831,24 +831,36 @@ fn set_output_config(body: &mut Value, key: &str, value: Value) {
     }
 }
 
-/// Whether `model` is Claude Fable 5.1, its Mythos twin, or a later release of
-/// that line.
+/// Whether `model` is on the contract Claude Fable 5.1 introduced: Fable 5.1,
+/// its Mythos twin, Opus 5.5, or a later release of either line.
 ///
-/// Fable 5.1 changed two things the rest of the line did not. It returns a 400
-/// for a forced `tool_choice` (`any` and `tool`), where Opus 5 and Fable 5 both
-/// think by default and still accept one — so the structured-output constraint
-/// goes on `output_config.format` instead of a forced tool. And it binds each
+/// Fable 5.1 changed two things the rest of the line did not, and Opus 5.5
+/// adopted both. These models return a 400 for a forced `tool_choice` (`any`
+/// and `tool`), where Opus 5 and Fable 5 both think by default and still
+/// accept one — so the structured-output constraint goes on
+/// `output_config.format` instead of a forced tool. And they bind each
 /// thinking block to the conversation prefix that produced it, so a replayed
 /// block behind a rewritten turn is rejected unless the request opts into
-/// dropping it. Neither follows from the generation alone: an Opus of the same
-/// generation keeps the old contract. So this reads the family and the
-/// generation together, the way `web_search_tool_type` carves out Haiku.
-fn fable_5_1_or_later(model: &str) -> bool {
-    /// First release of the line on this contract.
-    const FIRST: (u32, u32) = (5, 1);
+/// dropping it. Neither follows from the generation alone: Opus 5 and Opus 5.1
+/// keep the old contract while Fable 5.1 does not. So this reads the family
+/// and the generation together, the way `web_search_tool_type` carves out
+/// Haiku.
+fn on_fable_5_1_contract(model: &str) -> bool {
+    /// First Fable or Mythos release on this contract.
+    const FIRST_FABLE: (u32, u32) = (5, 1);
+    /// First Opus release on this contract.
+    const FIRST_OPUS: (u32, u32) = (5, 5);
     let leaf = model.rsplit('/').next().unwrap_or(model);
-    (leaf.contains("fable") || leaf.contains("mythos"))
-        && claude_generation(model).is_some_and(|generation| generation >= FIRST)
+    let Some(generation) = claude_generation(model) else {
+        return false;
+    };
+    if leaf.contains("fable") || leaf.contains("mythos") {
+        generation >= FIRST_FABLE
+    } else if leaf.contains("opus") {
+        generation >= FIRST_OPUS
+    } else {
+        false
+    }
 }
 
 fn anthropic_tool_choice(choice: &ToolChoice) -> Result<Value> {
@@ -867,6 +879,16 @@ fn anthropic_tool_choice(choice: &ToolChoice) -> Result<Value> {
             )))
         }
     })
+}
+
+/// Whether a request for `model` can carry reasoning at all.
+///
+/// The thinking block goes only to ids this adapter reads as Claude 4.6 or
+/// later (see [`takes_adaptive_thinking`]). A host that lets a reader declare
+/// a model's capabilities checks this before accepting a reasoning claim,
+/// because a model this returns `false` for would never think.
+pub fn sends_reasoning(model: &str) -> bool {
+    takes_adaptive_thinking(model)
 }
 
 /// Whether `model` takes the adaptive-thinking request shape.
