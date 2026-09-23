@@ -449,7 +449,7 @@ async fn journal_load_keeps_reads_fast_while_five_sessions_stream() {
         store.journal.committed_batches(),
     );
     for session_id in sessions {
-        let journal = list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
+        let journal = list_events(&store, &owner, session_id, 0, EVENTS_PER_SESSION as u64)
             .await
             .unwrap();
         let seqs: Vec<i64> = journal.events.iter().map(|entry| entry.seq).collect();
