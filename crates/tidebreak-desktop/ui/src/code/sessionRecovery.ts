@@ -62,7 +62,7 @@ export function sessionRecoveryState(
             state: {
               type: "needs_you",
               prompt:
-                "The engine connection stopped. Retry recovery to continue with the saved transcript.",
+                "The engine connection stopped. Try again to continue with the saved transcript.",
               source: "lifecycle",
             },
             source: "lifecycle",

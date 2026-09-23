@@ -189,7 +189,7 @@ function mcpUrlHint(draft: Draft): boolean {
 
 function mcpHintForPreview(draft: Draft): string | null {
   if (mcpUrlHint(draft)) {
-    return "This looks like an MCP HTTP endpoint, not an OpenAPI document. Add it under Settings → MCP servers as a remote HTTP server.";
+    return "This looks like an MCP HTTP endpoint, not an OpenAPI document. Add it under Settings → Connected apps as a remote HTTP server.";
   }
   return null;
 }
@@ -825,7 +825,7 @@ export function ConnectedAppsPanel({
       {mcpUrlHint(draft) && (
         <p className="text-sm text-muted-foreground">
           This looks like an MCP HTTP endpoint, not a REST/OpenAPI base URL. Add
-          it under Settings → MCP servers as a remote HTTP server.
+          it under Settings → Connected apps as a remote HTTP server.
         </p>
       )}
       {loopbackHttpHost(draft.baseUrl) !== null && (

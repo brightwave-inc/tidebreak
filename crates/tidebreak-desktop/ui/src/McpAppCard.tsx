@@ -151,7 +151,7 @@ export function McpAppCard({
               className="border-warning-border bg-background text-warning-foreground hover:bg-warning-background hover:text-warning-foreground"
               onClick={() => setPayloadAttempt((attempt) => attempt + 1)}
             >
-              Retry
+              Try again
             </Button>
           </div>
         )}

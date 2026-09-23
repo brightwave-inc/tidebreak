@@ -129,6 +129,8 @@ the session's first turn, folded.
 Record 78's identification rule survives unchanged; only its refusal is gone.
 The `canUneff` flag left the command menus, so nothing hides the item.
 
+Amendment (2026-09-23): the menu label is now “Report a problem…”. The command id stays `uneff-me`, and `uneff` remains a command-palette keyword so the old name still finds it.
+
 Revisit this if Code repo snapshots grow a remote identity that makes the
 name heuristic unnecessary, if the first prompt should carry a redacted
 report rather than the full one, or if "File an issue" should reach chat
@@ -142,7 +144,7 @@ prose around it is not; the no-checkout prompt says to ask before cloning and
 never claims a fresh workspace; a connected checkout gets a workspace and no
 checkout gets none; engine choice follows source session, then last create,
 then any; a plan ceiling yields plan rather than a refusal.
-`workspaceActions.test.ts` pins that Uneff me appears next to Copy debug JSON
+`workspaceActions.test.ts` pins that Report a problem appears next to Copy diagnostic details
 whenever there is a session and never without one. `PastedText.test.ts` pins
 the split. `CodeTranscript.dom.test.tsx` pins the action on a failed turn and
 an error notice, its absence on a warning and without a handler, and the

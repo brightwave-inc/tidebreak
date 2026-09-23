@@ -58,7 +58,7 @@ export function voiceSelectionLabel(
 ): string {
   if (!info) return "Loading…";
   if (info.model === "gpt4o_transcribe") return "OpenAI · gpt-4o-transcribe";
-  if (info.model === "gemini_flash") return "Google · Gemini 3.6 Flash";
+  if (info.model === "gemini_flash") return "Google · Gemini Flash";
   const local = selectedLocalVoiceModel(info);
   const host = hostMachineLabel();
   return local ? `On ${host} · ${local.label}` : `On ${host}`;
@@ -174,7 +174,7 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
                   )}
                   {info?.gemini_ready && (
                     <SelectItem value="gemini_flash">
-                      Google · Gemini 3.6 Flash
+                      Google · Gemini Flash
                     </SelectItem>
                   )}
                 </SelectGroup>

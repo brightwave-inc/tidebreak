@@ -870,7 +870,7 @@ function StoryChat({
             hydrated={hydration === undefined}
             hydrationError={
               hydration === "error"
-                ? "The connection was interrupted. Retry to load the transcript and pending approvals."
+                ? "The connection was interrupted. Try again to load the transcript and pending approvals."
                 : null
             }
             onRetryHydration={() => setHydration(undefined)}
@@ -1230,9 +1230,7 @@ export const HydrationRetry: Story = {
       "Could not load this work",
     );
     await expect(canvas.getByRole("textbox")).toBeDisabled();
-    await userEvent.click(
-      canvas.getByRole("button", { name: "Retry loading" }),
-    );
+    await userEvent.click(canvas.getByRole("button", { name: "Try again" }));
     await expect(canvas.queryByRole("alert")).not.toBeInTheDocument();
     await expect(canvas.getByRole("textbox")).toBeEnabled();
     await expect(canvas.getByRole("textbox")).toHaveValue(

@@ -120,7 +120,7 @@ function api(
  * also match the same server's card further down the page. */
 function mountRow(slug: string): HTMLElement {
   const row = screen
-    .getByRole("switch", { name: `Mount ${slug}` })
+    .getByRole("switch", { name: `Connect ${slug}` })
     .closest("li");
   if (!row) throw new Error(`no mount row for ${slug}`);
   return row;
@@ -308,7 +308,7 @@ describe("McpPanel", () => {
 
     expect(screen.getByLabelText("MCP JSON")).toHaveValue(json);
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /Couldn't import pasted JSON: JSON at character \d+: this JSON uses a comment/,
+      /Could not import pasted JSON: JSON at character \d+: this JSON uses a comment/,
     );
   });
 
@@ -500,7 +500,9 @@ describe("McpPanel", () => {
 
     // One row per endpoint: mount toggle, health chip, the apps it serves,
     // and a reconnect action — the whole transport story in one line.
-    await screen.findByRole("switch", { name: "Mount example-security-tools" });
+    await screen.findByRole("switch", {
+      name: "Connect example-security-tools",
+    });
     const row = mountRow("example-security-tools");
     expect(within(row).getByText("Healthy")).toBeInTheDocument();
     // Apps load after the session check, so the switch can appear before
@@ -536,7 +538,7 @@ describe("McpPanel", () => {
     await screen.findByText("Healthy");
     expect(screen.queryByText("Gateway endpoints")).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("switch", { name: /^Mount / }),
+      screen.queryByRole("switch", { name: /^Connect / }),
     ).not.toBeInTheDocument();
   });
 
@@ -548,12 +550,12 @@ describe("McpPanel", () => {
     );
 
     const toggle = await screen.findByRole("switch", {
-      name: "Mount example-security-tools",
+      name: "Connect example-security-tools",
     });
     expect(toggle).toBeChecked();
     expect(toggle).toBeDisabled();
     expect(
-      screen.getByText(/Sign in to the Model Gateway to mount or unmount/),
+      screen.getByText(/Sign in to the Model Gateway to connect or disconnect/),
     ).toBeInTheDocument();
     // Signed out, no entitlements were read, so nothing claims a revocation.
     expect(screen.queryByText(/No longer granted/)).not.toBeInTheDocument();
@@ -576,7 +578,7 @@ describe("McpPanel", () => {
 
     await user.click(
       await screen.findByRole("switch", {
-        name: "Mount example-security-tools",
+        name: "Connect example-security-tools",
       }),
     );
     await waitFor(() =>
@@ -617,7 +619,7 @@ describe("McpPanel", () => {
     render(<McpPanel client={client} />);
 
     await user.click(
-      await screen.findByRole("switch", { name: `Mount ${longSlug}` }),
+      await screen.findByRole("switch", { name: `Connect ${longSlug}` }),
     );
     await waitFor(() =>
       expect(putMcpServers).toHaveBeenCalledWith([
@@ -688,29 +690,29 @@ describe("McpPanel", () => {
     // unmounted.
     expect(
       await screen.findByText(
-        /Couldn't read the MCP server list: mcp backend unavailable/,
+        /Could not read the MCP server list: mcp backend unavailable/,
       ),
     ).toBeInTheDocument();
     expect(
       await screen.findByRole("switch", {
-        name: "Mount example-security-tools",
+        name: "Connect example-security-tools",
       }),
     ).toBeDisabled();
     expect(
       within(mountRow("example-security-tools")).getByText(
-        /Mount state unknown/,
+        /Connection state unknown/,
       ),
     ).toBeInTheDocument();
 
     listMcpServers.mockResolvedValue({ servers: [] });
-    await user.click(screen.getByRole("button", { name: /Retry/ }));
+    await user.click(screen.getByRole("button", { name: /Try again/ }));
     await waitFor(() =>
       expect(
         screen.queryByText(/mcp backend unavailable/),
       ).not.toBeInTheDocument(),
     );
     expect(
-      screen.getByRole("switch", { name: "Mount example-security-tools" }),
+      screen.getByRole("switch", { name: "Connect example-security-tools" }),
     ).toBeEnabled();
   });
 
@@ -741,7 +743,7 @@ describe("McpPanel", () => {
     });
     expect(
       screen.getByText(
-        /Couldn't read the MCP server list: mcp backend unavailable/,
+        /Could not read the MCP server list: mcp backend unavailable/,
       ),
     ).toBeInTheDocument();
     const row = mountRow("example-security-tools");
@@ -766,7 +768,7 @@ describe("McpPanel", () => {
     // The row survives the apps failure, labeled unknown-entitlements — never
     // misreported as revoked.
     expect(
-      await screen.findByText(/Couldn't read your entitlements/),
+      await screen.findByText(/Could not read your entitlements/),
     ).toBeInTheDocument();
     const row = mountRow("example-security-tools");
     expect(
@@ -802,7 +804,7 @@ describe("McpPanel", () => {
     // is exactly the write the server admits — and admission depends on the
     // inert manual definition arriving unchanged, so pin it exactly.
     const toggle = await screen.findByRole("switch", {
-      name: "Mount example-security-tools",
+      name: "Connect example-security-tools",
     });
     expect(toggle).toBeEnabled();
     await user.click(toggle);
@@ -894,7 +896,7 @@ describe("McpPanel", () => {
     );
     await user.click(
       await screen.findByRole("switch", {
-        name: "Mount example-security-tools",
+        name: "Connect example-security-tools",
       }),
     );
     // The mount write is rebuilt from the saved configuration: nobody's

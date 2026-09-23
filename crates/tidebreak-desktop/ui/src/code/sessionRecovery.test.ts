@@ -78,7 +78,7 @@ it("offers manual recovery for older servers without recovery digest fields", ()
   const result = sessionRecoveryState(snapshot, digest);
   expect(result.attention?.state).toMatchObject({
     type: "needs_you",
-    prompt: expect.stringContaining("Retry recovery"),
+    prompt: expect.stringContaining("Try again"),
   });
   expect(result.reason?.type).toBe("orphan_alive");
 });

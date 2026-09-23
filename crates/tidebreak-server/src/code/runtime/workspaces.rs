@@ -181,7 +181,7 @@ impl CodeRuntime {
         };
         let base_refresh_warning = refreshed.err().map(|error| {
             tracing::debug!(repo = %repo.id, %error, "local base refresh skipped");
-            format!("Couldn't update {base} to the latest version. Your workspace uses the available local history.")
+            format!("Could not update {base} to the latest version. Your workspace uses the available local history.")
         });
         if requested_repo_default && repo.default_base_ref != base {
             let mut repo = repo.clone();

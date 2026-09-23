@@ -106,7 +106,7 @@ describe("McpAppCard", () => {
     const warning = await screen.findByRole("alert");
     expect(warning).toHaveTextContent("Tool result did not load.");
 
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(getMcpAppPayload).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });

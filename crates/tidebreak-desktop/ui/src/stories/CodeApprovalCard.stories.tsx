@@ -260,7 +260,7 @@ export const Plan: Story = {
       canvas.getByRole("region", { name: "Proposed plan" }),
     ).toBeVisible();
     await expect(
-      canvas.getByRole("button", { name: "Harness payload" }),
+      canvas.getByRole("button", { name: "Engine request" }),
     ).toHaveAttribute("aria-expanded", "false");
   },
 };

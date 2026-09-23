@@ -96,10 +96,10 @@ export function SessionRecoveryNotice({
           onClick={() => void retry()}
         >
           {retrying
-            ? "Retrying…"
+            ? "Trying again…"
             : missingOutput
               ? "Continue with saved transcript"
-              : "Retry recovery"}
+              : "Try again"}
         </Button>
       )}
       {dialog}

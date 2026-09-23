@@ -306,7 +306,9 @@ describe("GatewayPanel", () => {
     expect(screen.queryByText("Connected apps")).not.toBeInTheDocument();
     // The route to mounting still shows: older gateways mount by slug too.
     expect(
-      screen.getByRole("button", { name: /Mount endpoints in Connected apps/ }),
+      screen.getByRole("button", {
+        name: /Connect endpoints in Connected apps/,
+      }),
     ).toBeInTheDocument();
   });
 
@@ -333,11 +335,13 @@ describe("GatewayPanel", () => {
 
     expect(await screen.findByText("Incident API")).toBeInTheDocument();
     expect(
-      screen.queryByRole("switch", { name: /^Mount / }),
+      screen.queryByRole("switch", { name: /^Connect / }),
     ).not.toBeInTheDocument();
 
     await user.click(
-      screen.getByRole("button", { name: /Mount endpoints in Connected apps/ }),
+      screen.getByRole("button", {
+        name: /Connect endpoints in Connected apps/,
+      }),
     );
     expect(openConnectedApps).toHaveBeenCalled();
   });

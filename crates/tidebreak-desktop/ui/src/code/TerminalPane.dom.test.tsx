@@ -324,7 +324,7 @@ describe("TerminalPane", () => {
       await screen.findByTestId("terminal-write-failure"),
     ).toHaveTextContent("3 unsent bytes");
 
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(writeCodeTerminal).toHaveBeenCalledTimes(3));
     expect(writeCodeTerminal.mock.calls.map((call) => call[2])).toEqual([
       "a",
@@ -363,7 +363,7 @@ describe("TerminalPane", () => {
     expect(screen.getByTestId("terminal-write-failure")).toHaveTextContent(
       "8 unsent bytes",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
 
     await waitFor(() => expect(writeCodeTerminal).toHaveBeenCalledTimes(2));
     expect(writeCodeTerminal.mock.calls.map((call) => call[2])).toEqual([
@@ -448,7 +448,7 @@ describe("TerminalPane", () => {
 
     const failure = await screen.findByTestId("terminal-attach-error");
     expect(failure).toHaveTextContent("Input stays paused");
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
 
     await waitFor(() => expect(listCodeTerminals).toHaveBeenCalledTimes(2));
     await expectReady();
@@ -467,7 +467,7 @@ describe("TerminalPane", () => {
 
     const failure = await screen.findByTestId("terminal-read-error");
     expect(failure).toHaveTextContent("Input is paused");
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
 
     await waitFor(() => expect(readCodeTerminal).toHaveBeenCalledTimes(2));
     await expectReady();
@@ -593,7 +593,7 @@ describe("TerminalPane", () => {
     );
 
     await screen.findByTestId("terminal-attach-error");
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(listCodeTerminals).toHaveBeenCalledTimes(2));
     unmount();
     await act(async () => retryList.resolve([]));

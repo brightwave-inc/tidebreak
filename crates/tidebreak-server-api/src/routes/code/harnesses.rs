@@ -296,7 +296,9 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
             let label = harness_label(*kind);
             let auth_mode = resolve_auth_mode(hosted, *kind, &probe);
             let remediation = if let Some(err) = install_error {
-                format!("could not download the {kind} binary: {err}")
+                format!(
+                    "Could not download {label}: {err}. Check your connection, then select Try again."
+                )
             } else if !probe.found && !installable {
                 format!("this build ships no pinned {kind} binary to download")
             } else if auth_mode == HarnessAuthMode::GatewayRelay {

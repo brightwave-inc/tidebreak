@@ -185,7 +185,7 @@ export function AgentRunTaskPlanChecklist({
           className="shrink-0 font-medium text-primary hover:underline"
           onClick={state.retry}
         >
-          Retry
+          Try again
         </button>
       </div>
     );

@@ -93,7 +93,7 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
 
 /** Shown when the selected harness cannot honor Ask or Auto. */
 export const PERMISSION_MODE_UNAVAILABLE_REASON =
-  "this harness cannot honor that mode";
+  "this engine cannot honor that mode";
 
 /** Shown when managed policy leaves an engine with no mode it can honor. */
 export const PERMISSION_MODE_POLICY_BLOCKED =

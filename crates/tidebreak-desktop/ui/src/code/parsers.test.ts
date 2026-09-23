@@ -2259,7 +2259,7 @@ describe("code frames against real server output", () => {
     expect(isRecord(workspace)).toBe(true);
     if (!isRecord(workspace)) throw new Error("Missing workspace fixture");
     const warning =
-      "Couldn't update main to the latest version. Your workspace uses the available local history.";
+      "Could not update main to the latest version. Your workspace uses the available local history.";
     expect(
       parseCodeWorkspace({ ...workspace, base_refresh_warning: warning })
         ?.base_refresh_warning,
