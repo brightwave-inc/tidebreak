@@ -9,6 +9,7 @@
 //! lives in a definition**: the connected-app record and every API projection
 //! carry names only, and values are resolved at the connection boundary.
 
+mod oauth;
 mod runtime;
 mod stdio;
 mod types;

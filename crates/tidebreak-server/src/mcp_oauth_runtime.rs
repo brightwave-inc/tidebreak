@@ -21,8 +21,10 @@ use serde::{Deserialize, Serialize};
 /// The states are exhaustive and ordered by the user's path through them:
 /// a server is `Unsupported` or, once OAuth is detected, moves
 /// `NotConnected` → `Authorizing` → `Connected`, and from `Connected` can fall
-/// to `Expired` (refresh rejected) or `AccessDenied` (the authorization server
-/// refused this user).
+/// to `Expired` (refresh rejected, or the server refused the stored session)
+/// or `AccessDenied` (the person declined, or the authorization server
+/// refused them). A server needs no saved flag to be detected: an HTTP server
+/// that answers `401` with OAuth metadata is enough.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum McpOAuthState {
@@ -47,15 +49,23 @@ pub enum McpOAuthState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct McpOAuthStatus {
     pub state: McpOAuthState,
-    /// The system-browser URL to open while `Authorizing`. Absent otherwise.
+    /// The page the desktop opens in the person's browser while
+    /// `Authorizing`, and opens again on request. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pending_authorization_url: Option<String>,
-    /// A bounded, secret-free reason shown for `Expired`, `AccessDenied`, or
-    /// `Unsupported`. Never echoes a URL, token, or upstream body.
+    /// A bounded, secret-free reason shown for `Expired`, `AccessDenied`,
+    /// `Unsupported`, and a `NotConnected` whose last sign-in failed. Never
+    /// echoes a URL, token, or upstream body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,
+    /// Host of the sign-in page Connect opens, such as `vercel.com`, so the
+    /// person sees where they are sent before they go. Only a host, never a
+    /// URL. Absent when it is not known yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sign_in_host: Option<String>,
 }
 
 impl McpOAuthStatus {
@@ -65,7 +75,15 @@ impl McpOAuthStatus {
             state,
             pending_authorization_url: None,
             error: None,
+            sign_in_host: None,
         }
+    }
+
+    /// This status, naming the host of the sign-in page.
+    #[must_use]
+    pub fn with_sign_in_host(mut self, host: Option<String>) -> Self {
+        self.sign_in_host = host.filter(|host| !host.is_empty());
+        self
     }
 
     #[must_use]
@@ -84,6 +102,7 @@ impl McpOAuthStatus {
             state: McpOAuthState::Authorizing,
             pending_authorization_url: Some(authorization_url),
             error: None,
+            sign_in_host: None,
         }
     }
 
@@ -93,6 +112,7 @@ impl McpOAuthStatus {
             state,
             pending_authorization_url: None,
             error: Some(reason.into()),
+            sign_in_host: None,
         }
     }
 }

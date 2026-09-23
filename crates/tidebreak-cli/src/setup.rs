@@ -710,10 +710,16 @@ fn decode_mcp(listing: &serde_json::Value) -> Result<McpServersInfo> {
 /// The route takes a complete replacement set of *user-configured* servers, so
 /// editing one means sending the others back untouched. Two things have to come
 /// off first: plugin-sourced servers, which the runtime rebuilds and the route
-/// refuses in a body, and the live projection fields (health, tool counts),
-/// which are not part of a definition.
+/// refuses in a body, and the live projection fields (health, tool counts,
+/// OAuth status), which are not part of a definition.
 fn configured_servers(listing: &serde_json::Value) -> Result<Vec<serde_json::Value>> {
-    const PROJECTED: [&str; 4] = ["health", "tool_count", "diagnostic", "curated"];
+    const PROJECTED: [&str; 5] = [
+        "health",
+        "tool_count",
+        "diagnostic",
+        "curated",
+        "oauth_status",
+    ];
     let servers = listing["servers"]
         .as_array()
         .ok_or_else(|| AgentError::msg("the MCP server list had no servers array"))?;
@@ -747,6 +753,51 @@ fn providers_json(providers: &[crate::api::wire::ProviderInfo]) -> Vec<serde_jso
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod mcp_listing_tests {
+    use super::configured_servers;
+
+    /// A server that asks for an OAuth sign-in lists an `oauth_status`. The
+    /// route refuses unknown fields, so sending it back would fail every
+    /// `mcp add` and `mcp remove` on a profile that has such a server.
+    #[test]
+    fn a_listed_oauth_status_is_not_sent_back_as_definition() {
+        let listing = serde_json::json!({"servers": [{
+            "name": "vercel",
+            "command": null,
+            "args": [],
+            "env": [],
+            "env_from": [],
+            "cwd": null,
+            "url": "https://mcp.vercel.com",
+            "bearer_token_env": null,
+            "oauth": false,
+            "gateway_endpoint": null,
+            "request_timeout_ms": 60000,
+            "enabled": true,
+            "plugin": null,
+            "health": "degraded",
+            "tool_count": 0,
+            "diagnostic": "This server needs you to sign in.",
+            "curated": null,
+            "oauth_status": {"state": "not_connected"}
+        }]});
+        let servers = configured_servers(&listing).unwrap();
+        assert_eq!(servers.len(), 1);
+        let fields = servers[0].as_object().unwrap();
+        for projected in [
+            "health",
+            "tool_count",
+            "diagnostic",
+            "curated",
+            "oauth_status",
+        ] {
+            assert!(!fields.contains_key(projected), "{projected} was sent back");
+        }
+        assert_eq!(servers[0]["url"], "https://mcp.vercel.com");
+    }
 }
 
 #[cfg(all(test, feature = "keychain"))]

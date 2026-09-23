@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use tidebreak_core::{AgentError, Result};
 use tidebreak_mcp::MAX_SERVER_NAME_BYTES;
 
+use super::oauth::OAuthNeed;
 use super::types::*;
 
 pub(super) fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
@@ -270,12 +271,45 @@ pub(super) fn reconnect_park(
     error: &AgentError,
 ) -> Option<ReconnectPark> {
     if crate::connectors::is_sign_in_required(error) {
-        return Some(ReconnectPark::SignIn);
+        return Some(if definition.gateway_endpoint.is_some() {
+            ReconnectPark::SignIn
+        } else {
+            ReconnectPark::Authorization
+        });
     }
     if definition.gateway_endpoint.is_none() && missing_parent_environment(definition).is_some() {
         return Some(ReconnectPark::Configuration);
     }
     None
+}
+
+/// The diagnostic for a failed connection, given what it taught the runtime
+/// about OAuth. A server that asks for a sign-in says so instead of reporting
+/// the `401` it answered with.
+pub(super) fn failure_diagnostic(
+    definition: &McpServerDefinition,
+    error: &AgentError,
+    oauth: Option<&OAuthNeed>,
+) -> String {
+    match oauth {
+        Some(need) => need.diagnostic(),
+        None => connection_diagnostic(definition, error),
+    }
+}
+
+/// [`reconnect_park`], given what the failure taught the runtime about OAuth.
+/// A server that asks for a sign-in cannot connect until someone signs in or
+/// changes it, so the supervisor stops retrying it. A sign-in service that
+/// did not answer is temporary and keeps the usual backoff.
+pub(super) fn failure_park(
+    definition: &McpServerDefinition,
+    error: &AgentError,
+    oauth: Option<&OAuthNeed>,
+) -> Option<ReconnectPark> {
+    match oauth {
+        Some(need) if need.parks() => Some(ReconnectPark::Authorization),
+        _ => reconnect_park(definition, error),
+    }
 }
 
 /// The first parent environment variable the definition reads that this
@@ -326,6 +360,9 @@ fn classified_transport_detail(error: &AgentError) -> Option<String> {
         "Not executable:",
         "Permission denied:",
         "Relative executable path",
+        // A token refresh the sign-in service did not answer: temporary, and
+        // worded for the person by the OAuth connector.
+        "Sign-in service unavailable",
     ];
     PREFIXES
         .iter()

@@ -1,6 +1,8 @@
 //! Live MCP connection supervision and tool registry publication.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -14,14 +16,42 @@ use tidebreak_mcp::{McpClient, McpProbe, MAX_SERVER_NAME_BYTES};
 use tokio::sync::Mutex;
 
 use crate::connectors::{
-    bind_mcp_loopback, build_authorize_url, open_system_browser, pkce_pair, McpOAuthClient,
-    McpOAuthCredentialVault, PendingMcpSignIn,
+    bind_mcp_loopback, build_authorize_url, pkce_pair, Discovery, McpOAuthClient,
+    McpOAuthCredentialVault, PendingMcpSignIn, SignInFailure,
 };
 use crate::mcp_curated::{curation_for, McpCuration};
 use crate::mcp_oauth_runtime::{McpOAuthState, McpOAuthStatus};
 
+use super::oauth::{self, OAuthAccess, OAuthNeed, SignInProgress, SignInRecord, SignInView};
 use super::types::*;
-use super::validation::{connection_diagnostic, reconnect_park, validate_servers};
+use super::validation::{failure_diagnostic, failure_park, validate_servers};
+
+/// One connection attempt's outcome, with what it taught the runtime about
+/// OAuth.
+type ConnectAttempt = (
+    Result<(McpClient, HashMap<String, UiViewDocument>)>,
+    Option<OAuthNeed>,
+);
+
+/// One sign-in the background task finishes: which server, at which URL,
+/// and which attempt, so it can tell whether it is still the one on file.
+struct FinishingSignIn {
+    id: ConnectedAppId,
+    name: String,
+    server_url: String,
+    generation: u64,
+}
+
+/// What [`McpRuntime::info`] reads under the state lock for one server that
+/// signs in, to project its OAuth status after the lock is released.
+struct OAuthSnapshot {
+    index: usize,
+    id: ConnectedAppId,
+    url: String,
+    flag: bool,
+    need: Option<OAuthNeed>,
+    progress: Option<SignInView>,
+}
 
 pub(super) struct ManagedServer {
     client: Option<McpClient>,
@@ -33,6 +63,9 @@ pub(super) struct ManagedServer {
     pub(super) reconnect_lock: Arc<Mutex<()>>,
     /// Prefetched MCP Apps view documents, keyed by declared `ui://` URI.
     ui_views: HashMap<String, UiViewDocument>,
+    /// Set when the last connection failed because the server asks for an
+    /// OAuth sign-in. Cleared by the next successful connection.
+    pub(super) oauth: Option<OAuthNeed>,
 }
 
 /// How the supervisor retries one server that is not connected.
@@ -61,11 +94,11 @@ impl Default for Reconnect {
 impl Reconnect {
     /// The state after a first connection failed. The caller logs that
     /// failure itself, so it counts as reported.
-    fn after_failure(definition: &McpServerDefinition, error: &AgentError) -> Self {
+    fn after_failure(park: Option<ReconnectPark>, diagnostic: String) -> Self {
         Self {
             backoff: INITIAL_RECONNECT_BACKOFF,
-            parked: reconnect_park(definition, error),
-            reported: Some(connection_diagnostic(definition, error)),
+            parked: park,
+            reported: Some(diagnostic),
         }
     }
 
@@ -100,6 +133,11 @@ fn report_reconnect_failure(name: &str, park: Option<ReconnectPark>, error: &Age
             server = %name,
             "MCP server cannot start with its configuration; it retries after a settings \
              change or a manual reconnect: {error}"
+        ),
+        Some(ReconnectPark::Authorization) => tracing::warn!(
+            server = %name,
+            "MCP server asks for an OAuth sign-in; it retries after someone connects it, \
+             a settings change, or a manual reconnect: {error}"
         ),
         None => tracing::warn!(server = %name, "MCP server reconnect failed: {error}"),
     }
@@ -148,6 +186,15 @@ pub struct McpRuntime {
     /// runtime. Unset, no plugin contributes servers.
     plugin_catalog: std::sync::OnceLock<Arc<dyn crate::plugin_mcp::PluginMcpCatalog>>,
     next_epoch: AtomicU64,
+    /// Each server's OAuth sign-in, by connected-app record id, while it runs
+    /// and after it fails. Kept apart from the connection set, which a
+    /// settings save replaces wholesale, so a save does not lose a sign-in
+    /// that is waiting on the browser.
+    sign_ins: std::sync::Mutex<HashMap<ConnectedAppId, SignInRecord>>,
+    next_sign_in: AtomicU64,
+    /// Lets a test's fake authorization server live on loopback.
+    #[cfg(test)]
+    oauth_loopback: AtomicBool,
 }
 
 impl McpRuntime {
@@ -176,6 +223,79 @@ impl McpRuntime {
             host_folders: std::sync::OnceLock::new(),
             plugin_catalog: std::sync::OnceLock::new(),
             next_epoch: AtomicU64::new(1),
+            sign_ins: std::sync::Mutex::new(HashMap::new()),
+            next_sign_in: AtomicU64::new(1),
+            #[cfg(test)]
+            oauth_loopback: AtomicBool::new(false),
+        }
+    }
+
+    /// Admit plain-`http` loopback OAuth endpoints, so a test can stand up a
+    /// fake authorization server beside a fake MCP server.
+    #[cfg(test)]
+    pub(super) fn admit_loopback_oauth_for_tests(&self) {
+        self.oauth_loopback.store(true, Ordering::Relaxed);
+    }
+
+    /// The HTTP client for OAuth discovery, registration, and tokens.
+    fn oauth_client(&self) -> Result<McpOAuthClient> {
+        #[cfg(test)]
+        if self.oauth_loopback.load(Ordering::Relaxed) {
+            return McpOAuthClient::admitting_loopback_for_tests();
+        }
+        McpOAuthClient::new()
+    }
+
+    /// Connect one definition.
+    ///
+    /// A server that [signs in](oauth::signs_in) presents its stored OAuth
+    /// session, if it has one. When such a server refuses the handshake with
+    /// a `401`, it is asked how to authorize: one that names an OAuth sign-in
+    /// fails as "sign in required" rather than as an authentication failure,
+    /// so Settings can offer Connect.
+    async fn connect_server(
+        &self,
+        definition: &McpServerDefinition,
+        env: &BTreeMap<String, String>,
+        app_id: Option<ConnectedAppId>,
+    ) -> ConnectAttempt {
+        let access = match app_id {
+            Some(id) if oauth::signs_in(definition) => {
+                self.oauth_client().ok().map(|client| OAuthAccess {
+                    secrets: Arc::clone(&self.secrets),
+                    id,
+                    client,
+                })
+            }
+            _ => None,
+        };
+        let result = definition
+            .connect_with_views(&self.gateway, env, access.as_ref())
+            .await;
+        let (Err(error), Some(access), Some(url)) = (&result, &access, &definition.url) else {
+            return (result, None);
+        };
+        if !tidebreak_mcp::is_unauthorized(error) {
+            return (result, None);
+        }
+        match oauth::detect(url, &access.client).await {
+            Some(need) => {
+                let error = match &need {
+                    OAuthNeed::SignIn { .. } => AgentError::SignInRequired(
+                        "the MCP server asks for an OAuth sign-in".into(),
+                    ),
+                    OAuthNeed::Unsupported(reason) => AgentError::config(format!(
+                        "the MCP server asks for an OAuth sign-in Tidebreak cannot complete: {}",
+                        reason.reason()
+                    )),
+                    OAuthNeed::Unavailable => AgentError::config(
+                        "the MCP server asks for an OAuth sign-in, and its sign-in service did \
+                         not answer",
+                    ),
+                };
+                (Err(error), Some(need))
+            }
+            None => (result, None),
         }
     }
 
@@ -546,19 +666,39 @@ impl McpRuntime {
     }
 
     pub async fn info(&self) -> McpServersInfo {
-        // Snapshot the projection under a short lock, recording the
-        // connected-app id of every OAuth server, then release the lock before
-        // touching the credential store. `oauth_status_for_id` reads the OS
-        // keychain, which must never run while the state lock is held, and
-        // re-locking to call `oauth_status` from here would deadlock.
-        let (mut servers, oauth_ids) = {
+        // Snapshot the projection under a short lock, recording every server
+        // that can sign in with OAuth, then release the lock before touching
+        // the credential store. `oauth_status_of` reads the OS keychain,
+        // which must never run while the state lock is held, and re-locking
+        // to call `oauth_status` from here would deadlock. The sign-in
+        // progress is read under the same lock as what the last connection
+        // learned: a finished sign-in updates both under it, so no read sees
+        // one without the other.
+        let (mut servers, oauth_servers) = {
             let state = self.state.lock().await;
+            let sign_ins = self
+                .sign_ins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut servers = Vec::with_capacity(state.definitions.len());
-            let mut oauth_ids: Vec<(usize, Option<ConnectedAppId>)> = Vec::new();
+            let mut oauth_servers = Vec::new();
             for (index, definition) in state.definitions.iter().enumerate() {
                 let managed = state.servers.get(&definition.name);
-                if definition.oauth {
-                    oauth_ids.push((index, state.ids.get(&definition.name).copied()));
+                if let (Some(id), Some(url)) = (
+                    state.ids.get(&definition.name),
+                    oauth::sign_in_url(definition),
+                ) {
+                    oauth_servers.push(OAuthSnapshot {
+                        index,
+                        id: *id,
+                        url: url.to_string(),
+                        flag: definition.oauth,
+                        need: managed.and_then(|server| server.oauth.clone()),
+                        progress: sign_ins
+                            .get(id)
+                            .filter(|record| record.server_url == url)
+                            .map(|record| record.progress.view()),
+                    });
                 }
                 servers.push(McpServerInfo {
                     health: managed.map_or(
@@ -579,37 +719,82 @@ impl McpRuntime {
                     definition: definition.clone(),
                 });
             }
-            (servers, oauth_ids)
+            (servers, oauth_servers)
         };
-        for (index, id) in oauth_ids {
-            servers[index].oauth_status = Some(self.oauth_status_for_id(id).await);
+        for snapshot in oauth_servers {
+            servers[snapshot.index].oauth_status = self.oauth_status_of(&snapshot).await;
         }
         McpServersInfo { servers }
     }
 
-    /// The OAuth status of one server given its resolved connected-app id,
-    /// read from the credential store with no state lock held. `None` id, a
-    /// missing session, or a vault error all read as `NotConnected`: the user
-    /// has no usable session and Connect is the next step. A stored session is
-    /// `Connected` while its access token is fresh or it still holds a refresh
-    /// token, and `Expired` once neither remains.
-    async fn oauth_status_for_id(&self, id: Option<ConnectedAppId>) -> McpOAuthStatus {
-        let Some(id) = id else {
-            return McpOAuthStatus::not_connected();
+    /// The OAuth status of one server that can sign in, read with no state
+    /// lock held. See [`oauth::project_status`] for how the pieces combine.
+    /// Only a session issued for this server's URL counts, and an unreadable
+    /// one reads as none, so Connect is offered.
+    async fn oauth_status_of(&self, snapshot: &OAuthSnapshot) -> Option<McpOAuthStatus> {
+        let stored = McpOAuthCredentialVault::new(self.secrets.clone(), snapshot.id)
+            .load_for(&snapshot.url)
+            .await
+            .ok()
+            .flatten();
+        oauth::project_status(
+            snapshot.flag,
+            snapshot.need.as_ref(),
+            snapshot.progress.as_ref(),
+            stored.as_ref(),
+        )
+    }
+
+    /// Clear every stored OAuth session that no longer belongs to its server.
+    ///
+    /// A session is bound to the URL it was issued for. When a replacement
+    /// removes a server, or keeps its name but changes its URL, or stops it
+    /// signing in at all, the session goes: otherwise a later server of the
+    /// same name, or the server at its new address, could inherit it. Best
+    /// effort, like the environment cleanup beside it: a failed delete leaves
+    /// a session that [`live_oauth_connection`](super::types) still refuses to
+    /// present, because it checks the URL on every load.
+    async fn reconcile_oauth_sessions(
+        &self,
+        definitions: &[McpServerDefinition],
+        ids: &BTreeMap<String, ConnectedAppId>,
+    ) {
+        let live: HashSet<ConnectedAppId> = ids.values().copied().collect();
+        let stale: Vec<ConnectedAppId> = {
+            let state = self.state.lock().await;
+            state
+                .ids
+                .values()
+                .copied()
+                .filter(|id| !live.contains(id))
+                .collect()
         };
-        let vault = McpOAuthCredentialVault::new(self.secrets.clone(), id);
-        match vault.load().await {
-            Ok(Some(credentials)) => {
-                if credentials.access_is_fresh() || credentials.refresh_token.is_some() {
-                    McpOAuthStatus::connected()
-                } else {
-                    McpOAuthStatus::failed(
-                        McpOAuthState::Expired,
-                        "the MCP OAuth session has expired",
-                    )
+        for id in stale {
+            let _ = McpOAuthCredentialVault::new(self.secrets.clone(), id)
+                .clear_all()
+                .await;
+        }
+        for definition in definitions {
+            let Some(id) = ids.get(&definition.name).copied() else {
+                continue;
+            };
+            let vault = McpOAuthCredentialVault::new(self.secrets.clone(), id);
+            let bound = match vault.load_registration().await {
+                Ok(None) => continue,
+                Ok(Some(registration)) => {
+                    registration.server_url.is_some()
+                        && registration.server_url.as_deref() == oauth::sign_in_url(definition)
+                }
+                Err(_) => false,
+            };
+            if !bound {
+                if let Err(error) = vault.clear_all().await {
+                    tracing::warn!(
+                        server = %definition.name,
+                        "could not clear an MCP OAuth session for a changed server: {error}"
+                    );
                 }
             }
-            Ok(None) | Err(_) => McpOAuthStatus::not_connected(),
         }
     }
 
@@ -889,6 +1074,9 @@ impl McpRuntime {
         // one resolution path, and the file stops being a second home for
         // credentials.
         self.commit_env_values(&mut definitions, &ids).await?;
+        // Before anything connects, so no connection below can present a
+        // session issued for a URL this replacement no longer names.
+        self.reconcile_oauth_sessions(&definitions, &ids).await;
         let configured = definitions;
         // Plugin-sourced servers ride along the same connection pass but are
         // never part of what is persisted or validated as a candidate: they
@@ -899,26 +1087,22 @@ impl McpRuntime {
         let definitions: Vec<McpServerDefinition> =
             configured.iter().cloned().chain(plugin).collect();
         let envs = self.resolve_envs(&definitions, &ids).await;
-        let gateway = &self.gateway;
         let lockdown = self.manual_lockdown().await;
-        let secrets = &self.secrets;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| {
             let env = envs.get(&definition.name).cloned().unwrap_or_default();
             let app_id = ids.get(&definition.name).copied();
             async move {
                 if connects(definition, lockdown) {
-                    definition
-                        .connect_with_views(gateway, &env, Some(secrets), app_id)
-                        .await
-                        .map(Some)
+                    let (result, oauth) = self.connect_server(definition, &env, app_id).await;
+                    (result.map(Some), oauth)
                 } else {
-                    Ok(None)
+                    (Ok(None), None)
                 }
             }
         }))
         .await;
-        for (definition, connection) in definitions.iter().zip(connections) {
+        for (definition, (connection, oauth)) in definitions.iter().zip(connections) {
             let connection = match connection {
                 Ok(connection) => connection,
                 // A gateway mount depends on session state that changes out
@@ -928,9 +1112,14 @@ impl McpRuntime {
                 // settings save until it was deleted. A plugin-sourced server
                 // degrades for the same reason from the other direction: it is
                 // not part of the candidate at all, so it must never be able
-                // to fail somebody's settings save.
+                // to fail somebody's settings save. A server that asks for an
+                // OAuth sign-in degrades as well: only a saved server can be
+                // signed in to, so refusing the save would leave no way to
+                // connect it.
                 Err(error)
-                    if definition.gateway_endpoint.is_some() || definition.plugin.is_some() =>
+                    if definition.gateway_endpoint.is_some()
+                        || definition.plugin.is_some()
+                        || oauth.as_ref().is_some_and(OAuthNeed::saves) =>
                 {
                     // The projected diagnostic is classified and URL-/secret-
                     // free; keep the typed cause in the log. The desktop
@@ -938,19 +1127,24 @@ impl McpRuntime {
                     // under `tidebreak serve` until it does.
                     tracing::warn!(
                         server = %definition.name,
-                        "gateway MCP mount degraded during replacement: {error}"
+                        "MCP server degraded during replacement: {error}"
                     );
+                    let diagnostic = failure_diagnostic(definition, &error, oauth.as_ref());
                     servers.insert(
                         definition.name.clone(),
                         ManagedServer {
                             client: None,
                             health: McpHealth::Degraded,
-                            diagnostic: Some(connection_diagnostic(definition, &error)),
+                            diagnostic: Some(diagnostic.clone()),
                             resolved_command: None,
-                            reconnect: Reconnect::after_failure(definition, &error),
+                            reconnect: Reconnect::after_failure(
+                                failure_park(definition, &error, oauth.as_ref()),
+                                diagnostic,
+                            ),
                             epoch: self.fresh_epoch(),
                             reconnect_lock: Arc::new(Mutex::new(())),
                             ui_views: HashMap::new(),
+                            oauth,
                         },
                     );
                     continue;
@@ -959,7 +1153,7 @@ impl McpRuntime {
                     return Err(AgentError::config(format!(
                         "external MCP server {} failed to start: {}",
                         definition.name,
-                        connection_diagnostic(definition, &error)
+                        failure_diagnostic(definition, &error, oauth.as_ref())
                     )));
                 }
             };
@@ -975,6 +1169,7 @@ impl McpRuntime {
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
                         ui_views: HashMap::new(),
+                        oauth: None,
                     },
                 );
                 continue;
@@ -990,6 +1185,7 @@ impl McpRuntime {
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views,
+                    oauth: None,
                 },
             );
         }
@@ -1038,29 +1234,26 @@ impl McpRuntime {
         definitions: Vec<McpServerDefinition>,
         ids: BTreeMap<String, ConnectedAppId>,
     ) {
+        self.reconcile_oauth_sessions(&definitions, &ids).await;
         let plugin = self.plugin_definitions(&definitions).await;
         let definitions: Vec<McpServerDefinition> = definitions.into_iter().chain(plugin).collect();
         let envs = self.resolve_envs(&definitions, &ids).await;
-        let gateway = &self.gateway;
         let lockdown = self.manual_lockdown().await;
-        let secrets = &self.secrets;
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| {
             let env = envs.get(&definition.name).cloned().unwrap_or_default();
             let app_id = ids.get(&definition.name).copied();
             async move {
                 if connects(definition, lockdown) {
-                    definition
-                        .connect_with_views(gateway, &env, Some(secrets), app_id)
-                        .await
-                        .map(Some)
+                    let (result, oauth) = self.connect_server(definition, &env, app_id).await;
+                    (result.map(Some), oauth)
                 } else {
-                    Ok(None)
+                    (Ok(None), None)
                 }
             }
         }))
         .await;
-        for (definition, connection) in definitions.iter().zip(connections) {
+        for (definition, (connection, oauth)) in definitions.iter().zip(connections) {
             let managed = match connection {
                 Ok(None) => ManagedServer {
                     client: None,
@@ -1071,6 +1264,7 @@ impl McpRuntime {
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views: HashMap::new(),
+                    oauth: None,
                 },
                 Ok(Some((client, ui_views))) => ManagedServer {
                     client: Some(client),
@@ -1081,6 +1275,7 @@ impl McpRuntime {
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views,
+                    oauth: None,
                 },
                 Err(error) => {
                     // As in `replace_strict`: the error chain is URL- and
@@ -1090,15 +1285,20 @@ impl McpRuntime {
                         server = %definition.name,
                         "MCP server connection failed during permissive replacement: {error}"
                     );
+                    let diagnostic = failure_diagnostic(definition, &error, oauth.as_ref());
                     ManagedServer {
                         client: None,
                         health: McpHealth::Degraded,
-                        diagnostic: Some(connection_diagnostic(definition, &error)),
+                        diagnostic: Some(diagnostic.clone()),
                         resolved_command: None,
-                        reconnect: Reconnect::after_failure(definition, &error),
+                        reconnect: Reconnect::after_failure(
+                            failure_park(definition, &error, oauth.as_ref()),
+                            diagnostic,
+                        ),
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
                         ui_views: HashMap::new(),
+                        oauth,
                     }
                 }
             };
@@ -1138,22 +1338,22 @@ impl McpRuntime {
         }
         let ids = self.state.lock().await.ids.clone();
         let lockdown = self.manual_lockdown().await;
-        let gateway = &self.gateway;
         // Only the entries that are new or changed are connected; the rest
         // keep the client they already hold.
         let fresh: Vec<&McpServerDefinition> = desired
             .iter()
             .filter(|definition| !live.contains(definition))
             .collect();
-        let secrets = &self.secrets;
         let connections = join_all(fresh.iter().map(|definition| {
             let app_id = ids.get(&definition.name).copied();
             async move {
                 if connects(definition, lockdown) {
-                    definition
-                        .connect_with_views(gateway, &BTreeMap::new(), Some(secrets), app_id)
-                        .await
-                        .map(Some)
+                    // Plugin servers never sign in, so the OAuth half of the
+                    // attempt is always empty here.
+                    let (result, _) = self
+                        .connect_server(definition, &BTreeMap::new(), app_id)
+                        .await;
+                    result.map(Some)
                 } else {
                     Ok(None)
                 }
@@ -1181,6 +1381,7 @@ impl McpRuntime {
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views,
+                    oauth: None,
                 },
                 Ok(None) => ManagedServer {
                     client: None,
@@ -1191,6 +1392,7 @@ impl McpRuntime {
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views: HashMap::new(),
+                    oauth: None,
                 },
                 Err(error) => {
                     tracing::warn!(
@@ -1198,15 +1400,20 @@ impl McpRuntime {
                         plugin = ?definition.plugin,
                         "plugin MCP server connection failed: {error}"
                     );
+                    let diagnostic = failure_diagnostic(definition, &error, None);
                     ManagedServer {
                         client: None,
                         health: McpHealth::Degraded,
-                        diagnostic: Some(connection_diagnostic(definition, &error)),
+                        diagnostic: Some(diagnostic.clone()),
                         resolved_command: None,
-                        reconnect: Reconnect::after_failure(definition, &error),
+                        reconnect: Reconnect::after_failure(
+                            failure_park(definition, &error, None),
+                            diagnostic,
+                        ),
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
                         ui_views: HashMap::new(),
+                        oauth: None,
                     }
                 }
             };
@@ -1232,6 +1439,7 @@ impl McpRuntime {
         let folders = self.folder_roster().await;
         let gateway = self.gateway.entitled_app_catalogs().await;
         let registry = self.registry_with(&servers, &rest, &folders, &gateway);
+        self.forget_stale_sign_ins(&definitions, &ids);
         let mut state = self.state.lock().await;
         state.definitions = definitions;
         state.ids = ids;
@@ -1351,16 +1559,25 @@ impl McpRuntime {
     }
 
     /// Force a fresh connection and tool discovery for one configured server.
+    /// The answer carries every server's OAuth status, as [`info`](Self::info)
+    /// does, so a Connect action does not vanish after a reconnect.
     pub async fn reconnect(&self, name: &str) -> Result<McpServersInfo> {
-        self.reconnect_if_epoch(name, None).await
+        self.reconnect_if_epoch(name, None).await?;
+        Ok(self.info().await)
     }
 
-    /// Begin the OAuth sign-in for one configured server: discover the
-    /// authorization server, register a client if needed, open the system
-    /// browser, and — on return — store the tokens and reconnect. The returned
-    /// [`McpOAuthStatus`] carries the browser URL while `Authorizing`.
-    pub async fn oauth_connect(&self, name: &str) -> Result<McpOAuthStatus> {
-        let (definition, id) = {
+    /// Begin the OAuth sign-in for one configured server.
+    ///
+    /// Discovers the server's authorization server, registers a client for a
+    /// fresh loopback redirect, and returns `Authorizing` with the page the
+    /// desktop opens in the person's browser. The server never opens a
+    /// browser itself: it may run on another machine. The rest happens in the
+    /// background. Once the browser returns, the tokens are stored, bound to
+    /// this server's URL, and the server reconnects; [`info`](Self::info)
+    /// reports `Connected`, or why the sign-in stopped. A second Connect
+    /// replaces a sign-in still waiting.
+    pub async fn oauth_connect(self: &Arc<Self>, name: &str) -> Result<McpOAuthStatus> {
+        let (definition, id, need) = {
             let state = self.state.lock().await;
             let definition = state
                 .definitions
@@ -1368,18 +1585,22 @@ impl McpRuntime {
                 .find(|definition| definition.name == name)
                 .cloned()
                 .ok_or_else(|| AgentError::config("MCP server not found"))?;
-            if !definition.oauth {
-                return Ok(McpOAuthStatus::failed(
-                    McpOAuthState::Unsupported,
-                    "this server does not use OAuth",
-                ));
-            }
             let id = state
                 .ids
                 .get(name)
                 .copied()
                 .ok_or_else(|| AgentError::config("MCP server record is missing"))?;
-            (definition, id)
+            let need = state
+                .servers
+                .get(name)
+                .and_then(|server| server.oauth.clone());
+            (definition, id, need)
+        };
+        let Some(url) = oauth::sign_in_url(&definition).map(str::to_string) else {
+            return Ok(McpOAuthStatus::failed(
+                McpOAuthState::Unsupported,
+                oauth::NO_OAUTH,
+            ));
         };
         // Managed lockdown gates every other connect and reconnect path, and an
         // OAuth server is a remote (`url`, no `command`) definition — exactly
@@ -1390,36 +1611,58 @@ impl McpRuntime {
         if manual_lockdown_applies(&definition, lockdown) {
             return Ok(McpOAuthStatus::failed(
                 McpOAuthState::Unsupported,
-                "managed policy has locked this MCP server",
+                "Managed policy has locked this MCP server.",
             ));
         }
-        let resource = definition
-            .url
-            .as_deref()
-            .ok_or_else(|| AgentError::config("this MCP server has no HTTP endpoint"))?;
-        let resource = url::Url::parse(resource)
+        let resource = url::Url::parse(&url)
             .map_err(|_| AgentError::config("this MCP server has no HTTP endpoint"))?;
 
-        let client = McpOAuthClient::new()?;
-        let discovered = match client.discover(&resource, None).await {
-            Ok(discovered) => discovered,
-            Err(error) => {
-                let message = error.to_string();
-                if message.contains("dynamic client registration") {
-                    return Ok(McpOAuthStatus::failed(
-                        McpOAuthState::Unsupported,
-                        "this server does not support dynamic client registration",
-                    ));
-                }
-                return Err(error);
+        let client = self.oauth_client()?;
+        let challenge = tidebreak_mcp::authorization_challenge(&url, oauth::CHALLENGE_TIMEOUT)
+            .await
+            .ok()
+            .flatten();
+        let discovered = match client.discover(&resource, challenge.as_deref()).await {
+            Some(Discovery::Supported(discovered)) => *discovered,
+            // These answers are kept, so the row goes on saying why after the
+            // next read, for a server known to sign in. A server that never
+            // asked for OAuth only gets the answer.
+            Some(Discovery::Unsupported(reason)) => {
+                return Ok(self.record_sign_in_stop(
+                    id,
+                    &url,
+                    None,
+                    McpOAuthState::Unsupported,
+                    reason.reason(),
+                ));
+            }
+            Some(Discovery::Unavailable) => {
+                return Ok(self.record_sign_in_stop(
+                    id,
+                    &url,
+                    None,
+                    McpOAuthState::NotConnected,
+                    oauth::METADATA_UNREADABLE,
+                ));
+            }
+            None if need.is_some() || definition.oauth => {
+                return Ok(self.record_sign_in_stop(
+                    id,
+                    &url,
+                    None,
+                    McpOAuthState::NotConnected,
+                    oauth::METADATA_UNREADABLE,
+                ));
+            }
+            None => {
+                return Ok(McpOAuthStatus::failed(
+                    McpOAuthState::Unsupported,
+                    oauth::NO_OAUTH,
+                ));
             }
         };
-        let registration_endpoint = discovered.registration_endpoint.as_ref().ok_or_else(|| {
-            AgentError::config("this MCP server does not support dynamic client registration")
-        })?;
 
         let (listeners, redirect_uri) = bind_mcp_loopback().await?;
-        let vault = McpOAuthCredentialVault::new(self.secrets.clone(), id);
         // Register a fresh public client for this sign-in rather than reusing a
         // stored one. A loopback redirect binds an ephemeral port (RFC 8252
         // §7.3), so a client registered for an earlier sign-in carries a
@@ -1429,15 +1672,20 @@ impl McpRuntime {
         // registered redirect, and neither PKCE nor state makes an unregistered
         // redirect safe. Registering per sign-in keeps the redirect and the
         // client the server has on file in lockstep. Refresh needs no redirect
-        // and still reuses the stored registration.
-        let mut registration = client
-            .register(registration_endpoint, &redirect_uri)
-            .await?;
+        // and still reuses the stored registration, which this sign-in
+        // replaces only once it succeeds.
+        let mut registration = match client
+            .register(&discovered.registration_endpoint, &redirect_uri)
+            .await
+        {
+            Ok(registration) => registration,
+            Err(failure) => return Ok(self.record_sign_in_failure(id, &url, None, failure)),
+        };
         registration.token_endpoint = Some(discovered.token_endpoint.as_str().to_string());
-        if registration.scopes.is_empty() {
-            registration.scopes = discovered.scopes_supported.clone();
-        }
-        vault.save_registration(&registration).await?;
+        registration.scopes = discovered.scopes.clone();
+        registration.resource = Some(discovered.resource.clone());
+        registration.server_url = Some(url.clone());
+        registration.sign_in_host = Some(discovered.sign_in_host.clone());
 
         let pkce = pkce_pair();
         let state = format!("{}-{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
@@ -1448,6 +1696,7 @@ impl McpRuntime {
             &pkce.challenge,
             &state,
             &registration.scopes,
+            registration.resource.as_deref(),
         );
         let pending = PendingMcpSignIn {
             authorization_url: authorization_url.clone(),
@@ -1456,75 +1705,370 @@ impl McpRuntime {
             verifier: pkce.verifier,
             state,
             token_endpoint: discovered.token_endpoint,
-            client_id: registration.client_id,
-            client_secret: registration.client_secret,
+            registration,
         };
-        open_system_browser(&authorization_url)?;
-        let credentials = pending.finish(&client).await?;
-        vault.save(&credentials).await?;
-        let _ = self.reconnect(name).await;
-        Ok(McpOAuthStatus::connected())
+        let generation = self.next_sign_in.fetch_add(1, Ordering::Relaxed);
+        {
+            // The task is spawned under the lock, so it cannot record its
+            // outcome before this sign-in is on file.
+            let mut sign_ins = self
+                .sign_ins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let runtime = Arc::clone(self);
+            let sign_in = FinishingSignIn {
+                id,
+                name: name.to_string(),
+                server_url: url.clone(),
+                generation,
+            };
+            let task = tokio::spawn(async move {
+                runtime.finish_oauth_sign_in(sign_in, client, pending).await;
+            });
+            let replaced = sign_ins.insert(
+                id,
+                SignInRecord {
+                    server_url: url,
+                    progress: SignInProgress::Pending {
+                        authorization_url: authorization_url.to_string(),
+                        sign_in_host: discovered.sign_in_host.clone(),
+                        generation,
+                        task: task.abort_handle(),
+                    },
+                },
+            );
+            if let Some(SignInRecord {
+                progress: SignInProgress::Pending { task, .. },
+                ..
+            }) = replaced
+            {
+                task.abort();
+            }
+        }
+        Ok(McpOAuthStatus::authorizing(authorization_url.to_string())
+            .with_sign_in_host(Some(discovered.sign_in_host)))
+    }
+
+    /// Wait for the browser to come back, then store the session and
+    /// reconnect the server, or record why the sign-in stopped.
+    ///
+    /// The session is kept only for the server the person signed in to (same
+    /// record, same URL) and only while this sign-in is still the one on file,
+    /// not canceled or replaced. The pending sign-in stays on file while the
+    /// session is stored; then clearing the server's sign-in-needed state and
+    /// retiring the pending sign-in happen together under the state lock. So
+    /// a read of [`info`](Self::info) sees either the wait or the new
+    /// session, never the new session beside the old "sign in required",
+    /// which would read as a rejected sign-in.
+    async fn finish_oauth_sign_in(
+        self: Arc<Self>,
+        sign_in: FinishingSignIn,
+        client: McpOAuthClient,
+        pending: PendingMcpSignIn,
+    ) {
+        let (registration, credentials) = match pending.finish(&client).await {
+            Ok(session) => session,
+            Err(failure) => {
+                self.record_sign_in_failure(
+                    sign_in.id,
+                    &sign_in.server_url,
+                    Some(sign_in.generation),
+                    failure,
+                );
+                return;
+            }
+        };
+        if !self.sign_in_is_current(&sign_in) {
+            return;
+        }
+        if definition_signing_in(&*self.state.lock().await, &sign_in).is_none() {
+            self.record_sign_in_stop(
+                sign_in.id,
+                &sign_in.server_url,
+                Some(sign_in.generation),
+                McpOAuthState::NotConnected,
+                oauth::CHANGED_DURING_SIGN_IN,
+            );
+            return;
+        }
+        let vault = McpOAuthCredentialVault::new(self.secrets.clone(), sign_in.id);
+        let stored = match vault.save_registration(&registration).await {
+            Ok(()) => vault.save(&credentials).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = stored {
+            tracing::warn!(server = %sign_in.name, "could not store the MCP OAuth session: {error}");
+            let _ = vault.clear_all().await;
+            self.record_sign_in_failure(
+                sign_in.id,
+                &sign_in.server_url,
+                Some(sign_in.generation),
+                SignInFailure::Failed,
+            );
+            return;
+        }
+        let lockdown = self.manual_lockdown().await;
+        let mut state = self.state.lock().await;
+        let Some(definition) = definition_signing_in(&state, &sign_in) else {
+            // The server changed while the session was being stored. The
+            // session is for a URL this record no longer has, so it goes.
+            drop(state);
+            let _ = vault.clear_all().await;
+            self.record_sign_in_stop(
+                sign_in.id,
+                &sign_in.server_url,
+                Some(sign_in.generation),
+                McpOAuthState::NotConnected,
+                oauth::CHANGED_DURING_SIGN_IN,
+            );
+            return;
+        };
+        {
+            let mut sign_ins = self
+                .sign_ins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(
+                sign_ins.get(&sign_in.id),
+                Some(SignInRecord {
+                    progress: SignInProgress::Pending { generation, .. },
+                    ..
+                }) if *generation == sign_in.generation
+            ) {
+                sign_ins.remove(&sign_in.id);
+            }
+        }
+        if let Some(server) = state.servers.get_mut(&sign_in.name) {
+            server.oauth = None;
+            if connects(&definition, lockdown) {
+                // The reconnect below takes it from here; until it lands the
+                // row reads as signed in and connecting, not as failed.
+                server.health = McpHealth::Reconnecting;
+                server.diagnostic = None;
+            }
+        }
+        drop(state);
+        // The reconnect runs as its own task: a newer Connect aborts this one,
+        // and an abort mid-reconnect would leave the server showing
+        // `reconnecting`.
+        let name = sign_in.name;
+        tokio::spawn(async move {
+            let _ = self.reconnect(&name).await;
+        });
+    }
+
+    /// Whether `sign_in` is still the pending sign-in on file for its server:
+    /// not canceled, disconnected, replaced, or dropped with its server.
+    fn sign_in_is_current(&self, sign_in: &FinishingSignIn) -> bool {
+        matches!(
+            self.sign_ins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&sign_in.id),
+            Some(SignInRecord {
+                server_url,
+                progress: SignInProgress::Pending { generation, .. },
+            }) if *generation == sign_in.generation && *server_url == sign_in.server_url
+        )
+    }
+
+    /// Record why a sign-in stopped. See [`Self::record_sign_in_stop`].
+    fn record_sign_in_failure(
+        &self,
+        id: ConnectedAppId,
+        server_url: &str,
+        generation: Option<u64>,
+        failure: SignInFailure,
+    ) -> McpOAuthStatus {
+        let state = if failure == SignInFailure::Denied {
+            McpOAuthState::AccessDenied
+        } else {
+            McpOAuthState::NotConnected
+        };
+        self.record_sign_in_stop(id, server_url, generation, state, failure.message())
+    }
+
+    /// Record that a sign-in stopped in `state`, unless it is a `generation`
+    /// a newer sign-in, a Cancel, or a Disconnect already replaced, and
+    /// return the status it leaves. `None` records a stop from before any
+    /// sign-in was on file, which never replaces one that is waiting.
+    fn record_sign_in_stop(
+        &self,
+        id: ConnectedAppId,
+        server_url: &str,
+        generation: Option<u64>,
+        state: McpOAuthState,
+        message: &str,
+    ) -> McpOAuthStatus {
+        let mut sign_ins = self
+            .sign_ins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = match (generation, sign_ins.get(&id).map(|record| &record.progress)) {
+            (
+                Some(generation),
+                Some(SignInProgress::Pending {
+                    generation: current,
+                    ..
+                }),
+            ) => *current == generation,
+            (Some(_), _) => false,
+            (None, Some(SignInProgress::Pending { .. })) => false,
+            (None, _) => true,
+        };
+        if current {
+            sign_ins.insert(
+                id,
+                SignInRecord {
+                    server_url: server_url.to_string(),
+                    progress: SignInProgress::Failed {
+                        state,
+                        message: message.to_string(),
+                    },
+                },
+            );
+        }
+        McpOAuthStatus::failed(state, message)
+    }
+
+    /// Drop the sign-ins that no longer match a configured server that signs
+    /// in at the same URL — the server was removed, its URL changed, or it
+    /// stopped signing in — stopping any that still wait on the browser.
+    fn forget_stale_sign_ins(
+        &self,
+        definitions: &[McpServerDefinition],
+        ids: &BTreeMap<String, ConnectedAppId>,
+    ) {
+        let urls: HashMap<ConnectedAppId, &str> = definitions
+            .iter()
+            .filter_map(|definition| {
+                Some((*ids.get(&definition.name)?, oauth::sign_in_url(definition)?))
+            })
+            .collect();
+        let mut sign_ins = self
+            .sign_ins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sign_ins.retain(|id, record| {
+            let keep = urls.get(id) == Some(&record.server_url.as_str());
+            if !keep {
+                if let SignInProgress::Pending { task, .. } = &record.progress {
+                    task.abort();
+                }
+            }
+            keep
+        });
+    }
+
+    /// The configured server `name` that signs in, with its record id and URL.
+    async fn signing_in_server(&self, name: &str) -> Result<Option<(ConnectedAppId, String)>> {
+        let state = self.state.lock().await;
+        let definition = state
+            .definitions
+            .iter()
+            .find(|definition| definition.name == name)
+            .ok_or_else(|| AgentError::config("MCP server not found"))?;
+        let id = state
+            .ids
+            .get(name)
+            .copied()
+            .ok_or_else(|| AgentError::config("MCP server record is missing"))?;
+        Ok(oauth::sign_in_url(definition).map(|url| (id, url.to_string())))
+    }
+
+    /// Stop a sign-in that still waits on the browser, leaving any stored
+    /// session alone, and return the status the server has without it.
+    pub async fn oauth_cancel(&self, name: &str) -> Result<McpOAuthStatus> {
+        let Some((id, _url)) = self.signing_in_server(name).await? else {
+            return Ok(McpOAuthStatus::failed(
+                McpOAuthState::Unsupported,
+                oauth::NO_OAUTH,
+            ));
+        };
+        {
+            let mut sign_ins = self
+                .sign_ins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(SignInRecord {
+                progress: SignInProgress::Pending { task, .. },
+                ..
+            }) = sign_ins.get(&id)
+            {
+                task.abort();
+                sign_ins.remove(&id);
+            }
+        }
+        self.oauth_status(name).await
     }
 
     /// Clear a server's stored OAuth session and drop its live connection.
+    /// Stops a sign-in that still waits on the browser.
     pub async fn oauth_disconnect(&self, name: &str) -> Result<McpOAuthStatus> {
-        let id = {
-            let state = self.state.lock().await;
-            let definition = state
-                .definitions
-                .iter()
-                .find(|definition| definition.name == name)
-                .ok_or_else(|| AgentError::config("MCP server not found"))?;
-            if !definition.oauth {
-                return Ok(McpOAuthStatus::failed(
-                    McpOAuthState::Unsupported,
-                    "this server does not use OAuth",
-                ));
-            }
-            state
-                .ids
-                .get(name)
-                .copied()
-                .ok_or_else(|| AgentError::config("MCP server record is missing"))?
+        let Some((id, _url)) = self.signing_in_server(name).await? else {
+            return Ok(McpOAuthStatus::failed(
+                McpOAuthState::Unsupported,
+                oauth::NO_OAUTH,
+            ));
         };
-        let vault = McpOAuthCredentialVault::new(self.secrets.clone(), id);
-        vault.clear().await?;
-        vault.clear_registration().await?;
+        if let Some(SignInRecord {
+            progress: SignInProgress::Pending { task, .. },
+            ..
+        }) = self
+            .sign_ins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id)
+        {
+            task.abort();
+        }
+        McpOAuthCredentialVault::new(self.secrets.clone(), id)
+            .clear_all()
+            .await?;
         let _ = self.reconnect(name).await;
         Ok(McpOAuthStatus::not_connected())
     }
 
-    /// Report one server's current OAuth connection state without mutating it.
+    /// Report one server's current OAuth connection state without mutating
+    /// it: the same status [`info`](Self::info) projects, and `Unsupported`
+    /// for a server with no OAuth sign-in.
     pub async fn oauth_status(&self, name: &str) -> Result<McpOAuthStatus> {
-        let (oauth, id) = {
+        let snapshot = {
             let state = self.state.lock().await;
             let definition = state
                 .definitions
                 .iter()
                 .find(|definition| definition.name == name)
                 .ok_or_else(|| AgentError::config("MCP server not found"))?;
-            (definition.oauth, state.ids.get(name).copied())
+            match (state.ids.get(name), oauth::sign_in_url(definition)) {
+                (Some(id), Some(url)) => Some(OAuthSnapshot {
+                    index: 0,
+                    id: *id,
+                    url: url.to_string(),
+                    flag: definition.oauth,
+                    need: state
+                        .servers
+                        .get(name)
+                        .and_then(|server| server.oauth.clone()),
+                    progress: self
+                        .sign_ins
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(id)
+                        .filter(|record| record.server_url == url)
+                        .map(|record| record.progress.view()),
+                }),
+                _ => None,
+            }
         };
-        if !oauth {
-            return Ok(McpOAuthStatus::of(McpOAuthState::Unsupported));
-        }
-        let Some(id) = id else {
-            return Ok(McpOAuthStatus::not_connected());
+        let unsupported = || McpOAuthStatus::failed(McpOAuthState::Unsupported, oauth::NO_OAUTH);
+        let Some(snapshot) = snapshot else {
+            return Ok(unsupported());
         };
-        let vault = McpOAuthCredentialVault::new(self.secrets.clone(), id);
-        let Some(credentials) = vault.load().await? else {
-            return Ok(McpOAuthStatus::not_connected());
-        };
-        if credentials.access_is_fresh() {
-            return Ok(McpOAuthStatus::connected());
-        }
-        if credentials.refresh_token.is_some() {
-            return Ok(McpOAuthStatus::connected());
-        }
-        Ok(McpOAuthStatus::failed(
-            McpOAuthState::Expired,
-            "the MCP OAuth session has expired",
-        ))
+        Ok(self
+            .oauth_status_of(&snapshot)
+            .await
+            .unwrap_or_else(unsupported))
     }
 
     async fn reconnect_if_epoch(
@@ -1597,10 +2141,8 @@ impl McpRuntime {
             Some(id) if !definition.env.is_empty() => self.stored_env(id).await,
             _ => BTreeMap::new(),
         };
-        match definition
-            .connect_with_views(&self.gateway, &env, Some(&self.secrets), app_id)
-            .await
-        {
+        let (result, oauth) = self.connect_server(&definition, &env, app_id).await;
+        match result {
             Ok((client, ui_views)) => {
                 let mut state = self.state.lock().await;
                 // A settings replacement may have won while the process started.
@@ -1628,12 +2170,14 @@ impl McpRuntime {
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
                         ui_views: HashMap::new(),
+                        oauth: None,
                     });
                 server.client = Some(client);
                 server.health = McpHealth::Healthy;
                 server.diagnostic = None;
                 server.resolved_command = super::stdio::resolved_display(&definition).await;
                 server.ui_views = ui_views;
+                server.oauth = None;
                 if server.reconnect.reported.is_some() {
                     tracing::info!(server = %name, "MCP server reconnected");
                 }
@@ -1647,8 +2191,8 @@ impl McpRuntime {
                 Ok(self.info_locked(&state))
             }
             Err(error) => {
-                let diagnostic = connection_diagnostic(&definition, &error);
-                let park = reconnect_park(&definition, &error);
+                let diagnostic = failure_diagnostic(&definition, &error, oauth.as_ref());
+                let park = failure_park(&definition, &error, oauth.as_ref());
                 let mut state = self.state.lock().await;
                 if let Some(server) = state
                     .servers
@@ -1659,6 +2203,7 @@ impl McpRuntime {
                     server.health = McpHealth::Degraded;
                     server.diagnostic = Some(diagnostic.clone());
                     server.ui_views = HashMap::new();
+                    server.oauth = oauth;
                     // As in `replace_strict`, the error chain is URL- and
                     // secret-free. A failure that repeats the last one logged
                     // stays at debug, so a server that stays down for hours
@@ -1840,6 +2385,24 @@ fn curation(definition: &McpServerDefinition) -> Option<McpCuration> {
 /// restores exactly what the profile had.
 fn connects(definition: &McpServerDefinition, lockdown: ManualLockdown) -> bool {
     definition.enabled && !manual_lockdown_applies(definition, lockdown)
+}
+
+/// The configured definition a finishing sign-in belongs to: the same name,
+/// still under the same record id, still signing in at the same URL. `None`
+/// once the server was removed, renamed, or pointed somewhere else.
+fn definition_signing_in(
+    state: &RuntimeState,
+    sign_in: &FinishingSignIn,
+) -> Option<McpServerDefinition> {
+    state
+        .definitions
+        .iter()
+        .find(|definition| definition.name == sign_in.name)
+        .filter(|definition| {
+            state.ids.get(&definition.name) == Some(&sign_in.id)
+                && oauth::sign_in_url(definition) == Some(sign_in.server_url.as_str())
+        })
+        .cloned()
 }
 
 /// Whether the managed lockdown applies to this definition. A gateway mount

@@ -319,6 +319,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::post_mcp_server_connect),
         )
         .route(
+            "/mcp/servers/{name}/connect/cancel",
+            post(routes::post_mcp_server_connect_cancel),
+        )
+        .route(
             "/mcp/servers/{name}/disconnect",
             post(routes::post_mcp_server_disconnect),
         )

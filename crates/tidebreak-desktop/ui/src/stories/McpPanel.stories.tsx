@@ -1,6 +1,11 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import type { ApiClient, GatewayStatus, McpServerInfo } from "@/api";
 import { McpPanel } from "@/settings/McpPanel";
+import {
+  mcpOauthAuthorizing,
+  mcpOauthNotConnected,
+  mcpSignInServer,
+} from "./fixtures";
 
 const signedOut: GatewayStatus = {
   base_url: "http://127.0.0.1:28081",
@@ -39,8 +44,11 @@ function stubClient(servers: McpServerInfo[]): ApiClient {
     listMcpServers: async () => listing,
     putMcpServers: async () => listing,
     reconnectMcpServer: async () => listing,
-    connectMcpServer: async () => listing,
-    disconnectMcpServer: async () => listing,
+    // The story's page stays put: the stub answers as the server would, and
+    // the listing keeps showing the state the story is about.
+    connectMcpServer: async () => mcpOauthAuthorizing,
+    cancelMcpServerConnect: async () => mcpOauthNotConnected,
+    disconnectMcpServer: async () => mcpOauthNotConnected,
     getGatewayStatus: async () => signedOut,
     getGatewayApps: async () => ({ supported: true, apps: [] }),
   } as unknown as ApiClient;
@@ -99,4 +107,18 @@ export const StdioProtocolFailure: Story = {
       }),
     ]),
   },
+};
+
+/** A remote server imported without the OAuth flag that asks for a sign-in:
+ * Connect, not an authentication failure. Padded so the row below the
+ * import section scrolls into view. */
+export const RemoteServerNeedsSignIn: Story = {
+  args: { client: stubClient([mcpSignInServer(mcpOauthNotConnected)]) },
+  parameters: { layout: "padded" },
+};
+
+/** The same server while the person finishes signing in in the browser. */
+export const RemoteServerWaitingForSignIn: Story = {
+  args: { client: stubClient([mcpSignInServer(mcpOauthAuthorizing)]) },
+  parameters: { layout: "padded" },
 };

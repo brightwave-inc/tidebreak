@@ -3331,8 +3331,10 @@ export type McpHealth = "initializing" | "healthy" | "degraded" | "reconnecting"
  * The states are exhaustive and ordered by the user's path through them:
  * a server is `Unsupported` or, once OAuth is detected, moves
  * `NotConnected` → `Authorizing` → `Connected`, and from `Connected` can fall
- * to `Expired` (refresh rejected) or `AccessDenied` (the authorization server
- * refused this user).
+ * to `Expired` (refresh rejected, or the server refused the stored session)
+ * or `AccessDenied` (the person declined, or the authorization server
+ * refused them). A server needs no saved flag to be detected: an HTTP server
+ * that answers `401` with OAuth metadata is enough.
  */
 export type McpOAuthState = "unsupported" | "not_connected" | "authorizing" | "connected" | "expired" | "access_denied";
 
@@ -3343,14 +3345,22 @@ export type McpOAuthState = "unsupported" | "not_connected" | "authorizing" | "c
  */
 export type McpOAuthStatus = { state: McpOAuthState,
 /**
- * The system-browser URL to open while `Authorizing`. Absent otherwise.
+ * The page the desktop opens in the person's browser while
+ * `Authorizing`, and opens again on request. Absent otherwise.
  */
 pending_authorization_url?: string,
 /**
- * A bounded, secret-free reason shown for `Expired`, `AccessDenied`, or
- * `Unsupported`. Never echoes a URL, token, or upstream body.
+ * A bounded, secret-free reason shown for `Expired`, `AccessDenied`,
+ * `Unsupported`, and a `NotConnected` whose last sign-in failed. Never
+ * echoes a URL, token, or upstream body.
  */
-error?: string, };
+error?: string,
+/**
+ * Host of the sign-in page Connect opens, such as `vercel.com`, so the
+ * person sees where they are sent before they go. Only a host, never a
+ * URL. Absent when it is not known yet.
+ */
+sign_in_host?: string, };
 
 /**
  * One external MCP server definition: a local stdio process (`command`), a
@@ -3389,10 +3399,12 @@ url: string | null,
  */
 bearer_token_env: string | null,
 /**
- * Whether this HTTP server authenticates with OAuth (RFC 9728 discovery,
- * RFC 7591 registration, PKCE sign-in) instead of a static bearer. Valid
- * only with `url`, and mutually exclusive with `bearer_token_env`. The
- * obtained tokens live in the OS credential store under
+ * Whether this HTTP server always authenticates with OAuth (RFC 9728
+ * discovery, RFC 7591 registration, PKCE sign-in) instead of a static
+ * bearer. Valid only with `url`, and mutually exclusive with
+ * `bearer_token_env`. The flag is optional: a server without it that
+ * answers `401` with OAuth metadata signs in the same way. The obtained
+ * tokens live in the OS credential store under
  * [`oauth_token_secret_key`], never in this type or the record.
  *
  * [`oauth_token_secret_key`]: crate::connectors::oauth_token_secret_key
@@ -3468,10 +3480,12 @@ url: string | null,
  */
 bearer_token_env: string | null,
 /**
- * Whether this HTTP server authenticates with OAuth (RFC 9728 discovery,
- * RFC 7591 registration, PKCE sign-in) instead of a static bearer. Valid
- * only with `url`, and mutually exclusive with `bearer_token_env`. The
- * obtained tokens live in the OS credential store under
+ * Whether this HTTP server always authenticates with OAuth (RFC 9728
+ * discovery, RFC 7591 registration, PKCE sign-in) instead of a static
+ * bearer. Valid only with `url`, and mutually exclusive with
+ * `bearer_token_env`. The flag is optional: a server without it that
+ * answers `401` with OAuth metadata signs in the same way. The obtained
+ * tokens live in the OS credential store under
  * [`oauth_token_secret_key`], never in this type or the record.
  *
  * [`oauth_token_secret_key`]: crate::connectors::oauth_token_secret_key

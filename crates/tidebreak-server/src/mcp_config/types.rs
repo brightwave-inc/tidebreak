@@ -9,13 +9,14 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tidebreak_core::id::ConnectedAppId;
-use tidebreak_core::{AgentError, Result, SecretProvider};
+use tidebreak_core::{AgentError, Result};
 use tidebreak_mcp::McpClient;
 use tokio::process::Command;
 
 use crate::mcp_curated::McpCuration;
 use crate::mcp_oauth_runtime::McpOAuthStatus;
 
+use super::oauth::OAuthAccess;
 use super::validation::validate_servers;
 
 pub(super) const CONFIG_ENV: &str = "TIDEBREAK_MCP_CONFIG";
@@ -44,6 +45,10 @@ pub(super) enum ReconnectPark {
     /// environment variable. It waits for a manual reconnect or a settings
     /// change.
     Configuration,
+    /// The server asks for an OAuth sign-in. It waits for the person to
+    /// connect it, a manual reconnect, or a settings change. A model-gateway
+    /// sign-in does not wake it.
+    Authorization,
 }
 
 /// The diagnostic every manual (command/url) server carries while managed
@@ -185,10 +190,12 @@ pub struct McpServerDefinition {
     /// resolved at connect time and never enters this type.
     #[serde(default)]
     pub bearer_token_env: Option<String>,
-    /// Whether this HTTP server authenticates with OAuth (RFC 9728 discovery,
-    /// RFC 7591 registration, PKCE sign-in) instead of a static bearer. Valid
-    /// only with `url`, and mutually exclusive with `bearer_token_env`. The
-    /// obtained tokens live in the OS credential store under
+    /// Whether this HTTP server always authenticates with OAuth (RFC 9728
+    /// discovery, RFC 7591 registration, PKCE sign-in) instead of a static
+    /// bearer. Valid only with `url`, and mutually exclusive with
+    /// `bearer_token_env`. The flag is optional: a server without it that
+    /// answers `401` with OAuth metadata signs in the same way. The obtained
+    /// tokens live in the OS credential store under
     /// [`oauth_token_secret_key`], never in this type or the record.
     ///
     /// [`oauth_token_secret_key`]: crate::connectors::oauth_token_secret_key
@@ -309,25 +316,26 @@ impl tidebreak_mcp::CallBearerSource for GatewayCallBearer {
     }
 }
 
-/// Load a live OAuth connection when a client registration and tokens are
-/// already stored. Missing credentials mean the user has not Connected yet:
-/// the HTTP client is built without a bearer rather than failing the connect.
+/// Load a live OAuth connection when a session for exactly `url` is stored.
+/// A session issued for any other URL — the server's URL before an edit, or
+/// a server of the same name that was removed — is never loaded, so its token
+/// cannot reach this one. Missing credentials mean the person has not
+/// connected yet: the HTTP client is built without a bearer rather than
+/// failing the connect, and a `401` then tells the runtime to ask the server
+/// how to sign in.
 async fn live_oauth_connection(
-    secrets: Arc<dyn SecretProvider>,
-    id: ConnectedAppId,
+    access: &OAuthAccess,
+    url: &str,
 ) -> Option<Arc<crate::connectors::McpOAuthConnection>> {
-    let vault = crate::connectors::McpOAuthCredentialVault::new(secrets, id);
-    let registration = vault.load_registration().await.ok().flatten()?;
+    let vault = crate::connectors::McpOAuthCredentialVault::new(access.secrets.clone(), access.id);
+    let (registration, _tokens) = vault.load_for(url).await.ok().flatten()?;
     let token_endpoint = registration.token_endpoint.as_deref()?;
     let token_endpoint = url::Url::parse(token_endpoint).ok()?;
-    let _tokens = vault.load().await.ok().flatten()?;
-    let client = crate::connectors::McpOAuthClient::new().ok()?;
     Some(Arc::new(crate::connectors::McpOAuthConnection::new(
-        client,
+        access.client.clone(),
         vault,
         token_endpoint,
-        registration.client_id,
-        registration.client_secret,
+        registration,
     )))
 }
 
@@ -400,12 +408,13 @@ impl McpServerDefinition {
         Ok(command)
     }
 
+    /// Open a session with this server. `oauth` is how to present a stored
+    /// OAuth session, given only for a server that [signs in](super::oauth::signs_in).
     pub(super) async fn connect(
         &self,
         gateway: &Arc<dyn GatewayEndpoints>,
         env: &BTreeMap<String, String>,
-        secrets: Option<&Arc<dyn SecretProvider>>,
-        app_id: Option<ConnectedAppId>,
+        oauth: Option<&OAuthAccess>,
     ) -> Result<McpClient> {
         let request_timeout = Duration::from_millis(self.request_timeout_ms);
         let initialization_timeout = request_timeout.min(INITIALIZATION_TIMEOUT);
@@ -432,9 +441,12 @@ impl McpServerDefinition {
             });
         }
         if let Some(url) = &self.url {
-            // OAuth servers (`self.oauth`) carry no static bearer: the
-            // refreshing access token is the only credential, loaded from
-            // the OS credential store and attached as a per-call bearer.
+            // A server that signs in with OAuth carries no static bearer: a
+            // stored session's refreshing access token is the only
+            // credential, loaded from the OS credential store and attached as
+            // a per-call bearer. That holds whatever the saved `oauth` flag
+            // says, so a server someone connected without the flag keeps its
+            // session.
             let bearer_token = self.resolve_bearer_token()?;
             let headers = match &self.launch {
                 Some(launch) => {
@@ -443,20 +455,23 @@ impl McpServerDefinition {
                 }
                 None => BTreeMap::new(),
             };
-            let oauth_connection = if self.oauth {
-                match (secrets, app_id) {
-                    (Some(secrets), Some(id)) => {
-                        live_oauth_connection(Arc::clone(secrets), id).await
-                    }
-                    _ => None,
-                }
-            } else {
-                None
+            let oauth_connection = match oauth {
+                Some(access) => live_oauth_connection(access, url).await,
+                None => None,
             };
-            let handshake_bearer = if let Some(connection) = &oauth_connection {
-                connection.access_token().await.ok()
-            } else {
-                bearer_token
+            let handshake_bearer = match &oauth_connection {
+                Some(connection) => match connection.access_token().await {
+                    Ok(token) => Some(token),
+                    // The sign-in service refused the refresh token: the
+                    // session is over, and the server's `401` says what to
+                    // do next.
+                    Err(error) if crate::connectors::is_oauth_sign_in_required(&error) => None,
+                    // Anything else is temporary. Keep the session and fail
+                    // this attempt, so the supervisor retries on its usual
+                    // backoff instead of connecting without the token.
+                    Err(error) => return Err(error),
+                },
+                None => bearer_token,
             };
             return McpClient::connect_http_with_headers(
                 self.name.clone(),
@@ -493,10 +508,9 @@ impl McpServerDefinition {
         &self,
         gateway: &Arc<dyn GatewayEndpoints>,
         env: &BTreeMap<String, String>,
-        secrets: Option<&Arc<dyn SecretProvider>>,
-        app_id: Option<ConnectedAppId>,
+        oauth: Option<&OAuthAccess>,
     ) -> Result<(McpClient, HashMap<String, UiViewDocument>)> {
-        let client = self.connect(gateway, env, secrets, app_id).await?;
+        let client = self.connect(gateway, env, oauth).await?;
         let uris: HashSet<String> = client
             .tools()
             .filter_map(|spec| client.ui_resource_uri(&spec.name))
@@ -633,9 +647,13 @@ async fn admit_plugin_endpoint(url: &str) -> Result<()> {
 /// bump `v`: the canonical form only ever saw the names, which are unchanged,
 /// so every grant issued before the move still matches after it. `bearer_token_env_set` records
 /// only whether a bearer name is selected. `cwd` is the configured path,
-/// lossily UTF-8. `oauth` records whether the server hands the endpoint an
+/// lossily UTF-8. `oauth` records whether the definition forces an
 /// OAuth-obtained token rather than a static env bearer — a different thing to
-/// have consented to run, which is why adding it bumped `v` from 2 to 3. The
+/// have consented to run, which is why adding it bumped `v` from 2 to 3. A
+/// server without the flag signs in only when it asks for OAuth and the person
+/// selects Connect. The session is bound to the exact URL it was issued for:
+/// it is never presented to another URL, and editing the URL or removing the
+/// server clears it, so a token cannot outlive the `url` this form covers. The
 /// `v:1` form excluded the server name because grants were keyed by it;
 /// app-keyed grants pin a record id instead, so `namespace`
 /// (the configured name, which decides which `mcp__{namespace}__…` mounted

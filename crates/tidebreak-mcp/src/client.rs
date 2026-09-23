@@ -24,7 +24,7 @@ use tokio::time::timeout;
 use crate::http::HttpWire;
 use crate::protocol::{Response, RpcError, PROTOCOL_VERSION};
 
-const CLIENT_NAME: &str = "tidebreak";
+pub(crate) const CLIENT_NAME: &str = "tidebreak";
 /// Provider-safe mounted function-name limit shared by OpenAI and Anthropic.
 pub const MAX_MOUNTED_TOOL_NAME_BYTES: usize = 64;
 /// Leaves useful room for the remote name inside `mcp__{server}__{tool}`.

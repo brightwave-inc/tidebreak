@@ -53,7 +53,9 @@ pub use client::{
     CallBearerSource, McpClient, McpProbe, McpServerInfo, ResourceContent, DEFAULT_REQUEST_TIMEOUT,
     MAX_SERVER_NAME_BYTES,
 };
-pub use http::{validate_http_url, validate_http_url_with_credentials};
+pub use http::{
+    authorization_challenge, is_unauthorized, validate_http_url, validate_http_url_with_credentials,
+};
 pub use protocol::PROTOCOL_VERSION;
 pub use server::McpServer;
 pub use stdio::{serve, serve_stdio};

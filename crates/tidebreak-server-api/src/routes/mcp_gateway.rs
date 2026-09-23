@@ -477,10 +477,12 @@ pub async fn post_mcp_server_reconnect(
     ))
 }
 
-/// `POST /mcp/servers/{name}/connect` — begin the OAuth sign-in for one server:
-/// discover the authorization server, open the system browser, and store the
-/// resulting tokens. Returns the OAuth status, which carries the browser URL
-/// while `Authorizing`.
+/// `POST /mcp/servers/{name}/connect` — begin the OAuth sign-in for one server
+/// and return at once. The status is `Authorizing` with the page the renderer
+/// opens in the person's browser; the server never opens a browser itself.
+/// The exchange completes in the background: poll `GET /mcp/servers`, whose
+/// `oauth_status` turns `Connected` or says why the sign-in stopped. A server
+/// that cannot sign in answers `Unsupported` with the reason.
 pub async fn post_mcp_server_connect(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -491,6 +493,23 @@ pub async fn post_mcp_server_connect(
         mutation
             .await
             .map_err(|_| ServerError::internal("MCP OAuth connect task failed"))?
+            .map_err(mcp_request_error)?,
+    ))
+}
+
+/// `POST /mcp/servers/{name}/connect/cancel` — stop a sign-in that still
+/// waits on the browser. A stored session is left alone. Returns the server's
+/// OAuth status without the sign-in.
+pub async fn post_mcp_server_connect_cancel(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<McpOAuthStatus>, ServerError> {
+    let runtime = state.mcp.clone();
+    let mutation = tokio::spawn(async move { runtime.oauth_cancel(&name).await });
+    Ok(Json(
+        mutation
+            .await
+            .map_err(|_| ServerError::internal("MCP OAuth cancel task failed"))?
             .map_err(mcp_request_error)?,
     ))
 }
