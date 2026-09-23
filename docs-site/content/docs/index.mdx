@@ -11,10 +11,23 @@ coding agent working in an isolated worktree.
 
 It runs on your machine. Your conversations, your documents, and the files the
 agent produces live in a local database and a local folder. Your provider API
-keys live in your operating system's credential store. Nothing is routed
-through a service the project operates — the only outbound traffic is the
-requests you configure: your model provider, your search provider, and
-whatever the agent explicitly fetches.
+keys live in your operating system's credential store.
+
+Local-first does not mean the app never talks to the network. Packaged
+release builds check `https://downloads.brightwave.io/tidebreak/` for a
+signed update 15 seconds after launch and every five minutes
+(`crates/tidebreak-desktop/src/updater.rs`). There is no setting that turns
+those checks off; development builds do not contact the feed. The first time
+you use each feature, the app also downloads:
+
+- the voice helper from `downloads.brightwave.io` (local transcription)
+- Node from `nodejs.org` (skills and coding engines)
+- LibreOffice from `download.documentfoundation.org` (presentation preview)
+- the coding engine you pick from npm
+
+Those installs live under `tools/` in the application data directory. You
+avoid a download by not using that feature. Model, search, sandbox, MCP, and
+hosted-machine traffic still go to the services you configure.
 
 <Callout type="warn">
 Tidebreak is pre-1.0 and under active development. Interfaces, storage
@@ -59,10 +72,12 @@ a local Ollama model.
 
 ## What it is not
 
-It is not a hosted service, and there is no Tidebreak account to create. It is
-not primarily a repository-bound coding assistant — the unit of work is a chat
-with files, folders, tools, and outputs. And it is not finished: the product is
-still pre-1.0 and its local data model can change between releases.
+It is not a hosted SaaS you log into for local work, and there is no Tidebreak
+account to create for the desktop. Hosted machines and a mobile client exist
+for people who attach through Model Gateway. It is not primarily a
+repository-bound coding assistant — the unit of work is a chat with files,
+folders, tools, and outputs. And it is not finished: the product is still
+pre-1.0.
 
 ## Start here
 

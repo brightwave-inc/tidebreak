@@ -40,13 +40,19 @@ macOS ties keychain approvals to a binary's code signature. After an update,
 or when switching between a release build and one you built yourself,
 previously stored credentials belong to a different signature.
 
-Re-enter the credential, or run:
+Re-enter the credential, or rewrite each stored item under the running
+binary's signature. The CLI is not on your PATH. Use the copy inside the app:
 
 ```sh
-tidebreak rehome-secrets
+/Applications/Tidebreak.app/Contents/MacOS/tidebreak rehome-secrets
 ```
 
-which rewrites each stored credential under the running binary's signature.
+If you built from source, run it through Cargo so the macOS signing runner
+applies:
+
+```sh
+cargo run -p tidebreak-cli -- rehome-secrets
+```
 
 ## The app will not start, or reports the data directory is in use
 
@@ -56,10 +62,9 @@ pointed at the same directory.
 
 ## Chats disappeared after an update
 
-While Tidebreak is pre-1.0, opening a database written by an incompatible
-older build can rebuild it rather than migrate it. Export anything you need
-to keep with **Save as…** on outputs, and treat the local database as
-disposable until 1.0.
+Desktop upgrades from v0.61.0 onward keep local data. Opening a database from
+v0.60.0 or earlier still rebuilds the SQLite profile once. Export anything you
+need to keep with **Save as…** on outputs before that one-time rebuild.
 
 ## Reporting a problem
 

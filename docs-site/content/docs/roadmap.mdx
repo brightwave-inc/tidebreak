@@ -1,78 +1,41 @@
 ---
-title: What comes after v1
-description: The capabilities Tidebreak deliberately does not promise in its first stable release, and why.
+title: Roadmap
+description: What 1.0 promises, and where parked product ideas live.
 ---
 
-Tidebreak v1 is a local-first coworker for real work: it can use configured
-models, work over user-approved files, call bounded tools, run code in an
-isolation boundary, and produce files you explicitly export. That is a useful
-foundation, not a claim that every kind of automation is already present.
+Tidebreak is still pre-1.0. This page states the direction. It does not set
+dates.
 
-## Not yet, by design
+## What 1.0 promises
 
-<Cards>
-  <Card title="Scheduled work" href="#a-coworker-that-can-work-later">
-    Future runs will reuse the durable run journal and never turn a schedule
-    into blanket permission.
-  </Card>
-  <Card title="Browser extensions" href="#browser-work-beyond-the-macos-release">
-    Background agents, other desktop platforms, and arbitrary signed-in
-    services remain outside the macOS browser release.
-  </Card>
-  <Card title="Connected services" href="#connected-services">
-    Managed OAuth integrations belong with gateway entitlements, not a parallel
-    desktop-owned connector catalog.
-  </Card>
-</Cards>
+1.0 is a compatibility commitment, not a feature dump.
 
-## A coworker that can work later
+- **Data upgrades in place.** Desktop upgrades from v0.61.0 onward already
+  keep local data
+  ([decision 61](https://github.com/brightwave-inc/tidebreak/blob/main/docs/decisions/0061-schema-changes-are-migrations.md)).
+  1.0 means a supported upgrade window, not another wipe.
+- **Stable CLI and `agent-mcp`.** Commands, flags, and the attach contract
+  stay compatible across 1.x. Breaking changes increment major.
+- **macOS first.** Production releases already ship a signed, notarized macOS
+  app. Windows and Linux packages exist; they return as first-class 1.0
+  platforms before 1.0 ships, including the remaining distribution work
+  recorded in the release guide.
 
-Tidebreak has durable background runs, but it does not schedule work for a
-future time or recurring cadence yet. The first local-first scheduler should
-support one-time, daily, and weekly tasks with visible history, explicit
-enable/disable controls, and bounded catch-up after sleep or offline time. It
-will reuse the existing journal and admission path instead of introducing a
-second automation engine.
+The full 1.0.0 checklist lives in
+[`docs/releases.md`](https://github.com/brightwave-inc/tidebreak/blob/main/docs/releases.md).
 
-A schedule cannot manufacture consent. Actions with external effects will
-remain subject to the applicable approval boundary; future recurring grants
-must be limited to exact, canonicalized destinations.
+## What stays parked
 
-## Browser work beyond the macOS release
+Ideas that are valuable but not part of that promise live in
+[`docs/deferred.md`](https://github.com/brightwave-inc/tidebreak/blob/main/docs/deferred.md).
+That list is not a ticket queue and it does not make dates. It covers
+scheduled work, browser work beyond the macOS release, a desktop-owned OAuth
+catalog, and other long-horizon capabilities.
 
-The [in-app browser](/browser) gives foreground chat and local coding agents a
-visible, shared macOS tab with a separate Tidebreak profile. Release acceptance
-is active work. Background browser agents, Windows and Linux agent control,
-arbitrary signed-in services, personal profiles, CAPTCHA handling, and
-password-manager integration remain outside that release.
+Do not treat a parked idea as implied by 1.0.
 
-## Connected services
+## What is already in motion
 
-Tidebreak supports local connected folders, MCP servers, web search, and
-user-configured REST definitions. It does not intend to publish and operate a
-separate desktop-owned OAuth catalog for services such as Slack, Google,
-Microsoft 365, Dropbox, or Box.
-
-For services that require a registered OAuth application, the intended managed
-path is a gateway entitlement that Tidebreak consumes and explains. Local users
-retain their escape hatches: mounted MCP servers and user-provided REST
-definitions and credentials.
-
-## Further out
-
-Later work can add connected-folder search from the composer, reusable output
-templates, an instruction-only plugin marketplace, and eventually
-capability-bearing plugin components with explicit per-component consent.
-
-Deeper isolation is also planned carefully. Detached background agents require
-scoped model tokens, provider lifetime caps, verified images, no reachable host
-authority, and enforceable credential-egress rules. Until those properties fit
-together, durable background runs remain local and attached.
-
-## What we are finishing now
-
-The v1 foundation still has ordinary implementation work: consolidating the
-pre-v1 schema baseline, closing the remaining self-hosted prompt-inbox ownership
-gap, enforcing Docker's strict network-off policy, and tightening deletion and
-audit behavior. These are active, buildable slices rather than deferred
-promises.
+Hosted machines (Model Gateway), the hosted web UI, and the mobile client are
+product, not parked scope. See [Code mode](/code-mode) and
+[Running headless](/headless).

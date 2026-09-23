@@ -152,12 +152,11 @@ Every pull request to `main` needs an approving review from
 `@brightwave-inc/engineering`. Members of that team can merge without waiting
 for the review. Squash-merge when the required checks pass.
 
-## Contributor License Agreement
+## License
 
 By submitting a contribution, you agree that your contribution is provided under
-the [Apache License 2.0](LICENSE) and that you have the right to submit it. A CLA
-check runs on pull requests; you'll be prompted to sign once, and it applies to
-all future contributions.
+the [Apache License 2.0](LICENSE) and that you have the right to submit it.
+There is no separate CLA and no CLA check on pull requests.
 
 ## Code of Conduct
 
