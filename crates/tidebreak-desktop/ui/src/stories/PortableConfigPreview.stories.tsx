@@ -231,3 +231,64 @@ export const UnsupportedVersion: Story = {
     await within(canvasElement).findByRole("alert");
   },
 };
+
+/** The path is filled in, so the repository moves from Skip to Add. */
+export const PathFilledIn: Story = {
+  args: {
+    client: previewClient([
+      entry("code_repositories", repoKey, "needs_remap", {
+        remap_fields: ["root_path"],
+      }),
+    ]),
+  },
+  play: async ({ canvasElement }) => {
+    const dialog = within(await openPreview(canvasElement));
+    await userEvent.type(
+      dialog.getByLabelText(`Remap root_path for ${repoKey}`),
+      "/Users/alex/code/tidebreak",
+    );
+  },
+};
+
+/** The import ran; the section says what it applied and skipped. */
+export const Imported: Story = {
+  args: {
+    client: {
+      ...previewClient([
+        entry("mcp_servers", "status", "new"),
+        entry("mcp_servers", "docs", "conflict", {
+          differing_fields: ["args"],
+        }),
+        entry("code_repositories", repoKey, "identical"),
+      ]),
+      applyWorkspaceConfig: async () => ({ applied: 1, skipped: 2 }),
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const dialog = within(await openPreview(canvasElement));
+    await userEvent.click(dialog.getByRole("button", { name: "Apply" }));
+    await within(canvasElement).findByText("Import finished");
+  },
+};
+
+/** A server would not start, so the import undid itself and says so. */
+export const ImportFailed: Story = {
+  args: {
+    client: {
+      ...previewClient([
+        entry("mcp_servers", "status", "new"),
+        entry("code_repositories", repoKey, "identical"),
+      ]),
+      applyWorkspaceConfig: async () => {
+        throw new Error(
+          "external MCP server status failed to start: the server answered 503. Nothing changed.",
+        );
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const dialog = within(await openPreview(canvasElement));
+    await userEvent.click(dialog.getByRole("button", { name: "Apply" }));
+    await dialog.findByText("The import did not run");
+  },
+};
