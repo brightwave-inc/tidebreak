@@ -240,8 +240,8 @@ export function ExecPanel({ client }: { client: ApiClient }) {
           </div>
 
           <p className="text-sm leading-relaxed text-muted-foreground">
-            Local execution confines writes to private work scratch and routes
-            any granted network access through a loopback broker. E2B and
+            Local execution confines writes to a private folder on this computer
+            and routes any granted network access through a local proxy. E2B and
             Daytona run commands in managed cloud sandboxes and reuse their
             workspace while it is alive. Docker runs them in a container on{" "}
             {hostMachineLabel()}, so staged files never leave it, with the same
@@ -354,7 +354,7 @@ const EGRESS_STATUS_PRESENTATION: Record<
   conditional_boundary: {
     badge: "info",
     label: "Boundary — conditional",
-    lead: "A strict per-sandbox boundary when enforced: unlisted domains, raw IPs, and unlisted-domain DNS are all blocked — stronger than E2B. Not guaranteed on every account:",
+    lead: "A strict per-sandbox boundary when enforced: domains that are not on the list, raw IPs, and DNS lookups for those domains are all blocked — stronger than E2B. Not guaranteed on every account:",
   },
   applied_with_gaps: {
     badge: "warning",
@@ -405,8 +405,8 @@ function EgressEnforcementDisclosure({
               {row.requirement && (
                 <span className="font-medium text-foreground">
                   {" "}
-                  Requires {row.requirement}. On a lower tier the per-sandbox
-                  override is refused and the account default applies.
+                  Requires {row.requirement}. On a lower tier this extra
+                  restriction is not applied and the account default applies.
                 </span>
               )}
             </span>

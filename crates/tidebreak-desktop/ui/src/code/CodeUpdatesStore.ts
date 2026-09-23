@@ -844,7 +844,7 @@ function notifyBackgroundClone(
   clientGeneration: number,
 ): void {
   const action = {
-    label: job.error ? "Retry" : "Open",
+    label: job.error ? "Try again" : "Open",
     onClick: () => {
       if (!selectCodeClone({ jobId: job.id, clientGeneration })) return;
       useCodeUiStore.getState().setAddRepoOpen(true);

@@ -775,7 +775,7 @@ function AssistantRewriteMessage({
       )}
       {item.rewriteState === "failed" && (
         <p className="text-muted-foreground mb-2 text-xs" role="status">
-          Couldn't write a recap. The original stands.
+          Could not write a recap. The original stands.
         </p>
       )}
       <AssistantMessageBody

@@ -497,7 +497,7 @@ export const BaseRefreshWarning: Story = {
       createCodeWorkspace: async () => ({
         ...codeWorkspace,
         base_refresh_warning:
-          "Couldn't update main to the latest version. Your workspace uses the available local history.",
+          "Could not update main to the latest version. Your workspace uses the available local history.",
       }),
       createCodeSession: fn(async () => codeSession),
     },
@@ -518,7 +518,7 @@ export const BaseRefreshWarning: Story = {
     );
     fireEvent.keyDown(dialog, { key: "Enter", metaKey: true });
     await body.findByText(
-      "Couldn't update main to the latest version. Your workspace uses the available local history.",
+      "Could not update main to the latest version. Your workspace uses the available local history.",
     );
   },
 };

@@ -200,7 +200,9 @@ function ProviderRow({
   // A provider whose models are all user-configured — or served by a gateway —
   // has no curated catalog rows here, so there is nothing to summarize.
   const summary =
-    catalogModels.length === 0 ? null : `${catalogModels.length} models`;
+    catalogModels.length === 0
+      ? null
+      : `${catalogModels.length} model${catalogModels.length === 1 ? "" : "s"}`;
 
   const revealed = useRef(false);
   useEffect(() => {

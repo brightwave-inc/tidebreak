@@ -82,7 +82,7 @@ it.each(["interactive", "watch"] as const)(
     });
     const view = render(<SelectedSession session={healthy} onRetry={retry} />);
     expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "Retry recovery" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
     expect(retry).not.toHaveBeenCalled();
 
@@ -91,11 +91,11 @@ it.each(["interactive", "watch"] as const)(
     expect(screen.getByRole("status")).toHaveTextContent(
       "Inspect the fenced session's process.",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Retry recovery" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(retry).toHaveBeenCalledOnce();
 
     view.rerender(<SelectedSession session={healthy} onRetry={retry} />);
     expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "Retry recovery" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   },
 );

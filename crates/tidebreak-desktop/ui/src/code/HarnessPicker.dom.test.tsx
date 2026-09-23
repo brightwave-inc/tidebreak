@@ -74,7 +74,7 @@ describe("HarnessPicker", () => {
         onChange={onChange}
       />,
     );
-    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("combobox", { name: "Engine" }));
     const row = screen.getByRole("option", { name: /opencode/ });
     expect(row).toHaveTextContent("Downloads on first use");
     expect(row).not.toHaveAttribute("aria-disabled", "true");
@@ -108,7 +108,7 @@ describe("HarnessPicker", () => {
         onChange={onChange}
       />,
     );
-    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("combobox", { name: "Engine" }));
     const listbox = screen.getByRole("listbox");
     expect(listbox.textContent).not.toMatch(/2\.1\.233|1\.0\.4|\/opt\/harness/);
     const grokRow = screen.getByRole("option", { name: /Grok CLI/ });
@@ -136,7 +136,7 @@ describe("HarnessPicker", () => {
 
     await userEvent
       .setup()
-      .click(screen.getByRole("combobox", { name: "Harness" }));
+      .click(screen.getByRole("combobox", { name: "Engine" }));
     const row = screen.getByRole("option", { name: /Claude Code/ });
     expect(row).toHaveTextContent("Unverified — sign in via your terminal");
     expect(row).toHaveAttribute("aria-disabled", "true");
@@ -177,7 +177,7 @@ describe("HarnessPicker", () => {
       />,
     );
 
-    const trigger = screen.getByRole("combobox", { name: "Harness" });
+    const trigger = screen.getByRole("combobox", { name: "Engine" });
     expect(trigger).not.toHaveTextContent("Tidebreak");
     await userEvent.setup().click(trigger);
     expect(

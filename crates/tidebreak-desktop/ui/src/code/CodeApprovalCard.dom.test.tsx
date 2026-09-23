@@ -135,7 +135,7 @@ describe("CodeApprovalCard", () => {
         ),
       ).toBeVisible();
       expect(screen.getByText(/Inspect the failing test/)).toHaveTextContent(
-        "Harness: codex",
+        "Engine: codex",
       );
       expect(screen.queryByText(/don't ask again/i)).not.toBeInTheDocument();
       await user.click(screen.getByRole("button", { name: "Approve" }));
@@ -230,7 +230,7 @@ describe("CodeApprovalCard", () => {
         plan.getByText("Do not change any repository files."),
       ).toBeVisible();
       expect(
-        screen.getByRole("button", { name: "Harness payload" }),
+        screen.getByRole("button", { name: "Engine request" }),
       ).toHaveAttribute("aria-expanded", "false");
       if (state === "approved") {
         expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
@@ -330,7 +330,7 @@ describe("CodeApprovalCard", () => {
       document.querySelector('time[datetime="2026-08-15T12:00:00.000Z"]'),
     ).not.toBeNull();
 
-    const toggle = screen.getByRole("button", { name: "Harness payload" });
+    const toggle = screen.getByRole("button", { name: "Engine request" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
 
     fireEvent.click(toggle);
@@ -343,7 +343,7 @@ describe("CodeApprovalCard", () => {
     expect(screen.getByText("Write this file?")).toBeInTheDocument();
     expect(screen.getByText("/workspace/probe.txt")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Harness payload" }),
+      screen.getByRole("button", { name: "Engine request" }),
     ).toHaveAttribute("aria-expanded", "false");
   });
 
@@ -373,7 +373,7 @@ describe("CodeApprovalCard", () => {
         onDecide={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Harness payload" }));
+    fireEvent.click(screen.getByRole("button", { name: "Engine request" }));
     const shown = screen.getByText(/more characters not shown/);
     expect(shown.textContent!.length).toBeLessThan(MAX_PAYLOAD_CHARS + 200);
   });

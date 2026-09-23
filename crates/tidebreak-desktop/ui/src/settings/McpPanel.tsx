@@ -329,7 +329,7 @@ function PluginServerSection({ server }: { server: McpServerInfo }) {
       <p className="text-sm leading-relaxed text-muted-foreground">
         Provided by the <code>{server.plugin}</code> plugin. Its configuration
         ships with the package, so it is not edited here — turn the plugin off
-        under Plugins to disconnect it and unmount its tools.
+        under Plugins to disconnect it and turn off its tools.
       </p>
     </SettingsSection>
   );
@@ -558,7 +558,7 @@ export function McpPanel({
       setImportDraft(text);
       applyImport(text, file.name);
     } catch (err) {
-      setImportError(`Couldn't import ${file.name}: ${errorMessage(err)}`);
+      setImportError(`Could not import ${file.name}: ${errorMessage(err)}`);
     } finally {
       setImporting(false);
     }
@@ -571,7 +571,7 @@ export function McpPanel({
     try {
       applyImport(importDraft, "pasted JSON");
     } catch (err) {
-      setImportError(`Couldn't import pasted JSON: ${errorMessage(err)}`);
+      setImportError(`Could not import pasted JSON: ${errorMessage(err)}`);
     } finally {
       setImporting(false);
     }
@@ -601,7 +601,7 @@ export function McpPanel({
       adoptServers(result.servers);
       setServersKnown(true);
       setListError(null);
-      toast.success(mounted ? `Mounted ${slug}` : `Unmounted ${slug}`);
+      toast.success(mounted ? `Connected ${slug}` : `Disconnected ${slug}`);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -728,7 +728,7 @@ export function McpPanel({
   // section that normally carries it has nothing else to show.
   const fallbackListError = !endpointsVisible && listError !== null && (
     <SettingsError>
-      Couldn't read the MCP server list: {listError}
+      Could not read the MCP server list: {listError}
     </SettingsError>
   );
 
@@ -744,20 +744,20 @@ export function McpPanel({
       <div className="flex flex-col gap-3" aria-busy={loading || working}>
         {!signedIn && (
           <p className="text-muted-foreground text-xs">
-            Sign in to the Model Gateway to mount or unmount endpoints. The
-            configured mounts stay listed meanwhile.
+            Sign in to the Model Gateway to connect or disconnect endpoints. The
+            configured connections stay listed meanwhile.
           </p>
         )}
         {appsFailed && (
           <p className="text-muted-foreground text-xs">
-            Couldn't read your entitlements from the gateway; these are the
-            configured mounts.
+            Could not read your entitlements from the gateway; these are the
+            configured connections.
           </p>
         )}
         {listError !== null && (
           <div className="flex items-center justify-between gap-4">
             <SettingsError>
-              Couldn't read the MCP server list: {listError}
+              Could not read the MCP server list: {listError}
             </SettingsError>
             <Button
               type="button"
@@ -769,7 +769,7 @@ export function McpPanel({
               }}
             >
               <RefreshCw size={14} />
-              Retry
+              Try again
             </Button>
           </div>
         )}
@@ -803,9 +803,9 @@ export function McpPanel({
                 >
                   <code className="font-medium">{slug}</code>
                   <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    mounted
+                    connected
                     <Switch
-                      aria-label={`Mount ${slug}`}
+                      aria-label={`Connect ${slug}`}
                       checked={mounted !== undefined}
                       disabled={!signedIn || working || !serversKnown}
                       onCheckedChange={(checked) =>
@@ -837,12 +837,13 @@ export function McpPanel({
                     )}
                   {!serversKnown && (
                     <span className="text-xs text-muted-foreground">
-                      Mount state unknown.
+                      Connection state unknown.
                     </span>
                   )}
                   {revoked && (
                     <span className="text-xs text-muted-foreground">
-                      No longer granted to your teams. Switch off to unmount it.
+                      No longer granted to your teams. Switch off to disconnect
+                      it.
                     </span>
                   )}
                   {mounted &&
@@ -1013,7 +1014,8 @@ export function McpPanel({
                     Managed by the Model Gateway (endpoint{" "}
                     <code>{server.gateway_endpoint}</code>). Its URL and
                     short-lived credentials come from the signed-in gateway
-                    session; mount or unmount it under Gateway endpoints above.
+                    session; connect or disconnect it under Gateway endpoints
+                    above.
                   </p>
                 )}
 
@@ -1211,7 +1213,7 @@ export function McpPanel({
                       }}
                     >
                       <Trash2 size={14} />
-                      Unmount
+                      Disconnect
                     </Button>
                   ) : (
                     <Button
@@ -1490,9 +1492,9 @@ function GatewayEndpoints({
 }) {
   /** The one line under a mount row: unknown beats revoked beats health. */
   const rowNote = (slug: string, mounted: McpServerInfo | undefined) => {
-    if (!serversKnown) return "Mount state unknown.";
+    if (!serversKnown) return "Connection state unknown.";
     if (entitledSlugs !== null && !entitledSlugs.has(slug)) {
-      return "No longer granted to your teams. Switch off to unmount it.";
+      return "No longer granted to your teams. Switch off to disconnect it.";
     }
     return mounted ? mountStatus(mounted) : null;
   };
@@ -1500,24 +1502,24 @@ function GatewayEndpoints({
   return (
     <SettingsSection
       title="Gateway endpoints"
-      description="Mounted endpoints connect with your gateway session — no tokens to copy, and they reconnect after you sign back in."
+      description="Connected endpoints use your gateway session — no tokens to copy, and they reconnect after you sign back in."
     >
       {!signedIn && (
         <p className="text-muted-foreground text-xs">
-          Sign in to the Model Gateway to mount or unmount endpoints. The
-          configured mounts stay listed meanwhile.
+          Sign in to the Model Gateway to connect or disconnect endpoints. The
+          configured connections stay listed meanwhile.
         </p>
       )}
       {appsFailed && (
         <p className="text-muted-foreground text-xs">
-          Couldn't read your entitlements from the gateway; these are the
-          configured mounts.
+          Could not read your entitlements from the gateway; these are the
+          configured connections.
         </p>
       )}
       {listError !== null && (
         <div className="flex items-center justify-between gap-4">
           <SettingsError>
-            Couldn't read the MCP server list: {listError}
+            Could not read the MCP server list: {listError}
           </SettingsError>
           <Button
             type="button"
@@ -1526,7 +1528,7 @@ function GatewayEndpoints({
             onClick={onRetry}
           >
             <RefreshCw size={14} />
-            Retry
+            Try again
           </Button>
         </div>
       )}
@@ -1549,7 +1551,7 @@ function GatewayEndpoints({
                   )}
                 </div>
                 <Switch
-                  aria-label={`Mount ${slug}`}
+                  aria-label={`Connect ${slug}`}
                   checked={mounted !== undefined}
                   disabled={!signedIn || working || !serversKnown}
                   onCheckedChange={(checked) => onToggle(slug, checked)}

@@ -123,7 +123,7 @@ describe("StartSessionPrompt", () => {
     );
 
     expect(screen.queryByText("Tidebreak")).not.toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Harness" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Engine" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
     expect(onStart).not.toHaveBeenCalled();
   });
@@ -183,7 +183,7 @@ describe("StartSessionPrompt", () => {
       ),
     ).toBeNull();
     expect(
-      screen.getByRole("combobox", { name: "Harness" }).closest("form"),
+      screen.getByRole("combobox", { name: "Engine" }).closest("form"),
     ).toHaveClass("chat-composer");
     const field = screen.getByRole("textbox", { name: "Message" });
     await user.type(field, "list the files");
@@ -369,7 +369,7 @@ describe("StartSessionPrompt", () => {
         />,
       ),
     );
-    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("combobox", { name: "Engine" }));
     await user.click(screen.getByRole("option", { name: /Grok CLI/ }));
     // The selected Ask is not honorable here; the mode follows the engine.
     expect(
@@ -612,7 +612,7 @@ describe("StartSessionPrompt", () => {
       screen.queryByRole("switch", { name: /Fast mode/ }),
     ).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("combobox", { name: "Engine" }));
     await user.click(screen.getByRole("option", { name: /opencode/ }));
     expect(
       await screen.findByRole("button", { name: "Model: GPT 5.6 Sol" }),

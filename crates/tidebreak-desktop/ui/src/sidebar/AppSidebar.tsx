@@ -76,7 +76,7 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
             className="self-start text-xs text-muted-foreground underline-offset-2 hover:underline"
             onClick={() => void refreshChats()}
           >
-            Retry
+            Try again
           </button>
         </div>
       )}

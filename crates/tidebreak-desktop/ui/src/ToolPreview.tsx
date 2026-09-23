@@ -87,7 +87,7 @@ export function toolPreviewPresentation(
     const detail = [
       headline,
       preview.task,
-      preview.harness && `Harness: ${preview.harness}`,
+      preview.harness && `Engine: ${preview.harness}`,
       preview.model && `Model: ${preview.model}`,
     ]
       .filter(Boolean)

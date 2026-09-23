@@ -91,6 +91,8 @@ export type WorkspaceCommandId =
 export type WorkspaceCommand = {
   id: WorkspaceCommandId;
   label: string;
+  /** Extra search words for the command palette; not shown in the menu. */
+  keywords?: string;
   destructive?: boolean;
   /** Draw a separator before this item. */
   separated?: boolean;
@@ -158,11 +160,15 @@ export function workspaceCommands(input: {
   if (input.hasSession) {
     items.push(
       input.attentionPinned
-        ? { id: "clear-attention", label: "Clear attention" }
-        : { id: "pin-attention", label: "Pin attention" },
+        ? { id: "clear-attention", label: "Stop keeping this in view" }
+        : { id: "pin-attention", label: "Keep this in view" },
     );
-    items.push({ id: "copy-debug-json", label: "Copy debug JSON" });
-    items.push({ id: "uneff-me", label: "Uneff me" });
+    items.push({ id: "copy-debug-json", label: "Copy diagnostic details" });
+    items.push({
+      id: "uneff-me",
+      label: "Report a problem…",
+      keywords: "uneff",
+    });
   }
   items.push({
     id: "archive",
@@ -229,14 +235,18 @@ export function workspaceHeaderCommands(input: {
   if (input.hasSession) {
     items.push(
       input.attentionPinned
-        ? { id: "clear-attention", label: "Clear attention" }
-        : { id: "pin-attention", label: "Pin attention" },
+        ? { id: "clear-attention", label: "Stop keeping this in view" }
+        : { id: "pin-attention", label: "Keep this in view" },
     );
     if (input.canFork) {
       items.push({ id: "fork-agent", label: "Fork this agent" });
     }
-    items.push({ id: "copy-debug-json", label: "Copy debug JSON" });
-    items.push({ id: "uneff-me", label: "Uneff me" });
+    items.push({ id: "copy-debug-json", label: "Copy diagnostic details" });
+    items.push({
+      id: "uneff-me",
+      label: "Report a problem…",
+      keywords: "uneff",
+    });
   }
   items.push({
     id: "repo-settings",
@@ -692,7 +702,7 @@ export function useWorkspaceCardCommands(): {
     if (!sessionId) return;
     const sourceId = context.workspace.id;
     if (useCodeUiStore.getState().workspaceStartups[sourceId]) {
-      toast.error("Uneff me is already running");
+      toast.error("A problem report is already running");
       return;
     }
     const catalog = useCodeCatalogStore.getState();
@@ -777,7 +787,9 @@ export function useWorkspaceCardCommands(): {
     } catch (error) {
       if (pendingId) removeWorkspace(pendingId);
       setWorkspaceStartup(sourceId, null);
-      toast.error(friendlyErrorMessage(error, "Could not start Uneff me"));
+      toast.error(
+        friendlyErrorMessage(error, "Could not start the problem report"),
+      );
       return;
     }
     const { workspace, prompt } = prepared;
@@ -965,9 +977,9 @@ export function useWorkspaceCardCommands(): {
           .getCodeSessionDebug(sessionId)
           .then((bundle) => copyPlainText(JSON.stringify(bundle, null, 2)))
           .then(() =>
-            toast.success("Debug JSON copied", {
+            toast.success("Diagnostic details copied", {
               description:
-                "Includes the session, turns, and journal events. Review it before sharing.",
+                "Includes the session, turns, and what happened along the way. Review it before sharing.",
             }),
           )
           .catch((error) =>

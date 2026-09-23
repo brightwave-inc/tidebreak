@@ -200,6 +200,7 @@ export function workspaceActionPaletteRows(input: {
       id: `action:${command.id}${command.actionName ? `:${command.actionName}` : ""}`,
       section: "actions" as const,
       label: command.label.replace(/…$/, ""),
+      keywords: command.keywords,
       icon: ACTION_ICONS[command.id],
       shortcut: ACTION_SHORTCUTS[command.id],
       onSelect: () => input.onCommand(command),

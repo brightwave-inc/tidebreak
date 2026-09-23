@@ -1170,7 +1170,7 @@ export function NewWorkspaceDialog({
                       variant="ghost"
                       className="h-8 min-w-0 max-w-48 gap-2 px-2"
                       disabled={allHarnesses.length === 0}
-                      aria-label={`Harness: ${HARNESS_LABELS[harness]}`}
+                      aria-label={`Engine: ${HARNESS_LABELS[harness]}`}
                     >
                       <HarnessIcon className="size-4 shrink-0" />
                       <span className="truncate">

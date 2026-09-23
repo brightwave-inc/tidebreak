@@ -81,7 +81,7 @@ const ULTRA_TRIGGER_CLASS =
 /// say "this turn costs more than the default".
 const FAST_TRIGGER_CLASS = ULTRA_TRIGGER_CLASS;
 const STEERING_UNAVAILABLE =
-  "Redirect isn’t available for this harness. Choose Queue to send this after the response.";
+  "Steer is not available for this engine. Choose Queue to send this after the response.";
 
 function appendComposerPrompt(current: string, prompt: string): string {
   const existing = current.trimEnd();
@@ -1097,7 +1097,7 @@ export function CodeComposer({
     steerRequestRef.current = request;
     setSteerPending(true);
     setSteerError(null);
-    setSteerStatus("Sending guidance…");
+    setSteerStatus("Steering…");
     setNotice(null);
     try {
       await onSteer(message);
@@ -1111,7 +1111,7 @@ export function CodeComposer({
         pastedTextsRef.current = [];
         setPastedTexts([]);
       }
-      setSteerStatus("Guidance sent");
+      setSteerStatus("Steer sent");
     } catch (err) {
       if (steerRequestRef.current !== request) return;
       setSteerStatus(null);

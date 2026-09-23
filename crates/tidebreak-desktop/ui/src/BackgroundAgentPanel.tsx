@@ -154,7 +154,7 @@ export function BackgroundAgentPanel({
             className="shrink-0 font-medium text-primary hover:underline"
             onClick={agentRuns.refresh}
           >
-            Retry
+            Try again
           </button>
         </div>
       ) : agentRuns.loading ? (

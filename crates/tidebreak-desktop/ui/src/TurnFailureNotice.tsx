@@ -30,33 +30,35 @@ export function turnFailureOffersRetry(category: TurnFailureCategory): boolean {
  */
 export function turnFailureCopy(
   category: TurnFailureCategory,
-  provider = "The model provider",
+  provider = "the model provider",
 ): { title: string; body: string } {
+  const titled =
+    provider === "the model provider" ? "The model provider" : provider;
   switch (category) {
     case "rate_limited":
       return {
-        title: `${provider} is rate-limiting requests`,
-        body: "Automatic retries are already spent. Retry after demand or your provider quota resets.",
+        title: `${titled} is rate-limiting requests`,
+        body: "Automatic retries are already spent. Try again after demand or your provider quota resets.",
       };
     case "auth":
       return {
-        title: `${provider} could not authenticate this request`,
+        title: `${titled} could not authenticate this request`,
         body: "Check that the API key is present, active, and belongs to the account or organization you intended to use.",
       };
     case "provider_access":
       return {
-        title: `${provider} denied access to this request`,
+        title: `${titled} denied access to this request`,
         body: `This came from ${provider}, not Tidebreak. Common causes include exhausted credits or quota, billing or organization restrictions, missing model access, and key permissions.`,
       };
     case "transient":
       return {
         title: `The connection to ${provider} failed`,
-        body: "The turn ended before the provider finished responding. Retrying may succeed.",
+        body: "The turn ended before the provider finished responding. Try again; it may succeed.",
       };
     case "unknown":
       return {
         title: "This turn could not be completed",
-        body: "Tidebreak does not have a specific recovery for this failure. Retry once; if it repeats, use the detail below when troubleshooting.",
+        body: "Tidebreak does not have a specific recovery for this failure. Try again once; if it repeats, use the detail below when troubleshooting.",
       };
   }
 }
@@ -83,7 +85,7 @@ export function TurnFailureNotice({
   // Settings sections are registered from a runtime table, so TanStack's
   // generated route union contains `/settings` but not each literal child.
   const providerSettingsPath: string = "/settings/providers";
-  const provider = model ? providerLabel(model.provider) : "The model provider";
+  const provider = model ? providerLabel(model.provider) : "the model provider";
   const copy = turnFailureCopy(category, provider);
 
   return (
@@ -111,7 +113,7 @@ export function TurnFailureNotice({
             onClick={onRetry}
           >
             <RefreshCw aria-hidden="true" />
-            Retry
+            Try again
           </Button>
         )
       ) : (

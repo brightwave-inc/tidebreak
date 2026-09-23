@@ -19,7 +19,7 @@ const recovering: Attention = {
 const blocked: Attention = {
   state: {
     type: "needs_you",
-    prompt: "The engine did not stop. Retry recovery.",
+    prompt: "The engine did not stop. Try again.",
     source: "lifecycle",
   },
   source: "lifecycle",
@@ -77,7 +77,7 @@ it("shows delayed progress, then a concrete failure with a single retry action",
       blocked.state.type === "needs_you" ? blocked.state.prompt : "",
     ),
   ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Retry recovery" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   expect(retry).toHaveBeenCalledOnce();
   rerender(
     <SessionRecoveryNotice
@@ -88,7 +88,7 @@ it("shows delayed progress, then a concrete failure with a single retry action",
       onRetry={retry}
     />,
   );
-  expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Trying again…" })).toBeDisabled();
   rerender(
     <SessionRecoveryNotice
       lifecycle="idle"
@@ -111,7 +111,7 @@ it.each<FenceReason>([
       onRetry={vi.fn()}
     />,
   );
-  expect(screen.getByRole("button", { name: "Retry recovery" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   expect(screen.getByRole("status")).toHaveTextContent(
     "The engine did not stop",
   );

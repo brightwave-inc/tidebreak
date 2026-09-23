@@ -146,7 +146,7 @@ export function ChannelPreferencesPanel({
   return (
     <SettingsPanel
       title="Configure Tidebreak"
-      description="Choose how Tidebreak works in this Slack channel. Model, harness, and instructions apply to new conversations. Existing work keeps its settings."
+      description="Choose how Tidebreak works in this Slack channel. Model, engine, and instructions apply to new conversations. Existing work keeps its settings."
       busy={loading || saving}
     >
       {loading ? (
@@ -169,9 +169,9 @@ export function ChannelPreferencesPanel({
           )}
           <SettingsSection
             title="Agent"
-            description="Unset harness choices inherit this Tidebreak instance’s default. Each harness supplies its default model. Gateway controls which models and tools the agent can use."
+            description="Unset engine choices inherit this Tidebreak instance’s default. Each engine supplies its default model. Gateway controls which models and tools the agent can use."
           >
-            <SettingsField label="Harness">
+            <SettingsField label="Engine">
               <Select
                 value={preferences.harness ?? "inherit"}
                 onValueChange={(value) =>
@@ -183,7 +183,7 @@ export function ChannelPreferencesPanel({
                 }
                 disabled={disabled}
               >
-                <SelectTrigger aria-label="Harness">
+                <SelectTrigger aria-label="Engine">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -206,8 +206,8 @@ export function ChannelPreferencesPanel({
               label="Model"
               hint={
                 !preferences.harness
-                  ? "Choose a harness to select a model for this channel."
-                  : "The catalog lists models available to the selected harness. Execution still requires access through the Slack connection."
+                  ? "Choose an engine to select a model for this channel."
+                  : "The catalog lists models available to the selected engine. Execution still requires access through the Slack connection."
               }
             >
               <Select
