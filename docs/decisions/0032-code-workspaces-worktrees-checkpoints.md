@@ -1,6 +1,6 @@
 # 32. Workspaces: Worktrees, Branches, and Per-Turn Checkpoints via Git Shell-Out
 
-- Status: Accepted
+- Status: Accepted (amended 2026-09-23, see [checkpoint restore](#amended-2026-09-23-checkpoint-restore))
 - Date: 2026-08-15
 - Owners: code mode
 - Related: [`0030-code-mode-separate-surface.md`](0030-code-mode-separate-surface.md),
@@ -164,3 +164,70 @@ A plausible wrong implementation checkpoints only tracked files and passes
 every tracked-edit test; the untracked-file case above must fail it. Another
 passes recovery tests by killing the decoy; the never-signaled assertion
 (decoy still alive after boot) must fail it.
+
+## Amended 2026-09-23: checkpoint restore
+
+The restore path this record deferred ships for 1.0. Reverting a file or one
+hunk from a diff, and discarding a file's uncommitted changes, ship beside it
+and share its rules; [`docs/code-mode.md`](../code-mode.md#undo-in-the-worktree)
+carries the mechanics.
+
+**What a restore targets.** "Before a turn" is the `from` of that turn's own
+diff: the previous checkpoint in the session's chain, the start baseline for
+turn 1, or where the chain resumed after an earlier restore. A turn with no
+such checkpoint is refused. The merge base the diff falls back to knows
+nothing of the untracked files that stood in the worktree then, so restoring
+to it would delete them.
+
+**What a restore changes.** Every file the checkpoint snapshot sees goes back:
+tracked and untracked, added, modified, deleted, and renamed. Ignored files
+stay, because no checkpoint records them. `HEAD`, the branch, the reflog, and
+the user's index are untouched. A turn that committed leaves its commit on
+the branch, and the restore shows as uncommitted changes that undo it.
+Rewriting the branch was rejected above for the same reason it was rejected
+here: history mutation is the change that destroys trust when it goes wrong.
+The checkout runs `git read-tree --reset -u` through a private index, so no
+checkout hook fires and a file whose content matches keeps its stat data.
+
+**A restore can be undone.** Before any file moves, the state being replaced
+is committed to its own hidden ref,
+`refs/tidebreak/checkpoints/<workspace>/<session>/restore/<id>`. Undo is a
+restore whose target is that state, and it saves its own. The confirmation
+lists every change since the target, whoever made it, and the restore takes
+the preview's snapshot tree back as `expected_tree`: a worktree that moved
+since the person confirmed is left alone.
+
+**The chain continues from the restore.** For every open session in the
+workspace, `…/<session>/after/<n>` points at the restored state, where `n` is
+that session's newest turn. The next turn diffs from it. Without that, the
+next turn's diff would start at its own previous checkpoint and claim the
+restore's reversal as the turn's work.
+
+**It runs between turns only.** The worktree turn lock is tried, not waited
+for, and a held lock is a refusal (`turn_running`). A session fenced for an
+engine that may still be alive in the checkout refuses it too (record 55).
+A sandbox workspace refuses it (`workspace_remote`).
+
+**It is journaled.** `CheckpointRestored` lands in the transcript of the
+session that owns the target, naming the restore, its target, and what it
+changed. A restore belongs to no turn and writes no turn row.
+
+**It is reachable headless.** `POST /code/workspaces/{id}/checkpoints/restore`
+serves the desktop and `tidebreak code restore` alike (record 7). The restore
+stays a user action: no agent tool and no automation path restores a
+workspace.
+
+Still excluded: rewinding the engine's own conversation with the files, which
+[`docs/deferred.md`](../deferred.md) carries, and restoring a sandbox
+workspace from the desktop.
+
+Validation: `crates/tidebreak-server/src/code/checkpoint/restore.rs` and
+`revert.rs` run against throwaway repositories: a restore brings back
+tracked and untracked files, removes added ones, leaves ignored files, `HEAD`,
+and the index byte-identical, rewrites no unchanged file, refuses a worktree
+that moved after its preview, and is undone by restoring its saved state.
+`a_turn_after_a_restore_diffs_from_the_restored_state` in `checkpoint.rs`
+pins the chain. `tests/code_undo.rs` in `tidebreak-server-api` drives the
+routes end to end, including the refusal while a turn is parked. A plausible
+wrong implementation restores tracked files only and passes every
+tracked-edit case; the untracked file that must come back fails it.

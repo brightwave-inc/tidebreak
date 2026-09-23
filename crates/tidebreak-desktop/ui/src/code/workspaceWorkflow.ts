@@ -633,8 +633,9 @@ export function resolveWorkflowShortcut(
         return { run: model.primary! };
       // Commit and push come first whether or not a pull request exists, so
       // these stages lead. With no pull request yet, uncommitted work gets the
-      // sent request that carries it all the way; with one open, new local
-      // changes go through the commit box to update it.
+      // sent request that carries it all the way; with one open, the agent
+      // commits and pushes the new changes to update it. The commit box in
+      // Source control does the commit by hand.
       if (model.stage === "dirty") {
         return { run: model.pr ? "update_pr" : "compose_pr" };
       }
@@ -657,9 +658,13 @@ export function resolveWorkflowShortcut(
       )
         return { run: model.primary! };
       // A rebase over uncommitted work is the classic way to lose it, and the
-      // snapshot already knows. Send the reader to the commit box instead.
+      // snapshot already knows. Send the reader to Source control, where the
+      // commit box and Discard are, instead.
       if (model.stage === "dirty") {
-        return { blocked: "Commit or discard your changes before rebasing" };
+        return {
+          blocked:
+            "Commit or discard your changes in Source control before rebasing",
+        };
       }
       return (
         prBlocker(model) ?? {
@@ -695,7 +700,10 @@ function mergeIfGreen(
   model: WorkspaceWorkflowModel,
 ): WorkflowShortcutResolution {
   if (model.stage === "dirty") {
-    return { blocked: "Commit or discard your changes before merging" };
+    return {
+      blocked:
+        "Commit or discard your changes in Source control before merging",
+    };
   }
   if (model.stage === "unpushed") {
     return { blocked: "Push your local commits before merging" };

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  diffHunks,
   groupUnifiedDiff,
   parseDiffGitLine,
   unquoteCStyle,
@@ -111,5 +112,42 @@ describe("parseDiffGitLine", () => {
 describe("unquoteCStyle", () => {
   it("decodes octal bytes", () => {
     expect(unquoteCStyle('"caf\\303\\251"')?.value).toBe("café");
+  });
+});
+
+describe("diffHunks", () => {
+  const header = ["diff --git a/a.txt b/a.txt", "--- a/a.txt", "+++ b/a.txt"];
+
+  it("splits a file at its hunk headers, keeping the no-newline marker", () => {
+    const [group] = groupUnifiedDiff(
+      [
+        ...header,
+        "@@ -1,2 +1,2 @@",
+        " one",
+        "-two",
+        "+2",
+        "@@ -9 +9 @@",
+        "-nine",
+        "+9",
+        "\\ No newline at end of file",
+        "",
+      ].join("\n"),
+    );
+    const hunks = group ? diffHunks(group) : [];
+    expect(hunks.map((hunk) => [hunk.index, hunk.complete])).toEqual([
+      [0, true],
+      [1, true],
+    ]);
+    expect(hunks[1]?.text).toBe(
+      "@@ -9 +9 @@\n-nine\n+9\n\\ No newline at end of file",
+    );
+    expect(hunks[1]).toMatchObject({ newStart: 9, newCount: 1 });
+  });
+
+  it("marks a hunk the diff ends inside as incomplete", () => {
+    const [group] = groupUnifiedDiff(
+      [...header, "@@ -1,4 +1,4 @@", " one", "-two", ""].join("\n"),
+    );
+    expect(group ? diffHunks(group)[0]?.complete : null).toBe(false);
   });
 });

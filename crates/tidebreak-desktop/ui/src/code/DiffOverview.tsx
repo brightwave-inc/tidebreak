@@ -1,47 +1,47 @@
-import { useCallback, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useMemo, useState } from "react";
 
-import { ChevronRight, Folder, FolderOpen } from "lucide-react";
+import {
+  ChevronRight,
+  Folder,
+  FolderOpen,
+  MoreHorizontal,
+  Trash2,
+  Undo2,
+} from "lucide-react";
 
 import type { ApiClient } from "../api/client";
-import type {
-  CodeFileChange,
-  CodeWorkspaceFiles,
-  FileChangeKind,
-} from "../api/types";
+import type { CodeFileChange, CodeWorkspaceFiles } from "../api/types";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { CodeFileIcon } from "./CodeFileIcon";
 import { DiffstatBadge } from "./TurnReviewCard";
-import { FOCUS_RING, HOVER_TINT } from "./interactive";
+import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { type LiveResource, useLiveResource } from "./useLiveContent";
 import { WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
 import { STATUS_TEXT } from "./statusTone";
+import { FILE_KIND, type RevertRequest } from "./worktreeUndo";
 
-const FILE_KIND: Record<
-  FileChangeKind,
-  { letter: string; label: string; className: string }
-> = {
-  added: {
-    letter: "A",
-    label: "Added",
-    className: STATUS_TEXT.ready,
-  },
-  modified: {
-    letter: "M",
-    label: "Modified",
-    className: STATUS_TEXT.warning,
-  },
-  deleted: {
-    letter: "D",
-    label: "Deleted",
-    className: STATUS_TEXT.critical,
-  },
-  renamed: {
-    letter: "R",
-    label: "Renamed",
-    className: STATUS_TEXT.pending,
-  },
+/**
+ * What a changed-file row offers besides opening its diff: revert the file,
+ * and discard its uncommitted changes. The host asks first and has the
+ * server apply it.
+ */
+export type ChangeRowActions = {
+  onRevertFile: (request: RevertRequest) => unknown;
+  /** Offered only on files with uncommitted changes. */
+  onDiscard?: (file: CodeFileChange) => unknown;
+  /**
+   * Why nothing can change the worktree right now, such as a running turn.
+   * The actions stay in the menu, turned off, with this sentence under them.
+   */
+  unavailableReason?: string;
 };
 
 /**
@@ -57,6 +57,8 @@ export function DiffOverview({
   selected,
   contentRevision = 0,
   onOpenFile,
+  actions,
+  commit,
 }: {
   client: Pick<ApiClient, "listCodeWorkspaceFiles">;
   workspaceId: string;
@@ -66,6 +68,9 @@ export function DiffOverview({
   selected?: string;
   contentRevision?: number;
   onOpenFile: (path: string) => void;
+  actions?: ChangeRowActions;
+  /** The commit box, when the list shows the workspace rather than a turn. */
+  commit?: (files: CodeWorkspaceFiles | null) => ReactNode;
 }) {
   const resource = useChangedFilesResource({
     client,
@@ -81,6 +86,8 @@ export function DiffOverview({
       turnLabel={turnLabel}
       selected={selected}
       onOpenFile={onOpenFile}
+      actions={actions}
+      commit={commit}
     />
   );
 }
@@ -117,6 +124,8 @@ export function DiffOverviewContent({
   turnLabel,
   selected,
   onOpenFile,
+  actions,
+  commit,
 }: {
   resource: Pick<
     LiveResource<CodeWorkspaceFiles>,
@@ -127,6 +136,12 @@ export function DiffOverviewContent({
   turnLabel?: string;
   selected?: string;
   onOpenFile: (path: string) => void;
+  actions?: ChangeRowActions;
+  /**
+   * The commit box. A turn's changes are history, so it only sits above the
+   * workspace's own list.
+   */
+  commit?: (files: CodeWorkspaceFiles | null) => ReactNode;
 }) {
   const { data: payload, error, refreshing } = resource;
 
@@ -137,9 +152,11 @@ export function DiffOverviewContent({
     () => buildChangeTree(payload?.files ?? []),
     [payload?.files],
   );
+  const rowActions = actions ? { ...actions, turnId } : undefined;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {!turnId && commit?.(payload)}
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 px-3 pb-2 pt-3">
         <div className="min-w-0 flex-[1_1_7rem]">
           <div className="flex items-baseline gap-1.5">
@@ -190,6 +207,7 @@ export function DiffOverviewContent({
               depth={0}
               selected={selected}
               onOpenFile={onOpenFile}
+              actions={rowActions}
             />
           ))}
         </ul>
@@ -202,6 +220,8 @@ export function DiffOverviewContent({
     </div>
   );
 }
+
+type RowActions = ChangeRowActions & { turnId?: string };
 
 type ChangeTreeNode = ChangeDirectoryNode | ChangeFileNode;
 
@@ -283,11 +303,13 @@ function ChangeTreeRow({
   depth,
   selected,
   onOpenFile,
+  actions,
 }: {
   node: ChangeTreeNode;
   depth: number;
   selected?: string;
   onOpenFile: (path: string) => void;
+  actions?: RowActions;
 }) {
   if (node.kind === "file") {
     return (
@@ -296,6 +318,7 @@ function ChangeTreeRow({
         depth={depth}
         selected={selected === node.path}
         onOpenFile={onOpenFile}
+        actions={actions}
       />
     );
   }
@@ -305,6 +328,7 @@ function ChangeTreeRow({
       depth={depth}
       selected={selected}
       onOpenFile={onOpenFile}
+      actions={actions}
     />
   );
 }
@@ -314,11 +338,13 @@ function ChangeDirectoryRow({
   depth,
   selected,
   onOpenFile,
+  actions,
 }: {
   node: ChangeDirectoryNode;
   depth: number;
   selected?: string;
   onOpenFile: (path: string) => void;
+  actions?: RowActions;
 }) {
   const [open, setOpen] = useState(true);
   const DirectoryIcon = open ? FolderOpen : Folder;
@@ -359,6 +385,7 @@ function ChangeDirectoryRow({
               depth={depth + 1}
               selected={selected}
               onOpenFile={onOpenFile}
+              actions={actions}
             />
           ))}
         </ul>
@@ -372,23 +399,26 @@ function ChangeFileRow({
   depth,
   selected,
   onOpenFile,
+  actions,
 }: {
   node: ChangeFileNode;
   depth: number;
   selected: boolean;
   onOpenFile: (path: string) => void;
+  actions?: RowActions;
 }) {
   const file = node.file;
   const kind = FILE_KIND[file.kind];
 
   return (
-    <li>
+    <li className="group/row relative">
       <button
         type="button"
         className={cn(
-          "group flex w-full cursor-pointer items-center gap-1.5 rounded-md py-1.5 pr-2 text-left",
+          "flex w-full cursor-pointer items-center gap-1.5 rounded-md py-1.5 pr-2 text-left",
           FOCUS_RING,
           HOVER_TINT,
+          actions && "pr-8",
           selected ? "bg-muted/70" : "hover:bg-muted/45",
         )}
         style={{ paddingLeft: 23 + depth * 14 }}
@@ -417,7 +447,77 @@ function ChangeFileRow({
           </span>
         </span>
       </button>
+      {actions && <ChangeFileMenu file={file} actions={actions} />}
     </li>
+  );
+}
+
+/**
+ * A file's actions, behind a trigger that shows while the row is hovered or
+ * holds focus. Revert goes back to the diff's own base; discard goes back to
+ * the last commit, so the two read differently whenever the branch has
+ * commits of its own.
+ */
+function ChangeFileMenu({
+  file,
+  actions,
+}: {
+  file: CodeFileChange;
+  actions: RowActions;
+}) {
+  const unavailable = actions.unavailableReason !== undefined;
+  const request: RevertRequest = {
+    path: file.path,
+    turnId: actions.turnId,
+    kind: file.kind,
+    previousPath: file.previous_path,
+  };
+  const discard = actions.onDiscard && file.uncommitted && !actions.turnId;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Actions for ${file.path}`}
+          className={cn(
+            "text-muted-foreground hover:bg-muted hover:text-foreground absolute top-1/2 right-1.5 grid size-6 -translate-y-1/2 cursor-pointer place-items-center rounded-md opacity-0 group-focus-within/row:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100 pointer-coarse:opacity-100",
+            FOCUS_RING_TIGHT,
+            HOVER_TINT,
+          )}
+        >
+          <MoreHorizontal className="size-3.5" aria-hidden="true" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        collisionPadding={12}
+        className="w-max max-w-80"
+      >
+        <DropdownMenuItem
+          disabled={unavailable}
+          onSelect={() => void actions.onRevertFile(request)}
+        >
+          <Undo2 />
+          {actions.turnId
+            ? "Revert this turn's changes"
+            : "Revert to base branch"}
+        </DropdownMenuItem>
+        {discard && (
+          <DropdownMenuItem
+            disabled={unavailable}
+            onSelect={() => void actions.onDiscard?.(file)}
+          >
+            <Trash2 />
+            Discard uncommitted changes
+          </DropdownMenuItem>
+        )}
+        {actions.unavailableReason && (
+          <p className="text-muted-foreground px-2 pb-1.5 pl-10 text-xs">
+            {actions.unavailableReason}
+          </p>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

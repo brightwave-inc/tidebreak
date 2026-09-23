@@ -86,6 +86,42 @@ one turn's work without untangling it from the rest.
 Nothing reaches your branch because a turn finished. The worktree holds the
 change until you commit it.
 
+## Undo and source control
+
+Every turn ends in a checkpoint, a saved copy of the worktree. To throw away
+what an agent did, open the turn's menu on its review card and choose
+**Restore to before this turn**.
+
+- A restore puts every file back to how it was before the turn started,
+  including new files the turn created and files it deleted. Files your
+  `.gitignore` covers stay as they are.
+- Everything changed since then is lost: that turn, later turns, other agents
+  in the workspace, and edits you made by hand. The confirmation lists those
+  files before anything changes.
+- Tidebreak saves the state it replaces. The conversation shows the restore
+  with an **Undo** that puts that state back.
+- Your commits and your branch stay as they are. If a turn committed, the
+  restore shows up as uncommitted changes that undo the commit.
+
+To undo less, use the diff. **Revert** in a file's header puts that file back,
+and **Revert** beside a hunk puts back just those lines. In the workspace diff
+a revert goes back to the base branch. In a turn's diff it undoes what that
+turn changed and keeps later edits. If a later edit changed the same lines,
+Tidebreak refuses the revert rather than overwrite it.
+
+**Source control** holds the commit box. Write a message and choose
+**Commit**, or press **⌘Enter** (**Ctrl+Enter** on Windows and Linux). The
+commit carries every change in the worktree; leave the message empty to use
+the suggested one. If Git refuses the commit, for example because a hook
+failed, the box shows what the hook printed. To throw away a file's
+uncommitted changes, open its menu in the list and choose **Discard
+uncommitted changes**. Discard puts the file back to its last commit and
+cannot be undone.
+
+Restore, revert, discard, and commit wait for a running turn to finish, so an
+agent never has its files changed under it. A sandbox workspace keeps its
+files in the sandbox, so you ask the agent there instead.
+
 ## Editing files
 
 To change a file yourself, open it from the **Files** tab and choose **Edit**.
@@ -154,8 +190,8 @@ out of scope for now:
 
 - The file viewer edits one existing text file at a time. It does not create,
   rename, or delete files, and it does not replace the editor you write in.
-- Checkpoints are recorded, but there is no restore-from-checkpoint surface
-  yet.
+- A restore puts files back, not the conversation. The agent still remembers
+  the turns you undid, so tell it what changed when you continue.
 
 Harnesses run on the machine that owns the session. On a laptop that is your
 computer. On a hosted machine (signed in through Model Gateway) the engine

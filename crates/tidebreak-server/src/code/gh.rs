@@ -110,6 +110,10 @@ impl CachedGhObservation {
 pub enum GhError {
     #[error("nothing to commit")]
     NothingToCommit,
+    /// `git commit` itself refused, most often a hook. Carries what git and
+    /// the hook printed, bounded, so the person can fix what it named.
+    #[error("git refused the commit: {0}")]
+    CommitRejected(String),
     #[error("{0}")]
     AuthFailed(String),
     #[error("{0}")]
@@ -324,7 +328,7 @@ pub async fn commit_all(
     };
     git(worktree, &["commit", "-m", &message], GIT_TIMEOUT)
         .await
-        .map_err(|err| classify_git(err, "commit"))?;
+        .map_err(|err| GhError::CommitRejected(bound_text(&err)))?;
     let sha = git(worktree, &["rev-parse", "HEAD"], GIT_TIMEOUT).await?;
     Ok(CommitOutcome { sha, message, stat })
 }
@@ -2751,6 +2755,45 @@ mod tests {
 
         let again = commit_all(&work, "first change", None).await.unwrap_err();
         assert!(matches!(again, GhError::NothingToCommit));
+    }
+
+    /// A pre-commit hook is how a repository says no. The refusal has to reach
+    /// the commit box as the hook's own words, not as an authentication
+    /// failure because the hook happened to print "permission denied".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_that_refuses_the_commit_reports_what_it_printed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, work, _bare) = init_paired_repos();
+        let hooks = work.join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\necho 'lint: permission denied on src/main.rs' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["config", "core.hooksPath", hooks.to_str().unwrap()])
+            .current_dir(&work)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::write(work.join("extra.txt"), "line\n").unwrap();
+
+        let err = commit_all(&work, "first change", Some("add a line"))
+            .await
+            .unwrap_err();
+
+        let GhError::CommitRejected(output) = err else {
+            panic!("expected a refused commit, got {err:?}");
+        };
+        assert!(
+            output.contains("lint: permission denied on src/main.rs"),
+            "{output}"
+        );
     }
 
     #[test]

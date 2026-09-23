@@ -1,6 +1,9 @@
 import type {
+  CheckpointRestoreTarget,
   CodeActionSnapshot,
   CodeCheckLogsSnapshot,
+  CodeCheckpointRestorePreview,
+  CodeCheckpointRestoreResult,
   CodeCommitSnapshot,
   CodeDeliveryPullRequestTarget,
   CodePrCommentsSnapshot,
@@ -13,12 +16,16 @@ import type {
   CodeWorkspaceDiff,
   CodeWorkspacePrSnapshot,
   CodeWorkspacePullRequests,
+  CodeWorktreeChange,
   PullRequestDigest,
+  RevertCodeWorkspaceChangeBody,
 } from "../types";
 import { type Constructor, HttpCore, HttpError, requireParsed } from "./http";
 import {
   parseCodeAction,
   parseCodeCheckLogsSnapshot,
+  parseCodeCheckpointRestorePreview,
+  parseCodeCheckpointRestoreResult,
   parseCodeCommit,
   parseCodePrComments,
   parseCodePush,
@@ -28,6 +35,7 @@ import {
   parseCodeWorkspaceDiff,
   parseCodeWorkspacePr,
   parseCodeWorkspacePullRequests,
+  parseCodeWorktreeChange,
 } from "../../code/parsers";
 
 export type CodeWorkspaceMergeRequest = {
@@ -484,6 +492,103 @@ export function withCodeGitApi<TBase extends Constructor<HttpCore>>(
           ),
         ),
         "code workspace diff",
+      );
+    }
+
+    /**
+     * What restoring `target` would undo: every change since then, whoever
+     * made it. Nothing moves; the confirmation names these files.
+     */
+    async previewCodeCheckpointRestore(
+      workspaceId: string,
+      target: CheckpointRestoreTarget,
+    ): Promise<CodeCheckpointRestorePreview> {
+      const params = new URLSearchParams(
+        target.kind === "before_turn"
+          ? { turn: target.turn_id }
+          : { restore: target.restore_id },
+      );
+      return requireParsed(
+        parseCodeCheckpointRestorePreview(
+          await this.json(
+            `/code/workspaces/${encodeURIComponent(workspaceId)}/checkpoints/restore?${params}`,
+            { headers: this.headers() },
+          ),
+        ),
+        "code checkpoint restore preview",
+      );
+    }
+
+    /**
+     * Put the worktree back to `target`. `expectedTree` is the preview's
+     * `current_tree`: when the worktree moved since, the server answers
+     * `409 worktree_changed` and changes nothing. One attempt, never retried.
+     */
+    async restoreCodeCheckpoint(
+      workspaceId: string,
+      target: CheckpointRestoreTarget,
+      expectedTree?: string,
+    ): Promise<CodeCheckpointRestoreResult> {
+      return requireParsed(
+        parseCodeCheckpointRestoreResult(
+          await this.json(
+            `/code/workspaces/${encodeURIComponent(workspaceId)}/checkpoints/restore`,
+            {
+              method: "POST",
+              headers: this.headers(true),
+              body: JSON.stringify(
+                expectedTree
+                  ? { target, expected_tree: expectedTree }
+                  : { target },
+              ),
+            },
+          ),
+        ),
+        "code checkpoint restore",
+      );
+    }
+
+    /**
+     * Undo one file's change, or one hunk of it, in the diff being read. The
+     * server rebuilds the change and applies it in reverse; the renderer
+     * never edits the text.
+     */
+    async revertCodeWorkspaceChange(
+      workspaceId: string,
+      body: RevertCodeWorkspaceChangeBody,
+    ): Promise<CodeWorktreeChange> {
+      return requireParsed(
+        parseCodeWorktreeChange(
+          await this.json(
+            `/code/workspaces/${encodeURIComponent(workspaceId)}/revert`,
+            {
+              method: "POST",
+              headers: this.headers(true),
+              body: JSON.stringify(body),
+            },
+          ),
+        ),
+        "code revert",
+      );
+    }
+
+    /** Put files back to the last commit, dropping uncommitted changes. */
+    async discardCodeWorkspaceChanges(
+      workspaceId: string,
+      paths: string[],
+    ): Promise<CodeWorktreeChange> {
+      return requireParsed(
+        parseCodeWorktreeChange(
+          await this.json(
+            `/code/workspaces/${encodeURIComponent(workspaceId)}/discard`,
+            {
+              method: "POST",
+              headers: this.headers(true),
+              body: JSON.stringify({ paths }),
+            },
+          ),
+        ),
+        "code discard",
       );
     }
   };

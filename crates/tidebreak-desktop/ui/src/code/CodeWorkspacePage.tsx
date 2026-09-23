@@ -29,6 +29,7 @@ import {
   splitCodeChromeLayout,
 } from "./codeChrome";
 import type {
+  CodeWorkspaceFiles,
   CodeWorkspaceSnapshot,
   CodeSessionSnapshot,
   PermissionMode,
@@ -47,8 +48,10 @@ import {
   MIN_WORKSPACE_SIZE,
   usableInspectorLayout,
 } from "./inspectorLayout";
-import { DiffOverview } from "./DiffOverview";
-import { DiffPanel } from "./DiffPanel";
+import { DiffOverview, type ChangeRowActions } from "./DiffOverview";
+import { DiffPanel, type DiffRevertActions } from "./DiffPanel";
+import { WorkspaceCommitBox } from "./WorkspaceCommitBox";
+import { TURN_RUNNING_REASON, useWorktreeUndo } from "./worktreeUndo";
 import { DndContext, DragOverlay, useSensor, useSensors } from "@dnd-kit/core";
 import { ErrorBoundary } from "@/ErrorBoundary";
 import type { LayoutState, PanelContent } from "@/panel/panelTypes";
@@ -83,7 +86,15 @@ import {
   StartSessionPrompt,
   WorkspaceSessionStartingState,
 } from "./StartSessionPrompt";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { WatchTaskBar } from "./workspace/subagents";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 import {
@@ -110,6 +121,7 @@ import {
   useCodeUpdatesStore,
   useSessionDigest,
   useWorkspaceFileRevision,
+  useWorkspaceTurnRunning,
 } from "./CodeUpdatesStore";
 import { useBrowserTabs } from "./workspace/useBrowserTabs";
 import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
@@ -367,6 +379,74 @@ function CodeWorkspaceBody({
     contentRevision,
     digest?.pr_state,
   );
+  // Undo, revert, discard, and commit change the live worktree. A sandbox
+  // workspace has none here, and a running turn holds it: the server refuses
+  // then, and the controls say why before the reader tries.
+  const undo = useWorktreeUndo({ client, workspaceId });
+  const turnRunning = useWorkspaceTurnRunning(workspaceId);
+  const worktreeChangeable =
+    workspace?.status === "active" &&
+    !isRemoteWorktreePath(workspace.worktree_path);
+  const worktreeUnavailableReason = turnRunning
+    ? TURN_RUNNING_REASON
+    : undefined;
+  const { restore: restoreCheckpoint } = undo;
+  const restoreBeforeTurn = useCallback(
+    (turnId: string) =>
+      void restoreCheckpoint({ kind: "before_turn", turn_id: turnId }),
+    [restoreCheckpoint],
+  );
+  const undoRestore = useCallback(
+    (restoreId: string) =>
+      void restoreCheckpoint({
+        kind: "before_restore",
+        restore_id: restoreId,
+      }),
+    [restoreCheckpoint],
+  );
+  const changeActions = useMemo<ChangeRowActions | undefined>(
+    () =>
+      worktreeChangeable
+        ? {
+            onRevertFile: undo.revertFile,
+            onDiscard: undo.discard,
+            unavailableReason: worktreeUnavailableReason,
+          }
+        : undefined,
+    [
+      worktreeChangeable,
+      undo.revertFile,
+      undo.discard,
+      worktreeUnavailableReason,
+    ],
+  );
+  const diffRevert = useMemo<DiffRevertActions | undefined>(
+    () =>
+      worktreeChangeable
+        ? {
+            onRevertFile: undo.revertFile,
+            onRevertHunk: undo.revertHunk,
+            unavailableReason: worktreeUnavailableReason,
+          }
+        : undefined,
+    [
+      worktreeChangeable,
+      undo.revertFile,
+      undo.revertHunk,
+      worktreeUnavailableReason,
+    ],
+  );
+  const renderCommitBox = worktreeChangeable
+    ? (files: CodeWorkspaceFiles | null) => (
+        <WorkspaceCommitBox
+          client={client}
+          workspaceId={workspaceId}
+          prResource={prResource}
+          files={files}
+          unavailableReason={worktreeUnavailableReason}
+        />
+      )
+    : undefined;
   const workspaceStartup = useCodeUiStore(
     (state) => state.workspaceStartups[workspaceId] ?? null,
   );
@@ -533,6 +613,7 @@ function CodeWorkspaceBody({
             turnId={panel.turnId}
             file={panel.path}
             contentRevision={contentRevision}
+            revert={diffRevert}
             onOpenFile={(path) => openFile(path, undefined, region)}
             onOpenInEditor={
               hostAccess && canOpenInExternalEditor()
@@ -580,6 +661,8 @@ function CodeWorkspaceBody({
               client={client}
               workspaceId={workspaceId}
               contentRevision={contentRevision}
+              actions={changeActions}
+              commit={renderCommitBox}
               onOpenFile={(path) => openFileDiff(path)}
             />
           </div>
@@ -780,6 +863,13 @@ function CodeWorkspaceBody({
                       ? (turnId) => void forkConversation(session.id, turnId)
                       : undefined
                   }
+                  onRestoreBeforeTurn={
+                    worktreeChangeable && session.kind === "interactive"
+                      ? restoreBeforeTurn
+                      : undefined
+                  }
+                  onUndoRestore={worktreeChangeable ? undoRestore : undefined}
+                  undoUnavailableReason={worktreeUnavailableReason}
                   subagentCallId={subagentParam}
                   subagentSummary={digest?.subagents?.find(
                     (entry) => entry.call_id === subagentParam,
@@ -940,6 +1030,7 @@ function CodeWorkspaceBody({
     >
       {dialogs}
       {unsavedFilesDialog}
+      {undo.dialog}
       <CodeQuickOpen
         client={client}
         workspaceId={workspaceId}
@@ -1128,6 +1219,8 @@ function CodeWorkspaceBody({
                     workspace={workspace}
                     contentRevision={contentRevision}
                     prResource={prResource}
+                    changeActions={changeActions}
+                    commit={renderCommitBox}
                     onOpenFile={openFile}
                     onOpenDiff={openFileDiff}
                     onClose={() => setReviewSidebarOpen(false)}

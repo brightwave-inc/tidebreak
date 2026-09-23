@@ -737,6 +737,62 @@ impl ScopedCode {
     }
 
     // ------------------------------------------------------------------
+    // Undo in the worktree. The gate commit and push use: a principal who may
+    // only view a shared session's workspace gets the answer a stranger gets.
+    // ------------------------------------------------------------------
+
+    /// What restoring `target` would undo, read before anything moves.
+    pub async fn preview_checkpoint_restore(
+        &self,
+        id: WorkspaceId,
+        target: tidebreak_core::CheckpointRestoreTarget,
+    ) -> Result<super::runtime::CheckpointRestorePreview, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime
+            .preview_checkpoint_restore(&owner, id, target)
+            .await
+    }
+
+    /// Put the worktree back to `target`, keeping what it replaces.
+    pub async fn restore_checkpoint(
+        &self,
+        id: WorkspaceId,
+        target: tidebreak_core::CheckpointRestoreTarget,
+        expected_tree: Option<&str>,
+    ) -> Result<super::runtime::CheckpointRestoreOutcome, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime
+            .restore_checkpoint(&owner, &self.owner, id, target, expected_tree)
+            .await
+    }
+
+    /// Undo one file's change, or one hunk of it.
+    pub async fn revert_workspace_change(
+        &self,
+        id: WorkspaceId,
+        turn_id: Option<TurnId>,
+        path: &str,
+        hunk: Option<super::checkpoint::HunkSelector<'_>>,
+    ) -> Result<super::checkpoint::RevertedChange, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime
+            .revert_workspace_change(&owner, &self.owner, id, turn_id, path, hunk)
+            .await
+    }
+
+    /// Put files back to the last commit.
+    pub async fn discard_workspace_changes(
+        &self,
+        id: WorkspaceId,
+        paths: &[String],
+    ) -> Result<super::checkpoint::RevertedChange, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime
+            .discard_workspace_changes(&owner, &self.owner, id, paths)
+            .await
+    }
+
+    // ------------------------------------------------------------------
     // Git surfaces on a workspace.
     // ------------------------------------------------------------------
 

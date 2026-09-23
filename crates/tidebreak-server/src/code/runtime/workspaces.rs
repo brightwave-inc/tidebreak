@@ -1120,9 +1120,30 @@ impl CodeRuntime {
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
             .map_err(map_checkpoint)?;
-        let listed = list_changed_files(&worktree, &from, &to, DiffBounds::default())
+        let mut listed = list_changed_files(&worktree, &from, &to, DiffBounds::default())
             .await
             .map_err(map_checkpoint)?;
+        // The workspace list says which files a commit would carry, so the
+        // source-control view offers Discard only where there is something
+        // uncommitted to lose. A turn's list is history and says nothing.
+        if turn.is_none() {
+            match crate::code::checkpoint::uncommitted_paths(&worktree, &to).await {
+                Ok(uncommitted) => {
+                    for file in &mut listed.files {
+                        file.uncommitted = uncommitted.contains(&file.path)
+                            || file
+                                .previous_path
+                                .as_ref()
+                                .is_some_and(|previous| uncommitted.contains(previous));
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    workspace = %workspace_id,
+                    %error,
+                    "could not tell which changes are uncommitted"
+                ),
+            }
+        }
         Ok((listed.files, listed.truncated, listed.stat, turn, None))
     }
 

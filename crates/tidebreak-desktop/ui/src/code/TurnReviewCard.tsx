@@ -4,6 +4,7 @@ import {
   Check,
   CircleSlash,
   GitFork,
+  History,
   LogIn,
   MoreHorizontal,
   TriangleAlert,
@@ -81,6 +82,8 @@ export function TurnReviewCard({
   recap,
   onOpenTurnDiff,
   onForkFromTurn,
+  onRestoreBeforeTurn,
+  undoUnavailableReason,
   onFileIssue,
 }: {
   turn: TurnBoundary;
@@ -90,6 +93,13 @@ export function TurnReviewCard({
   onOpenTurnDiff?: (turnId: string) => void;
   /** Hand everything up to this turn to a fresh agent, in a new tab. */
   onForkFromTurn?: (turnId: string) => void;
+  /** Put the worktree back to how it stood before this turn began. */
+  onRestoreBeforeTurn?: (turnId: string) => void;
+  /**
+   * Why the worktree cannot be changed right now, such as a turn running.
+   * The restore stays in the menu, turned off, with this sentence under it.
+   */
+  undoUnavailableReason?: string;
   /** Turn a failure into a Tidebreak issue or fix, from the failure itself. */
   onFileIssue?: () => void;
 }) {
@@ -101,8 +111,13 @@ export function TurnReviewCard({
       onOpenTurnDiff={onOpenTurnDiff}
     />
   );
-  const actions = turn.turnId && onForkFromTurn && (
-    <TurnActionsMenu turnId={turn.turnId} onForkFromTurn={onForkFromTurn} />
+  const actions = turn.turnId && (onForkFromTurn || onRestoreBeforeTurn) && (
+    <TurnActionsMenu
+      turnId={turn.turnId}
+      onForkFromTurn={onForkFromTurn}
+      onRestoreBeforeTurn={onRestoreBeforeTurn}
+      undoUnavailableReason={undoUnavailableReason}
+    />
   );
 
   if (turn.status === "failed") {
@@ -307,17 +322,19 @@ function TurnRecap({
 }
 
 /**
- * What the reader can do with a finished turn, behind one quiet trigger.
- *
- * Forking is the only entry today, but the seam is where per-turn actions
- * belong, so the affordance is a menu rather than a bare fork button.
+ * What the reader can do with a finished turn, behind one quiet trigger:
+ * hand it to a fresh agent, or put the worktree back to before it.
  */
 function TurnActionsMenu({
   turnId,
   onForkFromTurn,
+  onRestoreBeforeTurn,
+  undoUnavailableReason,
 }: {
   turnId: string;
-  onForkFromTurn: (turnId: string) => void;
+  onForkFromTurn?: (turnId: string) => void;
+  onRestoreBeforeTurn?: (turnId: string) => void;
+  undoUnavailableReason?: string;
 }) {
   return (
     <DropdownMenu>
@@ -334,13 +351,89 @@ function TurnActionsMenu({
           <MoreHorizontal className="size-3.5" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-52">
-        <DropdownMenuItem onSelect={() => onForkFromTurn(turnId)}>
-          <GitFork />
-          Fork from here
-        </DropdownMenuItem>
+      <DropdownMenuContent
+        align="start"
+        collisionPadding={12}
+        className="w-max max-w-80"
+      >
+        {onForkFromTurn && (
+          <DropdownMenuItem onSelect={() => onForkFromTurn(turnId)}>
+            <GitFork />
+            Fork from here
+          </DropdownMenuItem>
+        )}
+        {onRestoreBeforeTurn && (
+          <>
+            <DropdownMenuItem
+              disabled={undoUnavailableReason !== undefined}
+              onSelect={() => onRestoreBeforeTurn(turnId)}
+            >
+              <History />
+              Restore to before this turn
+            </DropdownMenuItem>
+            {undoUnavailableReason && (
+              <p className="text-muted-foreground px-2 pb-1.5 pl-10 text-xs">
+                {undoUnavailableReason}
+              </p>
+            )}
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/**
+ * The seam a restore leaves in the transcript: what the worktree went back
+ * to, what changed, and the way back.
+ *
+ * A restore runs between turns, so it reads as one of the quiet seams rather
+ * than as a card. Undo is a restore too, and it asks first, like this one did.
+ */
+export function CheckpointRestoreRow({
+  restore,
+  onUndo,
+  undoUnavailableReason,
+}: {
+  restore: Extract<CodeTranscriptItem, { kind: "restore" }>;
+  /** Put back the state this restore replaced. */
+  onUndo?: (restoreId: string) => void;
+  undoUnavailableReason?: string;
+}) {
+  const label =
+    restore.target.kind === "before_restore"
+      ? "Undid a restore"
+      : restore.turnOrdinal !== null
+        ? `Restored to before turn ${restore.turnOrdinal}`
+        : "Restored to before a turn";
+  return (
+    <SeamRow label={label} tone="quiet">
+      <History size={13} aria-hidden="true" />
+      <span>{label}</span>
+      {hasFileChanges(restore.diffstat) && (
+        <DiffstatBadge stat={restore.diffstat} />
+      )}
+      {onUndo && (
+        <button
+          type="button"
+          className={cn(
+            "text-muted-foreground hover:text-foreground ml-1 cursor-pointer rounded-sm font-medium underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:no-underline",
+            FOCUS_RING_TIGHT,
+            HOVER_TINT,
+          )}
+          disabled={undoUnavailableReason !== undefined}
+          title={undoUnavailableReason}
+          aria-label={
+            restore.target.kind === "before_restore"
+              ? "Redo the restore"
+              : "Undo the restore"
+          }
+          onClick={() => onUndo(restore.restoreId)}
+        >
+          Undo
+        </button>
+      )}
+    </SeamRow>
   );
 }
 

@@ -794,6 +794,10 @@ fn map_inspect_checkpoint(err: super::checkpoint::CheckpointError) -> ServerErro
         super::checkpoint::CheckpointError::User(message) => {
             ServerError::bad_request_kind("checkpoint", message)
         }
+        super::checkpoint::CheckpointError::Conflict { kind, message } => {
+            ServerError::conflict_kind(kind, message)
+        }
+        super::checkpoint::CheckpointError::NotFound(message) => ServerError::not_found(message),
         super::checkpoint::CheckpointError::Internal(message) => ServerError::internal(message),
     }
 }

@@ -153,6 +153,83 @@ export function patchLineKind(
   return "context";
 }
 
+/** One hunk of a file's diff, as the view shows it. */
+export type DiffHunk = {
+  /** Zero-based position of the hunk in its file's diff. */
+  index: number;
+  /** Position of the hunk's `@@` line in the file group's lines. */
+  line: number;
+  /** The hunk as shown: its `@@` line through its last line, newline-joined. */
+  text: string;
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  /**
+   * Every line the header promised is here. A diff cut at its size cap can
+   * end partway through a hunk, and that hunk cannot be reverted as shown.
+   */
+  complete: boolean;
+};
+
+/**
+ * Split one file's lines into its hunks.
+ *
+ * A hunk runs from its `@@` line to the line before the next one, which is
+ * how the server splits the same file when it rebuilds a hunk to revert.
+ */
+export function diffHunks(group: DiffFileGroup): DiffHunk[] {
+  const hunks: DiffHunk[] = [];
+  let current: {
+    line: number;
+    texts: string[];
+    oldStart: number;
+    oldCount: number;
+    newStart: number;
+    newCount: number;
+    oldSeen: number;
+    newSeen: number;
+  } | null = null;
+  const finish = () => {
+    if (!current) return;
+    hunks.push({
+      index: hunks.length,
+      line: current.line,
+      text: current.texts.join("\n"),
+      oldStart: current.oldStart,
+      oldCount: current.oldCount,
+      newStart: current.newStart,
+      newCount: current.newCount,
+      complete:
+        current.oldSeen === current.oldCount &&
+        current.newSeen === current.newCount,
+    });
+  };
+  group.lines.forEach((line, index) => {
+    if (line.kind === "hunk") {
+      finish();
+      const header = HUNK_HEADER.exec(line.text);
+      current = {
+        line: index,
+        texts: [line.text],
+        oldStart: Number(header?.[1] ?? 0),
+        oldCount: header?.[2] === undefined ? 1 : Number(header[2]),
+        newStart: Number(header?.[3] ?? 0),
+        newCount: header?.[4] === undefined ? 1 : Number(header[4]),
+        oldSeen: 0,
+        newSeen: 0,
+      };
+      return;
+    }
+    if (!current) return;
+    current.texts.push(line.text);
+    if (line.kind === "add" || line.kind === "context") current.newSeen += 1;
+    if (line.kind === "del" || line.kind === "context") current.oldSeen += 1;
+  });
+  finish();
+  return hunks;
+}
+
 export function parseDiffGitLine(line: string): string | null {
   if (!line.startsWith("diff --git ")) return null;
   const rest = line.slice("diff --git ".length);

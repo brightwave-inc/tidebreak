@@ -1204,6 +1204,18 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::get_workspace_diff),
         )
         .route(
+            "/code/workspaces/{id}/checkpoints/restore",
+            get(routes::code::preview_checkpoint_restore).post(routes::code::restore_checkpoint),
+        )
+        .route(
+            "/code/workspaces/{id}/revert",
+            post(routes::code::revert_workspace_change),
+        )
+        .route(
+            "/code/workspaces/{id}/discard",
+            post(routes::code::discard_workspace_changes),
+        )
+        .route(
             "/code/workspaces/{id}/git/commit",
             post(routes::code::commit_workspace),
         )

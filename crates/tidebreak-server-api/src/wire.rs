@@ -100,13 +100,14 @@ pub use crate::routes::{
 // or event type failing its frame. The fixtures in `fixtures/code-frames.json`
 // are serialized from these types (see `wire_code_fixtures`).
 pub use crate::code::types::{
-    ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodeFileChange,
-    CodeProjectConfigEffect, CodeProjectConfigEffectKind, CodeProjectConfigFile, CodePushSnapshot,
-    CodeRepoSnapshot, CodeRepoTrust, CodeRepoTrustSnapshot, CodeWatchSnapshot, CodeWorkspaceDiff,
-    CodeWorkspaceFiles, CodeWorkspaceGitState, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot,
-    HarnessAuthMode, HarnessDoctorEntry, HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot,
-    SequencedEventFrame, SessionAccessSnapshot, SessionDigest, SessionExternalOrigin,
-    SessionSnapshot, TurnRewriteState, TurnSnapshot, UpdateNotice,
+    ApprovalSnapshot, CodeActionSnapshot, CodeCheckpointRestorePreview,
+    CodeCheckpointRestoreResult, CodeCommitSnapshot, CodeFileChange, CodeProjectConfigEffect,
+    CodeProjectConfigEffectKind, CodeProjectConfigFile, CodePushSnapshot, CodeRepoSnapshot,
+    CodeRepoTrust, CodeRepoTrustSnapshot, CodeWatchSnapshot, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    CodeWorkspaceGitState, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode,
+    HarnessDoctorEntry, HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot,
+    RestoreCheckpointBody, SequencedEventFrame, SessionAccessSnapshot, SessionDigest,
+    SessionExternalOrigin, SessionSnapshot, TurnRewriteState, TurnSnapshot, UpdateNotice,
 };
 
 /// Guard sizes for the opaque strings a client draws from this surface.

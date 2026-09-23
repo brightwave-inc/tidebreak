@@ -40,6 +40,7 @@ mod triggers;
 pub mod types {
     pub use crate::code::types::*;
 }
+mod undo;
 mod updates;
 pub(crate) mod usage;
 mod workspaces;
@@ -138,6 +139,10 @@ pub(crate) use types::{
 pub(crate) use types::{
     CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories, CodeHarnessInstallSnapshot,
     CodeRepoSource, CodeRepoSources, CodeRepoTrustSnapshot, CodeWorktreeRoot, SetCodeRepoTrustBody,
+};
+pub(crate) use undo::{
+    discard_workspace_changes, preview_checkpoint_restore, restore_checkpoint,
+    revert_workspace_change,
 };
 pub(crate) use updates::code_updates;
 pub(crate) use usage::subscription_usage;

@@ -1779,6 +1779,11 @@ pub struct CodeFileChange {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub previous_path: Option<String>,
+    /// The file also differs from the last commit, so a discard has
+    /// something to throw away. Only the workspace list sets it; a turn's
+    /// list is history and omits it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub uncommitted: bool,
 }
 
 /// Bounded changed-file list for `GET /code/workspaces/{id}/files`.
@@ -1824,6 +1829,107 @@ pub struct CodeWorkspaceDiff {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub revision_saved_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Query for `GET /code/workspaces/{id}/checkpoints/restore`: name exactly one
+/// of a turn to restore to before, or an earlier restore to undo.
+#[derive(Debug, Deserialize)]
+pub struct CheckpointRestoreQuery {
+    #[serde(default)]
+    pub turn: Option<TurnId>,
+    #[serde(default)]
+    pub restore: Option<tidebreak_core::CodeRestoreId>,
+}
+
+/// What a checkpoint restore would undo, read before anything moves.
+///
+/// `files` lists everything that changed since the target state, whoever
+/// changed it: later turns, other sessions, and edits made by hand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeCheckpointRestorePreview {
+    pub target: tidebreak_core::CheckpointRestoreTarget,
+    /// The session whose transcript records the restore.
+    pub session_id: tidebreak_core::SessionId,
+    pub files: Vec<CodeFileChange>,
+    pub truncated: bool,
+    pub stat: Diffstat,
+    /// The worktree's state now. Send it back as the restore's
+    /// `expected_tree`, so the restore refuses to run over changes this
+    /// preview did not list.
+    pub current_tree: String,
+}
+
+/// Body of `POST /code/workspaces/{id}/checkpoints/restore`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreCheckpointBody {
+    pub target: tidebreak_core::CheckpointRestoreTarget,
+    /// The `current_tree` of the preview the person confirmed. When the
+    /// worktree has moved since, the restore answers `409 worktree_changed`
+    /// and changes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expected_tree: Option<String>,
+}
+
+/// A checkpoint restore that landed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeCheckpointRestoreResult {
+    /// Restoring `before_restore` with this id undoes the restore.
+    pub restore_id: tidebreak_core::CodeRestoreId,
+    pub target: tidebreak_core::CheckpointRestoreTarget,
+    /// The session whose transcript records the restore.
+    pub session_id: tidebreak_core::SessionId,
+    /// What the restore changed, from the replaced state to the restored one.
+    pub files: Vec<CodeFileChange>,
+    pub truncated: bool,
+    pub stat: Diffstat,
+}
+
+/// Body of `POST /code/workspaces/{id}/revert`: undo one file's change, or
+/// one hunk of it, in the diff the person is reading.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct RevertWorkspaceChangeBody {
+    /// The turn whose diff the person is reading. Absent for the workspace
+    /// against its base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_id: Option<TurnId>,
+    /// The file as the diff names it.
+    pub path: String,
+    /// One hunk of the file. Absent to revert the whole file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hunk: Option<RevertHunk>,
+}
+
+/// One hunk of a file's diff, as the diff view showed it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct RevertHunk {
+    /// Zero-based position of the hunk in the file's diff.
+    pub index: u32,
+    /// The hunk's lines from its `@@` line through its last line, joined with
+    /// newlines. The revert answers `409 diff_changed` when the hunk it finds
+    /// differs.
+    pub text: String,
+}
+
+/// Body of `POST /code/workspaces/{id}/discard`: put these files back to the
+/// last commit.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct DiscardWorkspaceChangesBody {
+    /// Every path must have an uncommitted change; a renamed file names both
+    /// its paths.
+    pub paths: Vec<String>,
+}
+
+/// The files a revert or a discard changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeWorktreeChange {
+    pub paths: Vec<String>,
 }
 
 /// One parked or decided engine approval.

@@ -29,6 +29,7 @@ import { toast } from "sonner";
 import { HttpError, type ApiClient } from "../api/client";
 import type {
   CodePrMergeMethod,
+  CodeWorkspaceFiles,
   CodeWorkspaceSnapshot,
   PullRequestCheck,
   PullRequestComment,
@@ -58,7 +59,11 @@ import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { openExternal } from "@/host";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { useCodeUiStore } from "./CodeUiStore";
-import { DiffOverviewContent, useChangedFilesResource } from "./DiffOverview";
+import {
+  type ChangeRowActions,
+  DiffOverviewContent,
+  useChangedFilesResource,
+} from "./DiffOverview";
 import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MergeMethodSelect, mergeMethodActionLabel } from "./MergeMethodSelect";
@@ -112,6 +117,8 @@ export function CodeInspector({
   contentRevision,
   prResource,
   initialTab,
+  changeActions,
+  commit,
   onOpenFile,
   onOpenDiff,
   onClose,
@@ -122,6 +129,10 @@ export function CodeInspector({
   contentRevision: number;
   prResource?: CodeWorkspacePrResource;
   initialTab?: InspectorTab;
+  /** Revert and discard on a changed file, where the worktree is ours. */
+  changeActions?: ChangeRowActions;
+  /** The commit box above the workspace's changes. */
+  commit?: (files: CodeWorkspaceFiles | null) => ReactNode;
   onOpenFile?: (path: string, line?: number) => void;
   onOpenDiff?: (path: string) => void;
   onClose?: () => void;
@@ -308,6 +319,8 @@ export function CodeInspector({
                 turnLabel={filesTurnId ? scope?.label : undefined}
                 selected={file}
                 onOpenFile={openDiff}
+                actions={remote ? undefined : changeActions}
+                commit={remote ? undefined : commit}
               />
             ) : (
               <WorkspaceFilesUnavailable

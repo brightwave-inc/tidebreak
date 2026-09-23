@@ -91,6 +91,8 @@ crates/tidebreak-server/src/code/   (the spine, not the whole directory)
   worktree_root.rs   the configured root new worktrees land under (0053)
   clone.rs, clone/external.rs   local and forge-backed clone jobs
   checkpoint.rs      hidden refs, synthetic commits via temp index, bounded diffs
+  checkpoint/restore.rs, checkpoint/revert.rs   restore to a checkpoint; revert
+                     a file or hunk; discard uncommitted changes
   setup_script.rs    setup/archive hooks, failure-preserves-checkout
   recovery.rs, worktree_orphans.rs   boot recovery, fencing, orphan probe, reap
   attention.rs       server-side attention computation, digest publication
@@ -530,6 +532,7 @@ bounded):
 | `TurnFailed` | bounded error; internal engine adds the error's kind |
 | `TurnInterrupted` | usage up to the interruption, when the engine reports it |
 | `CheckpointRecorded` | turn id, diffstat |
+| `CheckpointRestored` | restore id, target (before a turn, or before an earlier restore), diffstat, and the actor when it was not the owner. Journaled by the restore route, never by an engine |
 | `HarnessNotice` | level, message — the visible-degradation channel |
 | `CredentialRefused` | provider and refusal message |
 
@@ -607,6 +610,10 @@ POST            /code/mcp/connected-apps             loopback MCP bridge over ev
 
 GET             /code/workspaces/{id}/files          changed files vs base, per-turn filter
 GET             /code/workspaces/{id}/diff?turn=&file=   bounded unified diff
+GET/POST        /code/workspaces/{id}/checkpoints/restore   ?turn= | ?restore= preview, then
+                                                     {target, expected_tree?} restore
+POST            /code/workspaces/{id}/revert         {path, turn_id?, hunk?}  undo a file or a hunk
+POST            /code/workspaces/{id}/discard        {paths}  back to the last commit
 GET             /code/workspaces/{id}/tree | /search | /blob   the file viewer; /blob carries a hash
 PUT             /code/workspaces/{id}/file           {path, content, base_hash}  save one text file
 POST            /code/workspaces/{id}/git/commit | /git/push | /git/pr
@@ -705,7 +712,11 @@ of its own: registering one opens the new-workspace dialog, and picking one on
   permission-mode selector, interrupt), `CodeInspector`, `WorkspacePrList`,
   and `pullRequestPresentation.ts` (pull-request state and presentation),
   `DiffPanel`/`FilesPanel` (server-produced unified diffs styled with the
-  semantic status tokens; per-file grouping; per-turn anchoring),
+  semantic status tokens; per-file grouping; per-turn anchoring; Revert file
+  and Revert hunk), `DiffOverview` (the changed-file list with each file's
+  revert and discard), `CommitBox` (Source control's commit),
+  `worktreeUndo.tsx` (the confirmations and flows for restore, revert, and
+  discard, behind one shared dialog),
   `FileViewer` (Monaco over the tree/search/blob routes, with the editor
   described in [Editing files](#editing-files)),
   `TerminalPane` (ephemeral renderer over the cursor-read
@@ -775,6 +786,76 @@ desktop's View > Reload menu item reloads from the native side, so it does
 not ask about unsaved files yet; the quit confirmation will need the same
 native handshake.
 
+## Undo in the worktree
+
+Three operations change a workspace's live checkout on a person's behalf:
+restore to a checkpoint, revert a file or a hunk, and discard a file's
+uncommitted changes. Record 32's amendment covers why restore works the way
+it does. All three share one gate in `code/runtime/undo.rs`:
+
+- They run between turns only. The worktree turn lock is tried, not waited
+  for, and a held lock answers `409 turn_running`: the person asked to undo
+  the worktree they see now, not the one a finished turn will leave. A
+  session recorded as `Running` without a live lock answers the same.
+- A session fenced for an engine that may still be alive in the checkout
+  answers `409 workspace_fenced`, the rule turns already follow (record 55).
+- They take the workspace write lock first, then try the turn lock, the
+  order auto-recovery uses, so none of them can deadlock with a turn.
+- A sandbox workspace answers `409 workspace_remote`. A caller who may only
+  view a shared session's workspace gets `404`, as for commit and push.
+- Each one publishes `files_changed` on `/updates`, like a save, so every view
+  of the worktree reads it again.
+
+**Restore** (`checkpoint/restore.rs`). The target is the state before a turn,
+which is the `from` of that turn's own diff: the previous turn's checkpoint,
+the session's start baseline for turn 1, or where the chain resumed after an
+earlier restore. A turn with none refuses with `409 no_checkpoint` rather than
+fall back to the merge base, which knows nothing of untracked files.
+
+1. The preview (`GET …/checkpoints/restore?turn=` or `?restore=`) snapshots the
+   worktree and lists every change since the target, whoever made it. It
+   returns the snapshot's tree as `current_tree`.
+2. The restore snapshots the worktree again through a private index, seeded
+   from the reusable checkpoint index so it re-hashes only what changed. When
+   the tree differs from `expected_tree`, it answers `409 worktree_changed`
+   and changes nothing: the confirmation listed losses that are no longer the
+   whole list.
+3. It commits that tree to `refs/tidebreak/checkpoints/<ws>/<session>/restore/<id>`
+   before any file moves.
+4. It runs `read-tree --reset -u <target>` with the private index. Git writes
+   only the files whose content differs, removes files the target lacks, and
+   refuses before writing anything if an untracked file appeared in the way.
+   Ignored files, `HEAD`, and the user's index do not move.
+5. It points `…/<session>/after/<n>` at the restored state for every open
+   session in the workspace, where `n` is that session's newest turn. The next
+   turn's diff starts there, so no turn is credited with undoing what the
+   restore undid.
+6. It journals `CheckpointRestored` in the session that owns the target. The
+   undo is a restore whose target is `before_restore`, found by the saved
+   ref's id, and it saves its own state in turn.
+
+**Revert** (`checkpoint/revert.rs`). The request names the diff being read
+(`turn_id` or the workspace against its base), the file, and optionally one
+hunk by position with its text as shown. The server rebuilds that diff with
+the view's own flags, checks the hunk text matches (`409 diff_changed`
+otherwise), and applies the patch in reverse with `git apply -R` on the
+worktree alone. A whole file uses `--binary --full-index`, and a renamed file
+is patched under both names, so binary files and renames go back whole. A
+patch that no longer fits answers `409 revert_conflict` and writes nothing.
+A turn's diff is history, so the desktop marks a reverted hunk there instead
+of offering it again.
+
+**Discard** puts each path back to `HEAD`: `reset -q HEAD --` for the index,
+then `checkout-index -f` for paths `HEAD` holds and `clean -f` for the rest.
+Every path must be one `git diff --name-only --no-renames HEAD <snapshot>`
+lists, so a directory name never sweeps up the files inside it. None of these
+run a hook. The workspace file list marks such paths `uncommitted`, which is
+where Source control offers Discard.
+
+**Commit** keeps its route and its lock. A refused `git commit`, most often a
+hook, now answers `409 commit_rejected` with a sentence, a blank line, and
+what git and the hook printed, which the commit box shows as a block.
+
 ## Testing
 
 - Adapter parsers: fixture replay only
@@ -791,7 +872,6 @@ native handshake.
 ## What v1 excludes
 
 Recorded in [`docs/deferred.md`](deferred.md): running a harness in a PTY;
-checkpoint restore (the refs land in v1; the restore surface does not);
 an in-app editor beyond saving existing text files; chat–code convergence
 (the single-surface end state: one conversation concept with an optional
 workspace binding, engines behind the adapter contract, no user-facing mode

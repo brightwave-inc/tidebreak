@@ -1,5 +1,6 @@
 import type { ApprovalDecisionKind, TurnActor } from "../generated/wire";
 import type {
+  CheckpointRestoreTarget,
   CodeApprovalState,
   CodeEvent,
   CodeSessionLifecycle,
@@ -141,6 +142,20 @@ export type CodeTranscriptItem =
       id: string;
       turnId: string | null;
       files: Record<string, { kind: FileChangeKind; diffstat: Diffstat }>;
+    }
+  | {
+      /**
+       * The worktree went back to an earlier state between turns. The id
+       * names the state the restore replaced, which is what undoing it puts
+       * back.
+       */
+      kind: "restore";
+      id: string;
+      restoreId: string;
+      target: CheckpointRestoreTarget;
+      /** The restored turn's ordinal, when the transcript knows it. */
+      turnOrdinal: number | null;
+      diffstat: Diffstat;
     };
 
 export type CodeSessionState = {
@@ -162,6 +177,7 @@ export type CodeSessionState = {
   activeTurnId: string | null;
   /** Turn established by a journal `turn_started` frame. */
   journalTurnId: string | null;
+  /**
   /**
    * The turn whose end the journal applied last. What the engine does on its
    * own between turns lands after that turn and before the next one.
@@ -1196,6 +1212,35 @@ export function reduceCodeSessionEvent(
         state: {
           ...state,
           items: applyDiffstat(state.items, event.turn_id, event.diffstat),
+          contentRevision: state.contentRevision + 1,
+        },
+        effects,
+      };
+    }
+
+    case "checkpoint_restored": {
+      // A restore runs between turns and belongs to none of them, so it
+      // lands where the engine's own between-turn activity does: after the
+      // turn the journal last ended, before any prompt already placed for a
+      // later turn.
+      const id = `restore:${event.restore_id}`;
+      if (state.items.some((item) => item.id === id)) {
+        return { state, effects };
+      }
+      return {
+        state: {
+          ...state,
+          items: insertBackgroundItem(state, framed, {
+            kind: "restore",
+            id,
+            restoreId: event.restore_id,
+            target: event.target,
+            turnOrdinal:
+              event.target.kind === "before_turn"
+                ? (state.turnOrdinals.get(event.target.turn_id) ?? null)
+                : null,
+            diffstat: event.diffstat,
+          }),
           contentRevision: state.contentRevision + 1,
         },
         effects,

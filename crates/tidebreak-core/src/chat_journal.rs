@@ -300,6 +300,7 @@ pub fn chat_event(event: Event) -> Result<Option<AgentEvent>> {
             message_id: None, ..
         }
         | Event::CheckpointRecorded { .. }
+        | Event::CheckpointRestored { .. }
         | Event::HarnessNotice { .. }
         | Event::CredentialRefused { .. }
         | Event::SessionTree { .. }

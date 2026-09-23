@@ -79,6 +79,9 @@ export function CodeSessionPane({
   disabled,
   onOpenTurnDiff,
   onForkFromTurn,
+  onRestoreBeforeTurn,
+  onUndoRestore,
+  undoUnavailableReason,
   onFileIssue,
   subagentCallId,
   subagentSummary,
@@ -95,6 +98,12 @@ export function CodeSessionPane({
   onOpenTurnDiff?: (turnId: string) => void;
   /** Fork this conversation at the end of one turn, from its seam row. */
   onForkFromTurn?: (turnId: string) => void;
+  /** Put the worktree back to before one turn, from its seam row. */
+  onRestoreBeforeTurn?: (turnId: string) => void;
+  /** Put back what one restore replaced, from the restore's own row. */
+  onUndoRestore?: (restoreId: string) => void;
+  /** Why the worktree cannot be changed right now, such as a running turn. */
+  undoUnavailableReason?: string;
   /** Turn a failed turn or engine error into a Tidebreak issue or fix. */
   onFileIssue?: () => void;
   /** The spanning Task call to inspect inside this still-mounted session. */
@@ -597,6 +606,9 @@ export function CodeSessionPane({
           approvalErrorId={approvalErrorId}
           onOpenTurnDiff={onOpenTurnDiff}
           onForkFromTurn={subagentCallId ? undefined : onForkFromTurn}
+          onRestoreBeforeTurn={subagentCallId ? undefined : onRestoreBeforeTurn}
+          onUndoRestore={subagentCallId ? undefined : onUndoRestore}
+          undoUnavailableReason={undoUnavailableReason}
           onFileIssue={subagentCallId ? undefined : onFileIssue}
           onReveal={follow.pauseFollow}
           scrollRef={follow.scrollRef}

@@ -12,13 +12,13 @@ use crate::routes::SERVED_BYTES_CONTENT_POLICY;
 use crate::state::AppState;
 
 use super::types::{
-    ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceBlob, CodeWorkspaceDiff,
-    CodeWorkspaceFileSaved, CodeWorkspaceFiles, CodeWorkspaceHistorySearchMatch,
-    CodeWorkspaceHistorySearchSource, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
-    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, CreateRemoteWorkspaceBody,
-    CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody, SaveWorkspaceFileBody,
-    SetCodeWorktreeRootBody, WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery,
-    WorkspaceSearchQuery, WorkspaceTitleBody, WorkspaceTitleProposal, WorkspaceTreeQuery,
+    ArchiveWorkspaceBody, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFileSaved,
+    CodeWorkspaceFiles, CodeWorkspaceHistorySearchMatch, CodeWorkspaceHistorySearchSource,
+    CodeWorkspaceSearch, CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree,
+    CodeWorktreeRoot, CreateRemoteWorkspaceBody, CreateWorkspaceBody, ListWorkspacesQuery,
+    PatchWorkspaceBody, SaveWorkspaceFileBody, SetCodeWorktreeRootBody, WorkspaceBlobQuery,
+    WorkspaceDiffQuery, WorkspaceFilesQuery, WorkspaceSearchQuery, WorkspaceTitleBody,
+    WorkspaceTitleProposal, WorkspaceTreeQuery,
 };
 use tidebreak_core::WorkspaceId;
 
@@ -358,16 +358,7 @@ pub async fn list_workspace_files(
 ) -> Result<Json<CodeWorkspaceFiles>, ServerError> {
     let (files, truncated, stat, turn_id, source) = code.workspace_files(id, query.turn).await?;
     Ok(Json(CodeWorkspaceFiles {
-        files: files
-            .into_iter()
-            .map(|file| CodeFileChange {
-                path: file.path.to_wire(),
-                kind: file.kind,
-                insertions: file.insertions,
-                deletions: file.deletions,
-                previous_path: file.previous_path.map(|path| path.to_wire()),
-            })
-            .collect(),
+        files: super::undo::file_changes(files),
         truncated,
         stat,
         turn_id,

@@ -49,6 +49,7 @@ import {
   formatTurnDuration,
   harnessVersionRequirement,
   isCodexRevokedRefreshTokenError,
+  CheckpointRestoreRow,
   FileIssueButton,
   TurnReviewCard,
 } from "./TurnReviewCard";
@@ -77,6 +78,9 @@ export function CodeTranscript({
   animateStreaming = true,
   onOpenTurnDiff,
   onForkFromTurn,
+  onRestoreBeforeTurn,
+  onUndoRestore,
+  undoUnavailableReason,
   onFileIssue,
   emptyState,
   sessionId,
@@ -108,6 +112,12 @@ export function CodeTranscript({
   onOpenTurnDiff?: (turnId: string) => void;
   /** Fork the conversation at the end of one turn, from its seam row. */
   onForkFromTurn?: (turnId: string) => void;
+  /** Put the worktree back to before one turn, from its seam row. */
+  onRestoreBeforeTurn?: (turnId: string) => void;
+  /** Put back what one restore replaced, from the restore's own row. */
+  onUndoRestore?: (restoreId: string) => void;
+  /** Why the worktree cannot be changed right now, such as a running turn. */
+  undoUnavailableReason?: string;
   /** Turn a failed turn or an engine error into a Tidebreak issue or fix. */
   onFileIssue?: () => void;
   /** Copy for a filtered/read-only transcript with no captured rows. */
@@ -256,6 +266,9 @@ export function CodeTranscript({
                   onDecide={onDecide}
                   onOpenTurnDiff={onOpenTurnDiff}
                   onForkFromTurn={onForkFromTurn}
+                  onRestoreBeforeTurn={onRestoreBeforeTurn}
+                  onUndoRestore={onUndoRestore}
+                  undoUnavailableReason={undoUnavailableReason}
                   onFileIssue={onFileIssue}
                   sessionId={sessionId}
                   onReveal={onReveal}
@@ -618,6 +631,9 @@ const TranscriptItem = memo(function TranscriptItem({
   onDecide,
   onOpenTurnDiff,
   onForkFromTurn,
+  onRestoreBeforeTurn,
+  onUndoRestore,
+  undoUnavailableReason,
   onFileIssue,
   sessionId,
   onReveal,
@@ -639,6 +655,9 @@ const TranscriptItem = memo(function TranscriptItem({
   ) => void;
   onOpenTurnDiff?: (turnId: string) => void;
   onForkFromTurn?: (turnId: string) => void;
+  onRestoreBeforeTurn?: (turnId: string) => void;
+  onUndoRestore?: (restoreId: string) => void;
+  undoUnavailableReason?: string;
   onFileIssue?: () => void;
   sessionId?: string;
   onReveal?: () => void;
@@ -766,7 +785,17 @@ const TranscriptItem = memo(function TranscriptItem({
           recap={recap}
           onOpenTurnDiff={onOpenTurnDiff}
           onForkFromTurn={onForkFromTurn}
+          onRestoreBeforeTurn={onRestoreBeforeTurn}
+          undoUnavailableReason={undoUnavailableReason}
           onFileIssue={onFileIssue}
+        />
+      );
+    case "restore":
+      return (
+        <CheckpointRestoreRow
+          restore={item}
+          onUndo={onUndoRestore}
+          undoUnavailableReason={undoUnavailableReason}
         />
       );
   }

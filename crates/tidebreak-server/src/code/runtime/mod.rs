@@ -12,6 +12,7 @@
 //! - [`remote`]: remote and external sessions.
 //! - [`sessions`]: session rows, turn history, and debugging reads.
 //! - [`turns`]: turn submission, the queue, steering, and update quiesce.
+//! - [`undo`]: checkpoint restore, file and hunk revert, and discard.
 //! - [`settings`]: permission mode, effort, and model capability checks.
 //! - [`workers`]: per-session worker spawn and shutdown.
 //! - [`sweeps`]: triggers and the background sweeps.
@@ -104,6 +105,8 @@ mod settings;
 mod sweeps;
 mod trust;
 mod turns;
+mod undo;
+pub use undo::{CheckpointRestoreOutcome, CheckpointRestorePreview};
 mod workers;
 mod workspace_delivery;
 mod workspaces;
@@ -1113,6 +1116,8 @@ fn map_checkpoint(err: CheckpointError) -> ServerError {
                 ServerError::bad_request_kind("checkpoint", message)
             }
         }
+        CheckpointError::Conflict { kind, message } => ServerError::conflict_kind(kind, message),
+        CheckpointError::NotFound(message) => ServerError::not_found(message),
         CheckpointError::Internal(message) => ServerError::internal(message),
     }
 }
@@ -1123,6 +1128,9 @@ fn map_gh(err: GhError) -> ServerError {
             "nothing_to_commit",
             "there is nothing to commit in this workspace",
         ),
+        GhError::CommitRejected(output) => {
+            ServerError::conflict_kind("commit_rejected", commit_rejected_message(&output))
+        }
         GhError::AuthFailed(message) => ServerError::conflict_kind("git_auth_failed", message),
         GhError::PushFailed(message) => ServerError::conflict_kind("git_push_failed", message),
         GhError::GhAbsent { instructions } => ServerError::conflict_kind("gh_absent", instructions),
@@ -1142,6 +1150,17 @@ fn map_gh(err: GhError) -> ServerError {
             }
         }
         GhError::Internal(message) => ServerError::internal(message),
+    }
+}
+
+/// What a refused commit tells the person: that git refused it, then what git
+/// and its hooks printed, after a blank line a client can split on.
+pub(crate) fn commit_rejected_message(output: &str) -> String {
+    let output = output.trim();
+    if output.is_empty() {
+        "Git refused the commit. A hook may have stopped it without saying why.".to_owned()
+    } else {
+        format!("Git refused the commit.\n\n{output}")
     }
 }
 

@@ -223,6 +223,11 @@ import {
   type CodeCommitSnapshot as WireCodeCommitSnapshot,
   type CodePushSnapshot as WireCodePushSnapshot,
   type CodeFileChange as WireCodeFileChange,
+  type CheckpointRestoreTarget as WireCheckpointRestoreTarget,
+  type CodeCheckpointRestorePreview as WireCodeCheckpointRestorePreview,
+  type CodeCheckpointRestoreResult as WireCodeCheckpointRestoreResult,
+  type CodeWorktreeChange as WireCodeWorktreeChange,
+  type RevertWorkspaceChangeBody as WireRevertWorkspaceChangeBody,
   type SessionDigest as WireCodeSessionDigest,
   type UpdateNotice as WireCodeUpdateNotice,
   type CodeCloneDefaults as WireCodeCloneDefaults,
@@ -1440,6 +1445,16 @@ export type CodeSubagentSummary = WireCodeSubagentSummary;
 export type CodeSubagentStatus = WireCodeSubagentStatus;
 export type CodeCommitSnapshot = WireCodeCommitSnapshot;
 export type CodePushSnapshot = WireCodePushSnapshot;
+/** Where a checkpoint restore puts the worktree back to. */
+export type CheckpointRestoreTarget = WireCheckpointRestoreTarget;
+/** What a restore would undo, read before anything moves. */
+export type CodeCheckpointRestorePreview = WireCodeCheckpointRestorePreview;
+/** A restore that landed; its id undoes it. */
+export type CodeCheckpointRestoreResult = WireCodeCheckpointRestoreResult;
+/** The files a revert or a discard changed. */
+export type CodeWorktreeChange = WireCodeWorktreeChange;
+/** Body of POST /code/workspaces/{id}/revert. */
+export type RevertCodeWorkspaceChangeBody = WireRevertWorkspaceChangeBody;
 export type CodeActionSnapshot = WireCodeActionSnapshot;
 export type PullRequestDigest = WirePullRequestDigest;
 export type PullRequestCheck = WirePullRequestCheck;

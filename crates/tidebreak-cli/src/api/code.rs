@@ -16,12 +16,13 @@
 
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    AgentError, ApprovalId, CapLevel, Event, HarnessCaps, HarnessKind, PermissionMode, RepoId,
-    Result, SessionId, TurnId, WorkspaceId,
+    AgentError, ApprovalId, CapLevel, CheckpointRestoreTarget, Event, HarnessCaps, HarnessKind,
+    PermissionMode, RepoId, Result, SessionId, TurnId, WorkspaceId,
 };
 
 pub use tidebreak_server::wire::{
-    ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodePushSnapshot, CodeRepoSnapshot,
+    ApprovalSnapshot, CodeActionSnapshot, CodeCheckpointRestorePreview,
+    CodeCheckpointRestoreResult, CodeCommitSnapshot, CodePushSnapshot, CodeRepoSnapshot,
     CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot,
     HarnessAuthMode, HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, SequencedEventFrame,
     SessionAccessSnapshot, SessionDigest, SessionSnapshot, TurnSnapshot, UpdateNotice,
@@ -385,6 +386,48 @@ impl Client {
             url.push_str(&urlencode(file));
         }
         self.get_json(url).await
+    }
+
+    /// What restoring `target` would undo, read before anything moves.
+    pub async fn checkpoint_restore_preview(
+        &self,
+        workspace: WorkspaceId,
+        target: CheckpointRestoreTarget,
+    ) -> Result<CodeCheckpointRestorePreview> {
+        let query = match target {
+            CheckpointRestoreTarget::BeforeTurn { turn_id } => format!("turn={turn_id}"),
+            CheckpointRestoreTarget::BeforeRestore { restore_id } => {
+                format!("restore={restore_id}")
+            }
+        };
+        self.get_json(format!(
+            "{}/code/workspaces/{workspace}/checkpoints/restore?{query}",
+            self.base_url()
+        ))
+        .await
+    }
+
+    /// Put the workspace's worktree back to `target`. `expected_tree` is the
+    /// preview's `current_tree`: the restore refuses when the worktree moved
+    /// after it.
+    pub async fn restore_checkpoint(
+        &self,
+        workspace: WorkspaceId,
+        target: CheckpointRestoreTarget,
+        expected_tree: Option<&str>,
+    ) -> Result<CodeCheckpointRestoreResult> {
+        let mut body = serde_json::json!({ "target": target });
+        if let Some(expected_tree) = expected_tree {
+            body["expected_tree"] = serde_json::Value::from(expected_tree);
+        }
+        self.post_json(
+            format!(
+                "{}/code/workspaces/{workspace}/checkpoints/restore",
+                self.base_url()
+            ),
+            &body,
+        )
+        .await
     }
 
     pub async fn git_commit(
@@ -795,6 +838,10 @@ mod tests {
                 "harness_doctor" => round_trip::<HarnessDoctorReport>(name, value),
                 "workspace_files" => round_trip::<CodeWorkspaceFiles>(name, value),
                 "workspace_diff" => round_trip::<CodeWorkspaceDiff>(name, value),
+                "checkpoint_restore_preview" => {
+                    round_trip::<CodeCheckpointRestorePreview>(name, value)
+                }
+                "checkpoint_restore" => round_trip::<CodeCheckpointRestoreResult>(name, value),
                 "approval" => round_trip::<ApprovalSnapshot>(name, value),
                 "commit" => round_trip::<CodeCommitSnapshot>(name, value),
                 "push" => round_trip::<CodePushSnapshot>(name, value),
