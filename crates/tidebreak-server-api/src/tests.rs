@@ -84,6 +84,7 @@ mod configuration;
 mod conformance;
 mod connected_apps;
 mod conversations;
+mod data;
 mod documents;
 mod gateway_drafts;
 mod image_attachment;

@@ -481,6 +481,82 @@ pub async fn put_settings(
 /// cap in the worst case rather than refusing text the cap allows.
 pub const MAX_PERSONAL_INSTRUCTIONS_BODY_BYTES: usize = 64 * 1_024;
 
+/// The deployment-wide preferences `POST /settings/reset` returns to their
+/// defaults, beside the model roles: background agent limits, context
+/// compaction, the model list and prompt caching, and the coding engine
+/// options (turn recaps, closing rewrites, update channel).
+const RESET_SETTINGS: [&str; 12] = [
+    MAX_ACTIVE_BACKGROUND_AGENTS_SETTING,
+    SANDBOX_AGENT_CHECKIN_STEPS_SETTING,
+    SANDBOX_AGENT_ERROR_CHECKIN_SETTING,
+    COMPACTION_THRESHOLD_FRACTION_SETTING,
+    COMPACTION_TARGET_FRACTION_SETTING,
+    COMPACTION_MIN_THRESHOLD_TOKENS_SETTING,
+    COMPACTION_PROTECT_RECENT_MESSAGES_SETTING,
+    MODEL_VISIBILITY_OVERRIDES_SETTING,
+    crate::routes::PROMPT_CACHE_RETENTION_SETTING,
+    crate::code::recap::TURN_RECAPS_SETTING,
+    crate::code::rewrite::REWRITE_CLOSING_SETTING,
+    crate::code::harness_release::HARNESS_UPDATE_CHANNEL_SETTING,
+];
+
+/// The caller's own preferences a reset clears: new conversation defaults.
+const RESET_STICKY_DEFAULTS: [&str; 4] = [
+    STICKY_MODEL_KEY,
+    STICKY_REASONING_EFFORT_KEY,
+    STICKY_PERMISSION_MODE_KEY,
+    STICKY_NETWORK_POLICY_KEY,
+];
+
+/// The caller's own preferences a reset clears: Git branch naming.
+const RESET_GIT_NAMING: [&str; 4] = [
+    naming_settings::KEEP_LOCAL_MAIN_UP_TO_DATE_KEY,
+    naming_settings::AUTO_RENAME_BRANCHES_KEY,
+    naming_settings::BRANCH_PREFIX_MODE_KEY,
+    naming_settings::CUSTOM_BRANCH_PREFIX_KEY,
+];
+
+/// `POST /settings/reset` — put the preferences the settings pages keep back
+/// to their defaults, and return the settings as they now stand.
+///
+/// It resets the models the app picks by default, new conversation defaults,
+/// context and agent limits, the model list and prompt caching, the coding
+/// engine options, and Git branch naming. It keeps everything that is data or
+/// setup: conversations, memory and its switch, instructions, keys and
+/// providers, the Model Gateway, connected apps and MCP servers, web search,
+/// code execution, voice input, computer use, plugins, repositories,
+/// workspaces, and folder permissions.
+pub async fn post_settings_reset(
+    State(state): State<AppState>,
+    auth: AuthContext,
+) -> Result<Json<Settings>, ServerError> {
+    let owner = auth.principal.owner_id();
+    let store = &*state.store;
+    for role in [ModelRole::Chat, ModelRole::Utility] {
+        store.delete_setting(role.setting_key()).await?;
+    }
+    for key in RESET_SETTINGS {
+        store.delete_setting(key).await?;
+    }
+    for key in RESET_STICKY_DEFAULTS {
+        store
+            .delete_setting(&sticky_default_key(&owner, key))
+            .await?;
+    }
+    for key in RESET_GIT_NAMING {
+        store
+            .delete_setting(&naming_settings::user_setting_key(&owner, key))
+            .await?;
+    }
+    // The update channel decides which install each engine runs, so a live
+    // worker moves to the default one now, as a channel change does.
+    if let Some(code) = state.code.as_ref() {
+        code.resync_workers_to_selected_binaries(tidebreak_core::HarnessKind::ALL)
+            .await;
+    }
+    Ok(Json(read_settings(&state, &owner).await?))
+}
+
 /// `GET /settings/instructions` — the caller's personal instructions.
 pub async fn get_personal_instructions(
     State(state): State<AppState>,

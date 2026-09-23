@@ -99,6 +99,36 @@ impl ScratchDir {
     pub(crate) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
         self.dir.remove_file(name)
     }
+
+    /// Read one regular file in this directory, without following a link.
+    /// `None` when it does not exist. Refuses a file larger than `limit`.
+    pub(crate) fn read_regular(&self, name: &OsStr, limit: u64) -> io::Result<Option<Vec<u8>>> {
+        use std::io::Read as _;
+
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = match self.dir.open_with(name, &options) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "scratch path is not a regular file",
+            ));
+        }
+        if metadata.len() > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "scratch file is larger than expected",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.into_std().take(limit).read_to_end(&mut bytes)?;
+        Ok(Some(bytes))
+    }
 }
 
 /// A turn-specific scratch directory that removes itself when its owner exits.

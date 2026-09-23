@@ -9,6 +9,24 @@ impl CodeRuntime {
         root_path: PathBuf,
         metadata: RepoRegistration,
     ) -> Result<CodeRepo, ServerError> {
+        let repo = self
+            .prepare_repo_registration(owner, root_path, metadata)
+            .await?;
+        insert_repo(&self.db, &repo).await?;
+        self.delivery_cache.invalidate_owner(owner);
+        Ok(repo)
+    }
+
+    /// Everything [`Self::register_repo`] does except the write: validate the
+    /// checkout, refuse one already registered, and resolve its name, base
+    /// ref, branch prefix, and origin. An import prepares every repository
+    /// this way before it writes any of them.
+    pub(crate) async fn prepare_repo_registration(
+        &self,
+        owner: &OwnerId,
+        root_path: PathBuf,
+        metadata: RepoRegistration,
+    ) -> Result<CodeRepo, ServerError> {
         let RepoRegistration {
             cloned_from,
             display_name,
@@ -90,9 +108,34 @@ impl CodeRuntime {
             origin_owner: origin.as_ref().map(|target| target.owner.clone()),
             origin_name: origin.map(|target| target.name),
         };
-        insert_repo(&self.db, &repo).await?;
-        self.delivery_cache.invalidate_owner(owner);
         Ok(repo)
+    }
+
+    /// Write one import's repositories in a single transaction: register
+    /// `added`, which [`Self::prepare_repo_registration`] built, and save the
+    /// settings of `replaced`.
+    pub(crate) async fn import_repos(
+        &self,
+        owner: &OwnerId,
+        added: &[CodeRepo],
+        replaced: &[CodeRepo],
+    ) -> Result<(), ServerError> {
+        tidebreak_core::db::code::import_repos(&self.db, added, replaced).await?;
+        self.delivery_cache.invalidate_owner(owner);
+        Ok(())
+    }
+
+    /// Undo [`Self::import_repos`]: remove what it added and put back the
+    /// settings it replaced, in a single transaction.
+    pub(crate) async fn revert_repo_import(
+        &self,
+        owner: &OwnerId,
+        added: &[RepoId],
+        previous: &[CodeRepo],
+    ) -> Result<(), ServerError> {
+        tidebreak_core::db::code::revert_repo_import(&self.db, owner, added, previous).await?;
+        self.delivery_cache.invalidate_owner(owner);
+        Ok(())
     }
 
     pub(crate) async fn list_repos(&self, owner: &OwnerId) -> Result<Vec<CodeRepo>, ServerError> {

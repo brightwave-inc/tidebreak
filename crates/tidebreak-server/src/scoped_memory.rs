@@ -108,6 +108,15 @@ impl ScopedMemory {
             .map_err(ServerError::from)
     }
 
+    /// Hard-delete every record the requesting principal owns. Returns the
+    /// ids it deleted.
+    pub async fn delete_all(&self) -> Result<Vec<MemoryRecordId>, ServerError> {
+        self.backend
+            .delete_all(&self.owner)
+            .await
+            .map_err(ServerError::from)
+    }
+
     /// Search owned records.
     pub async fn search(
         &self,

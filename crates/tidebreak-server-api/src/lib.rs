@@ -34,13 +34,14 @@ pub(crate) use core::{
 pub use core::{
     code_execution, connectors, consent, deprovision_provisioned_gateway, deprovision_target,
     ensure_home_dir, host_folders, listen_endpoint, logging, media_type, openapi_catalog,
-    output_files, register_pending_pairing, register_replacing_pairing, rehome_configured_secrets,
-    rest_executor, sandbox_container_run, sandbox_docker, secret_rehome, voice_transcription,
-    web_search, workspace_config, AppState, BrowserChannelBinding, BrowserRuntime,
-    BrowserRuntimeError, BrowserRuntimeScope, ClientExecutionWake, DeprovisionTarget,
-    DurableOperationStore, LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus,
-    NativeChannelBinding, NativeRuntime, NativeRuntimeError, NativeRuntimeScope, PairingError,
-    PairingHandle, PendingRegistration, QuitProgress, Server, ServerError, UpdateQuiesce,
+    output_files, profile_data, register_pending_pairing, register_replacing_pairing,
+    rehome_configured_secrets, rest_executor, sandbox_container_run, sandbox_docker, secret_rehome,
+    voice_transcription, web_search, workspace_config, AppState, BrowserChannelBinding,
+    BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope, ClientExecutionWake,
+    DeprovisionTarget, DurableOperationStore, LocalVoiceError, LocalVoiceRunner, LocalVoiceState,
+    LocalVoiceStatus, NativeChannelBinding, NativeRuntime, NativeRuntimeError, NativeRuntimeScope,
+    PairingError, PairingHandle, PendingRegistration, QuitProgress, Server, ServerError,
+    UpdateQuiesce,
 };
 
 pub mod routes;
@@ -451,6 +452,12 @@ pub fn app(state: AppState) -> Router {
             "/code/worktree-root",
             get(routes::code::get_worktree_root).put(routes::code::set_worktree_root),
         )
+        // The profile as a whole: where it lives, its disk use, and a backup
+        // of every owner's data. The caller's own conversation export stays
+        // on the member plane below.
+        .route("/data", get(routes::get_data_overview))
+        .route("/data/backup", post(routes::post_data_backup))
+        .route("/settings/reset", post(routes::post_settings_reset))
         .route("/diagnostics/snapshot", get(diagnostics::get_snapshot))
         .route("/diagnostics/metrics", get(diagnostics::get_metrics))
         .route("/diagnostics/export", get(diagnostics::get_export))
@@ -686,10 +693,13 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(routes::MAX_PROJECT_UPDATE_BODY_BYTES)),
         )
         .route("/models", get(routes::list_models))
+        .route("/data/export", post(routes::post_data_export))
         .route("/memory/capabilities", get(routes::capabilities))
         .route(
             "/memory/records",
-            get(routes::list_records).post(routes::create_record),
+            get(routes::list_records)
+                .post(routes::create_record)
+                .delete(routes::delete_all_records),
         )
         .route(
             "/memory/records/{id}",

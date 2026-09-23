@@ -53,4 +53,7 @@ zip = { workspace = true }
 tidebreak-server-core = { path = "../tidebreak-server", features = ["test-support"] }
 tidebreak-core = { path = "../tidebreak-core", features = ["test-util"] }
 tower = { version = "=0.5.3", features = ["util"] }
+# Reads back the backup archive `POST /data/backup` streams.
+flate2 = "=1.1.10"
+tar = "=0.4.46"
 tokio-tungstenite = { workspace = true }

@@ -122,6 +122,119 @@ pub(crate) fn first_turn_memory_line(memory_dir: &Path) -> String {
     )
 }
 
+/// The largest materialized memory file this reads back. A record file is a
+/// capped body plus its heading, and the digest has its own byte cap.
+const MAX_MATERIALIZED_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Take deleted records out of every code session's materialized memory.
+///
+/// An engine reads `memory/MEMORY.md` and one file per record from its
+/// private root whenever it likes, and those files are rewritten only when a
+/// turn starts. Without this, a record deleted between turns would stay
+/// readable there until the next one, and in the root of a session that never
+/// runs again, for good. For each deleted id this removes the record's file
+/// and the digest line rendered beside it, which carries the date and title
+/// the file names. A digest left with no record line is removed too.
+///
+/// Returns how many memory folders changed. A folder that cannot be read or
+/// written is logged and skipped: the store no longer has the record, and a
+/// turn start rewrites the folder from the store in any case.
+pub async fn purge_materialized_records(
+    data_dir: &Path,
+    deleted: &[tidebreak_core::MemoryRecordId],
+) -> usize {
+    if deleted.is_empty() {
+        return 0;
+    }
+    let Some(listing) = scratch::list_private_roots(data_dir) else {
+        return 0;
+    };
+    let mut roots = Vec::new();
+    for id in &listing.workspaces {
+        match scratch::workspace_root(data_dir, *id) {
+            Ok(root) => roots.push(root),
+            Err(error) => tracing::warn!(
+                workspace = %id,
+                %error,
+                "memory: could not open a workspace's private root to remove deleted records"
+            ),
+        }
+    }
+    for id in &listing.sessions {
+        match scratch::session_root(data_dir, *id) {
+            Ok(root) => roots.push(root),
+            Err(error) => tracing::warn!(
+                session = %id,
+                %error,
+                "memory: could not open a session's private root to remove deleted records"
+            ),
+        }
+    }
+    let files: Vec<String> = deleted.iter().map(|id| format!("{id}.md")).collect();
+    let mut changed = 0;
+    for root in roots {
+        match purge_root(&root, &files).await {
+            Ok(true) => changed += 1,
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                root = %root.path().display(),
+                %error,
+                "memory: could not remove deleted records from a session's memory folder"
+            ),
+        }
+    }
+    changed
+}
+
+async fn purge_root(root: &ScratchRoot, record_files: &[String]) -> io::Result<bool> {
+    let Some(dir) = scratch::scratch_dir_if_exists(root, MEMORY_DIR)? else {
+        return Ok(false);
+    };
+    let mut lines = Vec::new();
+    let mut removed = false;
+    for name in record_files {
+        let name = OsStr::new(name);
+        let Some(bytes) = dir.read_regular(name, MAX_MATERIALIZED_FILE_BYTES)? else {
+            continue;
+        };
+        if let Some(line) = digest_line_for(&String::from_utf8_lossy(&bytes)) {
+            lines.push(line);
+        }
+        dir.remove_file(name)?;
+        removed = true;
+    }
+    if !removed {
+        return Ok(false);
+    }
+    let index = OsStr::new(MEMORY_INDEX);
+    let Some(digest) = dir.read_regular(index, MAX_MATERIALIZED_FILE_BYTES)? else {
+        return Ok(true);
+    };
+    let digest = String::from_utf8_lossy(&digest);
+    let kept: Vec<&str> = digest
+        .lines()
+        .filter(|line| !lines.iter().any(|deleted| deleted == line))
+        .collect();
+    if kept.iter().any(|line| line.starts_with("- ")) {
+        let mut rewritten = kept.join("\n");
+        rewritten.push('\n');
+        dir.publish(index, rewritten.as_bytes()).await?;
+    } else {
+        dir.remove_file(index)?;
+    }
+    Ok(true)
+}
+
+/// The digest line a record file was rendered beside:
+/// `- <updated date> — <title>`, read from the file's own heading and
+/// `Updated:` line (see [`render_memory_record_markdown`]).
+fn digest_line_for(record_file: &str) -> Option<String> {
+    let mut lines = record_file.lines();
+    let title = lines.next()?.strip_prefix("# ")?;
+    let updated = lines.find_map(|line| line.strip_prefix("Updated: "))?;
+    Some(format!("- {updated} — {title}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,5 +558,54 @@ mod tests {
             true
         }
         walk(root)
+    }
+
+    /// A deleted record leaves every materialized memory folder at once, not
+    /// at each session's next turn: its file goes, and so does its line in
+    /// the digest the real store rendered. A folder left with nothing in it
+    /// loses its digest too.
+    #[tokio::test]
+    async fn a_deleted_record_leaves_every_materialized_folder() {
+        let data = TempDir::new().unwrap();
+        let store = tidebreak_core::DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            data.path().join("tidebreak.db").display()
+        ))
+        .await
+        .unwrap();
+        let owner = OwnerId::local();
+        let mut kept = sample_record();
+        kept.id = MemoryRecordId::new();
+        kept.title = "When writing release notes".to_owned();
+        let mut deleted = sample_record();
+        deleted.id = MemoryRecordId::new();
+        store.put(&owner, deleted.clone()).await.unwrap();
+        let alone = scratch::session_root(data.path(), tidebreak_core::SessionId::new()).unwrap();
+        materialize_session_memory(&store, &owner, None, &alone)
+            .await
+            .unwrap()
+            .unwrap();
+        store.put(&owner, kept.clone()).await.unwrap();
+        let shared =
+            scratch::workspace_root(data.path(), tidebreak_core::WorkspaceId::new()).unwrap();
+        let shared_dir = materialize_session_memory(&store, &owner, None, &shared)
+            .await
+            .unwrap()
+            .unwrap();
+        let digest = std::fs::read_to_string(shared_dir.join(MEMORY_INDEX)).unwrap();
+        assert!(digest.contains("When cutting a release"), "{digest}");
+
+        assert!(store.delete(&owner, deleted.id).await.unwrap());
+        let changed = purge_materialized_records(data.path(), &[deleted.id]).await;
+
+        assert_eq!(changed, 2);
+        let digest = std::fs::read_to_string(shared_dir.join(MEMORY_INDEX)).unwrap();
+        assert!(!digest.contains("When cutting a release"), "{digest}");
+        assert!(digest.contains("When writing release notes"), "{digest}");
+        assert!(!shared_dir.join(format!("{}.md", deleted.id)).exists());
+        assert!(shared_dir.join(format!("{}.md", kept.id)).exists());
+        let alone_dir = memory_dir_path(&alone);
+        assert!(!alone_dir.join(format!("{}.md", deleted.id)).exists());
+        assert!(!alone_dir.join(MEMORY_INDEX).exists());
     }
 }

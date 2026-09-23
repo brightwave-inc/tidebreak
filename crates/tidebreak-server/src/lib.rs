@@ -90,6 +90,7 @@ pub mod plugin_install;
 pub mod plugin_mcp;
 pub mod plugin_state;
 pub mod principal;
+pub mod profile_data;
 #[doc(hidden)]
 pub mod provider;
 pub mod providers;

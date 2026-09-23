@@ -553,3 +553,89 @@ async fn apply_validates_every_decision_before_writing() {
         json_body::<serde_json::Value>(applied).await
     );
 }
+
+async fn registered_repos(router: &Router, bearer: &str) -> Vec<serde_json::Value> {
+    let repos = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/code/repos")
+                .header(header::AUTHORIZATION, bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repos.status(), StatusCode::OK);
+    json_body(repos).await
+}
+
+/// An import's repositories and MCP servers land together or not at all.
+/// The repository here is valid and is written first; the MCP server's
+/// command does not exist, so the MCP set fails to start it, and the
+/// repository comes back out. The refusal says so. A second import that
+/// leaves the server undecided skips it and counts it.
+#[tokio::test]
+async fn an_import_whose_mcp_servers_fail_leaves_no_repository_behind() {
+    let (router, token, _runtime, dir) = super::code::code_app(Vec::new()).await;
+    let bearer = format!("Bearer {token}");
+    let checkout = super::code::init_git_repo(dir.path());
+    let mut document = local_command_document(true);
+    document.sections.code_repositories = vec![crate::workspace_config::ExportedCodeRepository {
+        display_name: "origin".into(),
+        origin_url: None,
+        root_path: checkout.display().to_string(),
+        default_base_ref: "main".into(),
+        branch_prefix: "tidebreak/".into(),
+        setup_script: None,
+        archive_script: None,
+        quick_actions: vec![],
+        cloned_from: None,
+    }];
+    let register = WorkspaceConfigDecision {
+        section: WorkspaceConfigSectionId::CodeRepositories,
+        key: "origin".into(),
+        action: WorkspaceConfigAction::Add,
+        remaps: Default::default(),
+        enabled: None,
+    };
+
+    let refused = post_apply(
+        &router,
+        &bearer,
+        true,
+        &WorkspaceConfigApplyRequest {
+            document: document.clone(),
+            decisions: vec![register.clone(), add_decision("local_command", None)],
+        },
+    )
+    .await;
+    assert!(!refused.status().is_success());
+    let error: AgentErrorInfo = json_body(refused).await;
+    assert!(
+        error.message.contains("local_command") && error.message.ends_with("Nothing changed."),
+        "{}",
+        error.message
+    );
+    assert!(
+        registered_repos(&router, &bearer).await.is_empty(),
+        "the repository outlived the MCP failure"
+    );
+    assert!(mcp_server_names(&router, &bearer).await.is_empty());
+
+    let applied = post_apply(
+        &router,
+        &bearer,
+        false,
+        &WorkspaceConfigApplyRequest {
+            document,
+            decisions: vec![register],
+        },
+    )
+    .await;
+    assert_eq!(applied.status(), StatusCode::OK);
+    let result: crate::workspace_config::WorkspaceConfigApplyResult = json_body(applied).await;
+    assert_eq!((result.applied, result.skipped), (1, 1));
+    assert_eq!(registered_repos(&router, &bearer).await.len(), 1);
+    assert!(mcp_server_names(&router, &bearer).await.is_empty());
+}

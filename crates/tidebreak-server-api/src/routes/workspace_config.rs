@@ -64,10 +64,14 @@ pub async fn preview_workspace_config(
 /// `POST /workspace-config/apply`, and its native twin
 /// `POST /native/workspace-config/apply`.
 ///
-/// Every decision is validated before anything is written, so a refused
-/// entry leaves this machine exactly as it was. The MCP set commits first,
-/// because it is the step most likely to fail (a server that will not start);
-/// repository writes follow once it has landed.
+/// An entry the request makes no decision about is skipped. Every decision is
+/// validated, and every new repository is checked and resolved, before
+/// anything is written, so a refused entry leaves this machine exactly as it
+/// was. The writes then land together or not at all: the repositories go in
+/// one transaction, the MCP set commits after them, and an MCP set that will
+/// not commit (a server that will not start) undoes the repositories. Every
+/// refusal says that nothing changed; the one case where an undo itself fails
+/// says what is left.
 ///
 /// On the desktop, an import that would start a local MCP command needs the
 /// native confirmation, the same rule `PUT /mcp/servers` enforces (decision
@@ -115,7 +119,8 @@ pub async fn apply_workspace_config(
         repos.as_deref(),
         lockdown,
     )
-    .await?;
+    .await
+    .map_err(nothing_changed)?;
 
     // The MCP half of an import replaces the deployment's MCP servers, host
     // processes included, which `PUT /mcp/servers` reserves for the
@@ -165,9 +170,14 @@ struct ApplyPlan {
 
 enum RepoWrite {
     /// Overwrite an existing registration's settings with the file's.
-    Replace(Box<CodeRepo>),
+    Replace {
+        next: Box<CodeRepo>,
+        /// The registration as it stands, for an undo.
+        previous: Box<CodeRepo>,
+    },
     /// Register a checkout that is new to this machine.
     Register {
+        name: String,
         root: PathBuf,
         registration: RepoRegistration,
     },
@@ -302,7 +312,10 @@ async fn plan_apply(
                         repo.setup_script = setup_script;
                         repo.archive_script = archive_script;
                         repo.quick_actions = quick_actions;
-                        repo_writes.push(RepoWrite::Replace(Box::new(repo)));
+                        repo_writes.push(RepoWrite::Replace {
+                            next: Box::new(repo),
+                            previous: Box::new(existing.clone()),
+                        });
                     }
                     None => {
                         let root = PathBuf::from(apply_repo_path(exported, &decision.remaps));
@@ -316,6 +329,7 @@ async fn plan_apply(
                             ));
                         }
                         repo_writes.push(RepoWrite::Register {
+                            name: name.to_owned(),
                             root,
                             registration: RepoRegistration {
                                 cloned_from: exported.cloned_from.clone(),
@@ -334,6 +348,26 @@ async fn plan_apply(
         }
     }
 
+    // An entry nobody decided about is skipped, never applied: the file
+    // alone overwrites nothing (decision 83).
+    let decided = |section: WorkspaceConfigSectionId, key: &str| {
+        decisions
+            .iter()
+            .any(|decision| decision.section == section && decision.key == key)
+    };
+    skipped += document
+        .sections
+        .code_repositories
+        .iter()
+        .filter(|entry| !decided(WorkspaceConfigSectionId::CodeRepositories, &repo_key(entry)))
+        .count();
+    skipped += document
+        .sections
+        .mcp_servers
+        .iter()
+        .filter(|entry| !decided(WorkspaceConfigSectionId::McpServers, &entry.name))
+        .count();
+
     Ok(ApplyPlan {
         mcp: mcp_changed.then_some(mcp),
         mcp_imports,
@@ -341,6 +375,23 @@ async fn plan_apply(
         applied,
         skipped,
     })
+}
+
+/// Say that a refused import changed nothing, after whatever the refusal
+/// already says.
+fn nothing_changed(error: ServerError) -> ServerError {
+    let message = format!("{} Nothing changed.", as_sentence(error.message()));
+    error.with_message(message)
+}
+
+/// A refusal message ending in a full stop.
+fn as_sentence(message: &str) -> String {
+    let message = message.trim_end();
+    if message.ends_with('.') {
+        message.to_owned()
+    } else {
+        format!("{message}.")
+    }
 }
 
 /// Refuse a remap this entry does not take, or one left blank: a blank
@@ -419,34 +470,90 @@ async fn write_plan(
     code: Option<ScopedCode>,
     lockdown: ManualLockdown,
 ) -> Result<(), ServerError> {
-    if let Some(servers) = plan.mcp {
-        let outcome = mcp
-            .replace_under_policy(McpServersConfig { servers }, lockdown)
-            .await
-            .map_err(ServerError::from)?;
-        if let crate::mcp_config::McpReplaceOutcome::RefusedManual(refused) = outcome {
-            return Err(crate::providers::managed_profile_refusal(format!(
-                "this profile is managed by a model gateway; manual MCP servers are locked ({})",
-                refused.join(", ")
-            )));
-        }
-    }
-    if plan.repos.is_empty() {
-        return Ok(());
-    }
-    let Some(code) = code else {
-        // The plan only holds repository writes when code mode is present.
-        return Err(ServerError::internal(
-            "code mode disappeared during the import",
-        ));
-    };
+    // Resolve every new registration before the first write. This step reads
+    // each checkout, so it is the one most likely to turn up something the
+    // plan could not see.
+    let mut added = Vec::new();
+    let mut replaced = Vec::new();
+    let mut previous = Vec::new();
     for write in plan.repos {
+        let Some(code) = code.as_ref() else {
+            // The plan only holds repository writes when code mode is present.
+            return Err(nothing_changed(ServerError::internal(
+                "code mode disappeared during the import",
+            )));
+        };
         match write {
-            RepoWrite::Replace(repo) => code.save_repo(&repo).await?,
-            RepoWrite::Register { root, registration } => {
-                code.register_repo(root, registration).await?;
+            RepoWrite::Replace {
+                next,
+                previous: before,
+            } => {
+                replaced.push(*next);
+                previous.push(*before);
+            }
+            RepoWrite::Register {
+                name,
+                root,
+                registration,
+            } => {
+                let repo = code
+                    .prepare_repo_registration(root, registration)
+                    .await
+                    .map_err(|error| {
+                        let message = format!("code repository {name}: {}", error.message());
+                        nothing_changed(error.with_message(message))
+                    })?;
+                added.push(repo);
             }
         }
     }
-    Ok(())
+    let repos_written = !added.is_empty() || !replaced.is_empty();
+    if repos_written {
+        let code = code.as_ref().expect("repository writes imply code mode");
+        code.import_repos(&added, &replaced)
+            .await
+            .map_err(nothing_changed)?;
+    }
+
+    let Some(servers) = plan.mcp else {
+        return Ok(());
+    };
+    let failure = match mcp
+        .replace_under_policy(McpServersConfig { servers }, lockdown)
+        .await
+    {
+        Ok(crate::mcp_config::McpReplaceOutcome::Replaced(_)) => return Ok(()),
+        Ok(crate::mcp_config::McpReplaceOutcome::RefusedManual(refused)) => {
+            crate::providers::managed_profile_refusal(format!(
+                "this profile is managed by a model gateway; manual MCP servers are locked ({})",
+                refused.join(", ")
+            ))
+        }
+        Err(error) => ServerError::from(error),
+    };
+    if !repos_written {
+        return Err(nothing_changed(failure));
+    }
+    let code = code.as_ref().expect("repository writes imply code mode");
+    let added_ids: Vec<_> = added.iter().map(|repo| repo.id).collect();
+    match code.revert_repo_import(&added_ids, &previous).await {
+        Ok(()) => Err(nothing_changed(failure)),
+        Err(undo) => {
+            let names = added
+                .iter()
+                .chain(&replaced)
+                .map(|repo| repo.display_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                error = %undo.message(),
+                "could not undo a workspace configuration import's repositories"
+            );
+            Err(ServerError::internal(format!(
+                "{} The import stopped, and Tidebreak could not undo the repositories it had \
+                 already written: {names}. Check them in Settings.",
+                as_sentence(failure.message())
+            )))
+        }
+    }
 }

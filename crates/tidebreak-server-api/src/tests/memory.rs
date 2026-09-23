@@ -290,6 +290,31 @@ async fn memory_search_digest_and_history_read_only_owner_rows() {
     assert_eq!(history[0]["snapshot"]["id"], json!(id));
 }
 
+/// Delete everything removes every record the caller has, forgotten ones
+/// included, and says how many. A deleted record is gone from the list, not
+/// archived into it.
+#[tokio::test]
+async fn delete_everything_removes_the_callers_records() {
+    let (router, token, store, _dir) = memory_app().await;
+    let bearer = format!("Bearer {token}");
+    let owner = OwnerId::local();
+    store
+        .put(&owner, user_record(MemoryRecordId::new()))
+        .await
+        .unwrap();
+    let mut forgotten = user_record(MemoryRecordId::new());
+    forgotten.status = MemoryStatus::Archived;
+    forgotten.title = "When naming branches".to_owned();
+    store.put(&owner, forgotten).await.unwrap();
+
+    let deleted =
+        assert_ok(request(&router, &bearer, "DELETE", "/memory/records".into()).await).await;
+    assert_eq!(deleted["deleted"], json!(2));
+
+    let listed = assert_ok(request(&router, &bearer, "GET", "/memory/records".into()).await).await;
+    assert_eq!(listed, json!([]));
+}
+
 #[tokio::test]
 async fn memory_ingest_answers_not_implemented_for_the_default_backend() {
     let (router, token, _store, _dir) = memory_app().await;
