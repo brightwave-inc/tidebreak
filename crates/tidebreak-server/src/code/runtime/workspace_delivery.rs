@@ -1061,12 +1061,17 @@ impl CodeRuntime {
 
         // A pull request no reader tracks yet stays untracked: the read
         // shows in this workspace's column and mints no row (decision 77).
+        // The column takes it only while it still shows what this pass began
+        // from, so a pull request a create adopted meanwhile stays.
         let applied = self
             .apply_pull_request_read(
                 &read,
                 tidebreak_core::db::code::PullRequestReadOptions {
                     mint_row: false,
-                    adopt: Some(workspace.id),
+                    adopt: Some(tidebreak_core::db::code::PullRequestAdoption {
+                        workspace: workspace.id,
+                        replacing: workspace.pr.as_ref().and_then(|pr| pr.url.clone()),
+                    }),
                 },
             )
             .await

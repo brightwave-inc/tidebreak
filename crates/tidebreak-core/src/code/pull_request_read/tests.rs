@@ -279,6 +279,66 @@ fn a_validator_survives_a_read_that_changed_nothing_it_covers() {
     assert_eq!(merged.fact.last_seen_at, at(600));
 }
 
+/// A pull validator names the whole object, mergeability included. When a
+/// read's snapshot lands but its mergeability is older than the stored one,
+/// its validator must not stay behind: a 304 to it would confirm
+/// mergeability the validator never named. A 304 restates exactly what the
+/// stored validators name, mergeability and review decision alike.
+#[test]
+fn a_304_restates_exactly_what_its_validators_named() {
+    let stored = fetched();
+    // A lagging answer: an older version, observed later, that has already
+    // computed mergeability for the same head.
+    let mut lagging = read();
+    lagging.object = Some(object(
+        snapshot(5, "aaa"),
+        at(300),
+        Some(("mergeable", "clean")),
+        None,
+    ));
+    let after_lagging = merge_pull_request_read(&stored, &lagging);
+    assert_eq!(after_lagging.fact.title, "Version 10");
+    assert_eq!(live(&after_lagging).mergeable.as_deref(), Some("mergeable"));
+    assert_eq!(after_lagging.etags.pull, None);
+
+    // The fetcher's answer for the current version, observed before the
+    // lagging one, lands after it. Its snapshot is current; its
+    // mergeability is not.
+    let mut fetch = read();
+    fetch.object = Some(object(
+        snapshot(10, "aaa"),
+        at(200),
+        Some(("conflicting", "dirty")),
+        Some("W/\"pull-2\""),
+    ));
+    fetch.review = Some(PullRequestReviewRead {
+        etag: Some("W/\"reviews-2\"".into()),
+        ..review(Some("changes_requested"), at(201))
+    });
+    let merged = merge_pull_request_read(&after_lagging, &fetch);
+    assert_eq!(live(&merged).mergeable.as_deref(), Some("mergeable"));
+    assert_eq!(
+        merged.etags.pull, None,
+        "pull-2 names conflicting mergeability the row does not hold"
+    );
+    assert_eq!(merged.etags.reviews.as_deref(), Some("W/\"reviews-2\""));
+
+    let mut not_modified = read();
+    not_modified.object = Some(merged.restate_object(at(400)));
+    not_modified.review = Some(merged.restate_review(at(401)));
+    let confirmed = merge_pull_request_read(&merged, &not_modified);
+    assert_eq!(live(&confirmed).mergeable.as_deref(), Some("mergeable"));
+    assert_eq!(
+        live(&confirmed).merge_state_status.as_deref(),
+        Some("clean")
+    );
+    assert_eq!(
+        live(&confirmed).review_decision.as_deref(),
+        Some("changes_requested")
+    );
+    assert_eq!(confirmed.etags, merged.etags);
+}
+
 #[test]
 fn only_a_read_that_loaded_the_object_mints_a_row() {
     let mut checks_only = read();
@@ -745,9 +805,14 @@ fn assert_validators_name_reported_values(
         let named = base.etags.pull.as_ref() == Some(etag)
             && pull_fields(&base.fact) == pull_fields(&state.fact)
             || reads.iter().any(|read| {
+                // The validator names every field of the object it came
+                // with, not only the snapshot.
                 read.object.as_ref().is_some_and(|object| {
                     object.etag.as_ref() == Some(etag)
                         && object.snapshot == PullRequestSnapshot::of_fact(&state.fact)
+                        && object.mergeability.as_ref() == Some(&mergeability_of(&state.fact))
+                        && object.auto_merge_enabled.is_some()
+                        && object.auto_merge_enabled == auto_merge_of(&state.fact)
                 })
             });
         assert!(

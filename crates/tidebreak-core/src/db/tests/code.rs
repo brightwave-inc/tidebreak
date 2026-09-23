@@ -4767,7 +4767,7 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     first.object = Some(pull_request_object(
         first_seen, "aaa111", "First", first_seen, None,
     ));
-    let created = save_pull_request_read(&store, &first, mint)
+    let created = save_pull_request_read(&store, &first, mint.clone())
         .await
         .unwrap()
         .unwrap();
@@ -4782,7 +4782,7 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     object.snapshot.state = CodePullRequestState::Merged;
     object.snapshot.merged_at = Some(later);
     refreshed.object = Some(object);
-    let applied = save_pull_request_read(&store, &refreshed, mint)
+    let applied = save_pull_request_read(&store, &refreshed, mint.clone())
         .await
         .unwrap()
         .unwrap();
@@ -4913,7 +4913,7 @@ async fn partial_and_stale_reads_keep_a_stored_full_read() {
         observed_at: fetched_at,
         etag: Some("W/\"reviews-1\"".into()),
     });
-    save_pull_request_read(&store, &full, mint)
+    save_pull_request_read(&store, &full, mint.clone())
         .await
         .unwrap()
         .unwrap();
@@ -4940,7 +4940,7 @@ async fn partial_and_stale_reads_keep_a_stored_full_read() {
     );
     object.mergeability = None;
     list.object = Some(object);
-    let applied = save_pull_request_read(&store, &list, mint)
+    let applied = save_pull_request_read(&store, &list, mint.clone())
         .await
         .unwrap()
         .unwrap();
@@ -4970,7 +4970,7 @@ async fn partial_and_stale_reads_keep_a_stored_full_read() {
         observed_at: version - chrono::Duration::seconds(30),
         etag: None,
     });
-    save_pull_request_read(&store, &stale, mint)
+    save_pull_request_read(&store, &stale, mint.clone())
         .await
         .unwrap()
         .unwrap();
@@ -4995,13 +4995,13 @@ async fn partial_and_stale_reads_keep_a_stored_full_read() {
     );
     object.mergeability = None;
     pushed.object = Some(object);
-    save_pull_request_read(&store, &pushed, mint)
+    save_pull_request_read(&store, &pushed, mint.clone())
         .await
         .unwrap()
         .unwrap();
     let mut late = pull_request_read(&owner);
     late.object = Some(not_modified);
-    save_pull_request_read(&store, &late, mint)
+    save_pull_request_read(&store, &late, mint.clone())
         .await
         .unwrap()
         .unwrap();
@@ -5185,7 +5185,9 @@ async fn concurrent_pull_request_reads_converge() {
 /// nobody else does.
 #[tokio::test]
 async fn an_applied_read_projects_into_every_workspace_showing_it() {
-    use crate::db::code::{get_pull_request_fact, save_pull_request_read, PullRequestReadOptions};
+    use crate::db::code::{
+        get_pull_request_fact, save_pull_request_read, PullRequestAdoption, PullRequestReadOptions,
+    };
 
     let (_dir, store) = temp_store().await;
     let owner = OwnerId::local();
@@ -5229,7 +5231,10 @@ async fn an_applied_read_projects_into_every_workspace_showing_it() {
         &read,
         PullRequestReadOptions {
             mint_row: false,
-            adopt: Some(adopting),
+            adopt: Some(PullRequestAdoption {
+                workspace: adopting,
+                replacing: None,
+            }),
         },
     )
     .await
@@ -5281,7 +5286,10 @@ async fn an_applied_read_projects_into_every_workspace_showing_it() {
         &read,
         PullRequestReadOptions {
             mint_row: true,
-            adopt: Some(adopting),
+            adopt: Some(PullRequestAdoption {
+                workspace: adopting,
+                replacing: None,
+            }),
         },
     )
     .await
@@ -5310,6 +5318,114 @@ async fn an_applied_read_projects_into_every_workspace_showing_it() {
     .await
     .unwrap()
     .is_none());
+}
+
+/// An adoption that lands between a fetch's start and its write wins. The
+/// fetch began when the workspace showed #1; a create then pointed the column
+/// at #2. The fetch's read of #1 still reaches every workspace that shows #1,
+/// but no longer takes over the one that moved on to #2.
+#[tokio::test]
+async fn a_fetch_does_not_take_back_a_column_adopted_in_between() {
+    use crate::db::code::{
+        adopt_workspace_pull_request, save_pull_request_read, PullRequestAdoption,
+        PullRequestReadOptions,
+    };
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session_id, _turn_id) = seed_owner(&store, &owner, "adoption").await;
+    let workspace = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id
+        .expect("session has a workspace");
+    let light = |number: u64| -> PullRequestDigest {
+        serde_json::from_value(serde_json::json!({
+            "number": number,
+            "url": format!("https://github.com/acme/tools/pull/{number}"),
+            "state": "open"
+        }))
+        .unwrap()
+    };
+    let first_url = "https://github.com/acme/tools/pull/412".to_owned();
+    assert!(
+        adopt_workspace_pull_request(&store, &owner, workspace, &light(412))
+            .await
+            .unwrap()
+    );
+    let other = another_workspace(&store, &owner, workspace, Some(light(412))).await;
+
+    // The create lands while the fetch of #412 is in flight.
+    assert!(
+        adopt_workspace_pull_request(&store, &owner, workspace, &light(413))
+            .await
+            .unwrap()
+    );
+
+    let at = now();
+    let mut read = pull_request_read(&owner);
+    read.object = Some(pull_request_object(at, "aaa111", "Fetched", at, None));
+    let applied = save_pull_request_read(
+        &store,
+        &read,
+        PullRequestReadOptions {
+            mint_row: true,
+            adopt: Some(PullRequestAdoption {
+                workspace,
+                replacing: Some(first_url.clone()),
+            }),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(applied.workspaces, vec![other]);
+    assert_eq!(
+        get_workspace(&store, &owner, workspace)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr
+            .and_then(|pr| pr.url),
+        Some("https://github.com/acme/tools/pull/413".to_owned()),
+        "the pull request adopted in between stays"
+    );
+
+    // A column still showing what the fetch began from does take it.
+    let mut newer = pull_request_read(&owner);
+    let later = at + chrono::Duration::seconds(5);
+    newer.object = Some(pull_request_object(
+        later,
+        "aaa111",
+        "Fetched again",
+        later,
+        None,
+    ));
+    let taken = save_pull_request_read(
+        &store,
+        &newer,
+        PullRequestReadOptions {
+            mint_row: true,
+            adopt: Some(PullRequestAdoption {
+                workspace: other,
+                replacing: Some(first_url),
+            }),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(taken.workspaces, vec![other]);
+    assert_eq!(
+        get_workspace(&store, &owner, other)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr
+            .and_then(|pr| pr.title),
+        Some("Fetched again".to_owned())
+    );
 }
 
 /// A whole-row turn save cannot blank a recap that landed while it was held.

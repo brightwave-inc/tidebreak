@@ -528,11 +528,7 @@ async fn sweep_pull_requests(
         let mut stale = Vec::new();
         for number in numbers {
             let fresh = repo_facts.iter().find(|fact| {
-                fact.number == number
-                    && fact
-                        .live
-                        .as_ref()
-                        .is_some_and(|live| super::reconcile::live_tier_is_fresh(live, now))
+                fact.number == number && super::reconcile::live_tier_answers(fact, now)
             });
             let Some(fact) = fresh else {
                 stale.push(number);

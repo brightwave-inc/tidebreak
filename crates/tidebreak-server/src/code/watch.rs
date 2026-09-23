@@ -931,8 +931,8 @@ fn is_watch_actor(actor: Option<&TurnActor>) -> bool {
 /// The workspace's pull request as its fact row holds it, when that row's
 /// live tier is fresh (decision 66). The workspace column supplies the
 /// identity to join on. `None` sends the caller to a host read: no stored
-/// digest, no joinable URL, no fact row, or a tier older than the reconcile
-/// cadence promises.
+/// digest, no joinable URL, no fact row, a tier older than the reconcile
+/// cadence promises, or an open pull request whose checks are unknown.
 async fn fresh_stored_digest(
     runtime: &CodeRuntime,
     owner: &OwnerId,
@@ -955,8 +955,9 @@ async fn fresh_stored_digest(
     fresh_workspace_digest(stored, &fact, Utc::now())
 }
 
-/// Return the digest the fact row's live tier certifies, when that tier is
-/// fresh.
+/// Return the digest the fact row's live tier certifies, when that tier can
+/// answer: fresh, and with the check runs of an open pull request's head
+/// known ([`super::reconcile::live_tier_answers`]).
 ///
 /// The certificate and the fields it certifies must come from the same row
 /// (issue 2799). `observed_at` says when the fact row's live tier was
@@ -972,8 +973,7 @@ fn fresh_workspace_digest(
     fact: &tidebreak_core::CodePullRequestFact,
     now: chrono::DateTime<Utc>,
 ) -> Option<PullRequestDigest> {
-    let live = fact.live.as_ref()?;
-    if !super::reconcile::live_tier_is_fresh(live, now) {
+    if !super::reconcile::live_tier_answers(fact, now) {
         return None;
     }
     let mut digest = fact.digest();
@@ -1195,6 +1195,9 @@ mod tests {
         stored.state = "merged".to_owned();
         stored.merged = Some(true);
         stored.auto_merge_enabled = Some(false);
+        stored.checks = Some(Vec::new());
+        stored.checks_summary = Some("no checks".to_owned());
+        stored.check_counts = Some(tidebreak_core::PullRequestCheckCounts::default());
         let fact = CodePullRequestFact {
             id: CodePullRequestId::new(),
             owner: OwnerId::local(),
@@ -1269,6 +1272,60 @@ mod tests {
             assess(&digest),
             WatchAssessment::Actionable(WatchReason::FailingChecks)
         );
+    }
+
+    /// The window after the watch's own fix turn pushes: the push
+    /// confirmation stored head `pushed`, which cleared the old head's checks,
+    /// and no read has loaded the new head's yet. The row must not answer:
+    /// judged on its review state alone, the new head would read as needing
+    /// an approval before its checks even started.
+    #[test]
+    fn fresh_workspace_digest_refuses_a_head_whose_checks_are_unknown() {
+        let now = Utc::now();
+        let stored = base_pr();
+        let mut observed = base_pr();
+        observed.head_sha = Some("pushed".to_owned());
+        observed.review_decision = Some("review_required".to_owned());
+        observed.merge_state_status = Some("blocked".to_owned());
+        observed.checks = None;
+        let mut fact = CodePullRequestFact {
+            id: CodePullRequestId::new(),
+            owner: OwnerId::local(),
+            host: "github.com".to_owned(),
+            repo_owner: "example".to_owned(),
+            repo_name: "demo".to_owned(),
+            number: observed.number,
+            url: observed.url.clone().unwrap(),
+            title: observed.title.clone().unwrap(),
+            state: CodePullRequestState::Open,
+            draft: false,
+            author: None,
+            head_branch: "feature".to_owned(),
+            base_branch: "main".to_owned(),
+            head_sha: observed.head_sha.clone(),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            live: Some(CodePullRequestLiveState::from_digest(&observed, now)),
+        };
+        // Answering from this row would be wrong.
+        assert_eq!(
+            assess(&fact.digest()),
+            WatchAssessment::NeedsUser("the pull request needs a review approval")
+        );
+        assert_eq!(
+            fresh_workspace_digest(&stored, &fact, now),
+            None,
+            "unknown checks send the watch to a host read"
+        );
+
+        // Once a read loads the new head's checks, the row answers again.
+        fact.live.as_mut().unwrap().checks = Some(vec![check(PullRequestCheckBucket::Pending)]);
+        let digest = fresh_workspace_digest(&stored, &fact, now).expect("checks are known");
+        assert_eq!(assess(&digest), WatchAssessment::Waiting);
     }
 
     #[test]

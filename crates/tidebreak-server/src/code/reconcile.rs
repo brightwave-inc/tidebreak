@@ -65,12 +65,32 @@ pub(crate) fn reconcile_delay(attached: bool, since_last_sweep: Option<Duration>
 /// degrades to a fetch rather than a stale verdict.
 const LIVE_TIER_FRESH_SECS: i64 = (RECONCILE_SWEEP_INTERVAL.as_secs() as i64) * 2 + 30;
 
-/// Whether a sweep may consume this live tier instead of fetching.
-pub(crate) fn live_tier_is_fresh(
+/// Whether a live tier was observed recently enough to answer a sweep.
+fn live_tier_is_fresh(
     live: &tidebreak_core::CodePullRequestLiveState,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     now - live.observed_at <= chrono::Duration::seconds(LIVE_TIER_FRESH_SECS)
+}
+
+/// Whether a sweep may answer from this pull request's stored row instead
+/// of reading the host: the live tier is fresh, and an open pull request's
+/// check runs are known.
+///
+/// A newer head clears the old head's check runs, and a read that saw only
+/// the pull request object, such as a push confirmation, does not load the
+/// new head's. Until a read does, the row's checks are unknown, not empty:
+/// the watch would judge the new head on its review state alone, and a
+/// trigger could fire before the head's checks exist. A settled pull request
+/// needs no checks to classify.
+pub(crate) fn live_tier_answers(
+    fact: &tidebreak_core::CodePullRequestFact,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    fact.live.as_ref().is_some_and(|live| {
+        live_tier_is_fresh(live, now)
+            && (fact.state != tidebreak_core::CodePullRequestState::Open || live.checks.is_some())
+    })
 }
 
 /// Abort the reconcile sweep when the runtime is dropped.
@@ -247,6 +267,115 @@ pub async fn sweep_reconcile(runtime: &Arc<CodeRuntime>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a stored pull request through the store's merge, the way the
+    /// fetcher and a push confirmation would leave it.
+    fn stored_after(
+        reads: &[tidebreak_core::PullRequestRead],
+    ) -> tidebreak_core::StoredPullRequest {
+        let first = tidebreak_core::StoredPullRequest::first_sighting(
+            &reads[0],
+            tidebreak_core::CodePullRequestId::new(),
+        )
+        .unwrap();
+        reads.iter().fold(first, |state, read| {
+            tidebreak_core::merge_pull_request_read(&state, read)
+        })
+    }
+
+    fn object_read(
+        head: &str,
+        version: chrono::DateTime<chrono::Utc>,
+        observed_at: chrono::DateTime<chrono::Utc>,
+        state: tidebreak_core::CodePullRequestState,
+    ) -> tidebreak_core::PullRequestRead {
+        let mut read = tidebreak_core::PullRequestRead::new(
+            tidebreak_core::OwnerId::local(),
+            "github.com",
+            "acme",
+            "tools",
+            7,
+        );
+        read.object = Some(tidebreak_core::PullRequestObjectRead {
+            snapshot: tidebreak_core::PullRequestSnapshot {
+                url: "https://github.com/acme/tools/pull/7".into(),
+                title: "Tools".into(),
+                state,
+                draft: false,
+                author: None,
+                head_branch: "feature".into(),
+                base_branch: "main".into(),
+                head_sha: Some(head.into()),
+                created_at: version,
+                updated_at: version,
+                merged_at: None,
+                closed_at: None,
+            },
+            mergeability: None,
+            auto_merge_enabled: None,
+            observed_at,
+            etag: None,
+        });
+        read
+    }
+
+    /// The trigger and watch sweeps share this rule. After a push
+    /// confirmation moves the head, the row's checks are unknown until a read
+    /// loads them, and a row with unknown checks sends the sweep to the host
+    /// rather than firing on "no checks".
+    #[test]
+    fn a_moved_head_answers_again_only_once_its_checks_load() {
+        use tidebreak_core::{CodePullRequestState, PullRequestChecksRead, PullRequestReviewRead};
+
+        let now = chrono::Utc::now();
+        let at =
+            |seconds: i64| now - chrono::Duration::seconds(60) + chrono::Duration::seconds(seconds);
+        let mut fetched = object_read("aaa", at(0), at(1), CodePullRequestState::Open);
+        fetched.checks = Some(PullRequestChecksRead {
+            head_sha: Some("aaa".into()),
+            checks: Vec::new(),
+            observed_at: at(1),
+            etag: None,
+        });
+        fetched.review = Some(PullRequestReviewRead {
+            decision: Some("review_required".into()),
+            observed_at: at(1),
+            etag: None,
+        });
+        let before_push = stored_after(&[fetched.clone()]);
+        assert!(live_tier_answers(&before_push.fact, now));
+
+        // The push confirmation carries only the object, on the new head.
+        let pushed = object_read("bbb", at(10), at(11), CodePullRequestState::Open);
+        let after_push = stored_after(&[fetched.clone(), pushed.clone()]);
+        let live = after_push.fact.live.as_ref().unwrap();
+        assert!(super::live_tier_is_fresh(live, now), "the stamp is recent");
+        assert_eq!(live.checks, None);
+        assert!(
+            !live_tier_answers(&after_push.fact, now),
+            "unknown checks on an open pull request do not answer"
+        );
+
+        // A read of the new head's checks makes the row answer again.
+        let mut checked = object_read("bbb", at(10), at(20), CodePullRequestState::Open);
+        checked.checks = Some(PullRequestChecksRead {
+            head_sha: Some("bbb".into()),
+            checks: Vec::new(),
+            observed_at: at(20),
+            etag: None,
+        });
+        assert!(live_tier_answers(
+            &stored_after(&[fetched.clone(), pushed.clone(), checked]).fact,
+            now
+        ));
+
+        // A settled pull request needs no checks to classify.
+        let merged = object_read("bbb", at(30), at(31), CodePullRequestState::Merged);
+        assert!(live_tier_answers(
+            &stored_after(&[fetched, pushed, merged]).fact,
+            now
+        ));
+    }
 
     #[test]
     fn the_first_pass_runs_at_once_in_either_state() {

@@ -31,17 +31,31 @@ use super::super::super::{entities, store_err, DbStore};
 
 /// How [`save_pull_request_read`] treats a pull request with no row yet, and
 /// which workspace takes the result.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PullRequestReadOptions {
     /// Create the row when none exists. Readers that track a pull request
     /// (decision 77) mint; the conditional fetcher does not, so a workspace
     /// looking at a pull request never makes it tracked by looking.
     pub mint_row: bool,
-    /// The workspace whose pull-request column should show this pull
-    /// request even when it shows another one now. Every other active
-    /// workspace takes the result only when its column already shows this
-    /// pull request.
-    pub adopt: Option<WorkspaceId>,
+    /// A workspace whose pull-request column should show this pull request
+    /// even when it shows another one now. Every other active workspace
+    /// takes the result only when its column already shows this pull
+    /// request.
+    pub adopt: Option<PullRequestAdoption>,
+}
+
+/// A workspace that takes a pull request into its column: the conditional
+/// fetcher's own workspace, which may find a new pull request for its
+/// branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestAdoption {
+    /// The workspace.
+    pub workspace: WorkspaceId,
+    /// The pull request URL the column showed when the caller began, or
+    /// `None` for an empty column. The column takes the new pull request only
+    /// while it still shows that, or already shows the new one, so a pull
+    /// request another writer adopted in the meantime wins.
+    pub replacing: Option<String>,
 }
 
 /// What one applied read did.
@@ -98,7 +112,7 @@ fn save_in_transaction<'a>(
             AgentError::Store(format!("pull request number {} overflows", read.number))
         })?;
         let transaction = store.conn.begin().await.map_err(store_err)?;
-        match apply_on(&transaction, read, number, options).await {
+        match apply_on(&transaction, read, number, &options).await {
             Ok(applied) => {
                 transaction.commit().await.map_err(store_err)?;
                 Ok(applied)
@@ -115,7 +129,7 @@ async fn apply_on<C>(
     conn: &C,
     read: &PullRequestRead,
     number: i64,
-    options: PullRequestReadOptions,
+    options: &PullRequestReadOptions,
 ) -> Result<Option<AppliedPullRequestRead>>
 where
     C: ConnectionTrait,
@@ -129,7 +143,8 @@ where
             };
             if !options.mint_row {
                 let workspaces =
-                    project_into_workspaces(conn, &first.fact, options.adopt, true).await?;
+                    project_into_workspaces(conn, &first.fact, options.adopt.as_ref(), false)
+                        .await?;
                 return Ok(Some(AppliedPullRequestRead {
                     fact: first.fact,
                     stored: false,
@@ -154,11 +169,14 @@ where
     let changed = before
         .as_ref()
         .is_none_or(|before| merged.visibly_differs(before));
-    let workspaces = if changed || options.adopt.is_some() {
-        project_into_workspaces(conn, &merged.fact, options.adopt, false).await?
-    } else {
-        Vec::new()
-    };
+    // Only a changed digest can leave another workspace's column behind. An
+    // unchanged read, a 304 on the hot tier included, looks at no workspace
+    // but the one it adopts into, so it holds the writer only briefly.
+    let digest_changed = before
+        .as_ref()
+        .is_none_or(|before| before.fact.digest() != merged.fact.digest());
+    let workspaces =
+        project_into_workspaces(conn, &merged.fact, options.adopt.as_ref(), digest_changed).await?;
     Ok(Some(AppliedPullRequestRead {
         fact: merged.fact,
         stored: true,
@@ -406,47 +424,76 @@ impl LiveColumns {
     }
 }
 
-/// Rewrite the pull-request column of every active workspace that shows
-/// `fact`, and of `adopt`, with the fact's digest. With `adopt_only`, only
-/// `adopt` takes it. Returns the workspaces whose column changed.
+/// Rewrite the pull-request column of the workspaces that should show
+/// `fact`'s digest: with `every_showing`, every active workspace whose column
+/// already shows this pull request; and `adopt`'s workspace, while its column
+/// still shows what the caller began from. Returns the workspaces whose
+/// column changed.
 async fn project_into_workspaces<C>(
     conn: &C,
     fact: &CodePullRequestFact,
-    adopt: Option<WorkspaceId>,
-    adopt_only: bool,
+    adopt: Option<&PullRequestAdoption>,
+    every_showing: bool,
 ) -> Result<Vec<WorkspaceId>>
 where
     C: ConnectionTrait,
 {
-    if adopt_only && adopt.is_none() {
+    if !every_showing && adopt.is_none() {
         return Ok(Vec::new());
     }
     let digest = fact.digest();
-    let encoded = serde_json::to_value(&digest)?;
-    let mut query = entities::code_workspace::Entity::find()
-        .filter(entities::code_workspace::Column::Owner.eq(fact.owner.as_str()))
-        .filter(entities::code_workspace::Column::Status.eq(CodeWorkspaceStatus::Active.as_str()));
-    if adopt_only {
-        if let Some(adopt) = adopt {
-            query = query.filter(entities::code_workspace::Column::Id.eq(adopt.0));
-        }
-    }
-    let rows = query.all(conn).await.map_err(store_err)?;
-    let mut rewritten = Vec::new();
-    for row in rows {
-        let id = WorkspaceId(row.id);
-        let shows =
-            digest_url(row.pr.as_ref()).is_some_and(|url| url.eq_ignore_ascii_case(&fact.url));
-        if adopt != Some(id) && (adopt_only || !shows) {
-            continue;
-        }
-        let current: Option<PullRequestDigest> = row
+    let takes = |row: &entities::code_workspace::Model| {
+        let current = digest_url(row.pr.as_ref());
+        let shows_it = current.is_some_and(|url| url.eq_ignore_ascii_case(&fact.url));
+        let adopts = adopt.is_some_and(|adopt| {
+            adopt.workspace.0 == row.id
+                && (shows_it || same_url(current, adopt.replacing.as_deref()))
+        });
+        let stale = row
             .pr
             .as_ref()
-            .and_then(|value| serde_json::from_value(value.clone()).ok());
-        if current.as_ref() == Some(&digest) {
-            continue;
+            .and_then(|value| serde_json::from_value::<PullRequestDigest>(value.clone()).ok())
+            .as_ref()
+            != Some(&digest);
+        ((every_showing && shows_it) || adopts) && stale
+    };
+    let scope = || {
+        let query = entities::code_workspace::Entity::find()
+            .filter(entities::code_workspace::Column::Owner.eq(fact.owner.as_str()))
+            .filter(
+                entities::code_workspace::Column::Status.eq(CodeWorkspaceStatus::Active.as_str()),
+            );
+        match adopt {
+            Some(adopt) if !every_showing => {
+                query.filter(entities::code_workspace::Column::Id.eq(adopt.workspace.0))
+            }
+            _ => query,
         }
+    };
+    let candidates: Vec<uuid::Uuid> = scope()
+        .all(conn)
+        .await
+        .map_err(store_err)?
+        .iter()
+        .filter(|row| takes(row))
+        .map(|row| row.id)
+        .collect();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Lock the rows this transaction will rewrite and judge them again. On
+    // PostgreSQL an adoption that committed since the scan is seen here and
+    // wins, and one that starts later waits for this commit. SQLite's single
+    // writer already serializes both, and its query builder omits the lock.
+    let locked = scope()
+        .filter(entities::code_workspace::Column::Id.is_in(candidates))
+        .lock_exclusive()
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    let encoded = serde_json::to_value(&digest)?;
+    let mut rewritten = Vec::new();
+    for row in locked.iter().filter(|row| takes(row)) {
         let result = entities::code_workspace::Entity::update_many()
             .col_expr(
                 entities::code_workspace::Column::Pr,
@@ -461,10 +508,20 @@ where
             .await
             .map_err(store_err)?;
         if result.rows_affected == 1 {
-            rewritten.push(id);
+            rewritten.push(WorkspaceId(row.id));
         }
     }
     Ok(rewritten)
+}
+
+/// Whether a column's pull request URL is the expected one: both absent, or
+/// the same URL in any case.
+fn same_url(current: Option<&str>, expected: Option<&str>) -> bool {
+    match (current, expected) {
+        (None, None) => true,
+        (Some(current), Some(expected)) => current.eq_ignore_ascii_case(expected),
+        _ => false,
+    }
 }
 
 /// The pull request URL a stored workspace column names.
