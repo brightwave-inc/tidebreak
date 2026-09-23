@@ -430,7 +430,7 @@ export function DataPrivacyPanel({
             >
               <Button
                 type="button"
-                variant="destructive"
+                variant="ghost-destructive"
                 size="sm"
                 disabled={working !== null}
                 onClick={() => void deleteEverything()}

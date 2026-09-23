@@ -398,7 +398,7 @@ export function MemoryPanel({
                 </div>
                 <Button
                   type="button"
-                  variant="destructive"
+                  variant="ghost-destructive"
                   size="sm"
                   disabled={working}
                   onClick={() => void deleteEverything(records.length)}
