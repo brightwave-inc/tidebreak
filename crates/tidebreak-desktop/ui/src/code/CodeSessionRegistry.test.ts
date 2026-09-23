@@ -324,6 +324,47 @@ describe("CodeSessionRegistry", () => {
     expect(sockets.map((socket) => socket.after)).toEqual([0, 7]);
   });
 
+  it("retries the prompt fetch when the turn row is not visible yet", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    let visible = false;
+    const hydrateTurns = vi.fn(async () =>
+      visible
+        ? [turnSnapshot("t1", "running", "2026-08-15T12:00:00.000Z")]
+        : [],
+    );
+    const store = acquireCodeSession("s1", openSocket, undefined, hydrateTurns);
+    await flushMicrotasks();
+    sockets[0]?.emit({
+      seq: 1,
+      event: { type: "turn_started", turn_id: "t1" },
+    });
+    await flushMicrotasks();
+    expect(store.getState().items.some((item) => item.kind === "user")).toBe(
+      false,
+    );
+
+    visible = true;
+    await vi.advanceTimersByTimeAsync(40);
+    await flushMicrotasks();
+
+    expect(store.getState().items).toContainEqual(
+      expect.objectContaining({
+        kind: "user",
+        turnId: "t1",
+        text: "list the files",
+      }),
+    );
+  });
+
   it("retries initial turn hydration when the first open could not read it", async () => {
     const openSocket = (
       after: number,

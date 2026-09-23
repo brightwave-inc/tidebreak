@@ -41,6 +41,13 @@ export type CodeSessionEntry = {
 const registry = new Map<string, CodeSessionEntry>();
 const retainedSessionIds = new Set<string>();
 
+/**
+ * Gaps between prompt fetches when `turn_started` arrives before the turn row
+ * is visible. The first read often races the insert; a reload is what used to
+ * be the only retry.
+ */
+const PROMPT_RETRY_DELAYS_MS = [40, 80, 160, 320, 640];
+
 /** Bound transcript memory while keeping normal workspace switching instant. */
 export const MAX_RETAINED_CODE_SESSIONS = 4;
 
@@ -72,17 +79,9 @@ function createController(
       return;
     }
     fetchedPrompts.add(turnId);
-    void hydrateTurns()
-      .then((turns) => {
-        const turn = turns.find((candidate) => candidate.id === turnId);
-        if (!turn) return;
-        store
-          .getState()
-          .update((session) => applyCodeTurnSnapshot(session, turn));
-      })
-      .catch(() => {
-        // The prompt lands on the next open. The turn itself still streams.
-      });
+    void loadPrompt(hydrateTurns, store, turnId).then((landed) => {
+      if (!landed) fetchedPrompts.delete(turnId);
+    });
   };
   let controller: CodeSessionController;
   controller = new CodeSessionController({
@@ -233,6 +232,77 @@ export function releaseCodeSession(sessionId: string): void {
   existing.controller = null;
   existing.store.getState().setConnectionState("reconnecting");
   retainCodeSession(sessionId);
+}
+
+/**
+ * Wait until the conversation pane has opened its event socket.
+ *
+ * `POST /turns` does not return until the engine finishes the reply. If the
+ * request starts first, it can take the last connection, and the socket never
+ * opens. The transcript then stays on the startup screen until a reload
+ * aborts the request.
+ *
+ * Returns immediately when no view has acquired the session yet. Callers
+ * still post the turn; the page drops the startup screen when the turn row
+ * appears.
+ */
+export function waitForCodeSessionHydrated(
+  sessionId: string,
+  timeoutMs = 1000,
+): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      const entry = peekCodeSession(sessionId);
+      if (!entry || entry.store.getState().hydrated) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(finish, timeoutMs);
+      const unsubscribe = entry.store.subscribe((state) => {
+        if (state.hydrated) finish();
+      });
+      function finish() {
+        clearTimeout(timer);
+        unsubscribe();
+        resolve();
+      }
+    }, 0);
+  });
+}
+
+async function loadPrompt(
+  hydrateTurns: () => Promise<CodeTurnSnapshot[]>,
+  store: ReturnType<typeof createCodeSessionStore>,
+  turnId: string,
+): Promise<boolean> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const turns = await hydrateTurns();
+      const turn = turns.find((candidate) => candidate.id === turnId);
+      if (turn) {
+        store
+          .getState()
+          .update((session) => applyCodeTurnSnapshot(session, turn));
+        return true;
+      }
+    } catch {
+      // The row may not be visible yet. Retry, then leave the id free so a
+      // later frame can ask again.
+    }
+    const delay = PROMPT_RETRY_DELAYS_MS[attempt];
+    if (delay === undefined) return false;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+}
+
+/** Whether this session already has an accepted turn, live or in the store. */
+export function codeSessionAcceptedTurn(sessionId: string): boolean {
+  const state = peekCodeSession(sessionId)?.store.getState();
+  if (!state) return false;
+  return (
+    state.journalTurnId !== null ||
+    state.items.some((item) => item.kind === "user")
+  );
 }
 
 export function peekCodeSession(

@@ -115,6 +115,12 @@ export function CodeSessionPane({
   const store = useRegisteredCodeSession(session.id, client);
   const firstTurnRecovery = useFirstTurnRecovery(client, session.id);
   const items = store((state) => state.items);
+  useEffect(() => {
+    if (!firstTurnRecovery || firstTurnRecovery.status !== "sending") return;
+    const sent = items.some((item) => item.kind === "user");
+    if (!sent) return;
+    clearFirstTurnRecovery(client, session.id, firstTurnRecovery.id);
+  }, [client, firstTurnRecovery, items, session.id]);
   const treeChildren = store((state) => state.children);
   const treeWait = store((state) => state.wait);
   useEffect(() => {
