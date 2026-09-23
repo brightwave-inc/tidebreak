@@ -244,7 +244,11 @@ export function DataPrivacyPanel({
 
       <SettingsSection
         title="Where your data lives"
-        description="One folder holds everything but your keys, which stay in the keychain, and code worktrees, which stay in their own folder."
+        description={
+          overview?.storage === "postgres"
+            ? "Conversations live in PostgreSQL. This folder holds logs, tools, and working files."
+            : "Everything is in one folder. Your keys stay in the keychain, and code worktrees keep their own folder."
+        }
       >
         {loading && overview === null ? (
           <p className="text-sm text-muted-foreground" role="status">
@@ -287,30 +291,39 @@ export function DataPrivacyPanel({
       {overview && (
         <SettingsSection
           title="Disk use"
-          description={`${formatBytes(overview.total_bytes)} in all.`}
+          description={`${formatBytes(overview.total_bytes)} in this folder.`}
         >
           <ul
             className="flex flex-col divide-y divide-border"
             aria-label="Disk use by category"
           >
-            {overview.usage.map((entry) => (
-              <li
-                key={entry.category}
-                className="flex items-baseline justify-between gap-4 py-2 first:pt-0 last:pb-0"
-              >
-                <span className="min-w-0">
-                  <span className="text-sm">
-                    {DATA_CATEGORY_COPY[entry.category].label}
+            {overview.usage.map((entry) => {
+              // On PostgreSQL the database is not in this folder at all, so
+              // a size of nothing would say the wrong thing.
+              const elsewhere =
+                entry.category === "database" &&
+                overview.storage === "postgres";
+              return (
+                <li
+                  key={entry.category}
+                  className="flex items-baseline justify-between gap-4 py-2 first:pt-0 last:pb-0"
+                >
+                  <span className="min-w-0">
+                    <span className="text-sm">
+                      {DATA_CATEGORY_COPY[entry.category].label}
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      {elsewhere
+                        ? "In PostgreSQL, outside this folder"
+                        : DATA_CATEGORY_COPY[entry.category].description}
+                    </span>
                   </span>
-                  <span className="block text-xs text-muted-foreground">
-                    {DATA_CATEGORY_COPY[entry.category].description}
+                  <span className="shrink-0 text-sm tabular-nums">
+                    {elsewhere ? "—" : formatBytes(entry.bytes)}
                   </span>
-                </span>
-                <span className="shrink-0 text-sm tabular-nums">
-                  {formatBytes(entry.bytes)}
-                </span>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         </SettingsSection>
       )}
@@ -505,7 +518,7 @@ function ExportDialog({
   const ready = scope === "all" ? conversations.length > 0 : chosen.size > 0;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-lg grid-cols-[minmax(0,1fr)]">
         <DialogHeader>
           <DialogTitle>Export conversations</DialogTitle>
           <DialogDescription>
@@ -513,28 +526,36 @@ function ExportDialog({
             file you can read with other tools.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col gap-4">
-          <SegmentedControl<ConversationExportFormat>
-            aria-label="Export format"
-            value={format}
-            onValueChange={setFormat}
-            options={[
-              { value: "markdown", label: "Markdown" },
-              { value: "json", label: "JSON" },
-            ]}
-          />
-          <SegmentedControl<ExportScope>
-            aria-label="Conversations to export"
-            value={scope}
-            onValueChange={setScope}
-            options={[
-              { value: "all", label: `All ${conversations.length}` },
-              { value: "chosen", label: "Choose" },
-            ]}
-          />
+        <div className="flex min-w-0 flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <p className="text-xs font-medium text-muted-foreground">Format</p>
+            <SegmentedControl<ConversationExportFormat>
+              aria-label="Export format"
+              value={format}
+              onValueChange={setFormat}
+              options={[
+                { value: "markdown", label: "Markdown" },
+                { value: "json", label: "JSON" },
+              ]}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <p className="text-xs font-medium text-muted-foreground">
+              Conversations
+            </p>
+            <SegmentedControl<ExportScope>
+              aria-label="Conversations to export"
+              value={scope}
+              onValueChange={setScope}
+              options={[
+                { value: "all", label: `All ${conversations.length}` },
+                { value: "chosen", label: "Choose" },
+              ]}
+            />
+          </div>
           {scope === "chosen" && (
             <ul
-              className="flex max-h-[min(40vh,20rem)] flex-col overflow-y-auto rounded-lg border"
+              className="flex max-h-[min(40vh,20rem)] min-w-0 flex-col overflow-y-auto rounded-lg border"
               aria-label="Conversations"
             >
               {conversations.map((conversation) => {

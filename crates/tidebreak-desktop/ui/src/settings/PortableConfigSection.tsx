@@ -318,8 +318,8 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
           {applyError && (
             <SettingsStatus
               tone="critical"
-              label="The import did not run"
-              description={applyError}
+              label="The import failed"
+              description={sentenceCase(applyError)}
             />
           )}
           <DialogFooter>
@@ -356,6 +356,11 @@ function remapComplete(
   return (entry.remap_fields ?? []).every(
     (field) => (remap?.[field] ?? "").trim() !== "",
   );
+}
+
+/** A server message, which starts lowercase, as a sentence. */
+function sentenceCase(message: string): string {
+  return message.charAt(0).toUpperCase() + message.slice(1);
 }
 
 function appliedSummary(result: WorkspaceConfigApplyResult): string {
@@ -507,9 +512,9 @@ const CHOICE_LABEL: Record<WorkspaceConfigAction, string> = {
 
 /** What a missing remap is called in a sentence. */
 const REMAP_NOUN: Record<string, string> = {
-  command: "command on this machine",
-  cwd: "working directory on this machine",
-  root_path: "path on this machine",
+  command: "command",
+  cwd: "working directory",
+  root_path: "path",
 };
 
 const REMAP_LABEL: Record<string, string> = {
@@ -607,8 +612,8 @@ function PreviewRow({
       {missing.length > 0 && (
         <p className="mt-2 text-xs text-muted-foreground">
           Skipped until you enter the{" "}
-          {missing.map((field) => REMAP_NOUN[field] ?? field).join(" and ")}{" "}
-          below.
+          {missing.map((field) => REMAP_NOUN[field] ?? field).join(" and ")} on
+          this machine below.
         </p>
       )}
       {offersStart && (

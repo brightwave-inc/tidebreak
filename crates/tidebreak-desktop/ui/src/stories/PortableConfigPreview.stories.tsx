@@ -289,6 +289,6 @@ export const ImportFailed: Story = {
   play: async ({ canvasElement }) => {
     const dialog = within(await openPreview(canvasElement));
     await userEvent.click(dialog.getByRole("button", { name: "Apply" }));
-    await dialog.findByText("The import did not run");
+    await dialog.findByText("The import failed");
   },
 };

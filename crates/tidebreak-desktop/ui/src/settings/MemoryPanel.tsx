@@ -570,9 +570,10 @@ function ForgottenList({
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger asChild>
-        <button
+        <Button
           type="button"
-          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          variant="link"
+          className="h-auto gap-1.5 px-0 py-0.5 font-normal text-muted-foreground hover:text-foreground"
         >
           <ChevronRight
             className={`size-3.5 transition-transform ${open ? "rotate-90" : ""}`}
@@ -580,7 +581,7 @@ function ForgottenList({
           />
           {open ? "Hide" : "Show"} {records.length} forgotten{" "}
           {records.length === 1 ? "record" : "records"}
-        </button>
+        </Button>
       </CollapsibleTrigger>
       <CollapsibleContent>
         <ul className="mt-3 flex flex-col divide-y divide-border">

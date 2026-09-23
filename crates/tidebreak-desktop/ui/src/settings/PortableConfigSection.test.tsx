@@ -331,7 +331,7 @@ describe("PortableConfigSection", () => {
     await screen.findByLabelText("Import preview");
     await user.click(screen.getByRole("button", { name: "Apply" }));
 
-    expect(await screen.findByText("The import did not run")).toBeVisible();
+    expect(await screen.findByText("The import failed")).toBeVisible();
     expect(
       screen.getAllByText(/failed to start\. Nothing changed\./).length,
     ).toBeGreaterThan(0);
