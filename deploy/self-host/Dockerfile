@@ -164,12 +164,12 @@ RUN set -eu; \
 # together, and scripts/self-host-image-pins.test.mjs fails the build when
 # they drift apart.
 RUN set -eu; \
-    version=20.20.2; \
+    version=24.21.0; \
     case "$(dpkg --print-architecture)" in \
       amd64) platform=linux-x64; \
-             sha256=19e56f0825510207dd904f087fe52faa0a4eb6b2aab5f0ea7a33830d04888b8b ;; \
+             sha256=6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff ;; \
       arm64) platform=linux-arm64; \
-             sha256=47ef73d543ecf6eb19435f6c03a0ac4809b3bf0dd6b26c7c571efc2a6572a74d ;; \
+             sha256=724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5 ;; \
       *) echo "no managed Node pin for $(dpkg --print-architecture)" >&2; exit 1 ;; \
     esac; \
     archive="node-v${version}-${platform}.tar.gz"; \

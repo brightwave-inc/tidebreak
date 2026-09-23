@@ -20,7 +20,7 @@
 //! the artifact's SHA-256 is pinned in this file next to it, taken from the
 //! Node project's published checksum file:
 //!
-//! - <https://nodejs.org/dist/v20.20.2/SHASUMS256.txt>
+//! - <https://nodejs.org/dist/v24.21.0/SHASUMS256.txt>
 //!
 //! macOS, Linux, and Windows are supported on both shipped architectures. The
 //! local sandbox remains macOS-only, but code mode uses the same managed
@@ -121,43 +121,43 @@ struct PinnedArtifact {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
-    url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-darwin-arm64.tar.gz",
-    archive_root: "node-v20.20.2-darwin-arm64",
+    url: "https://nodejs.org/dist/v24.21.0/node-v24.21.0-darwin-arm64.tar.gz",
+    archive_root: "node-v24.21.0-darwin-arm64",
     archive_format: ArchiveFormat::TarGz,
 });
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
-    url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-darwin-x64.tar.gz",
-    archive_root: "node-v20.20.2-darwin-x64",
+    url: "https://nodejs.org/dist/v24.21.0/node-v24.21.0-darwin-x64.tar.gz",
+    archive_root: "node-v24.21.0-darwin-x64",
     archive_format: ArchiveFormat::TarGz,
 });
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
-    url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-arm64.tar.gz",
-    archive_root: "node-v20.20.2-linux-arm64",
+    url: "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-arm64.tar.gz",
+    archive_root: "node-v24.21.0-linux-arm64",
     archive_format: ArchiveFormat::TarGz,
 });
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
-    url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-x64.tar.gz",
-    archive_root: "node-v20.20.2-linux-x64",
+    url: "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.gz",
+    archive_root: "node-v24.21.0-linux-x64",
     archive_format: ArchiveFormat::TarGz,
 });
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
-    url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-win-arm64.zip",
-    archive_root: "node-v20.20.2-win-arm64",
+    url: "https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-arm64.zip",
+    archive_root: "node-v24.21.0-win-arm64",
     archive_format: ArchiveFormat::Zip,
 });
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
-    url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-win-x64.zip",
-    archive_root: "node-v20.20.2-win-x64",
+    url: "https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip",
+    archive_root: "node-v24.21.0-win-x64",
     archive_format: ArchiveFormat::Zip,
 });
 
@@ -344,7 +344,7 @@ pub(crate) async fn status(app: &AppHandle) -> tidebreak_code_execution::HostToo
         HostToolStatus::Unavailable(format!("Node {NODE_VERSION} is not installed yet"))
     } else {
         HostToolStatus::Unavailable(
-            "automatic Node install is not supported on this platform; install Node 20 yourself \
+            "automatic Node install is not supported on this platform; install Node 24 yourself \
              to use skills that need it"
                 .into(),
         )
