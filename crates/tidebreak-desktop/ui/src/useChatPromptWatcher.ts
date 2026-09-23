@@ -73,6 +73,7 @@ export function useChatPromptWatcher(
   const plansSignal = useRefreshSignals((state) => state.planApprovals);
   const folderSignal = useRefreshSignals((state) => state.folderAccess);
   const writebackSignal = useRefreshSignals((state) => state.outputWritebacks);
+  const inboxSignal = useRefreshSignals((state) => state.inbox);
 
   useEffect(() => {
     if (!client) {
@@ -255,6 +256,11 @@ export function useChatPromptWatcher(
   useVisibilityGatedPoll(() => refreshRef.current?.(), POLL_INTERVAL_MS, {
     enabled: client !== null,
     hiddenIntervalMs: HIDDEN_POLL_INTERVAL_MS,
-    revision: questionsSignal + plansSignal + folderSignal + writebackSignal,
+    revision:
+      questionsSignal +
+      plansSignal +
+      folderSignal +
+      writebackSignal +
+      inboxSignal,
   });
 }

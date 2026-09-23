@@ -101,6 +101,11 @@ export type ChatSessionEffect =
    */
   | { type: "refresh_task_plan" }
   | { type: "refresh_notifications" }
+  /**
+   * The turn parked on a tool approval. The shell re-reads the inbox, which is
+   * how it notices the park and tells you, instead of waiting for its poll.
+   */
+  | { type: "refresh_inbox" }
   /** A turn began; the host resets cancel state (and steer state when asked). */
   | { type: "turn_began"; turnId: string; startsDifferentTurn: boolean }
   /** A turn reached a terminal event; the host clears cancel/steer state. */
@@ -345,6 +350,7 @@ export function reduceChatSessionEvent(
       const approval = toolApprovalPresentation(event.approval);
       const provisionalToolCallIds = new Set(state.provisionalToolCallIds);
       provisionalToolCallIds.delete(event.call_id);
+      effects.push({ type: "refresh_inbox" });
       return {
         state: {
           ...state,

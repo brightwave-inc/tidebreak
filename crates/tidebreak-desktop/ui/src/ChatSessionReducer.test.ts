@@ -514,6 +514,17 @@ describe("approvals", () => {
     expect(state.provisionalToolCallIds.has("call-1")).toBe(false);
   });
 
+  it("asks the shell to re-read the inbox, so the park is noticed now", () => {
+    // Without it, a turn parked on an approval while you are in another app
+    // waits for the inbox poll before anything tells you.
+    const { effects } = play([
+      TURN,
+      { type: "tool_call_started", call_id: "call-1", name: "search" },
+      APPROVAL,
+    ]);
+    expect(effects).toContainEqual({ type: "refresh_inbox" });
+  });
+
   it("resolves the card and resumes or cancels the tool on decision", () => {
     const approved = play([
       TURN,

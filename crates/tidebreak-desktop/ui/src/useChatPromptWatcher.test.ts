@@ -201,6 +201,22 @@ describe("useChatPromptWatcher", () => {
     });
   });
 
+  it("re-reads the inbox when the open chat parks on an approval", async () => {
+    const listInbox = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        inboxEntry("chat-1", [{ callId: "call-1", kind: "tool_approval" }]),
+      ]);
+    const client = stubClient({ listInbox });
+    renderHook(() => useChatPromptWatcher(client, "chat-1"));
+    await waitFor(() => expect(listInbox).toHaveBeenCalledTimes(1));
+
+    act(() => useRefreshSignals.getState().signal("inbox"));
+
+    await waitFor(() => expect(presentNeedsYou).toHaveBeenCalledTimes(1));
+  });
+
   it("leaves a code conversation to its digest", async () => {
     const listInbox = vi
       .fn()
