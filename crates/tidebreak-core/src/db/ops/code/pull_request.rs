@@ -72,24 +72,43 @@ pub struct AppliedPullRequestRead {
 /// when [`PullRequestReadOptions::mint_row`] allows. Otherwise the read's own
 /// first sighting goes to the adopting workspace's column only, and nothing
 /// is stored. `Ok(None)` when there is no row and the read cannot make one.
+///
+/// The transaction runs as a boxed future built in a plain function. Its
+/// callers sit deep inside turn drivers and sweeps, and a caller that held
+/// the transaction's state inline would grow by all of it.
 pub async fn save_pull_request_read(
     store: &DbStore,
     read: &PullRequestRead,
     options: PullRequestReadOptions,
 ) -> Result<Option<AppliedPullRequestRead>> {
-    let number = i64::try_from(read.number)
-        .map_err(|_| AgentError::Store(format!("pull request number {} overflows", read.number)))?;
-    let transaction = store.conn.begin().await.map_err(store_err)?;
-    match apply_on(&transaction, read, number, options).await {
-        Ok(applied) => {
-            transaction.commit().await.map_err(store_err)?;
-            Ok(applied)
+    save_in_transaction(store, read, options).await
+}
+
+type SaveFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<AppliedPullRequestRead>>> + Send + 'a>,
+>;
+
+fn save_in_transaction<'a>(
+    store: &'a DbStore,
+    read: &'a PullRequestRead,
+    options: PullRequestReadOptions,
+) -> SaveFuture<'a> {
+    Box::pin(async move {
+        let number = i64::try_from(read.number).map_err(|_| {
+            AgentError::Store(format!("pull request number {} overflows", read.number))
+        })?;
+        let transaction = store.conn.begin().await.map_err(store_err)?;
+        match apply_on(&transaction, read, number, options).await {
+            Ok(applied) => {
+                transaction.commit().await.map_err(store_err)?;
+                Ok(applied)
+            }
+            Err(err) => {
+                let _ = transaction.rollback().await;
+                Err(err)
+            }
         }
-        Err(err) => {
-            let _ = transaction.rollback().await;
-            Err(err)
-        }
-    }
+    })
 }
 
 async fn apply_on<C>(
