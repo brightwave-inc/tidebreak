@@ -395,8 +395,8 @@ The SBOM inventories the released source checkout; it must not be interpreted
 as an inventory of files or dependencies embedded in the DMG, app bundle, or
 updater archive.
 
-Packaged macOS apps check `latest.json` 15 seconds after launch and every five
-minutes. When a newer signed version is available, the Tauri updater downloads
+Packaged macOS apps check `latest.json` 15 seconds after launch and every
+hour. When a newer signed version is available, the Tauri updater downloads
 it in the background, verifies its signature, and stages the archive in an
 `updates` folder under the app's cache directory. The app then emits a ready
 state to the UI. The user must choose **Restart to update** before Tidebreak
@@ -404,7 +404,11 @@ reads the staged archive back, checks that it still matches what was
 verified, installs it, and relaunches; the app never interrupts active work
 automatically. A staged archive that a newer release supersedes, that the
 feed withdraws, or that fails to install is deleted, and each launch deletes
-archives that earlier runs left behind. With **Download updates
+archives that earlier runs left behind. The app checks that the `updates`
+folder takes a file before it downloads. If saving a downloaded archive
+fails, for example on a full disk, automatic downloads stop until the next
+launch or until the user chooses **Download update**, and the Updates panel
+says why. With **Download updates
 automatically** turned off in **Settings → Updates**, or by the
 `DownloadUpdatesAutomatically` [managed policy](managed-policy.md), the app
 still checks and reports the update as available, and downloads it only when

@@ -25,10 +25,24 @@ and the setting reads "Managed by your organization." When it is `false`,
 Tidebreak still checks for updates and says when one is available, but it
 downloads the update only when the person chooses **Download update**. When
 it is `true`, automatic downloads stay on. Absent leaves the choice to the
-person, and the setting starts on. A present-but-broken value fails closed to
-`false`. The key needs no gateway: an artifact that carries only this key
-leaves the profile unmanaged. The desktop app reads the key before every
-update check, so a change applies without a restart.
+person, and the setting starts on. The key needs no gateway: an artifact that
+carries only this key leaves the profile unmanaged. The desktop app reads the
+key before every update check, so a change applies without a restart.
+
+A broken artifact turns automatic downloads off and locks the setting, even
+when the artifact never meant to set this key. That covers a value of the
+wrong type, and also any policy artifact that Tidebreak finds but cannot read:
+a Linux policy file that does not parse, a macOS managed-preferences file that
+does not parse or is not owned by root, and a Windows policy key or value
+that cannot be read. On macOS a broken channel still falls through to the
+next one, so a valid value in another channel wins.
+
+Before you deploy this key, upgrade every client to a release that knows it.
+Earlier releases ignore the key on macOS and Windows. On Linux, an earlier
+release refuses a policy file that names only `download_updates_automatically`,
+because the file then names no key it recognizes. It treats that file as a
+broken policy, so the profile resolves managed but misconfigured, with no
+usable gateway.
 
 ## macOS — managed preferences
 
