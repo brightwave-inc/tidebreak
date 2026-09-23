@@ -1,4 +1,4 @@
-import { FolderInput, Puzzle } from "lucide-react";
+import { FolderGit2, FolderInput, Puzzle } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -21,6 +21,7 @@ import {
   type SkillImportIssue,
   type SkillImportReport,
 } from "./skillImport";
+import { AddFromGitDialog } from "./AddFromGitDialog";
 import { SkillDialog } from "./SkillDialog";
 import {
   hostToolProvisioningLabel,
@@ -48,6 +49,7 @@ export function PluginsView({
   loadInstructions,
   onOpen,
   importSkills = importSkillsFromFolder,
+  installFromGit,
 }: {
   state: PluginCatalogState;
   loadInstructions: PluginsApis["instructions"];
@@ -55,6 +57,8 @@ export function PluginsView({
   onOpen: (pluginId: string) => void;
   /** Open a native picker and copy user skills into this installation. */
   importSkills?: () => Promise<SkillImportReport | null>;
+  /** Pin a public HTTPS Git source. Absent in stories that only list. */
+  installFromGit?: PluginsApis["installFromGit"];
 }) {
   const { catalog, loading, error, reload, setEnabled } = state;
   const provisioning = useHostToolProvisioning();
@@ -64,6 +68,7 @@ export function PluginsView({
   const [importReport, setImportReport] = useState<SkillImportReport | null>(
     null,
   );
+  const [gitOpen, setGitOpen] = useState(false);
 
   const filtered = useMemo(
     () => filterCatalog(catalog, query),
@@ -143,6 +148,16 @@ export function PluginsView({
                 <FolderInput aria-hidden="true" />
                 {importing ? "Importing…" : "Import skills"}
               </Button>
+              {installFromGit && (
+                <Button
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={() => setGitOpen(true)}
+                >
+                  <FolderGit2 aria-hidden="true" />
+                  Add from Git
+                </Button>
+              )}
             </div>
           </header>
 
@@ -263,6 +278,14 @@ export function PluginsView({
         </div>
       </div>
 
+      {installFromGit && (
+        <AddFromGitDialog
+          open={gitOpen}
+          onOpenChange={setGitOpen}
+          install={installFromGit}
+          onInstalled={reload}
+        />
+      )}
       <SkillDialog
         skill={shownSkill}
         gated={false}

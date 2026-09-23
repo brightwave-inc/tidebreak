@@ -20,8 +20,8 @@ asked for a PowerPoint improvises.
 | **Charts** | Charts |
 
 Built-in plugins and skills you write yourself are enabled by default. A
-plugin installed from a public archive starts off — turn it on in the Plugins
-panel before the agent can use its skills or launch any bundled MCP server.
+plugin installed from Git starts off — turn it on in the Plugins panel
+before the agent can use its skills or launch any bundled MCP server.
 The agent sees a catalog of the enabled skills and reads a skill's full
 instructions when it decides to use one.
 
@@ -92,6 +92,24 @@ skills: ["word-documents", "pdf-documents", "presentations"]
 
 Your skills are loaded after the built-in ones and cannot shadow a built-in
 name. Pick a different name if it collides.
+
+## Add from Git
+
+The Plugins page can import one public HTTPS repository at a pinned tag or
+full commit SHA. A moving branch is refused. The importer accepts a root
+`plugin.json` (Agent Plugins), a `PLUGIN.md` bundle, or a lone `SKILL.md`
+(the Claude / Agent Skills shape). The plugin's files run with the agent's
+permissions. Members the importer skips are listed with the reason.
+
+From the CLI:
+
+```sh
+tidebreak plugins install --git https://github.com/acme/notes --ref v1.0.0
+tidebreak plugins install --git https://github.com/acme/notes --ref v1.0.0 --json
+```
+
+`--json` prints one object stamped with `schema_version`. There is no
+marketplace, no auto-update, and no directory of plugins.
 
 <Callout>
 The description is what the model sees in the catalog when it is deciding

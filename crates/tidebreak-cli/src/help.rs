@@ -20,6 +20,7 @@ pub enum Family {
     Print,
     Output,
     Setup,
+    Plugins,
     Diagnostics,
     Folder,
     Code,
@@ -34,6 +35,7 @@ impl Family {
             Self::Print => PRINT_USAGE,
             Self::Output => OUTPUT_USAGE,
             Self::Setup => SETUP_USAGE,
+            Self::Plugins => PLUGINS_USAGE,
             Self::Diagnostics => DIAGNOSTICS_USAGE,
             Self::Folder => FOLDER_USAGE,
             Self::Code => CODE_USAGE,
@@ -48,6 +50,7 @@ impl Family {
             Self::Print => "Print mode",
             Self::Output => "Outputs and attachments",
             Self::Setup => "Setup",
+            Self::Plugins => "Plugins",
             Self::Diagnostics => "Diagnostics",
             Self::Folder => "Folders",
             Self::Code => "Code",
@@ -108,6 +111,7 @@ fn family_from_command(command: Option<&OsStr>) -> Family {
         Some("provider" | "model" | "settings" | "mcp-server" | "chat" | "agent-run") => {
             Family::Setup
         }
+        Some("plugins") => Family::Plugins,
         Some("diagnostics") => Family::Diagnostics,
         Some("folder") => Family::Folder,
         Some("code") => Family::Code,
@@ -201,6 +205,15 @@ diagnostics reads process measurements and local log tails from the server.
 export writes a ZIP for performance investigations; it does not read
 conversations, databases, blobs, attachments, or credential stores.
 These commands take --server <url> [--server-token-env <var>] or --attach.";
+
+const PLUGINS_USAGE: &str = "\
+usage: tidebreak plugins install --git <url> --ref <tag-or-sha> [--json]
+
+plugins install fetches one public HTTPS Git repository at a pinned tag or
+full commit SHA and imports it as an instruction-only plugin. A moving
+branch is refused. The plugin's files run with the agent's permissions.
+--json prints one object stamped with schema_version. These commands take
+--server <url> [--server-token-env <var>] or --attach.";
 
 const FOLDER_USAGE: &str = "\
 usage: tidebreak folder connect <path> --chat <id> [--output-format text|json]
@@ -376,6 +389,10 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("mcp-server …", "List, add, or remove MCP servers"),
             ("chat …", "List, create, delete, or steer chats"),
             ("agent-run …", "List, show, or cancel agent runs"),
+            (
+                "plugins install",
+                "Install an instruction-only plugin from a pinned Git source",
+            ),
         ],
     ),
     (
@@ -425,6 +442,7 @@ const FAMILY_SYNTAX: &[&str] = &[
     PRINT_USAGE,
     OUTPUT_USAGE,
     SETUP_USAGE,
+    PLUGINS_USAGE,
     DIAGNOSTICS_USAGE,
     FOLDER_USAGE,
     CODE_USAGE,
