@@ -67,7 +67,12 @@ it to what the route can actually carry:
   (`ProviderKind::enforces_structured_output`).
 - A custom id may not shadow a curated id of the same provider. When a catalog
   update curates an id a reader already added, the curated row wins in the
-  catalog and in bare-id resolution.
+  catalog and in bare-id resolution. The provider list leaves the saved row
+  out of `models` and names it in `replaced_by_built_in`, and the next save
+  to that provider drops it, so the row never blocks a save.
+- A configured row reads tolerantly, like every REST record, and a field
+  added to it serializes only when it differs from its default. The update
+  body still refuses a row key the server does not know.
 
 Find models (`POST /providers/{kind}/models/discover`) reads the provider's
 own model listing with the saved key, on the server. The response carries

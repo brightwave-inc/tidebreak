@@ -94,8 +94,9 @@ turn.
 A few rules keep a custom model honest:
 
 - A model ID the provider already has built in is refused; use the built-in
-  row instead. If a later release builds in a model you added, the built-in
-  row takes over.
+  row instead. If a later release builds in a model you added, Tidebreak uses
+  the built-in model, the provider card says so, and the next save removes
+  your copy.
 - Anthropic reasoning needs a Claude 4.6 or later model ID.
 - Custom OpenAI models need an API key. ChatGPT sign-in runs only the
   built-in models Codex accepts.
