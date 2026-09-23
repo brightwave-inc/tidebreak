@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Brain, FolderPlus, Package, Paperclip, Plus } from "lucide-react";
+import { toast } from "sonner";
 
 import type { NetworkPolicy, ReasoningEffort } from "./api";
 import { ReasoningEffortSubMenu } from "./ModelMenu";
@@ -193,7 +194,11 @@ export function ComposerToolsMenu({
                 // The row toggles in place; closing the menu would hide the
                 // switch state the flip just changed.
                 event.preventDefault();
-                void memoryIncognito.onChange(!memoryIncognito.value);
+                void Promise.resolve(
+                  memoryIncognito.onChange(!memoryIncognito.value),
+                ).catch(() => {
+                  toast.error("Could not update memory incognito. Try again.");
+                });
               }}
             >
               <Brain className="size-4 text-muted-foreground" />

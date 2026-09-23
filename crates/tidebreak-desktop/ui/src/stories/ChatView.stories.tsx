@@ -1019,6 +1019,30 @@ export const ActiveStreamingQueueAndStop: Story = {
   },
 };
 
+export const ActiveTurnKeepsAttachmentsOnQueue: Story = {
+  args: {
+    scenario: {
+      id: "active-turn-queue-attachments",
+      messages: streamingMessages,
+      draft: "Include the attached notes in the next turn.",
+      busy: true,
+      activeTurnId: ACTIVE_TURN_ID,
+      lastSeq: 12,
+      sendMode: "queue",
+      attachments: {
+        files: [
+          {
+            documentId: "doc-notes",
+            displayName: "notes.pdf",
+            mediaType: "application/pdf",
+            byteLen: 12_000,
+          },
+        ],
+      },
+    },
+  },
+};
+
 export const PendingApprovalReturnsToComposer: Story = {
   args: {
     scenario: {
