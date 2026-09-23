@@ -89,3 +89,4 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSA
 objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGWindow"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSBundle", "NSDictionary", "NSError", "NSGeometry", "NSKeyValueObserving", "NSString", "NSURL", "NSURLRequest", "NSUUID", "NSValue"] }
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["WKContentWorld", "WKFrameInfo", "WKNavigation", "WKNavigationAction", "WKOpenPanelParameters", "WKSecurityOrigin", "WKUIDelegate", "WKWebView", "WKWebViewConfiguration", "WKWindowFeatures", "block2", "objc2-app-kit"] }
+plist = "=1.10.1"

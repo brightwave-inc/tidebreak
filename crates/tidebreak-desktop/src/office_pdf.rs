@@ -4,8 +4,9 @@
 //! and drawn by the PDF viewer. Conversion prefers the app's own managed LibreOffice
 //! (downloaded and digest-verified by [`crate::office_install`] the first
 //! time a preview needs it, on macOS), then falls back to one the user
-//! installed. Its absence is a first-class state the renderer turns into a
-//! download or an install hint, not an error.
+//! installed, provided it is at least the pinned version. Its absence is a
+//! first-class state the renderer turns into a download or an install hint,
+//! not an error.
 //!
 //! The converter processes untrusted bytes, so it only runs inside a
 //! confinement boundary: on macOS, `sandbox-exec` with the profile in
@@ -229,7 +230,8 @@ fn content_key(bytes: &[u8], extension: &str) -> String {
 }
 
 /// Find a LibreOffice to convert with: the app's own verified managed
-/// install first, then one the user installed system-wide, then `PATH`.
+/// install first, then one the user installed at least as new as the pinned
+/// version, system-wide before `PATH`.
 ///
 /// The managed install leads because it is the copy whose provenance this
 /// app verified; a system hit is a candidate, not a guarantee — package
@@ -257,22 +259,121 @@ fn resolve_soffice(
     managed.or_else(system)
 }
 
+/// A LibreOffice the user installed: the standard install locations first,
+/// then `PATH`, passing over any install [`system_install_refusal`] turns
+/// down.
 fn system_soffice() -> Option<PathBuf> {
-    for candidate in standard_install_paths() {
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        for name in PATH_BINARY_NAMES {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
+    let on_path = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|dir| PATH_BINARY_NAMES.iter().map(move |name| dir.join(name)));
+    standard_install_paths()
+        .into_iter()
+        .chain(on_path)
+        .filter(|candidate| candidate.is_file())
+        .find(|candidate| match system_install_refusal(candidate) {
+            None => true,
+            Some(reason) => {
+                report_skipped_system_install(candidate, &reason);
+                false
             }
-        }
+        })
+}
+
+/// Why a LibreOffice the user installed may not convert, or `None` when it
+/// may. This app does not control that install's version, and an older
+/// release can carry parser bugs the pinned one fixed, so it must be at least
+/// [`crate::office_install::LIBREOFFICE_VERSION`]. The version comes from the
+/// bundle's `Info.plist`, so the install must resolve to a binary inside an
+/// application bundle; a launcher script outside one is turned down too.
+#[cfg(target_os = "macos")]
+fn system_install_refusal(candidate: &Path) -> Option<String> {
+    let minimum = crate::office_install::LIBREOFFICE_VERSION;
+    let binary = match std::fs::canonicalize(candidate) {
+        Ok(binary) => binary,
+        Err(error) => return Some(format!("it could not be resolved: {error}")),
+    };
+    let Some(bundle) = crate::office_sandbox::app_bundle(&binary) else {
+        return Some(
+            "it is not inside an application bundle, so its version cannot be checked".to_owned(),
+        );
+    };
+    match bundle_version(bundle) {
+        Some(version) if version_at_least(&version, minimum) => None,
+        Some(version) => Some(format!(
+            "it is version {version}, older than {minimum}, the version Tidebreak installs"
+        )),
+        None => Some(format!(
+            "its version could not be read from {}",
+            bundle.join("Contents/Info.plist").display()
+        )),
     }
-    None
+}
+
+/// Hosts other than macOS resolve no converter at all, so nothing reaches
+/// this. It refuses anyway, so a host that later gains confinement has to add
+/// its own version check before a system install can convert.
+#[cfg(not(target_os = "macos"))]
+fn system_install_refusal(_candidate: &Path) -> Option<String> {
+    Some("this host cannot check its version".to_owned())
+}
+
+/// The version an application bundle declares in its `Info.plist`.
+#[cfg(target_os = "macos")]
+fn bundle_version(bundle: &Path) -> Option<String> {
+    let info = plist::Value::from_file(bundle.join("Contents/Info.plist")).ok()?;
+    info.as_dictionary()?
+        .get("CFBundleShortVersionString")?
+        .as_string()
+        .map(str::to_owned)
+}
+
+/// Whether a dotted version is at least `minimum`, compared number by number
+/// with missing parts read as zero: `25.8.7.3` meets `25.8.7`, and `7.6.4.1`
+/// does not, although it sorts after it as text. A version that is not all
+/// dotted decimal numbers meets nothing.
+#[cfg(any(target_os = "macos", test))]
+fn version_at_least(version: &str, minimum: &str) -> bool {
+    fn parts(version: &str) -> Option<Vec<u64>> {
+        version
+            .split('.')
+            .map(|part| {
+                if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return None;
+                }
+                part.parse().ok()
+            })
+            .collect()
+    }
+    let (Some(version), Some(minimum)) = (parts(version), parts(minimum)) else {
+        return false;
+    };
+    let width = version.len().max(minimum.len());
+    let padded = |parts: &[u64]| {
+        (0..width)
+            .map(|index| parts.get(index).copied().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    padded(&version) >= padded(&minimum)
+}
+
+/// Logs why a system LibreOffice was passed over, once per reason per app
+/// run: resolution runs on every conversion and every tool status check.
+fn report_skipped_system_install(candidate: &Path, reason: &str) {
+    static REPORTED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let line = format!(
+        "not using the LibreOffice at {}: {reason}",
+        candidate.display()
+    );
+    let first = REPORTED
+        .lock()
+        .map(|mut reported| reported.insert(line.clone()))
+        .unwrap_or(true);
+    if first {
+        eprintln!("tidebreak-desktop: {line}");
+    }
 }
 
 /// Whether a system LibreOffice not only resolves but actually runs.
@@ -772,6 +873,73 @@ mod tests {
         assert_eq!(resolved.is_some(), cfg!(target_os = "macos"));
     }
 
+    /// A system LibreOffice must reach the pinned version, compared number by
+    /// number rather than as text, before it parses untrusted documents.
+    #[test]
+    fn system_version_must_reach_the_pinned_version() {
+        for newer_or_equal in ["25.8.7", "25.8.7.0", "25.8.7.3", "25.8.10.1", "26.2.0.3"] {
+            assert!(
+                version_at_least(newer_or_equal, "25.8.7"),
+                "{newer_or_equal}"
+            );
+        }
+        // `7.6.4.1` sorts after `25.8.7` as text but is years older.
+        for older in ["25.8.6.2", "25.2.7.2", "25.8", "7.6.4.1"] {
+            assert!(!version_at_least(older, "25.8.7"), "{older}");
+        }
+        for unreadable in ["", "25.8.7-beta", "25..7", "v25.8.7", "25.8.7 "] {
+            assert!(!version_at_least(unreadable, "25.8.7"), "{unreadable:?}");
+        }
+    }
+
+    /// Resolution reads the version from the install's own bundle and passes
+    /// over anything it cannot vouch for: an older release, a bundle with no
+    /// readable version, and a launcher script outside any bundle.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_install_must_be_a_bundle_at_least_the_pinned_version() {
+        let root = tempfile::tempdir().expect("root");
+        let install = |name: &str, version: Option<&str>| {
+            let contents = root.path().join(name).join("Contents");
+            std::fs::create_dir_all(contents.join("MacOS")).expect("bundle");
+            if let Some(version) = version {
+                std::fs::write(
+                    contents.join("Info.plist"),
+                    format!(
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                         <plist version=\"1.0\"><dict>\
+                         <key>CFBundleShortVersionString</key><string>{version}</string>\
+                         </dict></plist>\n"
+                    ),
+                )
+                .expect("Info.plist");
+            }
+            let soffice = contents.join("MacOS/soffice");
+            std::fs::write(&soffice, b"").expect("soffice");
+            soffice
+        };
+        let pinned = crate::office_install::LIBREOFFICE_VERSION;
+
+        assert_eq!(
+            system_install_refusal(&install("Pinned.app", Some(pinned))),
+            None
+        );
+        assert_eq!(
+            system_install_refusal(&install("Newer.app", Some(&format!("{pinned}.3")))),
+            None
+        );
+        let older = system_install_refusal(&install("Older.app", Some("7.6.4.1")))
+            .expect("an older install is refused");
+        assert!(
+            older.contains("7.6.4.1") && older.contains(pinned),
+            "{older}"
+        );
+        assert!(system_install_refusal(&install("Unversioned.app", None)).is_some());
+        let launcher = root.path().join("soffice");
+        std::fs::write(&launcher, b"#!/bin/sh\n").expect("launcher");
+        assert!(system_install_refusal(&launcher).is_some());
+    }
+
     #[test]
     fn libreoffice_profile_uri_encodes_reserved_path_characters() {
         let path = if cfg!(windows) {
@@ -851,7 +1019,7 @@ mod tests {
             return;
         }
         let Some(soffice) = system_soffice() else {
-            eprintln!("skipping: no LibreOffice installed");
+            eprintln!("skipping: no usable system LibreOffice installed");
             return;
         };
         let deck = include_bytes!("../tests/fixtures/deck.pptx");
