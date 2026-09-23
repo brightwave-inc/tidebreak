@@ -61,6 +61,14 @@ const MANAGED_PERMISSION_MODE_KEY: &str = "MaximumPermissionMode";
 /// default, and the organization opts in explicitly.
 const MANAGED_ALLOW_LOCAL_MCP_KEY: &str = "AllowLocalMcpServers";
 
+/// The key an OS artifact stores the automatic-update-download setting under,
+/// shared by the Windows registry value and the macOS managed-preferences key.
+/// When present it sets the desktop app's "Download updates automatically"
+/// setting and locks it. `false` keeps update checks running, but the app
+/// downloads an update only when the person asks. Absent leaves the choice to
+/// the person.
+const MANAGED_DOWNLOAD_UPDATES_KEY: &str = "DownloadUpdatesAutomatically";
+
 /// Which authority asserted the active policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
@@ -206,6 +214,15 @@ pub trait OsPolicySource: Send + Sync {
     /// exists but its assertion cannot be honored — [`resolve`] fails that
     /// closed to deny rather than honoring a broken opt-in.
     fn allow_local_mcp_servers(&self) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
+    /// The OS-asserted automatic-update-download setting, when the platform
+    /// declares one. Same error contract as [`Self::gateway_url`]: `Err`
+    /// means an artifact exists but its assertion cannot be honored —
+    /// [`update_downloads_policy`] fails that closed to off rather than
+    /// letting the app download without asking.
+    fn download_updates_automatically(&self) -> Result<Option<bool>> {
         Ok(None)
     }
 }
@@ -413,28 +430,32 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// Called from the production boot path (`bind_inner`), not from `AppState`
 /// construction, so directly assembled state (tests, custom embedders) stays
 /// hermetic and reads nothing from the host OS.
-#[cfg(target_os = "macos")]
 pub fn platform_source(config: &Config) -> Arc<dyn OsPolicySource> {
+    platform_source_for_bundle_id(config.bundle_id.as_deref())
+}
+
+#[cfg(target_os = "macos")]
+fn platform_source_for_bundle_id(bundle_id: Option<&str>) -> Arc<dyn OsPolicySource> {
     // Managed preferences are keyed by the embedding's bundle id; an
     // embedding without one (the CLI, tests) has no policy domain to read.
-    match &config.bundle_id {
+    match bundle_id {
         Some(bundle_id) => Arc::new(ManagedPreferencesSource::for_bundle_id(bundle_id)),
         None => Arc::new(NoOsPolicy),
     }
 }
 
 #[cfg(windows)]
-pub fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
+fn platform_source_for_bundle_id(_bundle_id: Option<&str>) -> Arc<dyn OsPolicySource> {
     Arc::new(RegistryPolicySource)
 }
 
 #[cfg(target_os = "linux")]
-pub fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
+fn platform_source_for_bundle_id(_bundle_id: Option<&str>) -> Arc<dyn OsPolicySource> {
     Arc::new(PolicyFileSource::at("/etc/tidebreak/managed-policy.json"))
 }
 
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
-pub fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
+fn platform_source_for_bundle_id(_bundle_id: Option<&str>) -> Arc<dyn OsPolicySource> {
     Arc::new(NoOsPolicy)
 }
 
@@ -586,6 +607,10 @@ impl OsPolicySource for ManagedPreferencesSource {
     fn allow_local_mcp_servers(&self) -> Result<Option<bool>> {
         self.channel_value(allow_local_mcp_from_managed_plist)
     }
+
+    fn download_updates_automatically(&self) -> Result<Option<bool>> {
+        self.channel_value(download_updates_from_managed_plist)
+    }
 }
 
 /// Read one managed-preferences channel's bytes: an absent file is `None`.
@@ -687,18 +712,30 @@ fn permission_mode_from_managed_plist(bytes: &[u8]) -> Result<Option<PermissionM
         .transpose()
 }
 
-/// Extract `AllowLocalMcpServers` from a managed-preferences plist: a native
-/// plist boolean as profile tooling authors it, or the shared string token
-/// for hand-built artifacts.
+/// Extract `AllowLocalMcpServers` from a managed-preferences plist.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn allow_local_mcp_from_managed_plist(bytes: &[u8]) -> Result<Option<bool>> {
-    match value_from_managed_plist(bytes, MANAGED_ALLOW_LOCAL_MCP_KEY)? {
+    flag_from_managed_plist(bytes, MANAGED_ALLOW_LOCAL_MCP_KEY)
+}
+
+/// Extract `DownloadUpdatesAutomatically` from a managed-preferences plist.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn download_updates_from_managed_plist(bytes: &[u8]) -> Result<Option<bool>> {
+    flag_from_managed_plist(bytes, MANAGED_DOWNLOAD_UPDATES_KEY)
+}
+
+/// Extract one boolean key from a managed-preferences plist: a native plist
+/// boolean as profile tooling authors it, or the shared string token for
+/// hand-built artifacts.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn flag_from_managed_plist(bytes: &[u8], key: &str) -> Result<Option<bool>> {
+    match value_from_managed_plist(bytes, key)? {
         None => Ok(None),
         Some(plist::Value::Boolean(flag)) => Ok(Some(flag)),
         Some(value) => match value.as_string() {
             Some(raw) => asserted_policy_flag(raw).map(Some),
             None => Err(AgentError::config(format!(
-                "managed preferences {MANAGED_ALLOW_LOCAL_MCP_KEY} is not a boolean"
+                "managed preferences {key} is not a boolean"
             ))),
         },
     }
@@ -760,6 +797,12 @@ impl OsPolicySource for RegistryPolicySource {
             .map(|raw| asserted_policy_flag(&raw))
             .transpose()
     }
+
+    fn download_updates_automatically(&self) -> Result<Option<bool>> {
+        registry_policy_value(MANAGED_DOWNLOAD_UPDATES_KEY)?
+            .map(|raw| asserted_policy_flag(&raw))
+            .transpose()
+    }
 }
 
 /// A JSON policy file: `{"gateway_url": "https://…"}`. Linux wires this at
@@ -813,11 +856,18 @@ impl OsPolicySource for PolicyFileSource {
     fn allow_local_mcp_servers(&self) -> Result<Option<bool>> {
         Ok(self.read()?.and_then(|file| file.allow_local_mcp_servers))
     }
+
+    fn download_updates_automatically(&self) -> Result<Option<bool>> {
+        Ok(self
+            .read()?
+            .and_then(|file| file.download_updates_automatically))
+    }
 }
 
 /// The policy-file payload: `{"gateway_url": "https://…",
-/// "maximum_permission_mode": "ask", "allow_local_mcp_servers": true}`, each
-/// key optional but at least one required.
+/// "maximum_permission_mode": "ask", "allow_local_mcp_servers": true,
+/// "download_updates_automatically": false}`, each key optional but at least
+/// one required.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Deserialize)]
 struct PolicyFilePayload {
@@ -827,6 +877,8 @@ struct PolicyFilePayload {
     maximum_permission_mode: Option<String>,
     #[serde(default)]
     allow_local_mcp_servers: Option<bool>,
+    #[serde(default)]
+    download_updates_automatically: Option<bool>,
 }
 
 /// Decode the policy-file payload. Split from the reader so the format is
@@ -842,6 +894,7 @@ fn decode_policy_json(bytes: &[u8]) -> Result<PolicyFilePayload> {
     if file.gateway_url.is_none()
         && file.maximum_permission_mode.is_none()
         && file.allow_local_mcp_servers.is_none()
+        && file.download_updates_automatically.is_none()
     {
         return Err(AgentError::config(
             "managed policy file names no recognized policy keys",
@@ -987,6 +1040,38 @@ pub fn resolve_with_deployment(
         }
     };
     Ok(policy)
+}
+
+/// Whether the OS policy turns automatic update downloads on or off:
+/// `Some(value)` when an organization sets it, `None` when the choice is the
+/// person's.
+///
+/// Read apart from [`resolve`], because only the desktop app downloads
+/// updates and it enforces this itself; the server's `/policy` projection has
+/// nothing to lock.
+///
+/// A present-but-broken value fails closed to `Some(false)`. An organization
+/// that tried to turn automatic downloads off must not get them back because
+/// its artifact is malformed, and off costs the person nothing but a click:
+/// the app still checks and says when an update is available.
+pub fn update_downloads_policy(os_policy: &dyn OsPolicySource) -> Option<bool> {
+    match os_policy.download_updates_automatically() {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                "OS-managed automatic update downloads value is present but unusable: {error}; \
+                 turning automatic downloads off"
+            );
+            Some(false)
+        }
+    }
+}
+
+/// [`update_downloads_policy`] from this platform's OS policy, for the desktop
+/// build whose bundle identifier is `bundle_id`. The desktop reads it before
+/// every update check, so an MDM push or removal applies without a restart.
+pub fn desktop_update_downloads_policy(bundle_id: &str) -> Option<bool> {
+    update_downloads_policy(&*platform_source_for_bundle_id(Some(bundle_id)))
 }
 
 /// The gateway half of [`resolve`]: managed verdict, URL, and authority.
@@ -1674,6 +1759,78 @@ mod tests {
         );
         let bad_flag = xml("<key>AllowLocalMcpServers</key><string>yes</string>");
         assert!(allow_local_mcp_from_managed_plist(bad_flag.as_bytes()).is_err());
+
+        // The automatic-download key shares that flag extraction.
+        let downloads_off = xml("<key>DownloadUpdatesAutomatically</key><false/>");
+        assert_eq!(
+            download_updates_from_managed_plist(downloads_off.as_bytes()).unwrap(),
+            Some(false)
+        );
+        let downloads_token = xml("<key>DownloadUpdatesAutomatically</key><string>true</string>");
+        assert_eq!(
+            download_updates_from_managed_plist(downloads_token.as_bytes()).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            download_updates_from_managed_plist(unrelated.as_bytes()).unwrap(),
+            None
+        );
+        let downloads_number = xml("<key>DownloadUpdatesAutomatically</key><integer>0</integer>");
+        assert!(download_updates_from_managed_plist(downloads_number.as_bytes()).is_err());
+    }
+
+    /// The automatic-download key through each reader: absent leaves the
+    /// choice to the person, a value locks it, and a broken artifact turns
+    /// automatic downloads off rather than on. An artifact that sets only this
+    /// key must also leave the gateway side alone: before the key existed,
+    /// the Linux decoder refused such a file as naming no recognized key,
+    /// which would fail the whole profile closed as misconfigured.
+    #[tokio::test]
+    async fn the_update_download_key_locks_the_setting_and_fails_closed_to_off() {
+        let provisioned = MemoryProvisionedPolicy::new();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("managed-policy.json");
+        let reader = PolicyFileSource::at(&path);
+
+        assert_eq!(update_downloads_policy(&NoOsPolicy), None);
+        assert_eq!(update_downloads_policy(&reader), None);
+
+        std::fs::write(&path, br#"{ "download_updates_automatically": false }"#).unwrap();
+        assert_eq!(update_downloads_policy(&reader), Some(false));
+        let policy = resolve(&*provisioned, &reader).unwrap();
+        assert!(!policy.managed && !policy.misconfigured);
+
+        std::fs::write(&path, br#"{ "download_updates_automatically": true }"#).unwrap();
+        assert_eq!(update_downloads_policy(&reader), Some(true));
+
+        for broken in [
+            &b"not json"[..],
+            br#"{ "download_updates_automatically": "no" }"#,
+        ] {
+            std::fs::write(&path, broken).unwrap();
+            assert_eq!(update_downloads_policy(&reader), Some(false));
+        }
+
+        // The macOS reader, through a device channel that forces only this key.
+        let plist = directory.path().join("app.plist");
+        std::fs::write(
+            &plist,
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>DownloadUpdatesAutomatically</key><false/></dict></plist>"#,
+        )
+        .unwrap();
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut reader = ManagedPreferencesSource::with_paths(vec![plist.clone()]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // Trust a file owned like the one this test just wrote.
+            reader.trusted_owner = std::fs::metadata(&plist).unwrap().uid();
+        }
+        assert_eq!(update_downloads_policy(&reader), Some(false));
+        let policy = resolve(&*provisioned, &reader).unwrap();
+        assert!(!policy.managed && !policy.misconfigured);
     }
 
     /// The ceiling's failure direction: a present-but-broken assertion clamps
