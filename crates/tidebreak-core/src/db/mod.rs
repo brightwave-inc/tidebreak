@@ -407,6 +407,34 @@ impl DbStore {
         self.conn.close().await.map_err(store_err)
     }
 
+    /// The file behind this store's main SQLite database, or `None` for
+    /// PostgreSQL and for an in-memory SQLite database.
+    ///
+    /// A backup copies this file through its own read-only connection, so it
+    /// needs the path rather than this store's pooled connections.
+    pub async fn sqlite_database_path(&self) -> Result<Option<std::path::PathBuf>> {
+        if self.conn.get_database_backend() != sea_orm::DatabaseBackend::Sqlite {
+            return Ok(None);
+        }
+        let rows = self
+            .conn
+            .query_all_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "PRAGMA database_list",
+            ))
+            .await
+            .map_err(store_err)?;
+        for row in rows {
+            let name: String = row.try_get("", "name").map_err(store_err)?;
+            if name != "main" {
+                continue;
+            }
+            let file: String = row.try_get("", "file").map_err(store_err)?;
+            return Ok((!file.is_empty()).then(|| std::path::PathBuf::from(file)));
+        }
+        Ok(None)
+    }
+
     /// Claim one already-inserted turn under a fresh lease so a session
     /// worker can drive the leg.
     pub async fn take_lease_on_turn(

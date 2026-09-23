@@ -1,4 +1,7 @@
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, Set, TransactionTrait,
+};
 
 use crate::code::{CodeRepo, QuickAction, RepoId};
 use crate::error::{AgentError, Result};
@@ -8,6 +11,10 @@ use super::super::super::{entities, store_err, DbStore};
 
 /// Insert a registered repository. The row belongs to `repo.owner`.
 pub async fn insert_repo(store: &DbStore, repo: &CodeRepo) -> Result<()> {
+    insert_repo_on(&store.conn, repo).await
+}
+
+async fn insert_repo_on<C: ConnectionTrait>(conn: &C, repo: &CodeRepo) -> Result<()> {
     entities::code_repo::ActiveModel {
         id: Set(repo.id.0),
         owner: Set(repo.owner.as_str().to_owned()),
@@ -25,10 +32,79 @@ pub async fn insert_repo(store: &DbStore, repo: &CodeRepo) -> Result<()> {
         origin_owner: Set(repo.origin_owner.clone()),
         origin_name: Set(repo.origin_name.clone()),
     }
-    .insert(&store.conn)
+    .insert(conn)
     .await
     .map_err(store_err)?;
     Ok(())
+}
+
+/// Write the repositories one configuration import brings in, in one
+/// transaction: insert every row in `added`, and save the settings of every
+/// row in `replaced`. Either all of them land or none do.
+pub async fn import_repos(
+    store: &DbStore,
+    added: &[CodeRepo],
+    replaced: &[CodeRepo],
+) -> Result<()> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    for repo in added {
+        insert_repo_on(&transaction, repo).await?;
+    }
+    for repo in replaced {
+        if !save_repo_on(&transaction, repo).await? {
+            return Err(AgentError::Store(format!(
+                "repository {} is no longer registered",
+                repo.display_name
+            )));
+        }
+    }
+    transaction.commit().await.map_err(store_err)
+}
+
+/// Undo [`import_repos`] in one transaction: remove the rows it added and
+/// put back the settings `previous` holds for the rows it replaced.
+///
+/// A row the import added is deleted outright, since nothing hangs off a
+/// registration that is seconds old. One that already has a workspace is
+/// marked removed instead, the way removing a repository always leaves it.
+pub async fn revert_repo_import(
+    store: &DbStore,
+    owner: &OwnerId,
+    added: &[RepoId],
+    previous: &[CodeRepo],
+) -> Result<()> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    for id in added {
+        let in_use = entities::code_workspace::Entity::find()
+            .filter(entities::code_workspace::Column::RepoId.eq(id.0))
+            .count(&transaction)
+            .await
+            .map_err(store_err)?
+            > 0;
+        if in_use {
+            entities::code_repo::Entity::update_many()
+                .col_expr(
+                    entities::code_repo::Column::RemovedAt,
+                    sea_orm::sea_query::Expr::value(chrono::Utc::now()),
+                )
+                .filter(entities::code_repo::Column::Id.eq(id.0))
+                .filter(entities::code_repo::Column::Owner.eq(owner.as_str()))
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+        } else {
+            entities::code_repo::Entity::delete_many()
+                .filter(entities::code_repo::Column::Id.eq(id.0))
+                .filter(entities::code_repo::Column::Owner.eq(owner.as_str()))
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+        }
+    }
+    for repo in previous {
+        save_repo_on(&transaction, repo).await?;
+    }
+    transaction.commit().await.map_err(store_err)
 }
 
 /// Load one of the owner's repositories by id.
@@ -97,6 +173,10 @@ pub async fn list_repos_all_owners(store: &DbStore) -> Result<Vec<CodeRepo>> {
 
 /// Persist mutable repository fields. `id`, `root_path`, and `created_at` stay as stored.
 pub async fn save_repo(store: &DbStore, repo: &CodeRepo) -> Result<bool> {
+    save_repo_on(&store.conn, repo).await
+}
+
+async fn save_repo_on<C: ConnectionTrait>(conn: &C, repo: &CodeRepo) -> Result<bool> {
     let result = entities::code_repo::Entity::update_many()
         .col_expr(
             entities::code_repo::Column::DisplayName,
@@ -124,7 +204,7 @@ pub async fn save_repo(store: &DbStore, repo: &CodeRepo) -> Result<bool> {
         )
         .filter(entities::code_repo::Column::Id.eq(repo.id.0))
         .filter(entities::code_repo::Column::Owner.eq(repo.owner.as_str()))
-        .exec(&store.conn)
+        .exec(conn)
         .await
         .map_err(store_err)?;
     Ok(result.rows_affected == 1)

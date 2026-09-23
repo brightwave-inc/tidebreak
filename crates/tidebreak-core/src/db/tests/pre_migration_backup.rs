@@ -214,3 +214,63 @@ async fn a_database_from_a_newer_build_is_refused_and_left_alone() {
         migration_names().len() + 1
     );
 }
+
+/// A backup copies the database through SQLite rather than the file system,
+/// so the copy is whole while the store keeps its connections open and keeps
+/// writing. A plain file copy of a WAL database can leave the newest rows in
+/// the log it did not copy.
+#[tokio::test]
+async fn a_snapshot_of_a_live_database_holds_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("tidebreak.db");
+    let store = DbStore::connect(&sqlite_url(&database)).await.unwrap();
+    store
+        .set_setting("snapshot_probe", &serde_json::json!("kept"))
+        .await
+        .unwrap();
+    let path = store
+        .sqlite_database_path()
+        .await
+        .unwrap()
+        .expect("a file-backed SQLite store names its file");
+    assert_eq!(
+        path.canonicalize().unwrap(),
+        database.canonicalize().unwrap()
+    );
+
+    let copy = dir.path().join("copy.db");
+    backup::snapshot_sqlite(&path, &copy).await.unwrap();
+    // The live store keeps writing after the copy is taken.
+    store
+        .set_setting("after_snapshot", &serde_json::json!(true))
+        .await
+        .unwrap();
+
+    let copied = DbStore::connect(&sqlite_url(&copy)).await.unwrap();
+    assert_eq!(
+        copied.get_setting("snapshot_probe").await.unwrap(),
+        Some(serde_json::json!("kept"))
+    );
+    assert_eq!(copied.get_setting("after_snapshot").await.unwrap(), None);
+    assert_eq!(
+        store.get_setting("after_snapshot").await.unwrap(),
+        Some(serde_json::json!(true))
+    );
+}
+
+/// A snapshot never writes over, or removes, a file that was already there.
+#[tokio::test]
+async fn a_snapshot_refuses_a_path_that_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("tidebreak.db");
+    let store = DbStore::connect(&sqlite_url(&database)).await.unwrap();
+    let path = store.sqlite_database_path().await.unwrap().unwrap();
+    let occupied = dir.path().join("occupied.db");
+    std::fs::write(&occupied, b"someone else's file").unwrap();
+
+    backup::snapshot_sqlite(&path, &occupied)
+        .await
+        .expect_err("an existing path must be refused");
+
+    assert_eq!(std::fs::read(&occupied).unwrap(), b"someone else's file");
+}

@@ -726,7 +726,11 @@ impl MemoryBackend for DbStore {
         }
 
         let now = Utc::now();
-        if change.status == MemoryStatus::Active {
+        // Activating a proposal that updates or supersedes other records
+        // archives them in the same transition. A restore is not that: the
+        // record comes back on its own, and whatever superseded it stays.
+        let restoring = existing.status == MemoryStatus::Archived;
+        if change.status == MemoryStatus::Active && !restoring {
             let sources = existing
                 .links
                 .iter()
@@ -767,8 +771,16 @@ impl MemoryBackend for DbStore {
         let revision = existing.revision.checked_add(1).ok_or_else(|| {
             MemoryError::Backend("memory revision counter is exhausted".to_owned())
         })?;
+        // A restored record carries authority again, so it no longer points
+        // at the merge that replaced it.
+        let superseded_by = if restoring && change.status == MemoryStatus::Active {
+            None
+        } else {
+            existing.superseded_by
+        };
         let record = MemoryRecord {
             status: change.status,
+            superseded_by,
             revision,
             updated_at: now,
             ..existing
@@ -816,6 +828,41 @@ impl MemoryBackend for DbStore {
         }
         transaction.commit().await.map_err(backend_err)?;
         Ok(true)
+    }
+
+    /// One transaction for the whole owner: every record, every revision,
+    /// and the sweep's per-scope fingerprints, which describe a record set
+    /// that no longer exists. Either all of it goes or none of it does.
+    async fn delete_all(&self, owner: &OwnerId) -> MemoryResult<Vec<MemoryRecordId>> {
+        let transaction = self.conn.begin().await.map_err(backend_err)?;
+        let ids: Vec<MemoryRecordId> = entities::memory_record::Entity::find()
+            .filter(entities::memory_record::Column::Owner.eq(owner.as_str()))
+            .order_by_asc(entities::memory_record::Column::Id)
+            .all(&transaction)
+            .await
+            .map_err(backend_err)?
+            .into_iter()
+            .map(|model| MemoryRecordId(model.id))
+            .collect();
+        // Revisions first, so the delete does not lean on the foreign key's
+        // cascade, which SQLite enforces only when the pragma is on.
+        entities::memory_revision::Entity::delete_many()
+            .filter(entities::memory_revision::Column::Owner.eq(owner.as_str()))
+            .exec(&transaction)
+            .await
+            .map_err(backend_err)?;
+        entities::memory_record::Entity::delete_many()
+            .filter(entities::memory_record::Column::Owner.eq(owner.as_str()))
+            .exec(&transaction)
+            .await
+            .map_err(backend_err)?;
+        entities::memory_sweep_scope::Entity::delete_many()
+            .filter(entities::memory_sweep_scope::Column::Owner.eq(owner.as_str()))
+            .exec(&transaction)
+            .await
+            .map_err(backend_err)?;
+        transaction.commit().await.map_err(backend_err)?;
+        Ok(ids)
     }
 
     async fn search(
