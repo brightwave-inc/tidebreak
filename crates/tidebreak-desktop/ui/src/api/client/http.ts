@@ -80,6 +80,12 @@ export class HttpError extends Error {
     readonly status: number,
     message: string,
     readonly kind?: string,
+    /**
+     * The whole error body, for the few kinds that carry more than a
+     * message: a refused file save names the hash on disk now, for one.
+     * Untrusted until a caller validates the field it reads.
+     */
+    readonly body?: Readonly<Record<string, unknown>>,
   ) {
     super(message);
     this.name = "HttpError";
@@ -106,14 +112,31 @@ export async function throwIfNotOk(response: Response): Promise<void> {
   if (response.ok) return;
   let detail = response.statusText;
   let kind: string | undefined;
+  let body: Record<string, unknown> | undefined;
   try {
-    const body = (await response.json()) as { message?: string; kind?: string };
-    if (body.message) detail = body.message;
-    if (typeof body.kind === "string" && body.kind.length > 0) kind = body.kind;
+    const parsed: unknown = await response.json();
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
+    ) {
+      body = parsed as Record<string, unknown>;
+      if (typeof body.message === "string" && body.message) {
+        detail = body.message;
+      }
+      if (typeof body.kind === "string" && body.kind.length > 0) {
+        kind = body.kind;
+      }
+    }
   } catch {
     /* ignore */
   }
-  throw new HttpError(response.status, `${response.status}: ${detail}`, kind);
+  throw new HttpError(
+    response.status,
+    `${response.status}: ${detail}`,
+    kind,
+    body,
+  );
 }
 
 export function requireParsed<T>(value: T | null, label: string): T {

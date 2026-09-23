@@ -1136,7 +1136,11 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/code/workspaces/{id}/file",
-            get(routes::code::get_workspace_file),
+            get(routes::code::get_workspace_file)
+                .put(routes::code::save_workspace_file)
+                .layer(DefaultBodyLimit::max(
+                    routes::code::MAX_WORKSPACE_FILE_SAVE_BODY_BYTES,
+                )),
         )
         .route(
             "/code/workspaces/{id}/diff",

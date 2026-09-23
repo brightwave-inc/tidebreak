@@ -1739,6 +1739,12 @@ pub struct CodeWorkspaceBlob {
     pub content: String,
     pub truncated: bool,
     pub binary: bool,
+    /// SHA-256 of the file's bytes, as lowercase hex. Present only when
+    /// `content` is the whole file as exact UTF-8 in a local worktree: the
+    /// files the editor can save. A save names it as the version it replaces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub revision: Option<WorkspaceContentRevision>,
@@ -1749,6 +1755,29 @@ pub struct CodeWorkspaceBlob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub revision_saved_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Body of `PUT /code/workspaces/{id}/file`: replace one existing text file.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SaveWorkspaceFileBody {
+    /// Worktree-relative path, resolved the way `GET /blob` resolves it.
+    pub path: String,
+    /// The file's new text, written byte for byte.
+    pub content: String,
+    /// The `hash` of the version the editor loaded. When the file on disk no
+    /// longer has it, the save answers `409` with kind `file_changed` and the
+    /// hash on disk now as `current_hash`.
+    pub base_hash: String,
+}
+
+/// Result of `PUT /code/workspaces/{id}/file`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeWorkspaceFileSaved {
+    pub path: String,
+    /// Hash of the saved text: the base for the next save.
+    pub hash: String,
 }
 
 /// Query for `GET /code/workspaces/{id}/diff`.
@@ -2188,6 +2217,10 @@ pub enum UpdateNotice {
         workspace_id: WorkspaceId,
         terminal_id: CodeTerminalId,
     },
+    /// Someone saved a file in this workspace from the file viewer. Views that
+    /// read the worktree (the file list, the diff, the changed-file count)
+    /// re-read it. Not restated on connect.
+    FilesChanged { workspace_id: WorkspaceId },
     /// Progress of one `git clone` job. Not restated on connect.
     CloneProgress {
         job: String,

@@ -2174,7 +2174,9 @@ pub fn two_word_name(seed: u128) -> String {
     format!("{adjective}-{noun}")
 }
 
-const MAX_BLOB_BYTES: usize = 512 * 1_024;
+/// The most text the file viewer shows. A longer file is cut here and marked
+/// truncated, and the editor saves nothing larger.
+pub const MAX_BLOB_BYTES: usize = 512 * 1_024;
 const MAX_VIEWABLE_FILE_BYTES: usize = 16 * 1_024 * 1_024;
 
 /// One worktree file's text, bounded so a huge blob cannot fill the viewer.
@@ -2184,6 +2186,18 @@ pub struct WorktreeBlob {
     pub content: String,
     pub truncated: bool,
     pub binary: bool,
+    /// [`content_hash`] of the file's bytes, present only when `content` is
+    /// the whole file as exact UTF-8. A save names it as the version it
+    /// replaces.
+    pub hash: Option<String>,
+}
+
+/// SHA-256 of a file's bytes, as lowercase hex.
+pub fn content_hash(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// One worktree file's original bytes for an inline viewer.
@@ -2222,13 +2236,18 @@ pub async fn read_worktree_file(
             content: String::new(),
             truncated: false,
             binary: true,
+            hash: None,
         });
     }
+    // Only the whole file, read as exact UTF-8, can be edited and saved back:
+    // a cut-short or lossily decoded view would write something else.
+    let hash = (!truncated && std::str::from_utf8(&bytes).is_ok()).then(|| content_hash(&bytes));
     Ok(WorktreeBlob {
         path,
         content: String::from_utf8_lossy(&bytes).into_owned(),
         truncated,
         binary: false,
+        hash,
     })
 }
 
@@ -2267,27 +2286,88 @@ async fn resolve_worktree_file(
     worktree_path: &Path,
     relative: &str,
 ) -> Result<(PathBuf, PathBuf), WorktreeError> {
-    let rel = validate_relative_file(relative)?;
+    let located = locate_worktree_file(worktree_path, relative).await?;
+    Ok((located.rel, located.canonical))
+}
+
+/// One worktree file, found the way every file route finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedWorktreeFile {
+    /// The path as asked for, relative to the worktree.
+    pub rel: PathBuf,
+    /// The file itself, with every link resolved.
+    pub canonical: PathBuf,
+    /// The worktree, with every link resolved.
+    pub canonical_root: PathBuf,
+}
+
+/// Why a relative path names no file inside the worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeFileRefusal {
+    /// Empty, absolute, or climbing out with `..`.
+    NotRelative(String),
+    /// Nothing is there, or a link on the way leads nowhere.
+    Missing(PathBuf),
+    /// The path, or a link on the way to it, leads out of the worktree.
+    Outside,
+    /// A directory, or anything else that is not a plain file.
+    NotAFile(PathBuf),
+    /// The worktree or the file could not be inspected.
+    Unreadable(String),
+}
+
+impl From<WorktreeFileRefusal> for WorktreeError {
+    fn from(refusal: WorktreeFileRefusal) -> Self {
+        match refusal {
+            WorktreeFileRefusal::NotRelative(message) => WorktreeError::user(message),
+            WorktreeFileRefusal::Missing(rel) => {
+                WorktreeError::user(format!("file not found: {}", rel.display()))
+            }
+            WorktreeFileRefusal::Outside => {
+                WorktreeError::user("path must stay inside the worktree")
+            }
+            WorktreeFileRefusal::NotAFile(rel) => {
+                WorktreeError::user(format!("{} is not a file", rel.display()))
+            }
+            WorktreeFileRefusal::Unreadable(message) => WorktreeError::internal(message),
+        }
+    }
+}
+
+/// Resolve a worktree-relative path to the file it names.
+///
+/// Reads and saves share this, so a path the viewer opens is exactly the path
+/// a save writes: links are followed, and anything that ends up outside the
+/// worktree, missing, or not a plain file is refused.
+pub async fn locate_worktree_file(
+    worktree_path: &Path,
+    relative: &str,
+) -> Result<LocatedWorktreeFile, WorktreeFileRefusal> {
+    let rel = validate_relative_file(relative)
+        .map_err(|err| WorktreeFileRefusal::NotRelative(err.to_string()))?;
     let abs = worktree_path.join(&rel);
     let canonical_root = tokio::fs::canonicalize(worktree_path)
         .await
-        .map_err(|err| WorktreeError::internal(format!("could not resolve the worktree: {err}")))?;
+        .map_err(|err| {
+            WorktreeFileRefusal::Unreadable(format!("could not resolve the worktree: {err}"))
+        })?;
     let canonical = tokio::fs::canonicalize(&abs)
         .await
-        .map_err(|_| WorktreeError::user(format!("file not found: {}", rel.display())))?;
+        .map_err(|_| WorktreeFileRefusal::Missing(rel.clone()))?;
     if !canonical.starts_with(&canonical_root) {
-        return Err(WorktreeError::user("path must stay inside the worktree"));
+        return Err(WorktreeFileRefusal::Outside);
     }
     let metadata = tokio::fs::metadata(&canonical).await.map_err(|err| {
-        WorktreeError::internal(format!("could not read {}: {err}", rel.display()))
+        WorktreeFileRefusal::Unreadable(format!("could not read {}: {err}", rel.display()))
     })?;
     if !metadata.is_file() {
-        return Err(WorktreeError::user(format!(
-            "{} is not a file",
-            rel.display()
-        )));
+        return Err(WorktreeFileRefusal::NotAFile(rel));
     }
-    Ok((rel, canonical))
+    Ok(LocatedWorktreeFile {
+        rel,
+        canonical,
+        canonical_root,
+    })
 }
 
 fn validate_relative_file(value: &str) -> Result<PathBuf, WorktreeError> {
@@ -3674,6 +3754,11 @@ mod tests {
         assert_eq!(blob.content, "hello from blob\n");
         assert!(!blob.binary);
         assert!(!blob.truncated);
+        assert_eq!(
+            blob.hash.as_deref(),
+            Some(content_hash(b"hello from blob\n").as_str()),
+            "a whole UTF-8 file carries the base a save names"
+        );
 
         let err = read_worktree_file(&path, "../README.md").await.unwrap_err();
         assert!(err.to_string().contains("relative"), "{err}");
@@ -3695,6 +3780,25 @@ mod tests {
         assert_eq!(blob.content.len(), MAX_BLOB_BYTES);
         assert!(blob.content.starts_with("hello "));
         assert_ne!(blob.content, huge);
+        assert_eq!(blob.hash, None, "a cut-short view is no base to save over");
+    }
+
+    #[tokio::test]
+    async fn blob_hash_is_absent_for_text_the_viewer_decodes_lossily() {
+        let (_dir, repo) = init_repo();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "blob-latin1");
+        create_ready(&repo, &path, "tidebreak/blob-latin1", "main").await;
+        std::fs::write(path.join("latin1.txt"), b"caf\xe9\n").unwrap();
+        std::fs::write(path.join("logo.png"), b"\x89PNG\r\n\x1a\n\x00\x00").unwrap();
+
+        let latin1 = read_worktree_file(&path, "latin1.txt").await.unwrap();
+        assert!(!latin1.binary);
+        assert_eq!(latin1.hash, None);
+
+        let binary = read_worktree_file(&path, "logo.png").await.unwrap();
+        assert!(binary.binary);
+        assert_eq!(binary.hash, None);
     }
 
     #[tokio::test]

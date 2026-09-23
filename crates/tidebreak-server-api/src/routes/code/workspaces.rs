@@ -12,14 +12,24 @@ use crate::routes::SERVED_BYTES_CONTENT_POLICY;
 use crate::state::AppState;
 
 use super::types::{
-    ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspaceHistorySearchMatch, CodeWorkspaceHistorySearchSource, CodeWorkspaceSearch,
-    CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
-    CreateRemoteWorkspaceBody, CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody,
+    ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceBlob, CodeWorkspaceDiff,
+    CodeWorkspaceFileSaved, CodeWorkspaceFiles, CodeWorkspaceHistorySearchMatch,
+    CodeWorkspaceHistorySearchSource, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
+    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, CreateRemoteWorkspaceBody,
+    CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody, SaveWorkspaceFileBody,
     SetCodeWorktreeRootBody, WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery,
     WorkspaceSearchQuery, WorkspaceTitleBody, WorkspaceTitleProposal, WorkspaceTreeQuery,
 };
 use tidebreak_core::WorkspaceId;
+
+/// The largest `PUT /code/workspaces/{id}/file` body the route buffers.
+///
+/// The text itself is capped at the viewer's 512 KiB, checked after parsing so
+/// an oversized save answers `413` with a sentence rather than a transport
+/// error. JSON escaping can grow text up to six times (a control character
+/// becomes `\u0001`), so the body limit leaves room for that and nothing more.
+pub(crate) const MAX_WORKSPACE_FILE_SAVE_BODY_BYTES: usize =
+    6 * crate::code::file_save::MAX_SAVE_BYTES + 64 * 1_024;
 
 /// Naming improves the checkout but must never hold workspace creation behind
 /// a slow provider stream. A later first turn can still update the display
@@ -289,6 +299,7 @@ pub async fn get_workspace_blob(
         content: blob.content,
         truncated: blob.truncated,
         binary: blob.binary,
+        hash: blob.hash,
         revision: source.as_ref().map(|source| source.revision),
         revision_saved_at: source.as_ref().and_then(|source| source.saved_at),
         revision_ref: source.and_then(|source| source.revision_ref),
@@ -316,6 +327,28 @@ pub async fn get_workspace_file(
         .map_err(|error| {
             ServerError::internal(format!("failed to build workspace file response: {error}"))
         })
+}
+
+/// `PUT /code/workspaces/{id}/file` — save one existing text file.
+///
+/// The file viewer's editor sends the text with the hash it loaded from
+/// `GET /blob`. Kinds a client branches on: `409 file_changed` (the file
+/// moved on disk; `current_hash` names what is there now), `409
+/// workspace_remote` (a sandbox workspace, which is read-only here), and
+/// `413 payload_too_large`. A caller who may only view the workspace gets
+/// `404`, as for commit and push.
+pub async fn save_workspace_file(
+    code: ScopedCode,
+    Path(id): Path<WorkspaceId>,
+    Json(body): Json<SaveWorkspaceFileBody>,
+) -> Result<Json<CodeWorkspaceFileSaved>, ServerError> {
+    let saved = code
+        .save_workspace_file(id, &body.path, &body.content, &body.base_hash)
+        .await?;
+    Ok(Json(CodeWorkspaceFileSaved {
+        path: saved.path,
+        hash: saved.hash,
+    }))
 }
 
 pub async fn list_workspace_files(

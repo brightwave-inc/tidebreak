@@ -73,6 +73,8 @@ export function monacoLanguage(path: string): string {
     cjs: "javascript",
     json: "json",
     md: "markdown",
+    mdx: "markdown",
+    markdown: "markdown",
     py: "python",
     go: "go",
     rb: "ruby",

@@ -148,6 +148,7 @@ import type {
   CodeWorkspaceSearch as WireCodeWorkspaceSearch,
   CodeWorkspaceSearchMatch as WireCodeWorkspaceSearchMatch,
   CodeWorkspaceBlob as WireCodeWorkspaceBlob,
+  CodeWorkspaceFileSaved as WireCodeWorkspaceFileSaved,
   ImageRef as WireCodeTurnAttachment,
   CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
   CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
@@ -3595,6 +3596,12 @@ export function parseCodeWorkspaceFiles(
   };
 }
 
+/** A file's SHA-256 as the server writes it: 64 lowercase hex digits. */
+const CONTENT_HASH = /^[0-9a-f]{64}$/;
+
+const contentHash = (value: unknown): value is string =>
+  typeof value === "string" && CONTENT_HASH.test(value);
+
 export function parseCodeWorkspaceBlob(
   value: unknown,
 ): CodeWorkspaceBlob | null {
@@ -3605,6 +3612,7 @@ export function parseCodeWorkspaceBlob(
       "content",
       "truncated",
       "binary",
+      "hash",
       "revision",
       "revision_ref",
       "revision_saved_at",
@@ -3612,7 +3620,8 @@ export function parseCodeWorkspaceBlob(
     !lineText(value.path) ||
     !rawText(value.content) ||
     typeof value.truncated !== "boolean" ||
-    typeof value.binary !== "boolean"
+    typeof value.binary !== "boolean" ||
+    (value.hash !== undefined && !contentHash(value.hash))
   ) {
     return null;
   }
@@ -3623,8 +3632,24 @@ export function parseCodeWorkspaceBlob(
     content: value.content,
     truncated: value.truncated,
     binary: value.binary,
+    ...(value.hash !== undefined ? { hash: value.hash } : {}),
     ...source,
   };
+}
+
+/** `PUT /code/workspaces/{id}/file`: the saved file and its next base. */
+export function parseCodeWorkspaceFileSaved(
+  value: unknown,
+): WireCodeWorkspaceFileSaved | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWorkspaceFileSaved>(value, ["path", "hash"]) ||
+    !lineText(value.path) ||
+    !contentHash(value.hash)
+  ) {
+    return null;
+  }
+  return { path: value.path, hash: value.hash };
 }
 
 export function parseCodeWorkspaceDiff(
@@ -5143,6 +5168,18 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         workspace_id: value.workspace_id,
         terminal_id: value.terminal_id,
       };
+    }
+    case "files_changed": {
+      if (
+        !onlyKeys<Extract<WireCodeUpdateNotice, { type: "files_changed" }>>(
+          value,
+          ["type", "workspace_id"],
+        ) ||
+        !wireId(value.workspace_id)
+      ) {
+        return null;
+      }
+      return { type: "files_changed", workspace_id: value.workspace_id };
     }
     case "turn_rewrite": {
       if (

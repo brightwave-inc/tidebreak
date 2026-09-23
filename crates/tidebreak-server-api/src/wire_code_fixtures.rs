@@ -773,6 +773,13 @@ fn update_notices() -> Vec<Fixture> {
             },
         ),
         fixture(
+            "updates: files changed",
+            "update_notice",
+            &UpdateNotice::FilesChanged {
+                workspace_id: workspace_id(),
+            },
+        ),
+        fixture(
             "updates: clone progress",
             "update_notice",
             &UpdateNotice::CloneProgress {

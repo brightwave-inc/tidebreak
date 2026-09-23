@@ -98,6 +98,13 @@ export type CodeUpdatesState = {
    * instead of running their own poll timers.
    */
   deliveryRevision: number;
+  /**
+   * Bumped per workspace on each `files_changed` notice: someone saved a file
+   * there from the file viewer. An agent's edit moves its session's content
+   * revision instead; a save belongs to no turn, so views that read the
+   * worktree watch both.
+   */
+  fileRevisions: Record<string, number>;
   /** Live rewrite notices, keyed session → turn. Not restated on connect. */
   turnRewrites: Record<
     string,
@@ -117,6 +124,7 @@ export type CodeUpdatesAction =
   | { type: "clone_progress"; job: CodeCloneJobSnapshot }
   | { type: "harness_install"; install: CodeHarnessInstallSnapshot }
   | { type: "delivery" }
+  | { type: "files_changed"; workspaceId: string }
   | {
       type: "turn_rewrite";
       session: string;
@@ -139,6 +147,7 @@ const EMPTY: CodeUpdatesState = {
   harnessInstalls: {},
   viewedWorkspaceId: null,
   deliveryRevision: 0,
+  fileRevisions: {},
   turnRewrites: {},
 };
 
@@ -233,6 +242,15 @@ export function reduceCodeUpdates(
       };
     case "delivery":
       return { ...state, deliveryRevision: state.deliveryRevision + 1 };
+    case "files_changed":
+      return {
+        ...state,
+        fileRevisions: {
+          ...state.fileRevisions,
+          [action.workspaceId]:
+            (state.fileRevisions[action.workspaceId] ?? 0) + 1,
+        },
+      };
     case "turn_rewrite": {
       const previous = state.turnRewrites[action.session]?.[action.turnId];
       const sessionRewrites = {
@@ -372,6 +390,25 @@ export function useSessionDigest(
   );
 }
 
+/**
+ * How many times files in one workspace were saved from the file viewer.
+ *
+ * Views that read the worktree add this to their session's content revision,
+ * so a save refreshes the file list, the diff, and the changed-file count the
+ * way an agent's edit does.
+ */
+export function useWorkspaceFileRevision(workspaceId: string): number {
+  return useCodeUpdatesStore((state) => state.fileRevisions[workspaceId] ?? 0);
+}
+
+/**
+ * Tell this window's views that a file in the workspace was saved, without
+ * waiting for the server's notice to come back round.
+ */
+export function noteWorkspaceFilesChanged(workspaceId: string): void {
+  useCodeUpdatesStore.getState().apply({ type: "files_changed", workspaceId });
+}
+
 const NO_DIGESTS: Record<string, CodeSessionDigest> = {};
 
 /**
@@ -499,6 +536,9 @@ export function noticeToAction(
   }
   if (notice.type === "delivery") {
     return { type: "delivery" };
+  }
+  if (notice.type === "files_changed") {
+    return { type: "files_changed", workspaceId: notice.workspace_id };
   }
   if (notice.type === "turn_rewrite") {
     return {

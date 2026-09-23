@@ -495,6 +495,9 @@ mod tests {
         generate::collect_from::<crate::routes::code::CodeWorkspaceTree>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceSearch>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceBlob>(&cfg, &mut out);
+        // The file viewer's save: the body it sends and what it gets back.
+        generate::collect_from::<crate::routes::code::SaveWorkspaceFileBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeWorkspaceFileSaved>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceDiff>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalRead>(&cfg, &mut out);

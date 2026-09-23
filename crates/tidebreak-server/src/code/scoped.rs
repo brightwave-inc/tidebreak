@@ -650,6 +650,22 @@ impl ScopedCode {
         self.runtime.workspace_file(&owner, id, path).await
     }
 
+    /// Save one text file from the file viewer. The same gate as commit and
+    /// push: a principal who may only view a shared session's workspace gets
+    /// the answer a stranger gets.
+    pub async fn save_workspace_file(
+        &self,
+        id: WorkspaceId,
+        path: &str,
+        content: &str,
+        base_hash: &str,
+    ) -> Result<super::file_save::SavedWorktreeFile, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime
+            .save_workspace_file(&owner, &self.owner, id, path, content, base_hash)
+            .await
+    }
+
     pub async fn workspace_files(
         &self,
         id: WorkspaceId,

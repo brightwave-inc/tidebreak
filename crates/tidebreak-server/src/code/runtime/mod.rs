@@ -68,6 +68,7 @@ use super::checkpoint::{
 use super::ci_logs;
 use super::clone::CloneJobs;
 use super::delivery::DeliveryCache;
+use super::file_save::{self, FileSaveError};
 use super::fork;
 use super::gh::{self, ActionOutcome, CommitOutcome, GhError, PushOutcome, WorkspaceGitStatus};
 use super::harness_install::HarnessInstallJobs;
@@ -1126,6 +1127,33 @@ fn map_gh(err: GhError) -> ServerError {
             }
         }
         GhError::Internal(message) => ServerError::internal(message),
+    }
+}
+
+/// A refused save keeps its kind, so the editor can tell "the file moved
+/// under you" apart from "this is not something you can save".
+fn map_file_save(err: FileSaveError) -> ServerError {
+    let message = err.to_string();
+    match err {
+        FileSaveError::PathRefused(_) => ServerError::bad_request_kind("path_refused", message),
+        FileSaveError::NotAFile(_) => ServerError::bad_request_kind("not_a_file", message),
+        FileSaveError::NotFound(_) => ServerError::not_found(message),
+        FileSaveError::NotEditable(_) => {
+            ServerError::unprocessable_kind("file_not_editable", message)
+        }
+        FileSaveError::ContentNotText(_) => {
+            ServerError::unprocessable_kind("content_not_text", message)
+        }
+        FileSaveError::TooLarge(_) => ServerError::payload_too_large(message),
+        FileSaveError::InvalidBase(_) => {
+            ServerError::bad_request_kind("invalid_base_hash", message)
+        }
+        FileSaveError::Changed { current_hash, .. } => ServerError::conflict_kind_with(
+            "file_changed",
+            message,
+            serde_json::json!({ "current_hash": current_hash }),
+        ),
+        FileSaveError::Internal(_) => ServerError::internal(message),
     }
 }
 

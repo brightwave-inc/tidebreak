@@ -67,6 +67,7 @@ const EMPTY_STATE: CodeUpdatesState = {
   harnessInstalls: {},
   viewedWorkspaceId: null,
   deliveryRevision: 0,
+  fileRevisions: {},
   turnRewrites: {},
 };
 
@@ -363,6 +364,22 @@ describe("reduceCodeUpdates", () => {
       },
     });
     expect(noticeToAction({ type: "delivery" })).toEqual({ type: "delivery" });
+  });
+
+  it("bumps one workspace's file revision when a file there is saved", () => {
+    const action = noticeToAction({
+      type: "files_changed",
+      workspace_id: "ws-1",
+    });
+    expect(action).toEqual({ type: "files_changed", workspaceId: "ws-1" });
+    if (!action) throw new Error("files_changed maps to an action");
+    const first = reduceCodeUpdates(EMPTY_STATE, action);
+    const second = reduceCodeUpdates(first, action);
+    expect(second.fileRevisions).toEqual({ "ws-1": 2 });
+    expect(
+      reduceCodeUpdates(second, { type: "files_changed", workspaceId: "ws-2" })
+        .fileRevisions,
+    ).toEqual({ "ws-1": 2, "ws-2": 1 });
   });
 
   it("bumps the delivery revision on each nudge (decision 66)", () => {

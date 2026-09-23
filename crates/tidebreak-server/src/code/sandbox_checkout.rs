@@ -437,13 +437,16 @@ pub async fn read_checkout_blob(
             content: String::new(),
             truncated: false,
             binary: true,
+            hash: None,
         });
     }
+    // A sandbox checkout is read-only here, so it offers no base to save over.
     Ok(WorktreeBlob {
         path,
         content: String::from_utf8_lossy(&bytes.bytes).into_owned(),
         truncated,
         binary: false,
+        hash: None,
     })
 }
 

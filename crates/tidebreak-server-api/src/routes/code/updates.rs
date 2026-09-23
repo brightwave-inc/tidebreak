@@ -168,6 +168,14 @@ async fn stream_updates(
                     };
                     wait_deadlines = deadlines;
                 }
+                Ok(CodeLiveUpdate::FilesChanged(workspace_id)) => {
+                    if send_notice(&mut socket, &UpdateNotice::FilesChanged { workspace_id })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 Err(RecvError::Lagged(_)) => {
                     let Ok(deadlines) = send_snapshot(&mut socket, &runtime, &owner).await else {
                         break;

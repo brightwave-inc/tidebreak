@@ -1161,6 +1161,56 @@ impl CodeRuntime {
             .map_err(map_worktree)
     }
 
+    /// Save one existing text file in a local workspace's worktree.
+    ///
+    /// Holds the workspace write lock, the one terminal writes and archive
+    /// take, so a save cannot land in a worktree archive is removing and two
+    /// saves do not interleave. It does not wait for a running turn: the base
+    /// hash, not the turn lock, is what keeps an agent's edit from being
+    /// overwritten unasked.
+    ///
+    /// The owner hears about the save on `/updates`, and so does `caller`
+    /// when someone else saved, so every view of the worktree re-reads it.
+    pub(crate) async fn save_workspace_file(
+        &self,
+        owner: &OwnerId,
+        caller: &OwnerId,
+        workspace_id: WorkspaceId,
+        path: &str,
+        content: &str,
+        base_hash: &str,
+    ) -> Result<file_save::SavedWorktreeFile, ServerError> {
+        let workspace = self.get_workspace(owner, workspace_id).await?;
+        if workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_remote",
+                "You cannot edit files in a sandbox workspace. Ask the agent to make the change.",
+            ));
+        }
+        let write = self.workspace_write_lock(workspace_id);
+        let _write_guard = write.lock().await;
+        let workspace = self.require_live_workspace(owner, workspace_id).await?;
+        let saved = file_save::save_worktree_file(
+            std::path::Path::new(&workspace.worktree_path),
+            path,
+            content,
+            base_hash,
+        )
+        .await
+        .map_err(map_file_save)?;
+        self.bus.publish_update(
+            owner,
+            crate::code::bus::CodeLiveUpdate::FilesChanged(workspace_id),
+        );
+        if caller != owner {
+            self.bus.publish_update(
+                caller,
+                crate::code::bus::CodeLiveUpdate::FilesChanged(workspace_id),
+            );
+        }
+        Ok(saved)
+    }
+
     pub async fn workspace_diff(
         &self,
         owner: &OwnerId,
