@@ -13,6 +13,7 @@ import {
 } from "../src/lib/standaloneAttach";
 import { REASON_REQUIRES_TLS } from "../src/lib/url";
 import { connections } from "../src/session/runtime";
+import { useThemeColors } from "../src/useThemeColors";
 
 type Stage = "idle" | StandaloneAttachStage;
 
@@ -30,6 +31,7 @@ type Stage = "idle" | StandaloneAttachStage;
  * until it reaches the secure store.
  */
 export default function AttachMachineScreen() {
+  const colors = useThemeColors();
   const router = useRouter();
   const [url, setUrl] = useState("");
   const [token, setToken] = useState("");
@@ -125,7 +127,7 @@ export default function AttachMachineScreen() {
         autoCorrect={false}
         keyboardType="url"
         placeholder="https://tidebreak.example"
-        placeholderTextColor="#6b7280"
+        placeholderTextColor={colors.mutedForeground}
         value={url}
         onChangeText={setUrl}
         className="rounded-lg border border-border bg-background px-3 py-3 text-base text-foreground"
@@ -139,7 +141,7 @@ export default function AttachMachineScreen() {
         secureTextEntry
         textContentType="password"
         placeholder="Token"
-        placeholderTextColor="#6b7280"
+        placeholderTextColor={colors.mutedForeground}
         value={token}
         onChangeText={setToken}
         className="rounded-lg border border-border bg-background px-3 py-3 text-base text-foreground"

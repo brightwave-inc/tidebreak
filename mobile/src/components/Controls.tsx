@@ -7,6 +7,7 @@ import {
   type TextInputProps,
   View,
 } from "react-native";
+import { useThemeColors } from "../useThemeColors";
 
 type ButtonVariant = "primary" | "secondary" | "destructive";
 
@@ -64,6 +65,7 @@ export function Field({
   multiline = false,
   ...props
 }: TextInputProps & { label: string; hint?: string }) {
+  const colors = useThemeColors();
   return (
     <View className="gap-1.5">
       <Text className="text-sm font-medium text-foreground">{label}</Text>
@@ -71,7 +73,7 @@ export function Field({
       <TextInput
         {...props}
         multiline={multiline}
-        placeholderTextColor="#697386"
+        placeholderTextColor={colors.mutedForeground}
         textAlignVertical={multiline ? "top" : "center"}
         className={`rounded-lg border border-border bg-background px-3 text-base text-foreground ${
           multiline ? "min-h-24 py-3" : "min-h-12 py-2.5"
