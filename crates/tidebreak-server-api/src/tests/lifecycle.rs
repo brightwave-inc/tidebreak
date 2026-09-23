@@ -2632,6 +2632,7 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
         },
     );
     let token = state.token.clone();
+    let mut executor_wake = state.events.client_execution_wake();
     spawn_turn_worker(&state);
     let router = app(state.clone());
     let bearer = format!("Bearer {token}");
@@ -2653,6 +2654,11 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
     })
     .await
     .expect("worker should durably checkpoint the client tool");
+    // Native executors sleep between slow sweeps, so the checkpoint itself
+    // has to wake them.
+    tokio::time::timeout(Duration::from_secs(1), executor_wake.notified())
+        .await
+        .expect("a client checkpoint should wake the native executors");
     let parked = store.get_turn(turn_id).await.unwrap().unwrap();
     assert_eq!(parked.status, TurnRunStatus::WaitingForClient);
     assert_eq!(parked.model_steps, 1);

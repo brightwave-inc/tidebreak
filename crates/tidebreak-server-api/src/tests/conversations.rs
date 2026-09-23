@@ -680,6 +680,44 @@ async fn patch_chat_sets_and_clears_the_model() {
     assert_eq!(json_body::<Chat>(cleared).await.model, None);
 }
 
+/// A write-back can wait on the reader under one permission mode and run
+/// unattended under another, so a mode change wakes the native executors.
+/// Other edits do not.
+#[tokio::test]
+async fn a_permission_mode_change_wakes_the_native_executors() {
+    let (router, token, state, _store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let mut executor_wake = state.events.client_execution_wake();
+
+    let renamed = patch_chat(
+        &router,
+        &bearer,
+        chat.id,
+        serde_json::json!({"title": "Renamed"}),
+    )
+    .await;
+    assert_eq!(renamed.status(), StatusCode::OK);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), executor_wake.notified())
+            .await
+            .is_err(),
+        "a rename should not wake the executors"
+    );
+
+    let auto = patch_chat(
+        &router,
+        &bearer,
+        chat.id,
+        serde_json::json!({"permission_mode": "auto"}),
+    )
+    .await;
+    assert_eq!(auto.status(), StatusCode::OK);
+    tokio::time::timeout(Duration::from_secs(1), executor_wake.notified())
+        .await
+        .expect("a mode change should wake the executors");
+}
+
 /// A per-chat choice of model, effort, mode, or network policy becomes the
 /// default the next chat seeds from; an explicit value in the create request
 /// still wins, and clearing a choice clears its sticky default too.

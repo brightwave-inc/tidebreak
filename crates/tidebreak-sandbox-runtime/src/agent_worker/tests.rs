@@ -3199,13 +3199,14 @@ async fn desktop_worker_checkpoints_one_exact_delegated_file_read() {
             reason: StopReason::ToolUse,
         },
     ]));
+    let events = Arc::new(EventBus::default());
     let worker = SandboxAgentRunWorker::new(
         store.clone(),
         test_secrets(),
         Arc::new(FixedResolver(provider)),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
-        Arc::new(EventBus::default()),
+        events.clone(),
         AgentConfig {
             model: "model".into(),
             ..AgentConfig::default()
@@ -3227,6 +3228,9 @@ async fn desktop_worker_checkpoints_one_exact_delegated_file_read() {
         tidebreak_core::SANDBOX_READ_DELEGATED_FILE_TOOL
     );
     assert_eq!(calls[0].arguments, serde_json::json!({}));
+    // The desktop's executor sleeps between slow sweeps, so the checkpoint
+    // has to wake it.
+    assert_eq!(events.host_execution_wakes(), 1);
 }
 
 /// Production routing resolves models through the host registry, which is

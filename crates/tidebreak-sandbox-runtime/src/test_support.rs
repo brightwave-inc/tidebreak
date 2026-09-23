@@ -26,6 +26,7 @@ pub(crate) mod resolver {
 
 pub(crate) mod bus {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use tidebreak_core::{SequencedAgentEvent, SessionId};
@@ -36,6 +37,19 @@ pub(crate) mod bus {
     #[derive(Default)]
     pub(crate) struct EventBus {
         channels: Mutex<HashMap<SessionId, broadcast::Sender<SequencedAgentEvent>>>,
+        host_execution_wakes: AtomicUsize,
+    }
+
+    impl EventBus {
+        /// Count one wake of the host's native executor.
+        pub(crate) fn wake_host_execution(&self) {
+            self.host_execution_wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        /// How many times a run woke the host's native executor.
+        pub(crate) fn host_execution_wakes(&self) -> usize {
+            self.host_execution_wakes.load(Ordering::SeqCst)
+        }
     }
 
     impl EventBus {
@@ -152,6 +166,10 @@ impl SandboxHost for TestSandboxHost {
         event: tidebreak_core::SequencedAgentEvent,
     ) {
         self.events.publish(session_id, event);
+    }
+
+    fn host_execution_pending(&self) {
+        self.events.wake_host_execution();
     }
 }
 
