@@ -189,6 +189,12 @@ fn supports_native_steering(version: Option<&str>) -> bool {
 /// must not depend on a PTY library, so this uses libc on Unix and degrades
 /// everywhere else. A missing binary, login screen, timeout, or unrecognized
 /// rendering conservatively yields no rows.
+///
+/// The installed `codex` is a Node launcher that starts the native engine as
+/// its own child. The capture runs the launcher as the leader of a new
+/// process group and kills that whole group when it ends, however it ends.
+/// Killing only the launcher left the engine running with no parent, one
+/// more after every probe.
 async fn observe_commands(
     binary: &Path,
     env: &[(std::ffi::OsString, std::ffi::OsString)],
@@ -228,7 +234,7 @@ fn capture_command_popup(
     let Ok(probe_dir) = tempfile::tempdir() else {
         return Vec::new();
     };
-    let mut command = std::process::Command::new(binary);
+    let mut command = Command::new(binary);
     command.args([
         "--no-alt-screen",
         "--dangerously-bypass-hook-trust",
@@ -260,9 +266,17 @@ fn capture_command_popup(
         .stdin(Stdio::from(slave_in))
         .stdout(Stdio::from(slave_out))
         .stderr(Stdio::from(slave_err));
-    let Ok(mut child) = command.spawn() else {
+    // The launcher leads a new process group, and the engine it starts joins
+    // it. Dropping `tree` kills the whole group on every path out of this
+    // function, including a panic.
+    let Ok(tree) = spawn_process_tree(&mut command) else {
         return Vec::new();
     };
+    // Close this side's copies of the terminal, so a read reports the end as
+    // soon as the launcher, the engine, and anything they started let go of
+    // it. The loop never reaps the launcher: a reaped leader ends ownership
+    // of the group, and anything still in it would outlive the probe.
+    drop(command);
     drop(slave);
     set_nonblocking(&master);
     let mut captured = Vec::new();
@@ -271,9 +285,6 @@ fn capture_command_popup(
     let mut sent_slash = false;
     let mut chunk = [0_u8; 4096];
     while Instant::now() < deadline {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            break;
-        }
         match master.read(&mut chunk) {
             Ok(0) => break,
             Ok(count) => {
@@ -309,14 +320,7 @@ fn capture_command_popup(
             break;
         }
     }
-    let _ = child.kill();
-    let wait_deadline = Instant::now() + Duration::from_millis(250);
-    while Instant::now() < wait_deadline {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    drop(tree);
     parse_command_popup(&captured)
 }
 
@@ -988,6 +992,78 @@ mod tests {
             CodexAdapter::new().capabilities(&probe).slash_commands,
             CapLevel::Supported
         );
+    }
+
+    /// The installed `codex` is a Node launcher that starts the native engine
+    /// and waits for it. The probe used to kill only the launcher, which left
+    /// the engine running with no parent after every probe. This stand-in
+    /// engine ignores the terminal closing and the signals a launcher
+    /// forwards, so only a kill of the whole process group ends it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_command_probe_leaves_no_engine_process_behind() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("engine.pid");
+        let launcher = dir.path().join("codex");
+        std::fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\n\
+                 /bin/sh -c 'trap \"\" HUP INT TERM; echo $$ > \"$1\"; \
+                 while :; do /bin/sleep 1; done' engine '{}' &\n\
+                 wait\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(observe_commands(&launcher, &[]).await.is_empty());
+
+        let engine = published_pid(&pid_file).await;
+        assert_exits(engine).await;
+    }
+
+    #[cfg(unix)]
+    async fn published_pid(path: &Path) -> libc::pid_t {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(pid) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the stand-in engine never published its pid"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Wait for `pid` to exit. A survivor is killed before the test fails, so
+    /// a regression does not leave the stand-in engine running.
+    #[cfg(unix)]
+    async fn assert_exits(pid: libc::pid_t) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            // SAFETY: signal 0 only checks whether the pid still exists.
+            if unsafe { libc::kill(pid, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                // SAFETY: the pid still answers, so it is still the stand-in
+                // engine this test started.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                panic!("engine {pid} outlived the probe");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[test]
