@@ -1240,6 +1240,15 @@ impl ClaudeSession {
     }
 
     async fn run_turn_inner(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
+        // A stop left over from the last turn cannot stop this one. Settle it
+        // before this turn counts as running, so a stop aimed at this turn is
+        // never answered as a stale one.
+        let current = self.channel.lock().await.clone();
+        if let Some(channel) = current {
+            channel.reader.settle_stops(&Err(
+                "the prior turn ended before the interrupt was acknowledged".into(),
+            ));
+        }
         self.interrupts_this_turn.store(0, Ordering::SeqCst);
         self.turn_in_flight.store(true, Ordering::SeqCst);
         let _in_flight = TurnGuard(&self.turn_in_flight);
@@ -1252,9 +1261,6 @@ impl ClaudeSession {
             let (channel, fresh) = self
                 .ensure_channel(input.model.as_deref(), input.reasoning_effort)
                 .await?;
-            channel.reader.settle_stops(&Err(
-                "the prior turn ended before the interrupt was acknowledged".into(),
-            ));
             let written = match channel.reader.begin_turn(&uuid) {
                 Some(done) => match self.write_line(&channel, &prompt).await {
                     Ok(()) => Ok(done),
@@ -3055,8 +3061,12 @@ done
             1,
             "the engine's own turn is not a turn the session reports as ended"
         );
+        let first_end = between
+            .iter()
+            .position(|event| matches!(event, HarnessEvent::TurnCompleted { .. }))
+            .unwrap();
         assert!(
-            between[first.len()..].iter().all(|event| !matches!(
+            between[first_end..].iter().all(|event| !matches!(
                 event,
                 HarnessEvent::AssistantDelta { .. } | HarnessEvent::ReasoningDelta { .. }
             )),
