@@ -335,11 +335,10 @@ pub async fn delete_api_key(State(state): State<AppState>) -> Result<StatusCode,
 
 /// Response for `GET /providers`.
 //
-// Also read back by the CLI through [`crate::wire`], so it rejects unknown
-// keys the way the renderer's guards do. A plain comment, not a doc comment,
-// so the generated `wire.ts` does not carry it.
+// Also read back by the CLI through [`crate::wire`], which ignores keys it
+// does not know so a newer server can add one. A plain comment, not a doc
+// comment, so the generated `wire.ts` does not carry it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProvidersList {
     pub providers: Vec<ProviderInfo>,
 }
@@ -500,11 +499,10 @@ pub async fn post_voice_transcription_install(
 
 /// A selectable model in the catalog.
 //
-// Also read back by the CLI through [`crate::wire`], so it rejects unknown
-// keys the way the renderer's guards do. A plain comment, not a doc comment,
-// so the generated `wire.ts` does not carry it.
+// Also read back by the CLI through [`crate::wire`], which ignores keys it
+// does not know so a newer server can add one. A plain comment, not a doc
+// comment, so the generated `wire.ts` does not carry it.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct ModelInfo {
     /// Stable provider-qualified selection key used by settings and chats.
     pub key: String,
@@ -560,7 +558,6 @@ pub struct ModelInfo {
 
 /// One named model role and what it resolves to right now.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct ModelRoleInfo {
     /// The role this row describes.
     pub role: ModelRole,
@@ -579,7 +576,6 @@ pub struct ModelRoleInfo {
 
 /// Response for `GET /models`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ModelCatalog {
     /// The models a client can select from.
     pub models: Vec<ModelInfo>,

@@ -72,13 +72,32 @@ export async function disconnectRemoteMachine(): Promise<RemoteMachineState> {
 /** A refused connect, or `null` when the failure was something else. */
 export function remoteConnectError(error: unknown): RemoteConnectError | null {
   if (!error || typeof error !== "object") return null;
-  const candidate = error as { reason?: unknown; detail?: unknown };
+  const candidate = error as {
+    reason?: unknown;
+    detail?: unknown;
+    machineVersion?: unknown;
+  };
   if (typeof candidate.reason !== "string") return null;
-  if (!(candidate.reason in CONNECT_COPY)) return null;
+  if (!Object.hasOwn(CONNECT_COPY, candidate.reason)) return null;
   return {
     reason: candidate.reason as RemoteConnectReason,
     detail: typeof candidate.detail === "string" ? candidate.detail : null,
+    machineVersion: printableRelease(candidate.machineVersion),
   };
+}
+
+/**
+ * A release string short and plain enough to put in a sentence, or `null`.
+ *
+ * The same rule the shell and the mobile app apply: 1 to 32 characters from
+ * letters, digits, `.`, `+`, and `-`. Anything else could put a lure such as
+ * "from https://…" into the "update to" copy, so the copy leaves the release
+ * out instead.
+ */
+function printableRelease(value: unknown): string | null {
+  return typeof value === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(value)
+    ? value
+    : null;
 }
 
 /**
@@ -87,8 +106,14 @@ export function remoteConnectError(error: unknown): RemoteConnectError | null {
  * Exhaustive by construction: a new reason on the shell side has no entry here
  * until someone writes one, and `remoteConnectError` will not recognize it, so
  * an unworded refusal surfaces as an ordinary failure rather than as a blank.
+ *
+ * The two version refusals name the machine's release, which is the one
+ * number both sides know: an app at that release or later reads it.
  */
-const CONNECT_COPY: Record<RemoteConnectReason, string> = {
+const CONNECT_COPY: Record<
+  RemoteConnectReason,
+  string | ((machineVersion: string | null) => string)
+> = {
   remote_machine_url_invalid:
     "That is not an address this app can use. Enter the full URL, starting with https://.",
   remote_machine_requires_tls:
@@ -103,10 +128,19 @@ const CONNECT_COPY: Record<RemoteConnectReason, string> = {
     "The token could not be saved to this computer's credential store. Nothing was changed.",
   remote_machine_gateway_auth_unavailable:
     "This machine is not connected to the same Model Gateway as this app. Sign in through that Gateway, or use a static token for a standalone machine.",
+  remote_machine_newer_than_app: (machineVersion) =>
+    machineVersion
+      ? `That machine runs Tidebreak ${machineVersion}. Update Tidebreak to ${machineVersion} or later to connect.`
+      : "That machine runs a newer Tidebreak. Update Tidebreak to connect.",
+  remote_machine_older_than_app: (machineVersion) =>
+    machineVersion
+      ? `That machine runs Tidebreak ${machineVersion}, which this version of Tidebreak no longer supports. Update the machine to connect.`
+      : "That machine runs an older Tidebreak that this version no longer supports. Update the machine to connect.",
 };
 
 export function connectFailureMessage(error: RemoteConnectError): string {
-  return CONNECT_COPY[error.reason];
+  const copy = CONNECT_COPY[error.reason];
+  return typeof copy === "string" ? copy : copy(error.machineVersion ?? null);
 }
 
 /**

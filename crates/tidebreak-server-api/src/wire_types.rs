@@ -150,6 +150,25 @@ pub(crate) mod generate {
         )
     }
 
+    /// The version handshake's range, emitted beside the generated types.
+    ///
+    /// A client built from this source reads servers from `MIN_API_LEVEL`
+    /// through `API_LEVEL`. The mobile app takes these numbers with the rest of
+    /// `wire.ts`, so its range moves with the code it ships.
+    pub(crate) fn render_api_levels() -> String {
+        use crate::wire::{API_LEVEL, MIN_API_LEVEL};
+        format!(
+            "/**\n\
+             \x20* The server API levels a client built from this source reads.\n\
+             \x20*\n\
+             \x20* Generated from `tidebreak_server::wire`. A client compares a server's\n\
+             \x20* `api_level` with this range before it attaches.\n\
+             \x20*/\n\
+             export const MIN_API_LEVEL = {MIN_API_LEVEL};\n\
+             export const API_LEVEL = {API_LEVEL};\n"
+        )
+    }
+
     /// Render the generated module, header and all, so ordering and preamble are
     /// part of the diff a reviewer sees.
     pub(crate) fn render(declarations: &Declarations, trailing: &[String]) -> String {
@@ -389,6 +408,9 @@ mod tests {
         // types with the conversation path, but one generated module keeps the
         // renderer importing from a single place.
         generate::collect_from::<crate::routes::Settings>(&cfg, &mut out);
+        // The version handshake: what `GET /version` answers, and the two keys
+        // `/healthz` and `/auth/discovery` carry beside their own.
+        generate::collect_from::<crate::server_version::ServerVersion>(&cfg, &mut out);
         // Its own endpoint root: personal instructions are the caller's, so
         // they are read and written apart from the deployment's settings.
         generate::collect_from::<crate::instructions::PersonalInstructions>(&cfg, &mut out);
@@ -574,6 +596,7 @@ mod tests {
             &[
                 generate::render_tool_name_list(&names),
                 generate::render_wire_limits(),
+                generate::render_api_levels(),
             ],
         )
     }
@@ -1872,52 +1895,58 @@ mod tests {
         );
     }
 
-    /// Unknown keys fail every REST record but the flattened MCP server row,
-    /// which is documented on [`crate::wire`].
+    /// A key a newer server adds is ignored by every REST record, at the top
+    /// and inside, and the record reads exactly as it would without it. The
+    /// round trip above is what still fails on a key a type does not declare.
     #[test]
-    fn rest_records_reject_unknown_keys() {
-        fn rejects<T: serde::de::DeserializeOwned>(name: &str, value: &serde_json::Value) {
+    fn rest_records_ignore_unknown_keys() {
+        fn ignores<T: serde::de::DeserializeOwned + serde::Serialize>(
+            name: &str,
+            value: &serde_json::Value,
+        ) {
             let mut extra = value.clone();
             extra["extra"] = serde_json::json!(1);
-            assert!(
-                serde_json::from_value::<T>(extra).is_err(),
-                "fixture {name} should reject an unknown key"
+            let decoded: T = serde_json::from_value(extra).unwrap_or_else(|error| {
+                panic!("fixture {name} should read past an unknown key: {error}")
+            });
+            assert_eq!(
+                &serde_json::to_value(&decoded).expect("a decoded record serializes"),
+                value,
+                "fixture {name} changed when an unknown key was added"
             );
         }
         for (name, kind, value) in rest_record_fixtures() {
             match kind {
-                "ModelCatalog" => rejects::<crate::wire::ModelCatalog>(name, &value),
-                "ProvidersList" => rejects::<crate::wire::ProvidersList>(name, &value),
-                "McpServersInfo" => rejects::<crate::wire::McpServersInfo>(name, &value),
-                "AgentRunSnapshot" => rejects::<crate::wire::AgentRunSnapshot>(name, &value),
-                "DeliverablesCatalog" => rejects::<crate::wire::DeliverablesCatalog>(name, &value),
-                "DeliverablePreview" => rejects::<crate::wire::DeliverablePreview>(name, &value),
+                "ModelCatalog" => ignores::<crate::wire::ModelCatalog>(name, &value),
+                "ProvidersList" => ignores::<crate::wire::ProvidersList>(name, &value),
+                "McpServersInfo" => ignores::<crate::wire::McpServersInfo>(name, &value),
+                "AgentRunSnapshot" => ignores::<crate::wire::AgentRunSnapshot>(name, &value),
+                "DeliverablesCatalog" => ignores::<crate::wire::DeliverablesCatalog>(name, &value),
+                "DeliverablePreview" => ignores::<crate::wire::DeliverablePreview>(name, &value),
                 "OutputRevisionsCatalog" => {
-                    rejects::<crate::wire::OutputRevisionsCatalog>(name, &value)
+                    ignores::<crate::wire::OutputRevisionsCatalog>(name, &value)
                 }
                 other => panic!("fixture {name} has an unknown type tag {other}"),
             }
         }
-        // Nested records too: a row inside the envelope is guarded on its own.
-        let mut model = rest_record_fixtures()[0].2["models"][0].clone();
-        model["extra"] = serde_json::json!(1);
-        assert!(serde_json::from_value::<crate::wire::ModelInfo>(model).is_err());
-        let mut source = rest_record_fixtures()
-            .iter()
-            .find(|(name, _, _)| *name == "output_revisions")
-            .expect("the revisions fixture")
-            .2["revisions"][0]["sources"][0]
-            .clone();
-        source["extra"] = serde_json::json!(1);
-        assert!(serde_json::from_value::<crate::wire::OutputRevisionSource>(source).is_err());
-        // The one tolerant record: a flattened definition cannot be guarded.
-        let mut server = rest_record_fixtures()
-            .iter()
-            .find(|(name, _, _)| *name == "mcp_servers")
-            .expect("the MCP fixture")
-            .2["servers"][0]
-            .clone();
-        server["extra"] = serde_json::json!(1);
-        assert!(serde_json::from_value::<crate::wire::McpServerInfo>(server).is_ok());
+        // Nested records too: a row inside the envelope reads on its own.
+        let fixtures = rest_record_fixtures();
+        let by_name = |wanted: &str| {
+            fixtures
+                .iter()
+                .find(|(name, _, _)| *name == wanted)
+                .unwrap_or_else(|| panic!("the {wanted} fixture exists"))
+                .2
+                .clone()
+        };
+        ignores::<crate::wire::ModelInfo>("a model row", &by_name("model_catalog")["models"][0]);
+        ignores::<crate::wire::OutputRevisionSource>(
+            "a revision source",
+            &by_name("output_revisions")["revisions"][0]["sources"][0],
+        );
+        ignores::<crate::wire::McpServerInfo>(
+            "an MCP server row",
+            &by_name("mcp_servers")["servers"][0],
+        );
     }
 }

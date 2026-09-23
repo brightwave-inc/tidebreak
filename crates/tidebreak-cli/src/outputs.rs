@@ -195,11 +195,10 @@ fn output_revision_json(revision: &OutputRevisionInfo) -> serde_json::Value {
     })
 }
 
-/// Write one JSON object on stdout, matching setup and print mode's shape so
-/// the same consumer can read every CLI surface.
+/// Write one JSON document on stdout, one object on one line, stamped with
+/// its `schema_version`. See [`crate::json_output`].
 fn emit(value: &serde_json::Value) -> Result<()> {
-    println!("{value}");
-    Ok(())
+    crate::json_output::print_document(value)
 }
 
 /// Write exported bytes, replacing the destination only once the whole file is

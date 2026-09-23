@@ -1460,11 +1460,10 @@ pub struct CatalogModel {
 
 /// Public view of a provider — never includes the credential itself.
 //
-// Also read back by the CLI through [`crate::wire`], so it rejects unknown
-// keys the way the renderer's guards do. A plain comment, not a doc comment,
-// so the generated `wire.ts` does not carry it.
+// Also read back by the CLI through [`crate::wire`], which ignores keys it
+// does not know so a newer server can add one. A plain comment, not a doc
+// comment, so the generated `wire.ts` does not carry it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct ProviderInfo {
     /// Provider kind.
     pub kind: ProviderKind,

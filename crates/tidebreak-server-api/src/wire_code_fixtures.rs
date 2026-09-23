@@ -1300,55 +1300,62 @@ fn every_code_frame_fixture_round_trips() {
     }
 }
 
-/// Unknown keys fail the value, at the snapshot, the notice, and the frame.
-///
-/// The one gap is serde's: a payload-less notice (`{"type":"delivery"}`) is
-/// a unit variant of an internally tagged enum, and serde reads no fields for
-/// it, so `deny_unknown_fields` has nothing to check. A stray key beside the
-/// tag is accepted there. The renderer's `onlyKeys` guard still rejects it.
+/// A key a newer server adds is ignored at the snapshot, the notice, and the
+/// frame, and the value reads exactly as it would without it. The round trip
+/// above is what still fails on a key a type does not declare.
 #[test]
-fn code_values_reject_unknown_keys() {
+fn code_values_ignore_unknown_keys() {
+    fn ignores<T: serde::de::DeserializeOwned + serde::Serialize>(
+        entry: &Fixture,
+        value: serde_json::Value,
+    ) {
+        let decoded: T = serde_json::from_value(value).unwrap_or_else(|error| {
+            panic!(
+                "fixture {} should read past an unknown key: {error}",
+                entry.name
+            )
+        });
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("a decoded value serializes"),
+            entry.value,
+            "fixture {} changed when an unknown key was added",
+            entry.name
+        );
+    }
     for entry in code_frame_fixtures() {
-        if entry.kind == "update_notice"
-            && entry.value.as_object().map(serde_json::Map::len) == Some(1)
-        {
-            continue;
-        }
         let mut value = entry.value.clone();
-        let object = match entry.kind {
-            "event_frame" => value["event"].as_object_mut(),
-            _ => value.as_object_mut(),
-        }
-        .expect("every fixture is an object");
-        object.insert("extra".to_owned(), serde_json::Value::Bool(true));
-        let rejected = match entry.kind {
-            "repo" => serde_json::from_value::<CodeRepoSnapshot>(value).is_err(),
-            "repo_trust" => serde_json::from_value::<CodeRepoTrustSnapshot>(value).is_err(),
-            "workspace" => serde_json::from_value::<CodeWorkspaceSnapshot>(value).is_err(),
-            "session" => serde_json::from_value::<SessionSnapshot>(value).is_err(),
-            "turn" => serde_json::from_value::<TurnSnapshot>(value).is_err(),
-            "queued_turn" => serde_json::from_value::<QueuedTurn>(value).is_err(),
-            "queued_turns" => serde_json::from_value::<QueuedTurnsSnapshot>(value).is_err(),
-            "harness_doctor" => serde_json::from_value::<HarnessDoctorReport>(value).is_err(),
-            "workspace_files" => serde_json::from_value::<CodeWorkspaceFiles>(value).is_err(),
-            "workspace_diff" => serde_json::from_value::<CodeWorkspaceDiff>(value).is_err(),
-            "approval" => serde_json::from_value::<ApprovalSnapshot>(value).is_err(),
-            "commit" => serde_json::from_value::<CodeCommitSnapshot>(value).is_err(),
-            "push" => serde_json::from_value::<CodePushSnapshot>(value).is_err(),
-            "workspace_pr" => serde_json::from_value::<CodeWorkspacePrSnapshot>(value).is_err(),
-            "action" => serde_json::from_value::<CodeActionSnapshot>(value).is_err(),
-            "session_digest" => serde_json::from_value::<SessionDigest>(value).is_err(),
-            "update_notice" => serde_json::from_value::<UpdateNotice>(value).is_err(),
-            // The event union is `tidebreak_core`'s and tolerates extra keys
-            // inside a variant; the frame around it does not.
-            "event_frame" => {
-                let mut frame = entry.value.clone();
-                frame["extra"] = serde_json::Value::Bool(true);
-                serde_json::from_value::<SequencedEventFrame>(frame).is_err()
+        value
+            .as_object_mut()
+            .expect("every fixture is an object")
+            .insert("extra".to_owned(), serde_json::Value::Bool(true));
+        if entry.kind == "event_frame" {
+            // Inside the event union too, which the server also reads back
+            // from its own journal.
+            if let Some(event) = value["event"].as_object_mut() {
+                event.insert("extra".to_owned(), serde_json::Value::Bool(true));
             }
+        }
+        match entry.kind {
+            "repo" => ignores::<CodeRepoSnapshot>(&entry, value),
+            "repo_trust" => ignores::<CodeRepoTrustSnapshot>(&entry, value),
+            "workspace" => ignores::<CodeWorkspaceSnapshot>(&entry, value),
+            "session" => ignores::<SessionSnapshot>(&entry, value),
+            "turn" => ignores::<TurnSnapshot>(&entry, value),
+            "queued_turn" => ignores::<QueuedTurn>(&entry, value),
+            "queued_turns" => ignores::<QueuedTurnsSnapshot>(&entry, value),
+            "harness_doctor" => ignores::<HarnessDoctorReport>(&entry, value),
+            "workspace_files" => ignores::<CodeWorkspaceFiles>(&entry, value),
+            "workspace_diff" => ignores::<CodeWorkspaceDiff>(&entry, value),
+            "approval" => ignores::<ApprovalSnapshot>(&entry, value),
+            "commit" => ignores::<CodeCommitSnapshot>(&entry, value),
+            "push" => ignores::<CodePushSnapshot>(&entry, value),
+            "workspace_pr" => ignores::<CodeWorkspacePrSnapshot>(&entry, value),
+            "action" => ignores::<CodeActionSnapshot>(&entry, value),
+            "session_digest" => ignores::<SessionDigest>(&entry, value),
+            "update_notice" => ignores::<UpdateNotice>(&entry, value),
+            "event_frame" => ignores::<SequencedEventFrame>(&entry, value),
             other => panic!("fixture {} has no decoder for kind {other}", entry.name),
-        };
-        assert!(rejected, "fixture {} accepted an unknown key", entry.name);
+        }
     }
 }
 

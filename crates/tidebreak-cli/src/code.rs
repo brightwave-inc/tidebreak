@@ -3,8 +3,9 @@
 //! Every verb here is a thin wrapper over a `/code/*` route the server already
 //! serves. The CLI embeds a server by default and attaches with `--server` /
 //! `--attach` the same way `-p` and the setup family do. `--json` (or
-//! `--output-format json`) writes one object, or NDJSON for the two streaming
-//! commands (`run`, `watch`); human output otherwise.
+//! `--output-format json`) writes one document stamped with its
+//! `schema_version`, or NDJSON for the two streaming commands (`run`,
+//! `watch`); human output otherwise.
 
 use std::future::Future as _;
 use std::io::Write as _;
@@ -21,20 +22,21 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::api::client::Client;
 use crate::api::code::{
-    decode_event_frame, decode_update_notice, is_turn_terminal, supported_caps_summary,
-    turn_exit_code, ApprovalSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode, SessionDigest,
-    SessionSnapshot, SubmitTurnResponse, TurnSnapshot, UpdateNotice,
+    is_turn_terminal, supported_caps_summary, turn_exit_code, ApprovalSnapshot,
+    CodeWorkspaceSnapshot, HarnessAuthMode, SessionDigest, SessionSnapshot, SubmitTurnResponse,
+    TurnSnapshot, UpdateNotice,
 };
 use crate::connect::Server;
+use crate::event_stream::{CodeFrames, UpdateNotices};
 use crate::print::OutputFormat;
 
 /// Exit status when `--on-approval fail` sees a parked approval.
-const EXIT_APPROVAL_PARKED: i32 = 3;
+pub(crate) const EXIT_APPROVAL_PARKED: i32 = 3;
 /// Timed out waiting for a turn or a watch snapshot. Same number GNU
 /// `timeout(1)` uses, so a driver can treat both the same way.
-const EXIT_TIMEOUT: i32 = 124;
+pub(crate) const EXIT_TIMEOUT: i32 = 124;
 /// SIGINT, following the shell's 128+signal convention and `-p`.
-const EXIT_INTERRUPTED: i32 = 130;
+pub(crate) const EXIT_INTERRUPTED: i32 = 130;
 
 const RECONNECT_ATTEMPTS: usize = 3;
 const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
@@ -1779,12 +1781,11 @@ fn clip(value: &str, max: usize) -> String {
     clipped
 }
 
+/// Write one JSON document on stdout, stamped with its `schema_version`. The
+/// streaming verbs write raw frames through [`emit_line`] instead. See
+/// [`crate::json_output`].
 fn emit<T: serde::Serialize>(value: &T) -> Result<i32> {
-    println!(
-        "{}",
-        serde_json::to_string(value)
-            .map_err(|error| AgentError::msg(format!("could not encode json: {error}")))?
-    );
+    crate::json_output::print_document(value)?;
     Ok(0)
 }
 
@@ -1798,23 +1799,29 @@ fn emit_line(raw: &str) {
     let _ = stdout.flush();
 }
 
+/// A code socket plus the readers that keep its cursor and count the frames
+/// this build cannot read. See [`crate::event_stream`] for how a skip is
+/// reported.
 struct CodeStream {
     socket: crate::api::client::EventSocket,
-    last_seq: i64,
+    frames: CodeFrames,
+    notices: UpdateNotices,
 }
 
 impl CodeStream {
     async fn open_session(client: &Client, session: SessionId) -> Result<Self> {
         Ok(Self {
             socket: client.open_code_events(session, 0).await?,
-            last_seq: 0,
+            frames: CodeFrames::after(0),
+            notices: UpdateNotices::default(),
         })
     }
 
     async fn open_updates(client: &Client) -> Result<Self> {
         Ok(Self {
             socket: client.open_code_updates().await?,
-            last_seq: 0,
+            frames: CodeFrames::after(0),
+            notices: UpdateNotices::default(),
         })
     }
 
@@ -1824,13 +1831,10 @@ impl CodeStream {
         session: SessionId,
     ) -> Result<Option<(String, crate::api::code::SequencedEventFrame)>> {
         match self.socket.next().await {
-            Some(Ok(Message::Text(text))) => match decode_event_frame(&text) {
-                Ok(frame) => {
-                    self.last_seq = frame.seq;
-                    Ok(Some((text.to_string(), frame)))
-                }
-                Err(_) => Ok(None),
-            },
+            Some(Ok(Message::Text(text))) => Ok(self
+                .frames
+                .read(&text)
+                .map(|frame| (text.to_string(), frame))),
             Some(Ok(_)) => Ok(None),
             Some(Err(_)) | None => {
                 self.reconnect_session(client, session).await?;
@@ -1841,10 +1845,10 @@ impl CodeStream {
 
     async fn next_updates(&mut self, client: &Client) -> Result<Option<(String, UpdateNotice)>> {
         match self.socket.next().await {
-            Some(Ok(Message::Text(text))) => match decode_update_notice(&text) {
-                Ok(notice) => Ok(Some((text.to_string(), notice))),
-                Err(_) => Ok(None),
-            },
+            Some(Ok(Message::Text(text))) => Ok(self
+                .notices
+                .read(&text)
+                .map(|notice| (text.to_string(), notice))),
             Some(Ok(_)) => Ok(None),
             Some(Err(_)) | None => {
                 self.reconnect_updates(client).await?;
@@ -1857,7 +1861,10 @@ impl CodeStream {
         let mut last = None;
         for _ in 0..RECONNECT_ATTEMPTS {
             tokio::time::sleep(RECONNECT_DELAY).await;
-            match client.open_code_events(session, self.last_seq).await {
+            match client
+                .open_code_events(session, self.frames.last_seq())
+                .await
+            {
                 Ok(socket) => {
                     self.socket = socket;
                     return Ok(());

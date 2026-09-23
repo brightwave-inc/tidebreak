@@ -3177,6 +3177,58 @@ fn public_get(uri: &str) -> Request<Body> {
     Request::builder().uri(uri).body(Body::empty()).unwrap()
 }
 
+/// The version handshake answers before a client holds anything: `/version`
+/// on its own, and the same two keys inside `/healthz` and `/auth/discovery`.
+/// A client compares the level with the range it reads before it attaches,
+/// so all three have to agree with what this build serves.
+#[tokio::test]
+async fn every_public_route_reports_the_same_version() {
+    let (router, _bearer, _store, _dir) = test_app().await;
+    let expected = serde_json::json!({
+        "version": tidebreak_core::VERSION,
+        "api_level": crate::wire::API_LEVEL,
+    });
+
+    let version = router
+        .clone()
+        .oneshot(public_get("/version"))
+        .await
+        .unwrap();
+    assert_eq!(version.status(), StatusCode::OK);
+    assert_eq!(json_body::<serde_json::Value>(version).await, expected);
+
+    let health: serde_json::Value = json_body(
+        router
+            .clone()
+            .oneshot(public_get("/healthz"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["version"], expected["version"]);
+    assert_eq!(health["api_level"], expected["api_level"]);
+
+    let discovery: serde_json::Value = json_body(
+        router
+            .clone()
+            .oneshot(public_get("/auth/discovery"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(discovery["mode"], "local");
+    assert_eq!(discovery["version"], expected["version"]);
+    assert_eq!(discovery["api_level"], expected["api_level"]);
+
+    // Each document reads back as the handshake a client compares.
+    for document in [&expected, &health, &discovery] {
+        let read =
+            crate::wire::ServerVersion::from_answer(200, &serde_json::to_vec(document).unwrap());
+        assert_eq!(read, Some(crate::wire::ServerVersion::current()));
+    }
+}
+
 /// What a standalone machine tells a browser it can do, and what it refuses.
 ///
 /// The discovery document is the page's only input before it holds anything,
@@ -3204,7 +3256,14 @@ async fn a_standalone_machine_publishes_the_one_sign_in_it_can_run() {
             .unwrap(),
     )
     .await;
-    assert_eq!(discovery, serde_json::json!({ "mode": "static_token" }));
+    assert_eq!(
+        discovery,
+        serde_json::json!({
+            "mode": "static_token",
+            "version": tidebreak_core::VERSION,
+            "api_level": crate::wire::API_LEVEL,
+        })
+    );
     for route in [
         "/auth/oidc/start",
         "/auth/oidc/callback?code=c&state=s",
@@ -3243,6 +3302,8 @@ async fn a_standalone_machine_publishes_the_one_sign_in_it_can_run() {
             // The public URL's path prefix is kept, so the button works
             // behind the operator's own ingress.
             "start_url": "https://machine.example.com/tidebreak/auth/oidc/start",
+            "version": tidebreak_core::VERSION,
+            "api_level": crate::wire::API_LEVEL,
         })
     );
     let no_console = oidc

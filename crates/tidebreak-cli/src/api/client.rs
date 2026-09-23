@@ -18,7 +18,7 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use super::wire::{
     AgentActivityHistoryItem, AgentRunSnapshot, ApprovalGrantRung, Chat, DeliverablePreview,
     DeliverablesCatalog, ModelCatalog, OutputRevisionsCatalog, PendingPlanApproval,
-    PendingUserQuestions, ProviderInfo, ProvidersList,
+    PendingUserQuestions, ProviderInfo, ProvidersList, ServerVersion,
 };
 
 /// The chat event stream once the upgrade completes.
@@ -1021,6 +1021,47 @@ impl Client {
 
     pub(crate) fn base_url(&self) -> &str {
         &self.base
+    }
+
+    /// What the server says about its own version.
+    ///
+    /// `Ok(None)` covers a server that predates `GET /version` (a `404`), a
+    /// page in front of it, an answer this client could not print, and a
+    /// request refused outright. The caller treats all of them as compatible:
+    /// the check exists to explain a version gap, and a server that refused
+    /// this request refuses the command's own next one with its own error.
+    ///
+    /// A server that does not answer within `timeout` is an error instead.
+    /// The command's own requests would wait on it without a limit, so the
+    /// check ends the wait rather than adding to it.
+    pub async fn server_version(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<ServerVersion>> {
+        let unanswered = || {
+            AgentError::msg(format!(
+                "the server at {} did not answer within {} seconds",
+                self.base,
+                timeout.as_secs_f32()
+            ))
+        };
+        let response = match self
+            .http
+            .get(format!("{}/version", self.base))
+            .timeout(timeout)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if error.is_timeout() => return Err(unanswered()),
+            Err(_) => return Ok(None),
+        };
+        let status = response.status().as_u16();
+        match response.bytes().await {
+            Ok(body) => Ok(ServerVersion::from_answer(status, &body)),
+            Err(error) if error.is_timeout() => Err(unanswered()),
+            Err(_) => Ok(None),
+        }
     }
 }
 

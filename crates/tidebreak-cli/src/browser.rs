@@ -1337,6 +1337,11 @@ fn set_browser_action(
 // ---------------------------------------------------------------------------
 
 /// Run a `tidebreak browser …` command.
+///
+/// Each command prints one JSON document on one line, stamped with its
+/// `schema_version` like every other `--json` document (see
+/// [`crate::json_output`]). The fields beside it are the browser tool's own
+/// result.
 pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
     let cap = BrowserCapfile::from_env()?;
     let client = BrowserClient::new(&cap)?;
@@ -1345,11 +1350,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             let result = browser_list(&client)
                 .await
                 .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
-            println!(
-                "{}",
-                serde_json::to_string(&result)
-                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-            );
+            crate::json_output::print_document(&result)?;
             Ok(())
         }
         BrowserCommand::Navigate { browser_id, url } => {
@@ -1362,11 +1363,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             let result = browser_navigate(&client, &args)
                 .await
                 .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
-            println!(
-                "{}",
-                serde_json::to_string(&result)
-                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-            );
+            crate::json_output::print_document(&result)?;
             Ok(())
         }
         BrowserCommand::Snapshot {
@@ -1385,11 +1382,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             let result = browser_snapshot(&client, &args)
                 .await
                 .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
-            println!(
-                "{}",
-                serde_json::to_string(&result)
-                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-            );
+            crate::json_output::print_document(&result)?;
             Ok(())
         }
         BrowserCommand::Wait {
@@ -1412,11 +1405,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             let result = browser_wait(&client, &args)
                 .await
                 .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
-            println!(
-                "{}",
-                serde_json::to_string(&result)
-                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-            );
+            crate::json_output::print_document(&result)?;
             Ok(())
         }
         BrowserCommand::Screenshot {
@@ -1444,18 +1433,10 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
                 Some(path) => {
                     let receipt = write_screenshot_output(&result, &path)
                         .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
-                    println!(
-                        "{}",
-                        serde_json::to_string(&receipt)
-                            .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-                    );
+                    crate::json_output::print_document(&receipt)?;
                 }
                 None => {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&result)
-                            .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-                    );
+                    crate::json_output::print_document(&result)?;
                 }
             }
             Ok(())
@@ -1482,11 +1463,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             let result = browser_act(&client, &args)
                 .await
                 .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
-            println!(
-                "{}",
-                serde_json::to_string(&result)
-                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-            );
+            crate::json_output::print_document(&result)?;
             Ok(())
         }
         BrowserCommand::Open { url } => {
@@ -1497,11 +1474,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             let result = browser_open(&client, &args)
                 .await
                 .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
-            println!(
-                "{}",
-                serde_json::to_string(&result)
-                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-            );
+            crate::json_output::print_document(&result)?;
             Ok(())
         }
         BrowserCommand::Close { browser_id } => {
@@ -1514,11 +1487,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             let result = browser_close(&client, &args)
                 .await
                 .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
-            println!(
-                "{}",
-                serde_json::to_string(&result)
-                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-            );
+            crate::json_output::print_document(&result)?;
             Ok(())
         }
         BrowserCommand::Activate { browser_id } => {
@@ -1531,11 +1500,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             let result = browser_activate(&client, &args)
                 .await
                 .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
-            println!(
-                "{}",
-                serde_json::to_string(&result)
-                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-            );
+            crate::json_output::print_document(&result)?;
             Ok(())
         }
         BrowserCommand::Diagnostics {
@@ -1556,11 +1521,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             let result = browser_diagnostics(&client, &args)
                 .await
                 .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
-            println!(
-                "{}",
-                serde_json::to_string(&result)
-                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
-            );
+            crate::json_output::print_document(&result)?;
             Ok(())
         }
     }

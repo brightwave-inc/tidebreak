@@ -213,8 +213,8 @@ impl FromRequestParts<AppState> for AdapterBootstrapAuth {
 /// sign-in screens it can offer (decision 0087).
 ///
 /// The document is public and unauthenticated by design — a page has to read
-/// it before it holds any credential — so it names modes and public URLs and
-/// nothing else.
+/// it before it holds any credential — so it names modes, public URLs, and the
+/// version handshake's two keys, and nothing else.
 #[derive(serde::Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum AuthDiscovery {
@@ -232,7 +232,20 @@ pub enum AuthDiscovery {
     Local,
 }
 
-pub async fn discovery(State(state): State<AppState>) -> Json<AuthDiscovery> {
+/// The whole `/auth/discovery` answer: the sign-in mode, plus the version
+/// handshake a client reads before it attaches.
+///
+/// Both halves flatten into one object, so a client that reads only the mode
+/// sees exactly the keys it always has.
+#[derive(serde::Serialize)]
+pub struct DiscoveryDocument {
+    #[serde(flatten)]
+    pub auth: AuthDiscovery,
+    #[serde(flatten)]
+    pub server: crate::server_version::ServerVersion,
+}
+
+pub async fn discovery(State(state): State<AppState>) -> Json<DiscoveryDocument> {
     let discovery = match (
         state.config.profile,
         state.principal_authenticator.as_ref(),
@@ -251,7 +264,10 @@ pub async fn discovery(State(state): State<AppState>) -> Json<AuthDiscovery> {
         (Profile::SelfHost, PrincipalAuthenticator::Static(_), _) => AuthDiscovery::StaticToken,
         _ => AuthDiscovery::Local,
     };
-    Json(discovery)
+    Json(DiscoveryDocument {
+        auth: discovery,
+        server: crate::server_version::ServerVersion::current(),
+    })
 }
 
 /// Validate a static token specifically for browser sign-in.

@@ -841,5 +841,6 @@ async fn a_self_host_deployment_serves_liveness_on_its_configured_address() {
         .await
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(response.text().await.unwrap(), "ok");
+    let health: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(health["status"], "ok");
 }

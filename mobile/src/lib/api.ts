@@ -20,6 +20,17 @@ export type CodeTurnSubmission =
   | { kind: "ran"; turn: CodeTurnSnapshot }
   | { kind: "queued"; queued: QueuedCodeTurn };
 
+/**
+ * A code-mode approval as the app lists it.
+ *
+ * `unrecognized` marks a kind this app does not know. The approval still
+ * lists, so nothing waiting is hidden, but it can only be denied here: the
+ * app cannot show what approving it would let the engine do.
+ */
+export type ListedCodeApproval = CodeApprovalSnapshot & {
+  unrecognized: boolean;
+};
+
 type MachineJsonClient = Pick<MachineClient, "getJson" | "requestJson">;
 
 export type ActiveCodeWorkspace = {
@@ -377,14 +388,57 @@ function parseApprovalKind(value: unknown): CodeApprovalKind | null {
   }
 }
 
-export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
+/**
+ * Every kind tag this app reads. Typed on the generated union, so a kind the
+ * server adds fails to compile here until the parser above handles it.
+ */
+const CODE_APPROVAL_KIND_TAGS = {
+  command: true,
+  file_write: true,
+  network: true,
+  other: true,
+  tool_use: true,
+  questions: true,
+  plan: true,
+} as const satisfies Record<CodeApprovalKind["type"], true>;
+
+/**
+ * The tag of a kind a newer machine added, or `null` when the kind is one
+ * this app knows (a known kind it cannot read still fails its list).
+ */
+function unknownKindTag(value: unknown): string | null {
+  const kind = record(value);
+  return kind &&
+    typeof kind.type === "string" &&
+    !Object.hasOwn(CODE_APPROVAL_KIND_TAGS, kind.type)
+    ? kind.type
+    : null;
+}
+
+/**
+ * What the card says about a kind this app does not know. The request lists
+ * as `other` with this summary; approving it is not offered.
+ */
+function unrecognizedApprovalKind(type: string): CodeApprovalKind {
+  const named = /^[a-z0-9_]{1,64}$/.test(type) ? ` (${type})` : "";
+  return {
+    type: "other",
+    summary: `This app does not recognize this kind of request${named}, so it cannot approve it. Update the app to approve it here, or deny it.`,
+  };
+}
+
+export function parseCodeApproval(value: unknown): ListedCodeApproval | null {
   const approval = record(value);
+  const known = approval ? parseApprovalKind(approval.kind) : null;
+  const unknownTag = approval && !known ? unknownKindTag(approval.kind) : null;
+  const kind =
+    known ?? (unknownTag !== null ? unrecognizedApprovalKind(unknownTag) : null);
   if (
     !approval ||
     !nonEmpty(approval.id) ||
     !nonEmpty(approval.session_id) ||
     !nonEmpty(approval.turn_id) ||
-    !parseApprovalKind(approval.kind) ||
+    !kind ||
     typeof approval.harness_raw_json !== "string" ||
     !["pending", "approved", "denied", "abandoned"].includes(
       String(approval.state),
@@ -395,7 +449,11 @@ export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
   ) {
     return null;
   }
-  return value as CodeApprovalSnapshot;
+  return {
+    ...(value as CodeApprovalSnapshot),
+    kind,
+    unrecognized: known === null,
+  };
 }
 
 export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
@@ -595,7 +653,7 @@ export async function listCodeApprovals(
   client: MachineJsonClient,
   sessionId?: string,
   options: { signal?: AbortSignal } = {},
-): Promise<CodeApprovalSnapshot[]> {
+): Promise<ListedCodeApproval[]> {
   const params = new URLSearchParams({ state: "pending" });
   if (sessionId) params.set("session_id", sessionId);
   return parseList(
@@ -610,7 +668,7 @@ export async function decideCodeApproval(
   approvalId: string,
   decision: "approve" | "deny",
   feedback?: string,
-): Promise<CodeApprovalSnapshot> {
+): Promise<ListedCodeApproval> {
   const denialFeedback = decision === "deny" ? feedback?.trim() : undefined;
   if (decision === "deny" && !denialFeedback) {
     throw new Error("Denial feedback is required.");

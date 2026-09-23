@@ -4,14 +4,16 @@
 //! `tidebreak_server::wire`: one Rust definition serializes on the server and
 //! deserializes here, so a renamed field is a compile error in this crate the
 //! way it is a type error in the desktop renderer's generated `wire.ts`. The
-//! contract those types carry — closed vocabularies, unknown keys rejected, an
-//! unknown event type failing its frame — is documented on that module, along
-//! with the one record (`McpServerInfo`) that tolerates unknown keys because
-//! it flattens its definition.
+//! contract those types carry is documented on that module: unknown keys are
+//! ignored, so this CLI keeps working against a server a release ahead;
+//! vocabularies stay closed; and an event type this build does not know fails
+//! its frame, which the event stream counts and reports.
 //!
 //! The chat event socket's frames and the REST records (the model catalog,
 //! providers, MCP servers, agent runs, and conversation outputs) both come
-//! through here; the tests below decode the server's fixtures for each.
+//! through here. The tests below decode the server's fixtures for each and
+//! serialize every entry back, so a key a type does not declare still fails
+//! here rather than at a prompt.
 
 pub use tidebreak_core::{
     Chat, PendingPlanApproval, PendingUserQuestions, RendererToolName, ToolActionPreview,
@@ -27,6 +29,8 @@ pub use tidebreak_server::wire::{
     McpServersInfo, ModelCatalog, OutputRevisionInfo, OutputRevisionsCatalog, ProviderInfo,
     ProvidersList,
 };
+// The version handshake an attach reads before anything else.
+pub use tidebreak_server::wire::{compatibility, Compatibility, ServerVersion};
 
 #[cfg(test)]
 mod tests {

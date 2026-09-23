@@ -21,7 +21,8 @@ pub(crate) use core::{
     exec_write_snapshot, extract, gateway_drafts, gateway_runtime, image_attachment, instructions,
     managed_policy, mcp_config, mcp_curated, mcp_oauth_runtime, memory_sweep, model_registry,
     model_roles, obo_gateway, openapi_discovery, plugin_install, plugin_state, principal,
-    providers, runtime_settings, scoped_memory, scoped_store, state, ui_bundle, view_frames,
+    providers, runtime_settings, scoped_memory, scoped_store, server_version, state, ui_bundle,
+    view_frames,
 };
 #[cfg(test)]
 pub(crate) use core::{
@@ -1252,8 +1253,10 @@ pub fn app(state: AppState) -> Router {
     let frame_state = state.clone();
     // Public like discovery, and for the same reason: a page has to reach
     // both before it holds a bearer. The handoff route answers only on a
-    // gateway-authenticated machine.
+    // gateway-authenticated machine. `/version` is the handshake a client
+    // reads before it attaches, so it is public for the same reason.
     let auth_discovery = Router::new()
+        .route("/version", get(version))
         .route("/auth/discovery", get(auth::discovery))
         .route("/auth/token-sign-in", post(auth::static_token_sign_in))
         .route("/auth/handoff", get(auth::handoff))
@@ -1356,9 +1359,26 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
 }
 
+/// What `/healthz` answers: liveness, plus the version handshake's two keys
+/// so a probe also says what is running.
+#[derive(serde::Serialize)]
+struct Health {
+    status: &'static str,
+    #[serde(flatten)]
+    server: server_version::ServerVersion,
+}
+
 /// Liveness probe — no auth, no state.
-async fn healthz() -> &'static str {
-    "ok"
+async fn healthz() -> axum::Json<Health> {
+    axum::Json(Health {
+        status: "ok",
+        server: server_version::ServerVersion::current(),
+    })
+}
+
+/// The version handshake — no auth, no state. See [`server_version`].
+async fn version() -> axum::Json<server_version::ServerVersion> {
+    axum::Json(server_version::ServerVersion::current())
 }
 
 fn queued_turn_promoter(

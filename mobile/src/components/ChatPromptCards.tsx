@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import {
+  mobileApprovalDetail,
   mobileApprovalQuestion,
-  mobileApprovalSummary,
   mobileToolPreviewDetail,
   type MobilePendingPlanApproval,
   type MobilePendingToolApproval,
@@ -62,7 +62,7 @@ export function ChatToolApprovalCard({
           {mobileApprovalQuestion(approval)}
         </Text>
         <Text className="text-sm text-muted-foreground">
-          {mobileApprovalSummary(approval.approval)}
+          {mobileApprovalDetail(approval)}
         </Text>
       </View>
 

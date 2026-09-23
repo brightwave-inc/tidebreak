@@ -388,6 +388,11 @@ export type RemoteMachineState = {
 export type RemoteConnectError = {
   reason: RemoteConnectReason;
   detail: string | null;
+  /**
+   * The release the machine reported. Only the two version refusals carry
+   * it, so the copy can name which release to update to.
+   */
+  machineVersion?: string | null;
 };
 
 export type RemoteConnectReason =
@@ -397,7 +402,9 @@ export type RemoteConnectReason =
   | "remote_machine_token_refused"
   | "remote_machine_not_a_machine"
   | "remote_machine_token_storage_failed"
-  | "remote_machine_gateway_auth_unavailable";
+  | "remote_machine_gateway_auth_unavailable"
+  | "remote_machine_newer_than_app"
+  | "remote_machine_older_than_app";
 
 export type ProviderKind = WireProviderKind;
 /** Stable provider-scoped key used for new settings and chat overrides. */

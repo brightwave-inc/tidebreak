@@ -22,6 +22,8 @@ describe("remote connect refusals", () => {
       "remote_machine_not_a_machine",
       "remote_machine_token_storage_failed",
       "remote_machine_gateway_auth_unavailable",
+      "remote_machine_newer_than_app",
+      "remote_machine_older_than_app",
     ] as const;
     for (const reason of reasons) {
       const refused = remoteConnectError({ reason, detail: null });
@@ -38,12 +40,56 @@ describe("remote connect refusals", () => {
     expect(connectFailureMessage(refused!)).toContain("https");
   });
 
+  it("names the machine's release when the versions do not match", () => {
+    const newer = remoteConnectError({
+      reason: "remote_machine_newer_than_app",
+      detail: null,
+      machineVersion: "9.4.0",
+    });
+    expect(connectFailureMessage(newer!)).toBe(
+      "That machine runs Tidebreak 9.4.0. Update Tidebreak to 9.4.0 or later to connect.",
+    );
+    const older = remoteConnectError({
+      reason: "remote_machine_older_than_app",
+      detail: null,
+      machineVersion: "0.9.0",
+    });
+    expect(connectFailureMessage(older!)).toContain("Update the machine");
+    expect(connectFailureMessage(older!)).toContain("0.9.0");
+    // A refusal without the release still says which side to update.
+    const unnamed = remoteConnectError({
+      reason: "remote_machine_newer_than_app",
+      detail: null,
+    });
+    expect(connectFailureMessage(unnamed!)).toContain("Update Tidebreak");
+  });
+
+  it("leaves out a release it could not show as it is", () => {
+    for (const machineVersion of [
+      "9.4.0 from https://evil.example",
+      "\u001b[1;31m9.4.0",
+      "1".repeat(33),
+    ]) {
+      const refused = remoteConnectError({
+        reason: "remote_machine_newer_than_app",
+        detail: null,
+        machineVersion,
+      });
+      expect(refused?.machineVersion, machineVersion).toBeNull();
+      expect(connectFailureMessage(refused!)).toBe(
+        "That machine runs a newer Tidebreak. Update Tidebreak to connect.",
+      );
+    }
+  });
+
   it("leaves anything that is not a worded refusal to the ordinary failure path", () => {
     expect(
       remoteConnectError({ reason: "remote_machine_invented_reason" }),
     ).toBeNull();
     expect(remoteConnectError("remote_machine_requires_tls")).toBeNull();
     expect(remoteConnectError(null)).toBeNull();
+    // An inherited property name is not a reason.
+    expect(remoteConnectError({ reason: "toString" })).toBeNull();
   });
 });
 

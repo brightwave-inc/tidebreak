@@ -142,8 +142,13 @@ screen and Settings → Connections both offer that path.
 Attach validates the machine URL the same way desktop does, reads
 `/auth/discovery`, derives `tidebreak:<sha256(canonical_url)>` locally, and
 refuses a mismatched echo or a gateway URL that is not the paired deployment.
-`GET /policy` is the authenticated probe. Auto-attach runs exactly this
-sequence — nothing is skipped but the tap.
+Discovery also carries the machine's `version` and `api_level`. The app
+compares the level with the range in its copy of `wire.ts` (`MIN_API_LEVEL`
+through `API_LEVEL`) and refuses a machine outside it with a message that says
+whether to update the app or the machine. A machine that predates the
+handshake leaves both keys out and attaches as before. `GET /policy` is the
+authenticated probe. Auto-attach runs exactly this sequence — nothing is
+skipped but the tap.
 
 The Attach screen is the fallback, and it is where the app lands whenever
 auto-attach cannot finish:
@@ -152,6 +157,7 @@ auto-attach cannot finish:
 - discovery timed out after 10s — usually a hosted machine on a VPN this phone
   isn't on, shown with that hint and a Retry,
 - the echo or gateway URL failed validation,
+- the machine runs an API level this app does not read,
 - or the machine URL needs correcting by hand.
 
 ## Environment variants

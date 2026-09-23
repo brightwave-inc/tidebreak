@@ -106,6 +106,8 @@ mod agent_mcp;
 mod api;
 mod browser;
 mod code;
+#[cfg(test)]
+mod compatibility;
 mod computer_use;
 mod connect;
 mod diagnostics;
@@ -114,6 +116,7 @@ mod folder;
 mod folder_executor;
 mod help;
 mod image_output;
+mod json_output;
 mod outputs;
 mod print;
 mod setup;

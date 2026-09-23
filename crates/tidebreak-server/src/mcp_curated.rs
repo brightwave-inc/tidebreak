@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 /// without one is "community". One field cannot disagree with itself the way
 /// a separate boolean and a separate record could.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct McpCuration {
     /// The curated list's own name for the server, which need not match the
     /// namespace the reader configured it under.

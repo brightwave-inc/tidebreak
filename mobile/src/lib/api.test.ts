@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  approvalSummary,
+  canApproveCodeApproval,
+  codeApprovalHeadline,
+} from "./approvals";
 import type { MachineClient } from "./machine";
 import {
   createCodeSession,
@@ -315,6 +320,34 @@ describe("mobile supervision API contracts", () => {
     ).resolves.toMatchObject({ kind: "queued" });
   });
 
+  /**
+   * The approve button posts `{"decision":"approve"}`, which the machine
+   * accepts for any kind. A kind this app cannot show, such as an exact
+   * preview whose harness payload is `null`, must never offer it.
+   */
+  it("never offers to approve a kind it cannot show", () => {
+    const exactPreview = parseCodeApproval({
+      ...approval,
+      kind: {
+        type: "exact_preview",
+        preview: { tool: "exec", command: "rm", args: ["-rf", "build"] },
+      },
+      harness_raw_json: "null",
+    });
+    expect(exactPreview).toMatchObject({
+      unrecognized: true,
+      kind: { type: "other" },
+    });
+    expect(canApproveCodeApproval(exactPreview!)).toBe(false);
+    expect(approvalSummary(exactPreview!.kind)).toContain(
+      "cannot approve it",
+    );
+    const known = parseCodeApproval(approval);
+    expect(known?.unrecognized).toBe(false);
+    expect(canApproveCodeApproval(known!)).toBe(true);
+    expect(codeApprovalHeadline(known!)).toBe("Run command?");
+  });
+
   it("lists pending approvals and sends feedback only with a denial", async () => {
     expect(
       parseCodeApproval({
@@ -355,6 +388,39 @@ describe("mobile supervision API contracts", () => {
     await expect(
       listCodeApprovals(listed.client, "session/1"),
     ).resolves.toHaveLength(1);
+
+    // A kind a newer machine added lists as a request the reader can only
+    // deny, instead of failing every approval beside it.
+    const future = fakeClient([
+      approval,
+      {
+        ...approval,
+        id: "approval-2",
+        kind: { type: "mcp_tool_call", server: "docs", tool: "search" },
+      },
+    ]);
+    const approvals = await listCodeApprovals(future.client, "session-1");
+    expect(
+      approvals.map((item) => [item.kind.type, item.unrecognized]),
+    ).toEqual([
+      ["command", false],
+      ["other", true],
+    ]);
+    expect(approvals[1]?.kind).toMatchObject({
+      type: "other",
+      summary: expect.stringContaining("(mcp_tool_call)"),
+    });
+    expect(canApproveCodeApproval(approvals[0]!)).toBe(true);
+    expect(canApproveCodeApproval(approvals[1]!)).toBe(false);
+    expect(codeApprovalHeadline(approvals[1]!)).toBe("Deny this request?");
+    expect(
+      parseCodeApproval({ ...approval, kind: { type: 7 } }),
+    ).toBeNull();
+    // A kind this app knows, but cannot read, still fails its list rather
+    // than listing as something it is not.
+    expect(
+      parseCodeApproval({ ...approval, kind: { type: "command" } }),
+    ).toBeNull();
     expect(listed.getJson).toHaveBeenCalledWith(
       "/approvals?state=pending&session_id=session%2F1",
       {},

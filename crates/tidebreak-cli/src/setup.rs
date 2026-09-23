@@ -632,11 +632,10 @@ fn activity_headline(detail: Option<&AgentActivityDetail>) -> String {
     }
 }
 
-/// Write one JSON object on stdout, matching print mode's one-object-per-line
-/// shape so both surfaces can be read by the same consumer.
+/// Write one JSON document on stdout, one object on one line, stamped with
+/// its `schema_version`. See [`crate::json_output`].
 fn emit(value: &serde_json::Value) -> Result<()> {
-    println!("{value}");
-    Ok(())
+    crate::json_output::print_document(value)
 }
 
 /// Render one settings field for a person: an absent or null value reads as

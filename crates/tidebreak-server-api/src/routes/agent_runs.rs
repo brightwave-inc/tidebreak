@@ -66,11 +66,10 @@ impl ExecProviderSnapshot {
 /// Worker lease tokens, scheduling budgets, and other executor-facing fields
 /// intentionally remain inside the server/store boundary.
 //
-// Also read back by the CLI through [`crate::wire`], so it rejects unknown
-// keys the way the renderer's guards do. A plain comment, not a doc comment,
-// so the generated `wire.ts` does not carry it.
+// Also read back by the CLI through [`crate::wire`], which ignores keys it
+// does not know so a newer server can add one. A plain comment, not a doc
+// comment, so the generated `wire.ts` does not carry it.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct AgentRunSnapshot {
     pub id: tidebreak_core::AgentRunId,
     pub parent_id: Option<tidebreak_core::AgentRunId>,
@@ -161,7 +160,6 @@ impl AgentRunSnapshot {
 
 /// Renderer-safe disjoint token accounting for one background run.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct AgentRunUsageSnapshot {
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -182,7 +180,6 @@ impl From<tidebreak_core::Usage> for AgentRunUsageSnapshot {
 
 /// One file a background run submitted, as the renderer sees it.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct SubmittedOutputSnapshot {
     pub output_id: tidebreak_core::OutputId,
     /// The name the run gave the file, which is the output's name.
@@ -201,7 +198,6 @@ pub struct SubmittedOutputSnapshot {
 /// Copying it as stored is therefore not a gap in the clamp; it is the same
 /// rule enforced one surface earlier.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct AgentRunTaskPlanProgress {
     pub completed: u32,
     pub total: u32,
@@ -279,7 +275,6 @@ pub enum AgentActivityStatus {
 
 /// Renderer-safe projection of one live supported checkpoint.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct AgentActivitySnapshot {
     pub kind: AgentActivityKind,
     pub status: AgentActivityStatus,
