@@ -280,6 +280,9 @@ impl CodeRuntime {
                 // worker at spawn; retrying its failed turn would hit the
                 // same version floor. Move every idle one onto this install.
                 self.resync_workers_to_selected_binaries(&[kind]).await;
+                // Installing removed the versions no session ran. Remove the
+                // ones the sessions that just moved left behind.
+                self.remove_superseded_installs(kind);
                 self.finish_harness_install(
                     owner,
                     kind,
