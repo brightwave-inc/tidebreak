@@ -1181,6 +1181,7 @@ const STEER_CONTROL_TIMEOUT: Duration = Duration::from_millis(100);
 /// [`CodeEventBus::wake_parked`]. This poll only catches a settlement that
 /// reaches neither, such as one made by another process.
 const PARK_SAFETY_POLL: Duration = Duration::from_secs(5);
+
 #[cfg(not(any(test, feature = "test-support")))]
 const APPROVAL_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(test, feature = "test-support"))]
