@@ -29,7 +29,7 @@ function openRoute(href: string): void {
   window.location.hash = `#${href}`;
 }
 
-/** An agent that stopped for you, in a conversation you are not looking at. */
+/** An agent that stopped for your approval, your answer, or your review. */
 export type NeedsYouNotice = {
   /** The conversation's name, as the rail shows it. */
   name: string;

@@ -27,6 +27,10 @@ import {
   useFirstTaskGuide,
 } from "@/FirstTaskWalkthrough";
 import { useInbox } from "@/Inbox";
+import {
+  setFinishedNotificationsEnabled,
+  setNeedsYouNotificationsEnabled,
+} from "@/NotificationPreferences";
 import { useNotifications } from "@/NotificationStore";
 import { ManagedPolicyContext } from "@/managedPolicy";
 import { useNewChatSettings } from "@/NewChatSettings";
@@ -986,6 +990,9 @@ export function resetRouteStoryStores({
   } catch {
     // Story fixtures remain deterministic even when storage is unavailable.
   }
+  // A notification story can turn these off, and storage outlives it.
+  setNeedsYouNotificationsEnabled(true);
+  setFinishedNotificationsEnabled(true);
 }
 
 export function RouteStoryProviders({
