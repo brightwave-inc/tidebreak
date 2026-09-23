@@ -34,6 +34,7 @@ describe("ToolOutputPreview", () => {
     expect(screen.getByLabelText("Output").textContent).toBe("one\ntwo");
     expect(screen.queryByRole("button", { name: /more line/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Copy output" })).toBeTruthy();
+    expect(screen.getByLabelText("Output")).toHaveAttribute("tabindex", "0");
   });
 
   it("follows the tail when asked, and still offers the full text", async () => {

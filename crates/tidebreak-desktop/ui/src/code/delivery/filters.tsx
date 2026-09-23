@@ -500,7 +500,7 @@ function LinkedFilter({
           onChange(next === "any" ? undefined : next === "linked")
         }
       >
-        <SelectTrigger size="sm" className="w-28">
+        <SelectTrigger size="sm" className="w-28" aria-label="Tidebreak link">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

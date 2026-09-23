@@ -45,4 +45,18 @@ describe("phase label typing", () => {
     );
     expect(result.current).toBe("Browsed files");
   });
+
+  it("shows the full label immediately when reduced motion is on", () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("prefers-reduced-motion"),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    const { result } = renderHook(() =>
+      useTypewriterOnce("Requesting folder access", true),
+    );
+    expect(result.current).toBe("Requesting folder access");
+    vi.unstubAllGlobals();
+  });
 });

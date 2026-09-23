@@ -146,6 +146,9 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
           className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-left text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
         >
           <span>Work</span>
+          {hiddenAttention && (
+            <span className="sr-only">, needs attention</span>
+          )}
           <ChevronRight
             aria-hidden="true"
             className={cn(
@@ -156,7 +159,6 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
           {hiddenAttention && (
             <span
               className="text-warning ml-auto shrink-0"
-              aria-label="Work needs attention"
               title="Work needs attention"
             >
               <CircleAlert aria-hidden="true" size={15} />

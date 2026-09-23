@@ -88,6 +88,7 @@ export function ToolOutputPreview({
           // control beside it uses the same word.
           role="group"
           aria-label={label}
+          tabIndex={0}
           className={cn(
             bare
               ? "text-muted-foreground max-h-80 overflow-auto pr-7 font-mono text-sm whitespace-pre [overflow-anchor:none]"

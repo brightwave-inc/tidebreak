@@ -230,145 +230,161 @@ export function CodeCenterTabs({
     } else if (event.key === "End") {
       event.preventDefault();
       select(editorTabs.length + tabOffset - 1);
+    } else if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      const conversation = conversations[position];
+      if (conversation) {
+        if (conversation.closable) onCloseConversation?.(conversation.id);
+        return;
+      }
+      onCloseEditor(position - tabOffset);
     }
   }
 
   return (
     <div
       className="workspace-pane-tabs flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-border-subtle bg-page-background/55 px-2"
-      role="tablist"
       // The strip takes drops on its own account, so releasing past the last
       // tab still lands in this group instead of falling through to nothing.
       ref={setStripRef}
-      aria-label={region === "primary" ? "Workspace center" : "Workspace split"}
       data-region={region}
     >
-      {conversations.map((conversation, index) => {
-        const active = conversation === activeConversation;
-        const forkable = conversation.id;
-        const Icon = conversation.harness
-          ? HARNESS_ICONS[conversation.harness]
-          : Bot;
-        return (
-          <ContextMenu key={conversation.id ?? "new"}>
-            <ContextMenuTrigger asChild>
-              {/* The close control is a second control on the same row, so
+      <div
+        className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
+        role="tablist"
+        aria-label={
+          region === "primary" ? "Workspace center" : "Workspace split"
+        }
+      >
+        {conversations.map((conversation, index) => {
+          const active = conversation === activeConversation;
+          const forkable = conversation.id;
+          const Icon = conversation.harness
+            ? HARNESS_ICONS[conversation.harness]
+            : Bot;
+          return (
+            <ContextMenu key={conversation.id ?? "new"}>
+              <ContextMenuTrigger asChild>
+                {/* The close control is a second control on the same row, so
                   the pair stays transparent to assistive tech. */}
-              <div
-                role="presentation"
-                className={cn(
-                  "flex h-8 min-w-0 shrink-0 items-center rounded-lg transition-[background-color,box-shadow] duration-150",
-                  conversation.closable && "pr-1",
-                  HOVER_TINT,
-                  active
-                    ? "bg-background shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_7%,transparent),inset_0_0_0_1px_var(--border-subtle)]"
-                    : "hover:bg-background/65",
-                )}
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  id={conversationTabId(conversation.id)}
-                  aria-selected={active}
-                  aria-controls={CHAT_PANEL_ID}
-                  tabIndex={active ? 0 : -1}
-                  ref={(node) => {
-                    tabRefs.current[index] = node;
-                  }}
+                <div
+                  role="presentation"
                   className={cn(
-                    "flex h-full min-w-0 cursor-pointer items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-[color,transform] duration-150 active:translate-y-px",
-                    FOCUS_RING_TIGHT,
+                    "flex h-8 min-w-0 shrink-0 items-center rounded-lg transition-[background-color,box-shadow] duration-150",
+                    conversation.closable && "pr-1",
                     HOVER_TINT,
                     active
-                      ? "text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
+                      ? "bg-background shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_7%,transparent),inset_0_0_0_1px_var(--border-subtle)]"
+                      : "hover:bg-background/65",
                   )}
-                  onClick={() => onSelectConversation?.(conversation.id)}
-                  onKeyDown={(event) => onKeyDown(event, index)}
                 >
-                  <Icon className="size-3.5 shrink-0" />
-                  <span className="max-w-40 truncate">
-                    {conversation.label}
-                  </span>
-                  {/* The mark is the agent's own state, not the tab's, so it
-                      shows on the tabs the reader is not looking at too. */}
-                  <AttentionBadge attention={conversation.attention} compact />
-                </button>
-                {conversation.closable && (
                   <button
                     type="button"
+                    role="tab"
+                    id={conversationTabId(conversation.id)}
+                    aria-selected={active}
+                    aria-controls={CHAT_PANEL_ID}
+                    tabIndex={active ? 0 : -1}
+                    ref={(node) => {
+                      tabRefs.current[index] = node;
+                    }}
                     className={cn(
-                      "text-muted-foreground hover:bg-muted hover:text-foreground grid size-5 shrink-0 cursor-pointer place-items-center rounded-md",
+                      "flex h-full min-w-0 cursor-pointer items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-[color,transform] duration-150 active:translate-y-px",
                       FOCUS_RING_TIGHT,
                       HOVER_TINT,
+                      active
+                        ? "text-foreground"
+                        : "text-muted-foreground hover:text-foreground",
                     )}
-                    onClick={() => onCloseConversation?.(conversation.id)}
+                    onClick={() => onSelectConversation?.(conversation.id)}
+                    onKeyDown={(event) => onKeyDown(event, index)}
                   >
-                    <X className="size-3" />
-                    <span className="sr-only">{`Close ${conversation.label}`}</span>
+                    <Icon className="size-3.5 shrink-0" />
+                    <span className="max-w-40 truncate">
+                      {conversation.label}
+                    </span>
+                    {/* The mark is the agent's own state, not the tab's, so it
+                      shows on the tabs the reader is not looking at too. */}
+                    <AttentionBadge
+                      attention={conversation.attention}
+                      compact
+                    />
                   </button>
+                  {conversation.closable && (
+                    <span
+                      role="presentation"
+                      className={cn(
+                        "text-muted-foreground hover:bg-muted hover:text-foreground grid size-5 shrink-0 cursor-pointer place-items-center rounded-md",
+                        FOCUS_RING_TIGHT,
+                        HOVER_TINT,
+                      )}
+                      onClick={() => onCloseConversation?.(conversation.id)}
+                    >
+                      <X className="size-3" />
+                    </span>
+                  )}
+                </div>
+              </ContextMenuTrigger>
+              <TabContextMenuContent label={conversation.label}>
+                {/* A draft has no transcript yet, so it has nothing to fork. */}
+                {onForkConversation && forkable !== null && (
+                  <>
+                    <ContextMenuItem
+                      className="gap-3 py-2"
+                      onSelect={() => onForkConversation(forkable)}
+                    >
+                      <GitFork />
+                      Fork this agent
+                    </ContextMenuItem>
+                    <ContextMenuSeparator />
+                  </>
                 )}
-              </div>
-            </ContextMenuTrigger>
-            <TabContextMenuContent label={conversation.label}>
-              {/* A draft has no transcript yet, so it has nothing to fork. */}
-              {onForkConversation && forkable !== null && (
-                <>
-                  <ContextMenuItem
-                    className="gap-3 py-2"
-                    onSelect={() => onForkConversation(forkable)}
-                  >
-                    <GitFork />
-                    Fork this agent
-                  </ContextMenuItem>
-                  <ContextMenuSeparator />
-                </>
-              )}
-              <ContextMenuItem
-                className="gap-3 py-2"
-                disabled={editorTabs.length === 0}
-                onSelect={onCloseEveryEditor ?? onCloseAllEditors}
-              >
-                <ListX />
-                Close other tabs
-              </ContextMenuItem>
-            </TabContextMenuContent>
-          </ContextMenu>
-        );
-      })}
-      <SortableContext
-        items={editorTabs.map((panel) => editorTabDragId(region, panel))}
-        strategy={horizontalListSortingStrategy}
-      >
-        {editorTabs.map((panel, index) => (
-          <EditorTab
-            key={panelKey(panel)}
-            panel={panel}
-            index={index}
-            region={region}
-            panelId={panelId}
-            active={!conversationFocused && index === editorActiveIndex}
-            tabCount={editorTabs.length}
-            browserTitles={browserTitles}
-            terminalLabels={terminalLabels}
-            tabRef={(node) => {
-              tabRefs.current[index + tabOffset] = node;
-            }}
-            onSelect={() => onSelectEditor(index)}
-            onKeyDown={(event) => onKeyDown(event, index + tabOffset)}
-            onClose={() => onCloseEditor(index)}
-            onCloseOthers={() => onCloseOtherEditors(index)}
-            onCloseToRight={() => onCloseEditorsToRight(index)}
-            onCloseAll={onCloseAllEditors}
-            onCopyPath={onCopyPath}
-            onMoveToOtherGroup={
-              onMoveEditorToOtherGroup &&
-              (() => onMoveEditorToOtherGroup(index))
-            }
-            onMove={onMoveEditor && ((to: number) => onMoveEditor(index, to))}
-          />
-        ))}
-      </SortableContext>
+                <ContextMenuItem
+                  className="gap-3 py-2"
+                  disabled={editorTabs.length === 0}
+                  onSelect={onCloseEveryEditor ?? onCloseAllEditors}
+                >
+                  <ListX />
+                  Close other tabs
+                </ContextMenuItem>
+              </TabContextMenuContent>
+            </ContextMenu>
+          );
+        })}
+        <SortableContext
+          items={editorTabs.map((panel) => editorTabDragId(region, panel))}
+          strategy={horizontalListSortingStrategy}
+        >
+          {editorTabs.map((panel, index) => (
+            <EditorTab
+              key={panelKey(panel)}
+              panel={panel}
+              index={index}
+              region={region}
+              panelId={panelId}
+              active={!conversationFocused && index === editorActiveIndex}
+              tabCount={editorTabs.length}
+              browserTitles={browserTitles}
+              terminalLabels={terminalLabels}
+              tabRef={(node) => {
+                tabRefs.current[index + tabOffset] = node;
+              }}
+              onSelect={() => onSelectEditor(index)}
+              onKeyDown={(event) => onKeyDown(event, index + tabOffset)}
+              onClose={() => onCloseEditor(index)}
+              onCloseOthers={() => onCloseOtherEditors(index)}
+              onCloseToRight={() => onCloseEditorsToRight(index)}
+              onCloseAll={onCloseAllEditors}
+              onCopyPath={onCopyPath}
+              onMoveToOtherGroup={
+                onMoveEditorToOtherGroup &&
+                (() => onMoveEditorToOtherGroup(index))
+              }
+              onMove={onMoveEditor && ((to: number) => onMoveEditor(index, to))}
+            />
+          ))}
+        </SortableContext>
+      </div>
       {/* One + for everything the center can open. A bare click must say
           what it will do, so the button offers the choices instead of
           jumping into the file picker. */}
@@ -580,8 +596,8 @@ function EditorTab({
               {suffix && <span className="shrink-0">{suffix}</span>}
             </span>
           </button>
-          <button
-            type="button"
+          <span
+            role="presentation"
             // Pressing close and drifting a few pixels should still close the
             // tab, not carry it somewhere. The sensor reads this flag.
             data-no-drag="true"
@@ -593,8 +609,7 @@ function EditorTab({
             onClick={onClose}
           >
             <X className="size-3" />
-            <span className="sr-only">{`Close ${label}`}</span>
-          </button>
+          </span>
         </div>
       </ContextMenuTrigger>
       <TabContextMenuContent label={label}>

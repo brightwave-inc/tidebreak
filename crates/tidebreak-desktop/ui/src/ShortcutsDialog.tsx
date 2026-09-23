@@ -69,7 +69,11 @@ export function ShortcutsList({
 }) {
   const groups = useMemo(() => groupedShellShortcuts(mode), [mode]);
   return (
-    <div className="grid max-h-[65vh] grid-cols-[1fr_auto] items-center gap-x-6 gap-y-2 overflow-y-auto pr-1">
+    <div
+      className="grid max-h-[65vh] grid-cols-[1fr_auto] items-center gap-x-6 gap-y-2 overflow-y-auto pr-1"
+      tabIndex={0}
+      aria-label="Keyboard shortcuts"
+    >
       {groups.map(({ group, items }, index) => (
         <Fragment key={group}>
           <h3

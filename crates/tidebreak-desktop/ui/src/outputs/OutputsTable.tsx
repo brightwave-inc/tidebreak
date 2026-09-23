@@ -129,7 +129,7 @@ export function OutputsTable({
           Date.parse(left) - Date.parse(right),
       },
       {
-        headerName: "",
+        headerName: "Actions",
         colId: "actions",
         width: 56,
         cellRenderer: ActionsCellRenderer,

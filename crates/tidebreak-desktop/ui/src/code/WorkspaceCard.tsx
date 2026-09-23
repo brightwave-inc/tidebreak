@@ -303,7 +303,7 @@ export function WorkspaceCard({
                   creationLabel,
                 })}
                 aria-current={active ? "page" : undefined}
-                aria-selected={selected || undefined}
+                aria-pressed={selected || undefined}
                 disabled={creating}
                 className={cn(
                   "flex w-full cursor-pointer flex-col gap-0.5 rounded-xl px-2.5 py-2 text-left",

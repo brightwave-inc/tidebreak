@@ -306,7 +306,7 @@ function CodeArchiveBody() {
           className="min-w-56 flex-1 md:max-w-md"
         />
         <Select value={repoId} onValueChange={setRepoId}>
-          <SelectTrigger size="sm" className="w-44">
+          <SelectTrigger size="sm" className="w-44" aria-label="Repository">
             <SelectValue placeholder="All repositories" />
           </SelectTrigger>
           <SelectContent>
@@ -322,7 +322,7 @@ function CodeArchiveBody() {
           value={age}
           onValueChange={(value) => setAge(value as AgeFilter)}
         >
-          <SelectTrigger size="sm" className="w-36">
+          <SelectTrigger size="sm" className="w-36" aria-label="Age">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

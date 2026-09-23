@@ -119,6 +119,7 @@ export function AddRepoInline({
           </div>
           <Progress
             value={state.percent ?? 0}
+            aria-label="Clone progress"
             style={{ forcedColorAdjust: "none" }}
           />
           <p className="text-muted-foreground text-xs">
