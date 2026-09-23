@@ -110,8 +110,11 @@ export function ContextUsageIndicator({
               <div
                 className={cn(
                   "h-full rounded-full",
+                  // The tooltip inverts the theme, so the critical fill leans
+                  // a quarter of the way to the tooltip's own ink. That keeps
+                  // it red and 3:1 against the tooltip in both themes.
                   level === "critical"
-                    ? "bg-destructive"
+                    ? "bg-[color-mix(in_oklab,var(--critical),var(--primary-foreground)_25%)]"
                     : "bg-primary-foreground/90",
                 )}
                 style={{ width: `${percent}%` }}
@@ -141,7 +144,7 @@ export function ContextUsageIndicator({
               {/* Labeled, because these are not the ring's numbers: they sum
                   every model call the turn made, and on a long turn they run
                   well past what the window ever held. */}
-              <p className="text-2xs uppercase tracking-wide opacity-60">
+              <p className="text-2xs uppercase tracking-wide opacity-70">
                 Turn spend
               </p>
               <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 text-xs leading-relaxed">
