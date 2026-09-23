@@ -1,41 +1,6 @@
-//! Durable pull-request facts and stack-parent resolution.
+//! Stack-parent resolution.
 
 use std::collections::{HashMap, HashSet};
-
-use tidebreak_core::{CodePullRequestFact, CodePullRequestId, CodePullRequestState, OwnerId};
-
-use crate::wire::CodeDeliveryPullRequestSummary;
-
-pub fn fact_from_summary(
-    owner: &OwnerId,
-    summary: &CodeDeliveryPullRequestSummary,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<CodePullRequestFact> {
-    let state = CodePullRequestState::from_str(&summary.state)?;
-    Some(CodePullRequestFact {
-        id: CodePullRequestId::new(),
-        owner: owner.clone(),
-        host: summary.repository.host.clone(),
-        repo_owner: summary.repository.owner.clone(),
-        repo_name: summary.repository.name.clone(),
-        number: summary.number,
-        url: summary.url.clone(),
-        title: summary.title.clone(),
-        state,
-        draft: summary.draft,
-        author: summary.author.clone(),
-        head_branch: summary.head_branch.clone(),
-        base_branch: summary.base_branch.clone(),
-        head_sha: summary.head_sha.clone(),
-        created_at: summary.created_at,
-        updated_at: summary.updated_at,
-        merged_at: summary.merged_at,
-        closed_at: summary.closed_at,
-        first_seen_at: now,
-        last_seen_at: now,
-        live: None,
-    })
-}
 
 /// Case-insensitive repository identity used while resolving stack edges.
 ///

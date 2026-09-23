@@ -180,7 +180,7 @@ where
     let locked = entities::code_pull_request::Entity::update_many()
         .col_expr(
             entities::code_pull_request::Column::Number,
-            Expr::col(entities::code_pull_request::Column::Number).into(),
+            Expr::col(entities::code_pull_request::Column::Number),
         )
         .filter(entities::code_pull_request::Column::Owner.eq(read.owner.as_str()))
         .filter(entities::code_pull_request::Column::Host.eq(read.host.as_str()))

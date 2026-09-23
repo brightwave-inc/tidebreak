@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use tidebreak_code_delivery::{DeliveryError, DeliveryErrorStatus, DeliveryRuntime};
-use tidebreak_core::{OwnerId, PullRequestDigest, RepoId, WorkspaceId};
+use tidebreak_core::{OwnerId, RepoId, WorkspaceId};
 
 use super::gh::{self, GhObservation};
 use super::runtime::CodeRuntime;
@@ -189,15 +189,21 @@ impl DeliveryRuntime for ServerDeliveryRuntime {
             .await;
     }
 
-    async fn record_pull_request_live_state(
+    async fn apply_pull_request_read(
         &self,
-        owner: &OwnerId,
-        source: Option<WorkspaceId>,
-        digest: &PullRequestDigest,
-    ) {
+        read: &tidebreak_core::PullRequestRead,
+    ) -> Option<tidebreak_core::CodePullRequestId> {
         self.0
-            .record_pull_request_live_state(owner, source, digest)
-            .await;
+            .apply_pull_request_read(
+                read,
+                tidebreak_core::db::code::PullRequestReadOptions {
+                    mint_row: true,
+                    adopt: None,
+                },
+            )
+            .await
+            .filter(|applied| applied.stored)
+            .map(|applied| applied.fact.id)
     }
 
     fn refresh_workspaces_for_pull_request(&self, owner: &OwnerId, pull_request_url: &str) {

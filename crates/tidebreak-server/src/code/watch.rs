@@ -976,7 +976,7 @@ fn fresh_workspace_digest(
     if !super::reconcile::live_tier_is_fresh(live, now) {
         return None;
     }
-    let mut digest = super::pr_facts::digest_from_fact(fact);
+    let mut digest = fact.digest();
     let stored_state = stored.state.trim().to_ascii_lowercase();
     if stored.merged == Some(true) || stored_state == "merged" || stored_state == "closed" {
         digest.state = stored.state.clone();

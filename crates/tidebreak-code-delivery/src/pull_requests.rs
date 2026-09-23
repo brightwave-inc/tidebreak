@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::stack::{
-    fact_from_summary, StackParentCandidate, StackParentEdge, StackParentIndex,
-    StackParentResolution, StackPullRequestIdentity, StackRepositoryIdentity,
+    StackParentCandidate, StackParentEdge, StackParentIndex, StackParentResolution,
+    StackPullRequestIdentity, StackRepositoryIdentity,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,9 +56,19 @@ pub(super) struct PullRequestObservation {
     pub(super) from_host: bool,
     /// True when the read loaded the check rollup. A list read for every
     /// state skips `statusCheckRollup`, so its empty check list means
-    /// "not asked", not "none": the live-tier write must not clear the
-    /// checks the conditional fetcher wrote.
+    /// "not asked", not "none": the store's merge must keep the checks
+    /// another read stored.
     pub(super) checks_loaded: bool,
+    /// True when the host answer carried a review decision. A REST answer
+    /// never does, so its empty decision is "not asked", not "none".
+    pub(super) review_loaded: bool,
+    /// True when the host answer carried mergeability. A REST list does not.
+    pub(super) mergeability_loaded: bool,
+    /// True when the host answer carried the auto-merge request.
+    pub(super) auto_merge_loaded: bool,
+    /// When the read that produced this observation asked the host. The
+    /// store's merge orders reads by it.
+    pub(super) observed_at: DateTime<Utc>,
 }
 
 impl PullRequestObservation {
@@ -837,6 +847,9 @@ pub(super) async fn fetch_pull_requests(
     let api = reader.api(target).await?;
     let repository =
         resolve_repository_cached(runtime, api.as_ref(), target, None, force_refresh).await?;
+    // Taken before the host is asked, so a slow answer never claims to be
+    // newer than it is.
+    let observed_at = Utc::now();
     let (values, stacks) = tokio::join!(
         with_transient_retry(|| {
             api.pull_requests(
@@ -864,6 +877,7 @@ pub(super) async fn fetch_pull_requests(
         .filter_map(|value| parse_pull_request(&repository, value, workspaces))
         .map(|mut observation| {
             observation.host_stack = memberships.get(&observation.summary.number).cloned();
+            observation.observed_at = observed_at;
             observation
         })
         .collect())
@@ -1005,6 +1019,10 @@ pub(super) fn observation_from_fact(
         host_stack: None,
         from_host: false,
         checks_loaded,
+        review_loaded: false,
+        mergeability_loaded: false,
+        auto_merge_loaded: false,
+        observed_at: fact.last_seen_at,
     }
 }
 
@@ -1050,10 +1068,13 @@ pub(super) async fn fetch_pull_request(
     number: u64,
     workspaces: &[WorkspaceIndexEntry],
 ) -> Result<PullRequestObservation, String> {
+    let observed_at = Utc::now();
     let mut value = api.pull_request(target, repository, number).await?;
     attach_merge_queue_membership(api, target, std::slice::from_mut(&mut value)).await;
-    parse_pull_request(repository, &value, workspaces)
-        .ok_or_else(|| "GitHub returned an incomplete pull request".into())
+    let mut observation = parse_pull_request(repository, &value, workspaces)
+        .ok_or_else(|| "GitHub returned an incomplete pull request".to_owned())?;
+    observation.observed_at = observed_at;
+    Ok(observation)
 }
 
 async fn fetch_pull_request_with_retry(
@@ -1254,6 +1275,14 @@ pub(super) fn parse_pull_request(
         host_stack: None,
         from_host: true,
         checks_loaded,
+        // A field the answer does not carry was not asked for. `gh` names
+        // every requested field, null or not; the REST restatement omits
+        // what its endpoint does not return.
+        review_loaded: value.get("reviewDecision").is_some(),
+        mergeability_loaded: value.get("mergeable").is_some()
+            || value.get("mergeStateStatus").is_some(),
+        auto_merge_loaded: value.get("autoMergeRequest").is_some(),
+        observed_at: Utc::now(),
     })
 }
 
@@ -1592,6 +1621,82 @@ pub fn digest_from_summary(item: &CodeDeliveryPullRequestSummary) -> PullRequest
     }
 }
 
+/// Describe one host observation as a read for the store's merge: the pull
+/// request object with whatever the answer carried, and the checks, review
+/// decision, and queue membership only when the read loaded them.
+/// `observed_queue` is the membership the host reported, before any stored
+/// answer filled the gap. `None` for a lifecycle the store cannot name.
+pub(super) fn read_from_observation(
+    owner: &OwnerId,
+    observation: &PullRequestObservation,
+    observed_queue: Option<bool>,
+) -> Option<PullRequestRead> {
+    let summary = &observation.summary;
+    let state = CodePullRequestState::from_str(&summary.state)?;
+    let observed_at = observation.observed_at;
+    let head_sha = summary.head_sha.clone();
+    let mut read = PullRequestRead::new(
+        owner.clone(),
+        summary.repository.host.clone(),
+        summary.repository.owner.clone(),
+        summary.repository.name.clone(),
+        summary.number,
+    );
+    read.object = Some(PullRequestObjectRead {
+        snapshot: PullRequestSnapshot {
+            url: summary.url.clone(),
+            title: summary.title.clone(),
+            state,
+            draft: summary.draft,
+            author: summary.author.clone(),
+            head_branch: summary.head_branch.clone(),
+            base_branch: summary.base_branch.clone(),
+            head_sha: head_sha.clone(),
+            created_at: summary.created_at,
+            updated_at: summary.updated_at,
+            merged_at: summary.merged_at,
+            closed_at: summary.closed_at,
+        },
+        mergeability: observation
+            .mergeability_loaded
+            .then(|| PullRequestMergeability {
+                mergeable: summary.mergeable.clone(),
+                merge_state_status: summary.merge_state_status.clone(),
+            }),
+        auto_merge_enabled: observation
+            .auto_merge_loaded
+            .then_some(summary.auto_merge_enabled),
+        observed_at,
+        etag: None,
+    });
+    read.checks = observation.checks_loaded.then(|| PullRequestChecksRead {
+        head_sha: head_sha.clone(),
+        checks: summary
+            .checks
+            .iter()
+            .map(|check| PullRequestCheck {
+                name: check.name.clone(),
+                bucket: check.bucket,
+                detail: check.detail.clone(),
+                url: check.url.clone(),
+            })
+            .collect(),
+        observed_at,
+        etag: None,
+    });
+    read.review = observation.review_loaded.then(|| PullRequestReviewRead {
+        decision: summary.review_decision.clone(),
+        observed_at,
+        etag: None,
+    });
+    read.queue = observed_queue.map(|in_merge_queue| PullRequestQueueRead {
+        head_sha,
+        in_merge_queue,
+        observed_at,
+    });
+    Some(read)
+}
+
 /// Persist durable facts for the page's tracked pull requests and fold the
 /// stored attribution back into every item's workspace links (decision 77).
 ///
@@ -1629,7 +1734,7 @@ pub(super) async fn persist_and_augment_pull_request_facts(
     let mut fact_ids: HashMap<usize, CodePullRequestId> = HashMap::new();
     for indices in groups.values() {
         let repository = &items[indices[0]].summary.repository;
-        let mut repo_facts = match list_pull_request_facts_for_repo(
+        let repo_facts = match list_pull_request_facts_for_repo(
             db,
             owner,
             &repository.host,
@@ -1677,7 +1782,12 @@ pub(super) async fn persist_and_augment_pull_request_facts(
             .collect();
         for &index in indices {
             let from_host = items[index].from_host;
-            let checks_loaded = items[index].checks_loaded;
+            // What the host said about the queue, before the stored answer
+            // fills the gap for display.
+            let observed_queue = items[index].summary.in_merge_queue;
+            let read = from_host
+                .then(|| read_from_observation(owner, &items[index], observed_queue))
+                .flatten();
             let item = &mut items[index].summary;
             if item.in_merge_queue.is_none() {
                 item.in_merge_queue = known_queue.get(&item.number).copied();
@@ -1703,38 +1813,16 @@ pub(super) async fn persist_and_augment_pull_request_facts(
                 }
                 continue;
             }
-            let Some(fact) = fact_from_summary(owner, item, now) else {
+            let Some(read) = read else {
                 continue;
             };
-            let id = match save_pull_request_fact(db, &fact).await {
-                Ok(id) => id,
-                Err(err) => {
-                    tracing::debug!("fact upsert failed for a delivery page: {err}");
-                    continue;
-                }
+            // The summary is a fresh host observation. It lands through the
+            // store's one merge, which keeps every field this read did not
+            // load and fans real change out to every workspace holding the
+            // pull request (decision 66).
+            let Some(id) = runtime.apply_pull_request_read(&read).await else {
+                continue;
             };
-            // The summary is a fresh host observation: write it onto the
-            // row's live tier and fan real change out to every workspace
-            // holding the pull request (decision 66). One list read per
-            // repository is what keeps every surface fresh.
-            let mut digest = digest_from_summary(item);
-            if !checks_loaded {
-                // Not asked, so not known: `None` keeps the row's checks.
-                digest.checks_summary = None;
-                digest.check_counts = None;
-                digest.checks = None;
-            }
-            runtime
-                .record_pull_request_live_state(owner, None, &digest)
-                .await;
-            // Keep this pass's fact set current for later durable reads.
-            match repo_facts
-                .iter_mut()
-                .find(|known| known.number == fact.number)
-            {
-                Some(existing) => *existing = fact,
-                None => repo_facts.push(fact),
-            }
             fact_ids.insert(index, id);
             for workspace_id in exact_workspaces {
                 match insert_pull_request_attribution(

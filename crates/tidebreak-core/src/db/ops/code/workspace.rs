@@ -325,7 +325,7 @@ pub async fn adopt_workspace_pull_request(
     let locked = entities::code_workspace::Entity::update_many()
         .col_expr(
             entities::code_workspace::Column::Title,
-            sea_orm::sea_query::Expr::col(entities::code_workspace::Column::Title).into(),
+            sea_orm::sea_query::Expr::col(entities::code_workspace::Column::Title),
         )
         .filter(entities::code_workspace::Column::Id.eq(id.0))
         .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))

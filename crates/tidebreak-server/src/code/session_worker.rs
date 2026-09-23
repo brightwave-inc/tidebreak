@@ -2562,7 +2562,7 @@ async fn close_open_turn(
                 .await;
             }
             super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
-            super::pr_facts::sweep_turn_for_pull_request_acts(
+            let rewritten = super::pr_facts::sweep_turn_for_pull_request_acts(
                 db,
                 session,
                 turn.id,
@@ -2570,6 +2570,9 @@ async fn close_open_turn(
                 Some(&sink.hot_prs),
             )
             .await;
+            for workspace in rewritten {
+                super::attention::emit_workspace_digests(db, bus, &session.owner, workspace).await;
+            }
             if let Some(detail) = attachment_cleanup_error.as_ref() {
                 let _ = super::recovery::fence_session(
                     db,
@@ -2612,7 +2615,7 @@ async fn close_open_turn(
         turn = current;
     }
     super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
-    super::pr_facts::sweep_turn_for_pull_request_acts(
+    let rewritten = super::pr_facts::sweep_turn_for_pull_request_acts(
         db,
         session,
         turn.id,
@@ -2620,6 +2623,9 @@ async fn close_open_turn(
         Some(&sink.hot_prs),
     )
     .await;
+    for workspace in rewritten {
+        super::attention::emit_workspace_digests(db, bus, &session.owner, workspace).await;
+    }
     if let Some(detail) = attachment_cleanup_error {
         let _ = super::recovery::fence_session(
             db,
@@ -3388,7 +3394,7 @@ async fn drive_turn_inner(
             // the turn's edits can still be checkpointed. The engine may have
             // rewritten files before the stream broke.
             super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
-            super::pr_facts::sweep_turn_for_pull_request_acts(
+            let rewritten = super::pr_facts::sweep_turn_for_pull_request_acts(
                 db,
                 session,
                 turn.id,
@@ -3396,6 +3402,9 @@ async fn drive_turn_inner(
                 Some(&sink.hot_prs),
             )
             .await;
+            for workspace in rewritten {
+                super::attention::emit_workspace_digests(db, bus, &session.owner, workspace).await;
+            }
             if let Some(detail) = attachment_cleanup_error.as_ref() {
                 let _ = super::recovery::fence_session(
                     db,
@@ -3441,7 +3450,7 @@ async fn drive_turn_inner(
         turn = current;
     }
     super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
-    super::pr_facts::sweep_turn_for_pull_request_acts(
+    let rewritten = super::pr_facts::sweep_turn_for_pull_request_acts(
         db,
         session,
         turn.id,
@@ -3449,6 +3458,9 @@ async fn drive_turn_inner(
         Some(&sink.hot_prs),
     )
     .await;
+    for workspace in rewritten {
+        super::attention::emit_workspace_digests(db, bus, &session.owner, workspace).await;
+    }
     if let Some(detail) = attachment_cleanup_error {
         let _ = super::recovery::fence_session(
             db,
