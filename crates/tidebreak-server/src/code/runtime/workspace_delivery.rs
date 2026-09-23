@@ -48,6 +48,13 @@ pub(super) fn pr_head_changed(expected: &str, current: &str) -> ServerError {
     )
 }
 
+/// One conditional fetch: the digest the workspace column now shows, and
+/// the read that produced it.
+pub(super) struct FetchedPullRequest {
+    pub(super) digest: PullRequestDigest,
+    pub(super) read: tidebreak_core::PullRequestRead,
+}
+
 pub(super) fn short_sha(sha: &str) -> &str {
     sha.get(..sha.len().min(8)).unwrap_or(sha)
 }
@@ -140,7 +147,7 @@ impl CodeRuntime {
                 }
             };
             if let Some(value) = values.as_ref().and_then(|values| values.first()) {
-                crate::code::pr_facts::record_confirmed_fact(
+                if let Some(applied) = crate::code::pr_facts::record_confirmed_fact(
                     &self.db,
                     owner,
                     workspace.id,
@@ -151,7 +158,10 @@ impl CodeRuntime {
                     tidebreak_core::CodePullRequestRelation::Contributed,
                     tidebreak_core::CodePullRequestDiscovery::Command,
                 )
-                .await;
+                .await
+                {
+                    self.publish_pull_request_read(owner, &applied).await;
+                }
             }
         }
         // A push dirties the row: refresh it now (decision 66), so the next
@@ -588,14 +598,16 @@ impl CodeRuntime {
         } else {
             gh::authenticated_gh_binary(gh_path.as_deref()).await
         };
-        let digest = match binary {
+        // The fetch lands its read through the store's merge, which also
+        // rewrites this workspace's column and publishes the change.
+        match binary {
             Some(binary) => {
                 let transport = crate::code::pr_fetch::FetchTransport::Gh {
                     cwd: &worktree,
                     binary: &binary,
                 };
                 self.fetched_workspace_digest(owner, &workspace, transport)
-                    .await
+                    .await?;
             }
             None => {
                 let (target, credential) = self
@@ -615,41 +627,20 @@ impl CodeRuntime {
                     api_base: &api_base,
                     credential: &credential,
                 };
-                let digest = self
+                let fetched = self
                     .fetched_workspace_digest(owner, &workspace, transport)
                     .await?;
                 if workspace.is_remote() {
-                    if let Some(digest) = digest.as_ref() {
+                    if let Some(fetched) = fetched.as_ref() {
                         self.record_remote_workspace_pr(
                             owner,
                             &workspace,
                             &target,
                             &credential,
-                            digest,
+                            fetched,
                         )
                         .await?;
                     }
-                }
-                Ok(digest)
-            }
-        };
-        let Some(digest) = digest? else {
-            return Ok(());
-        };
-        if workspace.pr.as_ref() != Some(&digest) {
-            match set_active_workspace_pull_request(&self.db, owner, workspace.id, &digest).await {
-                Ok(true) => {
-                    crate::code::attention::emit_workspace_digests(
-                        &self.db,
-                        &self.bus,
-                        owner,
-                        workspace.id,
-                    )
-                    .await;
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    tracing::debug!(error = %err, "code-mode: workspace digest write failed");
                 }
             }
         }
@@ -663,8 +654,9 @@ impl CodeRuntime {
         workspace: &CodeWorkspace,
         target: &CodeGitHubRepositoryTarget,
         credential: &crate::obo_gateway::GitCredential,
-        digest: &PullRequestDigest,
+        fetched: &FetchedPullRequest,
     ) -> Result<(), String> {
+        let digest = &fetched.digest;
         if digest.head_branch.as_deref() != Some(workspace.branch_name.as_str()) {
             return Ok(());
         }
@@ -717,21 +709,20 @@ impl CodeRuntime {
                 "The pull request response does not match the workspace repository.".into(),
             );
         }
-        crate::code::pr_facts::record_confirmed_fact(
+        // The fetch's own read mints the row, so the row starts with the
+        // live state the fetch observed rather than a bare snapshot.
+        let applied = crate::code::pr_facts::record_confirmed_read(
             &self.db,
-            owner,
+            &fetched.read,
             workspace.id,
             None,
             None,
-            target,
-            &value,
             tidebreak_core::CodePullRequestRelation::Contributed,
             tidebreak_core::CodePullRequestDiscovery::Reconcile,
         )
         .await
         .ok_or_else(|| "The confirmed pull request could not be saved.".to_owned())?;
-        self.record_pull_request_live_state(owner, Some(workspace.id), digest)
-            .await;
+        self.publish_pull_request_read(owner, &applied).await;
         Ok(())
     }
 
@@ -796,24 +787,26 @@ impl CodeRuntime {
             .ok()
     }
 
-    /// The workspace's digest through the conditional fetcher (decision 66),
-    /// over whichever transport the caller resolved — `gh` or the hosted
-    /// forge REST API.
+    /// The workspace's pull request through the conditional fetcher
+    /// (decision 66), over whichever transport the caller resolved — `gh` or
+    /// the hosted forge REST API.
     ///
     /// Identity comes from the stored digest's URL, or a head lookup when
     /// the workspace knows no pull request yet. Each endpoint sends the
-    /// row's stored ETag: a 304 answers from the row for free, and a 200
-    /// carries new state. The result lands on the row — live tier, fanout,
-    /// and the ETags for next time. `None` leaves the caller's persisted
-    /// digest standing: no pull request, a parked host, a failed read, or a
-    /// conditional read whose row moved under it.
+    /// row's stored validator. A 304 restates exactly the stored fields that
+    /// validator names, and a 200 carries new ones; either way the pass
+    /// becomes one read, dated per endpoint, that lands through the store's
+    /// merge. The merge decides what each answer may change, so a pass that
+    /// lost a race to a newer read changes nothing, and the workspace column
+    /// shows the merged row. `None` when the branch has no pull request.
     pub(super) async fn fetched_workspace_digest(
         &self,
         owner: &OwnerId,
         workspace: &CodeWorkspace,
         transport: crate::code::pr_fetch::FetchTransport<'_>,
-    ) -> Result<Option<PullRequestDigest>, String> {
+    ) -> Result<Option<FetchedPullRequest>, String> {
         use crate::code::pr_fetch::{self, EndpointRead};
+        use tidebreak_core::{PullRequestChecksRead, PullRequestQueueRead, PullRequestReviewRead};
 
         let gate = &self.host_gate;
         let mut stored_identity = workspace
@@ -873,7 +866,7 @@ impl CodeRuntime {
                 (target.host, target.owner, target.name, found.number)
             }
         };
-        let stored = tidebreak_core::db::code::get_pull_request_fetch_state(
+        let stored = tidebreak_core::db::code::get_stored_pull_request(
             &self.db,
             owner,
             &host,
@@ -884,39 +877,41 @@ impl CodeRuntime {
         .await
         .ok()
         .flatten();
-        let (stored_fact, mut pull_etag, mut checks_etag, mut reviews_etag) = match stored {
-            Some(state) => (
-                Some(state.fact),
-                state.pull_etag,
-                state.checks_etag,
-                state.reviews_etag,
-            ),
-            None => (None, None, None, None),
-        };
-        let sent_pull_etag = pull_etag.clone();
-        let (pull, fresh_pull) = match pr_fetch::read_pull_request(
+        let etags = stored
+            .as_ref()
+            .map(|stored| stored.etags.clone())
+            .unwrap_or_default();
+        let mut read = tidebreak_core::PullRequestRead::new(
+            owner.clone(),
+            host.clone(),
+            repo_owner.clone(),
+            repo_name.clone(),
+            number,
+        );
+
+        // Every observation is dated before its request goes out, so a slow
+        // answer never claims to be newer than it is.
+        let pull_at = Utc::now();
+        let object = match pr_fetch::read_pull_request(
             gate,
             transport,
             &host,
             &repo_owner,
             &repo_name,
             number,
-            pull_etag.as_deref(),
+            etags.pull.as_deref(),
         )
         .await
         {
-            Ok(EndpointRead::Fresh { value, etag }) => {
-                pull_etag = etag;
-                (value, true)
-            }
-            Ok(EndpointRead::NotModified) => (
-                pr_fetch::rest_pull_from_fact(
-                    stored_fact
-                        .as_ref()
-                        .ok_or_else(|| "The cached pull request is unavailable.".to_owned())?,
-                ),
-                false,
-            ),
+            Ok(EndpointRead::Fresh { value, etag }) => value
+                .object_read(pull_at, etag)
+                .ok_or_else(|| "The pull request answer carried no URL.".to_owned())?,
+            // The host confirms the object the stored validator names, which
+            // is the stored one.
+            Ok(EndpointRead::NotModified) => stored
+                .as_ref()
+                .ok_or_else(|| "The cached pull request is unavailable.".to_owned())?
+                .restate_object(pull_at),
             Ok(EndpointRead::Missing) => {
                 return Err("The pull request is unavailable on GitHub.".to_owned());
             }
@@ -925,17 +920,22 @@ impl CodeRuntime {
                 return Err(failure.to_string());
             }
         };
-        let stored_live = stored_fact.as_ref().and_then(|fact| fact.live.as_ref());
-        let checks = match pull.head_sha.as_deref() {
+        let head_sha = object.snapshot.head_sha.clone();
+        let open = object.snapshot.state == tidebreak_core::CodePullRequestState::Open;
+        let base_branch = object.snapshot.base_branch.clone();
+        read.object = Some(object);
+
+        let checks_at = Utc::now();
+        read.checks = match head_sha.as_deref() {
             Some(sha) => {
-                // A checks ETag names one head's answer; a moved head sends
-                // an unconditional read.
-                let same_head = stored_fact
+                // A checks validator names one head's answer; a moved head
+                // sends an unconditional read.
+                let same_head = stored
                     .as_ref()
-                    .and_then(|fact| fact.head_sha.as_deref())
+                    .and_then(|stored| stored.fact.head_sha.as_deref())
                     == Some(sha);
                 let conditional = if same_head {
-                    checks_etag.as_deref()
+                    etags.checks.as_deref()
                 } else {
                     None
                 };
@@ -950,14 +950,21 @@ impl CodeRuntime {
                 )
                 .await
                 {
-                    Ok(EndpointRead::Fresh { value, etag }) => {
-                        checks_etag = etag;
-                        value
-                    }
-                    Ok(EndpointRead::NotModified) => stored_live
-                        .and_then(|live| live.checks.clone())
-                        .unwrap_or_default(),
-                    Ok(EndpointRead::Missing) => Vec::new(),
+                    Ok(EndpointRead::Fresh { value, etag }) => Some(PullRequestChecksRead {
+                        head_sha: head_sha.clone(),
+                        checks: value,
+                        observed_at: checks_at,
+                        etag,
+                    }),
+                    Ok(EndpointRead::NotModified) => stored
+                        .as_ref()
+                        .and_then(|stored| stored.restate_checks(checks_at)),
+                    Ok(EndpointRead::Missing) => Some(PullRequestChecksRead {
+                        head_sha: head_sha.clone(),
+                        checks: Vec::new(),
+                        observed_at: checks_at,
+                        etag: None,
+                    }),
                     Err(failure) => {
                         tracing::debug!(error = %failure, "code-mode: check-runs read skipped");
                         return Err(format!(
@@ -966,22 +973,27 @@ impl CodeRuntime {
                     }
                 }
             }
-            None => Vec::new(),
+            None => Some(PullRequestChecksRead {
+                head_sha: None,
+                checks: Vec::new(),
+                observed_at: checks_at,
+                etag: None,
+            }),
         };
-        let open = pull.state == "open";
         let rules = if open {
             self.branch_rules_for(
                 transport,
                 &host,
                 &repo_owner,
                 &repo_name,
-                pull.base_branch.as_deref(),
+                (!base_branch.is_empty()).then_some(base_branch.as_str()),
             )
             .await
         } else {
             None
         };
-        let review_decision = if open {
+        let reviews_at = Utc::now();
+        read.review = if open {
             match pr_fetch::read_reviews(
                 gate,
                 transport,
@@ -989,26 +1001,37 @@ impl CodeRuntime {
                 &repo_owner,
                 &repo_name,
                 number,
-                reviews_etag.as_deref(),
+                etags.reviews.as_deref(),
             )
             .await
             {
-                Ok(EndpointRead::Fresh { value, etag }) => {
-                    reviews_etag = etag;
-                    pr_fetch::derive_review_decision(rules, &value)
-                }
-                Ok(EndpointRead::NotModified) => {
-                    stored_live.and_then(|live| live.review_decision.clone())
-                }
-                Ok(EndpointRead::Missing) => None,
+                Ok(EndpointRead::Fresh { value, etag }) => Some(PullRequestReviewRead {
+                    decision: pr_fetch::derive_review_decision(rules, &value),
+                    observed_at: reviews_at,
+                    etag,
+                }),
+                Ok(EndpointRead::NotModified) => stored
+                    .as_ref()
+                    .map(|stored| stored.restate_review(reviews_at)),
+                Ok(EndpointRead::Missing) => Some(PullRequestReviewRead {
+                    decision: None,
+                    observed_at: reviews_at,
+                    etag: None,
+                }),
                 Err(failure) => {
                     tracing::debug!(error = %failure, "code-mode: reviews read skipped");
                     return Err(format!("Could not read review status: {failure}"));
                 }
             }
         } else {
-            None
+            // A settled pull request has no review decision to act on.
+            Some(PullRequestReviewRead {
+                decision: None,
+                observed_at: reviews_at,
+                etag: None,
+            })
         };
+        let queue_at = Utc::now();
         let in_merge_queue = if open {
             match rules {
                 // Rules that name no queue spare the timeline read; a queue
@@ -1030,62 +1053,35 @@ impl CodeRuntime {
         } else {
             Some(false)
         };
-        let fresh_fact = if fresh_pull {
-            stored_fact.clone().map(|mut fact| {
-                pr_fetch::apply_fresh_pull_to_fact(&mut fact, &pull, Utc::now());
-                fact
-            })
-        } else {
-            None
-        };
-        let condition = if fresh_pull {
-            tidebreak_core::db::code::PullRequestFetchCondition::Unconditional
-        } else {
-            tidebreak_core::db::code::PullRequestFetchCondition::PullEtag(sent_pull_etag.as_deref())
-        };
+        read.queue = in_merge_queue.map(|in_merge_queue| PullRequestQueueRead {
+            head_sha: head_sha.clone(),
+            in_merge_queue,
+            observed_at: queue_at,
+        });
 
-        let digest = pr_fetch::digest_from_parts(&pull, &checks, review_decision, in_merge_queue);
-        // The validator gates every write this read produces, not just the
-        // fetch state (issue 2799). A 304 reconstructs its digest from the
-        // stored snapshot, so a row that moved under the read leaves that
-        // reconstruction describing a pull request that no longer exists.
-        // Write the transport hints first: if the row refuses them, the
-        // digest never reaches the live tier, the workspace column, or the
-        // caller's broadcast.
-        let accepted = match tidebreak_core::db::code::set_pull_request_fetch_state(
-            &self.db,
-            owner,
-            &host,
-            &repo_owner,
-            &repo_name,
-            number,
-            fresh_fact.as_ref(),
-            condition,
-            pull_etag.as_deref(),
-            checks_etag.as_deref(),
-            reviews_etag.as_deref(),
-        )
-        .await
-        {
-            Ok(accepted) => accepted,
-            Err(err) => {
-                tracing::debug!(error = %err, "code-mode: fetch-state write failed");
-                false
-            }
-        };
-        if !fresh_pull && !accepted {
-            tracing::debug!(
-                host = %host,
-                number = number,
-                "code-mode: a conditional pull-request read lost its validator; dropping it"
-            );
-            return Err(
-                "Pull request status changed during refresh. Retry the refresh.".to_owned(),
-            );
-        }
-        self.record_pull_request_live_state(owner, Some(workspace.id), &digest)
-            .await;
-        Ok(Some(digest))
+        // A pull request no reader tracks yet stays untracked: the read
+        // shows in this workspace's column and mints no row (decision 77).
+        // The column takes it only while it still shows what this pass began
+        // from, so a pull request a create adopted meanwhile stays.
+        let applied = self
+            .apply_pull_request_read(
+                &read,
+                tidebreak_core::db::code::PullRequestReadOptions {
+                    mint_row: false,
+                    adopt: Some(tidebreak_core::db::code::PullRequestAdoption {
+                        workspace: workspace.id,
+                        replacing: workspace.pr.as_ref().and_then(|pr| pr.url.clone()),
+                    }),
+                },
+            )
+            .await
+            .ok_or_else(|| {
+                "Pull request status could not be saved. Retry the refresh.".to_owned()
+            })?;
+        Ok(Some(FetchedPullRequest {
+            digest: applied.fact.digest(),
+            read,
+        }))
     }
 
     /// The base branch's rules, cached per branch for [`BRANCH_RULES_TTL`].
@@ -1190,122 +1186,42 @@ impl CodeRuntime {
         });
     }
 
-    /// Write a freshly observed digest onto its decision-62 fact row and fan
-    /// real change out (decision 66): every other live workspace holding the
-    /// same pull request takes the digest as a write-through copy — column
-    /// and digest cache both — and broadcasts, so one host read updates
-    /// every surface without a second one. Best-effort: a missing fact row
-    /// or a store failure leaves the sweeps to correct.
-    pub async fn record_pull_request_live_state(
+    /// Land one pull-request read through the store's merge (decision 66)
+    /// and publish what it changed. Quiet on a store failure: the caller
+    /// keeps what it had, and the next read corrects.
+    pub(crate) async fn apply_pull_request_read(
+        &self,
+        read: &tidebreak_core::PullRequestRead,
+        options: tidebreak_core::db::code::PullRequestReadOptions,
+    ) -> Option<tidebreak_core::db::code::AppliedPullRequestRead> {
+        match tidebreak_core::db::code::save_pull_request_read(&self.db, read, options).await {
+            Ok(Some(applied)) => {
+                self.publish_pull_request_read(&read.owner, &applied).await;
+                Some(applied)
+            }
+            Ok(None) => None,
+            Err(err) => {
+                tracing::debug!(error = %err, "code-mode: pull-request write failed");
+                None
+            }
+        }
+    }
+
+    /// Restate the digest of every workspace whose column an applied read
+    /// rewrote, and send one delivery nudge when a stored field a reader sees
+    /// moved (decision 66): the delivery page and notification monitor
+    /// re-read on receipt instead of on their own timers.
+    pub(crate) async fn publish_pull_request_read(
         &self,
         owner: &OwnerId,
-        source: Option<WorkspaceId>,
-        digest: &PullRequestDigest,
+        applied: &tidebreak_core::db::code::AppliedPullRequestRead,
     ) {
-        let Some(url) = digest.url.as_deref() else {
-            return;
-        };
-        let Some((host, repo_owner, repo_name, number)) =
-            crate::code::pr_facts::pull_request_identity_from_url(url)
-        else {
-            return;
-        };
-        if number != digest.number {
-            return;
+        if applied.stored && applied.changed {
+            self.nudge_delivery_update(owner);
         }
-        let mut live = tidebreak_core::CodePullRequestLiveState::from_digest(digest, Utc::now());
-        // REST never derives a review decision: the unknown sentinel omits
-        // the column on the live-tier write the same way an unloaded check
-        // rollup keeps the checks. Authoritative `None` (loaded reviews, no
-        // objection) still replaces and clears. Do not pre-read the row;
-        // a concurrent authoritative write would be overwritten by a stale
-        // copy, and a failed read would stamp `None`.
-        let review_decision_write =
-            if crate::code::forge_rest::review_decision_is_unknown(live.review_decision.as_deref())
-            {
-                live.review_decision = None;
-                tidebreak_core::db::code::PullRequestReviewDecisionWrite::Preserve
-            } else {
-                tidebreak_core::db::code::PullRequestReviewDecisionWrite::Replace
-            };
-        let (changed, stored) = match tidebreak_core::db::code::set_pull_request_live_state_with(
-            &self.db,
-            owner,
-            &host,
-            &repo_owner,
-            &repo_name,
-            number,
-            &live,
-            review_decision_write,
-        )
-        .await
-        {
-            Ok(Some((_, changed, stored))) => (changed, stored),
-            // No fact row yet: the detector or the reconcile sweep mints it,
-            // and the next digest change lands on it.
-            Ok(None) => return,
-            Err(err) => {
-                tracing::debug!(error = %err, "code-mode: live-tier write failed");
-                return;
-            }
-        };
-        if !changed {
-            return;
-        }
-        // A read that did not load checks writes through the checks the row
-        // kept, not its own absence: the workspace column mirrors the tier.
-        let mut digest = digest.clone();
-        if digest.checks.is_none() {
-            digest.checks_summary = stored.checks_summary;
-            digest.check_counts = stored
-                .checks
-                .as_deref()
-                .map(tidebreak_core::PullRequestCheckCounts::from_checks);
-            digest.checks = stored.checks;
-        }
-        if crate::code::forge_rest::review_decision_is_unknown(digest.review_decision.as_deref()) {
-            digest.review_decision = stored.review_decision.clone();
-        }
-        let digest = &digest;
-        // One delivery nudge per real change (decision 66): the delivery
-        // page and notification monitor re-read on receipt instead of on
-        // their own timers.
-        self.nudge_delivery_update(owner);
-        let workspaces = match list_workspaces(&self.db, owner, None).await {
-            Ok(workspaces) => workspaces,
-            Err(_) => return,
-        };
-        for workspace in workspaces {
-            if source == Some(workspace.id) || workspace.status != CodeWorkspaceStatus::Active {
-                continue;
-            }
-            let holds = workspace
-                .pr
-                .as_ref()
-                .and_then(|pr| pr.url.as_deref())
-                .is_some_and(|value| value.eq_ignore_ascii_case(url));
-            if !holds || workspace.pr.as_ref() == Some(digest) {
-                continue;
-            }
-            match set_active_workspace_pull_request(&self.db, owner, workspace.id, digest).await {
-                Ok(true) => {
-                    crate::code::attention::emit_workspace_digests(
-                        &self.db,
-                        &self.bus,
-                        owner,
-                        workspace.id,
-                    )
-                    .await;
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    tracing::warn!(
-                        workspace = %workspace.id,
-                        error = %err,
-                        "code-mode: pull-request write-through failed"
-                    );
-                }
-            }
+        for workspace in &applied.workspaces {
+            crate::code::attention::emit_workspace_digests(&self.db, &self.bus, owner, *workspace)
+                .await;
         }
     }
 
@@ -1605,7 +1521,7 @@ impl CodeRuntime {
     ) -> Result<WorkspaceGitStatus, ServerError> {
         let turn = self.worktree_turn_lock(id);
         let _turn_guard = turn.lock().await;
-        let mut workspace = self.require_live_workspace(owner, id).await?;
+        let workspace = self.require_live_workspace(owner, id).await?;
         let worktree = std::path::PathBuf::from(&workspace.worktree_path);
         // On a hosted machine the pull request rides the forge REST API with
         // a borrowed credential (decision 65) and lands as the caller; the
@@ -1649,13 +1565,12 @@ impl CodeRuntime {
         };
         self.delivery_cache.invalidate();
         let created_number = digest.number;
-        self.save_created_workspace_pr(&mut workspace, digest)
-            .await?;
+        self.save_created_workspace_pr(&workspace, digest).await?;
         // Best-effort authored fact (decision 77). The digest just came from
         // the host; the REST path already holds the full row, and the `gh`
         // path re-reads it repository-qualified for full identity and
         // timestamps. Failures are silent; the reconcile sweep corrects.
-        if let Some((target, fact)) = rest_fact {
+        let authored = if let Some((target, fact)) = rest_fact {
             crate::code::pr_facts::record_confirmed_fact(
                 &self.db,
                 owner,
@@ -1667,7 +1582,7 @@ impl CodeRuntime {
                 tidebreak_core::CodePullRequestRelation::Authored,
                 tidebreak_core::CodePullRequestDiscovery::Command,
             )
-            .await;
+            .await
         } else if let Ok(target) =
             crate::code::delivery::repository_target_from_path(&worktree).await
         {
@@ -1692,8 +1607,15 @@ impl CodeRuntime {
                     tidebreak_core::CodePullRequestRelation::Authored,
                     tidebreak_core::CodePullRequestDiscovery::Command,
                 )
-                .await;
+                .await
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some(applied) = authored {
+            self.publish_pull_request_read(owner, &applied).await;
         }
         // Creation dirties the row (decision 66): the response carries the
         // fetched digest — checks pending on the fresh pull request — not
@@ -1701,17 +1623,32 @@ impl CodeRuntime {
         self.refresh_workspace_pr(owner, id).await
     }
 
-    /// Persist the creation result before refresh, without internal read markers.
+    /// Point the workspace at the pull request it just created, before the
+    /// refresh, so the refresh can name it. The column only takes the
+    /// creation answer while it shows some other pull request: a projection
+    /// of the merged row is never older than a creation answer.
     async fn save_created_workspace_pr(
         &self,
-        workspace: &mut CodeWorkspace,
-        mut digest: PullRequestDigest,
+        workspace: &CodeWorkspace,
+        digest: PullRequestDigest,
     ) -> Result<(), ServerError> {
-        if crate::code::forge_rest::review_decision_is_unknown(digest.review_decision.as_deref()) {
-            digest.review_decision = None;
+        if tidebreak_core::db::code::adopt_workspace_pull_request(
+            &self.db,
+            &workspace.owner,
+            workspace.id,
+            &digest,
+        )
+        .await?
+        {
+            crate::code::attention::emit_workspace_digests(
+                &self.db,
+                &self.bus,
+                &workspace.owner,
+                workspace.id,
+            )
+            .await;
         }
-        workspace.pr = Some(digest);
-        self.save_workspace(workspace).await
+        Ok(())
     }
 
     pub async fn run_workspace_action(
@@ -1781,6 +1718,30 @@ mod remote_pr_tests {
         root: &Path,
         host: Option<&str>,
     ) -> (CodeRuntime, Arc<FakeLender>, OwnerId, CodeWorkspace) {
+        fixture_with(
+            root,
+            host,
+            Some(shown_pr("https://github.com/acme/tools/pull/17")),
+        )
+        .await
+    }
+
+    /// The light digest a workspace column holds before any read enriched it.
+    fn shown_pr(url: &str) -> PullRequestDigest {
+        serde_json::from_value(serde_json::json!({
+            "number": 17,
+            "url": url,
+            "state": "open",
+            "title": "Stored title"
+        }))
+        .unwrap()
+    }
+
+    async fn fixture_with(
+        root: &Path,
+        host: Option<&str>,
+        shown: Option<PullRequestDigest>,
+    ) -> (CodeRuntime, Arc<FakeLender>, OwnerId, CodeWorkspace) {
         let db = DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             root.join("remote-pr.db").display()
@@ -1823,15 +1784,7 @@ mod remote_pr_tests {
             .build_remote_workspace(&owner, &repo, Some("Remote delivery".into()))
             .await
             .unwrap();
-        workspace.pr = Some(
-            serde_json::from_value(serde_json::json!({
-                "number": 17,
-                "url": "https://github.com/acme/tools/pull/17",
-                "state": "open",
-                "title": "Stored title"
-            }))
-            .unwrap(),
-        );
+        workspace.pr = shown;
         insert_workspace(&runtime.db, &workspace).await.unwrap();
         (runtime, lender, owner, workspace)
     }
@@ -1853,511 +1806,184 @@ mod remote_pr_tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn an_unknown_rest_review_decision_keeps_the_live_tier() {
-        use tidebreak_core::db::code::{
-            get_pull_request_fact, save_pull_request_fact, set_pull_request_live_state,
-        };
-        use tidebreak_core::{
-            CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestState,
-            PullRequestDigest,
+    const MINT: tidebreak_core::db::code::PullRequestReadOptions =
+        tidebreak_core::db::code::PullRequestReadOptions {
+            mint_row: true,
+            adopt: None,
         };
 
-        let dir = tempfile::tempdir().unwrap();
-        let (runtime, _, owner, _) = fixture(dir.path()).await;
-        let now = Utc::now();
-        let fact = CodePullRequestFact {
-            id: CodePullRequestId::new(),
-            owner: owner.clone(),
-            host: "github.com".into(),
-            repo_owner: "acme".into(),
-            repo_name: "tools".into(),
-            number: 17,
-            url: "https://github.com/acme/tools/pull/17".into(),
-            title: "Stored title".into(),
-            state: CodePullRequestState::Open,
-            draft: false,
-            author: None,
-            head_branch: "feat".into(),
-            base_branch: "main".into(),
-            head_sha: Some("abc".into()),
-            created_at: now,
-            updated_at: now,
-            merged_at: None,
-            closed_at: None,
-            first_seen_at: now,
-            last_seen_at: now,
-            live: None,
-        };
-        save_pull_request_fact(&runtime.db, &fact).await.unwrap();
-        set_pull_request_live_state(
-            &runtime.db,
-            &owner,
-            "github.com",
-            "acme",
-            "tools",
-            17,
-            &CodePullRequestLiveState {
-                checks_summary: None,
-                checks: None,
-                review_decision: Some("changes_requested".into()),
-                mergeable: None,
-                merge_state_status: None,
-                auto_merge_enabled: None,
-                in_merge_queue: None,
-                observed_at: now,
-            },
-        )
-        .await
-        .unwrap();
-        runtime
-            .record_pull_request_live_state(
-                &owner,
-                None,
-                &PullRequestDigest {
-                    number: 17,
-                    url: Some("https://github.com/acme/tools/pull/17".into()),
-                    state: "open".into(),
-                    title: Some("Stored title".into()),
-                    checks_summary: None,
-                    check_counts: None,
-                    checks: None,
-                    draft: Some(false),
-                    merged: Some(false),
-                    review_decision: Some(crate::code::forge_rest::REVIEW_DECISION_UNKNOWN.into()),
-                    mergeable: None,
-                    merge_state_status: None,
-                    head_branch: Some("feat".into()),
-                    base_branch: Some("main".into()),
-                    head_sha: Some("abc".into()),
-                    auto_merge_enabled: None,
-                    in_merge_queue: None,
-                },
-            )
-            .await;
-        let stored = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "tools", 17)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            stored.live.unwrap().review_decision.as_deref(),
-            Some("changes_requested")
-        );
-    }
-
-    /// Issue 3339: a REST list never derives a review decision, so the
-    /// reconcile write keeps `changes_requested`. The list restatement is
-    /// `fact_value` (no reviews endpoint); the unknown sentinel on the
-    /// digest is the keep-the-row marker.
-    #[tokio::test]
-    async fn a_rest_list_reconcile_keeps_changes_requested_without_reading_reviews() {
-        use crate::code::forge_rest;
-        use tidebreak_core::db::code::{
-            get_pull_request_fact, save_pull_request_fact, set_pull_request_live_state,
-        };
-        use tidebreak_core::{
-            CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestState,
-            PullRequestDigest,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let (runtime, _, owner, _) = fixture(dir.path()).await;
-        let now = Utc::now();
-        save_pull_request_fact(
-            &runtime.db,
-            &CodePullRequestFact {
-                id: CodePullRequestId::new(),
-                owner: owner.clone(),
-                host: "github.com".into(),
-                repo_owner: "acme".into(),
-                repo_name: "tools".into(),
-                number: 17,
+    /// A read of pull request 17 at host version `version`, observed at
+    /// `observed_at`: the object alone, as a hosted REST list returns it.
+    fn read_17(
+        owner: &OwnerId,
+        version: chrono::DateTime<Utc>,
+        observed_at: chrono::DateTime<Utc>,
+    ) -> tidebreak_core::PullRequestRead {
+        let mut read =
+            tidebreak_core::PullRequestRead::new(owner.clone(), "github.com", "acme", "tools", 17);
+        read.object = Some(tidebreak_core::PullRequestObjectRead {
+            snapshot: tidebreak_core::PullRequestSnapshot {
                 url: "https://github.com/acme/tools/pull/17".into(),
                 title: "Stored title".into(),
-                state: CodePullRequestState::Open,
+                state: tidebreak_core::CodePullRequestState::Open,
                 draft: false,
                 author: None,
                 head_branch: "feat".into(),
                 base_branch: "main".into(),
                 head_sha: Some("abc".into()),
-                created_at: now,
-                updated_at: now,
+                created_at: version,
+                updated_at: version,
                 merged_at: None,
                 closed_at: None,
-                first_seen_at: now,
-                last_seen_at: now,
-                live: None,
             },
-        )
-        .await
-        .unwrap();
-        set_pull_request_live_state(
-            &runtime.db,
-            &owner,
-            "github.com",
-            "acme",
-            "tools",
-            17,
-            &CodePullRequestLiveState {
-                checks_summary: None,
-                checks: None,
-                review_decision: Some("changes_requested".into()),
-                mergeable: None,
-                merge_state_status: None,
-                auto_merge_enabled: None,
-                in_merge_queue: None,
-                observed_at: now,
-            },
-        )
-        .await
-        .unwrap();
-
-        let rest = serde_json::json!({
-            "number": 17,
-            "html_url": "https://github.com/acme/tools/pull/17",
-            "title": "Stored title",
-            "state": "open",
-            "draft": false,
-            "user": { "login": "mira-chen" },
-            "head": { "ref": "feat", "sha": "abc" },
-            "base": { "ref": "main" },
+            mergeability: None,
+            auto_merge_enabled: Some(false),
+            observed_at,
+            etag: None,
         });
-        let listed = forge_rest::fact_value(&rest);
-        assert!(listed["reviewDecision"].is_null());
-        assert!(!forge_rest::review_decision_is_unknown(None));
-        assert!(forge_rest::review_decision_is_unknown(Some(
-            forge_rest::REVIEW_DECISION_UNKNOWN
-        )));
-
-        runtime
-            .record_pull_request_live_state(
-                &owner,
-                None,
-                &PullRequestDigest {
-                    number: 17,
-                    url: Some("https://github.com/acme/tools/pull/17".into()),
-                    state: "open".into(),
-                    title: Some("Stored title".into()),
-                    checks_summary: None,
-                    check_counts: None,
-                    checks: None,
-                    draft: Some(false),
-                    merged: Some(false),
-                    review_decision: Some(forge_rest::REVIEW_DECISION_UNKNOWN.into()),
-                    mergeable: None,
-                    merge_state_status: None,
-                    head_branch: Some("feat".into()),
-                    base_branch: Some("main".into()),
-                    head_sha: Some("abc".into()),
-                    auto_merge_enabled: None,
-                    in_merge_queue: None,
-                },
-            )
-            .await;
-        let stored = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "tools", 17)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            stored.live.unwrap().review_decision.as_deref(),
-            Some("changes_requested")
-        );
+        read
     }
 
-    /// A conditional refresh that fully loaded reviews and derived no
-    /// decision must clear a stored `changes_requested`. Unloaded REST
-    /// still keeps the row via the unknown sentinel (tested above).
-    #[tokio::test]
-    async fn a_loaded_empty_review_decision_clears_changes_requested() {
-        use crate::code::forge_rest;
-        use tidebreak_core::db::code::{
-            get_pull_request_fact, save_pull_request_fact, set_pull_request_live_state,
-        };
-        use tidebreak_core::{
-            CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestState,
-            PullRequestDigest,
-        };
+    fn review(
+        decision: Option<&str>,
+        observed_at: chrono::DateTime<Utc>,
+    ) -> tidebreak_core::PullRequestReviewRead {
+        tidebreak_core::PullRequestReviewRead {
+            decision: decision.map(ToOwned::to_owned),
+            observed_at,
+            etag: None,
+        }
+    }
 
-        let dir = tempfile::tempdir().unwrap();
-        let (runtime, _, owner, _) = fixture(dir.path()).await;
-        let now = Utc::now();
-        save_pull_request_fact(
+    async fn stored_17(
+        runtime: &CodeRuntime,
+        owner: &OwnerId,
+    ) -> tidebreak_core::CodePullRequestFact {
+        tidebreak_core::db::code::get_pull_request_fact(
             &runtime.db,
-            &CodePullRequestFact {
-                id: CodePullRequestId::new(),
-                owner: owner.clone(),
-                host: "github.com".into(),
-                repo_owner: "acme".into(),
-                repo_name: "tools".into(),
-                number: 17,
-                url: "https://github.com/acme/tools/pull/17".into(),
-                title: "Stored title".into(),
-                state: CodePullRequestState::Open,
-                draft: false,
-                author: None,
-                head_branch: "feat".into(),
-                base_branch: "main".into(),
-                head_sha: Some("abc".into()),
-                created_at: now,
-                updated_at: now,
-                merged_at: None,
-                closed_at: None,
-                first_seen_at: now,
-                last_seen_at: now,
-                live: None,
-            },
-        )
-        .await
-        .unwrap();
-        set_pull_request_live_state(
-            &runtime.db,
-            &owner,
+            owner,
             "github.com",
             "acme",
             "tools",
             17,
-            &CodePullRequestLiveState {
-                checks_summary: None,
-                checks: None,
-                review_decision: Some("changes_requested".into()),
-                mergeable: None,
-                merge_state_status: None,
-                auto_merge_enabled: None,
-                in_merge_queue: None,
-                observed_at: now,
-            },
         )
         .await
-        .unwrap();
-
-        assert!(!forge_rest::review_decision_is_unknown(None));
-        runtime
-            .record_pull_request_live_state(
-                &owner,
-                None,
-                &PullRequestDigest {
-                    number: 17,
-                    url: Some("https://github.com/acme/tools/pull/17".into()),
-                    state: "open".into(),
-                    title: Some("Stored title".into()),
-                    checks_summary: None,
-                    check_counts: None,
-                    checks: None,
-                    draft: Some(false),
-                    merged: Some(false),
-                    review_decision: None,
-                    mergeable: None,
-                    merge_state_status: None,
-                    head_branch: Some("feat".into()),
-                    base_branch: Some("main".into()),
-                    head_sha: Some("abc".into()),
-                    auto_merge_enabled: None,
-                    in_merge_queue: None,
-                },
-            )
-            .await;
-        let stored = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "tools", 17)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.live.unwrap().review_decision, None);
+        .unwrap()
+        .unwrap()
     }
 
-    /// Seeded `changes_requested`, then an authoritative `approved`, then a
-    /// REST unknown write must leave `approved`. A later authoritative
-    /// `None` still clears. No pre-read: preserve is the column omit.
+    /// Issues 3339 and 3364: a hosted REST list read loads no reviews and no
+    /// mergeability. It must keep what the fetcher stored, in the row and in
+    /// the column of the workspace that shows the pull request.
     #[tokio::test]
-    async fn an_unknown_rest_write_does_not_overwrite_a_fresher_authoritative_decision() {
-        use crate::code::forge_rest;
-        use tidebreak_core::db::code::{get_pull_request_fact, save_pull_request_fact};
-        use tidebreak_core::{
-            CodePullRequestFact, CodePullRequestId, CodePullRequestState, PullRequestDigest,
-        };
-
+    async fn a_hosted_rest_read_keeps_what_the_fetcher_stored() {
         let dir = tempfile::tempdir().unwrap();
-        let (runtime, _, owner, _) = fixture(dir.path()).await;
-        let now = Utc::now();
-        save_pull_request_fact(
-            &runtime.db,
-            &CodePullRequestFact {
-                id: CodePullRequestId::new(),
-                owner: owner.clone(),
-                host: "github.com".into(),
-                repo_owner: "acme".into(),
-                repo_name: "tools".into(),
-                number: 17,
-                url: "https://github.com/acme/tools/pull/17".into(),
-                title: "Stored title".into(),
-                state: CodePullRequestState::Open,
-                draft: false,
-                author: None,
-                head_branch: "feat".into(),
-                base_branch: "main".into(),
-                head_sha: Some("abc".into()),
-                created_at: now,
-                updated_at: now,
-                merged_at: None,
-                closed_at: None,
-                first_seen_at: now,
-                last_seen_at: now,
-                live: None,
-            },
-        )
-        .await
-        .unwrap();
+        let (runtime, _, owner, workspace) = fixture(dir.path()).await;
+        let version = Utc::now();
+        let at = |seconds| version + chrono::Duration::seconds(seconds);
 
-        let digest = |review_decision: Option<&str>| PullRequestDigest {
-            number: 17,
-            url: Some("https://github.com/acme/tools/pull/17".into()),
-            state: "open".into(),
-            title: Some("Stored title".into()),
-            checks_summary: None,
-            check_counts: None,
-            checks: None,
-            draft: Some(false),
-            merged: Some(false),
-            review_decision: review_decision.map(str::to_owned),
-            mergeable: None,
-            merge_state_status: None,
-            head_branch: Some("feat".into()),
-            base_branch: Some("main".into()),
-            head_sha: Some("abc".into()),
-            auto_merge_enabled: None,
-            in_merge_queue: None,
-        };
-        runtime
-            .record_pull_request_live_state(&owner, None, &digest(Some("changes_requested")))
-            .await;
-        runtime
-            .record_pull_request_live_state(&owner, None, &digest(Some("approved")))
-            .await;
-        runtime
-            .record_pull_request_live_state(
-                &owner,
-                None,
-                &digest(Some(forge_rest::REVIEW_DECISION_UNKNOWN)),
-            )
-            .await;
-        let stored = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "tools", 17)
+        let mut fetched = read_17(&owner, version, at(1));
+        fetched.object.as_mut().unwrap().mergeability =
+            Some(tidebreak_core::PullRequestMergeability {
+                mergeable: Some("conflicting".into()),
+                merge_state_status: Some("dirty".into()),
+            });
+        fetched.review = Some(review(Some("changes_requested"), at(1)));
+        let minted = runtime
+            .apply_pull_request_read(&fetched, MINT)
+            .await
+            .unwrap();
+        assert!(minted.stored && minted.changed);
+        assert_eq!(
+            minted.workspaces,
+            vec![workspace.id],
+            "the workspace showing the pull request takes the projection"
+        );
+
+        let listed = runtime
+            .apply_pull_request_read(&read_17(&owner, version, at(2)), MINT)
+            .await
+            .unwrap();
+        assert!(
+            !listed.changed,
+            "a list read that saw nothing new changes nothing"
+        );
+        assert!(listed.workspaces.is_empty());
+
+        let live = stored_17(&runtime, &owner).await.live.unwrap();
+        assert_eq!(live.review_decision.as_deref(), Some("changes_requested"));
+        assert_eq!(live.mergeable.as_deref(), Some("conflicting"));
+        assert_eq!(live.merge_state_status.as_deref(), Some("dirty"));
+        let shown = runtime
+            .get_workspace(&owner, workspace.id)
             .await
             .unwrap()
+            .pr
             .unwrap();
+        assert_eq!(shown.review_decision.as_deref(), Some("changes_requested"));
+        assert_eq!(shown.mergeable.as_deref(), Some("conflicting"));
+    }
+
+    /// Review decisions land in the order they were observed, whatever order
+    /// they arrive in: a late older decision and a read that never loaded
+    /// reviews change nothing, and a newer read that found no decision
+    /// clears one.
+    #[tokio::test]
+    async fn review_decisions_land_in_observation_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _, owner, _) = fixture(dir.path()).await;
+        let version = Utc::now();
+        let at = |seconds| version + chrono::Duration::seconds(seconds);
+        let apply = |decision: Option<Option<&str>>, observed: i64| {
+            let mut read = read_17(&owner, version, at(observed));
+            read.review = decision.map(|decision| review(decision, at(observed)));
+            read
+        };
+
+        for read in [
+            apply(Some(Some("changes_requested")), 1),
+            apply(Some(Some("approved")), 3),
+            // Observed before the approval, landing after it.
+            apply(Some(Some("changes_requested")), 2),
+            // A hosted REST read: reviews were never asked for.
+            apply(None, 4),
+        ] {
+            runtime.apply_pull_request_read(&read, MINT).await.unwrap();
+        }
         assert_eq!(
-            stored.live.unwrap().review_decision.as_deref(),
+            stored_17(&runtime, &owner)
+                .await
+                .live
+                .unwrap()
+                .review_decision
+                .as_deref(),
             Some("approved")
         );
+
         runtime
-            .record_pull_request_live_state(&owner, None, &digest(None))
-            .await;
-        let stored = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "tools", 17)
+            .apply_pull_request_read(&apply(Some(None), 5), MINT)
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(stored.live.unwrap().review_decision, None);
-    }
-
-    /// A merged REST digest must not derive a review decision, so a stale
-    /// `changes_requested` is not written onto the live tier.
-    #[tokio::test]
-    async fn a_merged_rest_digest_does_not_write_a_review_decision() {
-        use tidebreak_core::db::code::{
-            get_pull_request_fact, save_pull_request_fact, set_pull_request_live_state,
-        };
-        use tidebreak_core::{
-            CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestState,
-            PullRequestDigest,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let (runtime, _, owner, _) = fixture(dir.path()).await;
-        let now = Utc::now();
-        save_pull_request_fact(
-            &runtime.db,
-            &CodePullRequestFact {
-                id: CodePullRequestId::new(),
-                owner: owner.clone(),
-                host: "github.com".into(),
-                repo_owner: "acme".into(),
-                repo_name: "tools".into(),
-                number: 17,
-                url: "https://github.com/acme/tools/pull/17".into(),
-                title: "Merged title".into(),
-                state: CodePullRequestState::Merged,
-                draft: false,
-                author: None,
-                head_branch: "feat".into(),
-                base_branch: "main".into(),
-                head_sha: Some("abc".into()),
-                created_at: now,
-                updated_at: now,
-                merged_at: Some(now),
-                closed_at: Some(now),
-                first_seen_at: now,
-                last_seen_at: now,
-                live: None,
-            },
-        )
-        .await
-        .unwrap();
-        set_pull_request_live_state(
-            &runtime.db,
-            &owner,
-            "github.com",
-            "acme",
-            "tools",
-            17,
-            &CodePullRequestLiveState {
-                checks_summary: None,
-                checks: None,
-                review_decision: None,
-                mergeable: None,
-                merge_state_status: None,
-                auto_merge_enabled: None,
-                in_merge_queue: None,
-                observed_at: now,
-            },
-        )
-        .await
-        .unwrap();
-
-        let digest = PullRequestDigest {
-            number: 17,
-            url: Some("https://github.com/acme/tools/pull/17".into()),
-            state: "merged".into(),
-            title: Some("Merged title".into()),
-            checks_summary: None,
-            check_counts: None,
-            checks: None,
-            draft: Some(false),
-            merged: Some(true),
-            review_decision: None,
-            mergeable: None,
-            merge_state_status: None,
-            head_branch: Some("feat".into()),
-            base_branch: Some("main".into()),
-            head_sha: Some("abc".into()),
-            auto_merge_enabled: None,
-            in_merge_queue: Some(false),
-        };
-        runtime
-            .record_pull_request_live_state(&owner, None, &digest)
-            .await;
-        let stored = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "tools", 17)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.live.unwrap().review_decision, None);
+        assert_eq!(
+            stored_17(&runtime, &owner)
+                .await
+                .live
+                .unwrap()
+                .review_decision,
+            None,
+            "a newer read that loaded reviews and found no decision clears it"
+        );
     }
 
     #[tokio::test]
-    async fn a_created_rest_digest_stays_public_when_refresh_fails() {
+    async fn a_created_digest_stays_on_the_column_when_the_refresh_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let (runtime, _, owner, mut workspace) =
-            fixture_with_host(dir.path(), Some("unsupported.example")).await;
-        let mut created = workspace.pr.clone().unwrap();
-        created.review_decision = Some(crate::code::forge_rest::REVIEW_DECISION_UNKNOWN.into());
+        let (runtime, _, owner, workspace) =
+            fixture_with(dir.path(), Some("unsupported.example"), None).await;
+        let mut created = shown_pr("https://github.com/acme/tools/pull/17");
+        created.title = Some("Created title".into());
         runtime
-            .save_created_workspace_pr(&mut workspace, created)
+            .save_created_workspace_pr(&workspace, created)
             .await
             .unwrap();
         assert!(runtime
@@ -2366,29 +1992,55 @@ mod remote_pr_tests {
             .is_err());
 
         let stored = runtime.get_workspace(&owner, workspace.id).await.unwrap();
-        assert_eq!(stored.pr.as_ref().unwrap().review_decision, None);
+        assert_eq!(
+            stored.pr.as_ref().unwrap().title.as_deref(),
+            Some("Created title")
+        );
         let status = runtime.workspace_pr(&owner, workspace.id).await.unwrap();
         assert_eq!(status.pr.as_ref().unwrap().review_decision, None);
-        let wire = serde_json::to_value(status.pr.unwrap()).unwrap();
-        assert!(wire
-            .get("review_decision")
-            .is_none_or(serde_json::Value::is_null));
     }
 
+    /// A creation answer seeds a column that shows another pull request, and
+    /// never replaces a column that already shows this one: whatever is
+    /// there came from a read at least as new.
     #[tokio::test]
-    async fn a_created_digest_keeps_an_authoritative_review_decision() {
+    async fn a_created_digest_only_seeds_a_column_that_shows_another_pull_request() {
         let dir = tempfile::tempdir().unwrap();
-        let (runtime, _, owner, mut workspace) = fixture(dir.path()).await;
-        let mut created = workspace.pr.clone().unwrap();
+        let (runtime, _, owner, workspace) = fixture_with(
+            dir.path(),
+            Some("github.com"),
+            Some(shown_pr("https://github.com/acme/tools/pull/9")),
+        )
+        .await;
+        let mut created = shown_pr("https://github.com/acme/tools/pull/17");
         created.review_decision = Some("approved".into());
         runtime
-            .save_created_workspace_pr(&mut workspace, created)
+            .save_created_workspace_pr(&workspace, created)
             .await
             .unwrap();
-        let stored = runtime.get_workspace(&owner, workspace.id).await.unwrap();
+        let shown = runtime
+            .get_workspace(&owner, workspace.id)
+            .await
+            .unwrap()
+            .pr;
         assert_eq!(
-            stored.pr.unwrap().review_decision.as_deref(),
+            shown.as_ref().and_then(|pr| pr.review_decision.as_deref()),
             Some("approved")
+        );
+
+        let mut again = shown_pr("https://github.com/acme/tools/pull/17");
+        again.title = Some("A late creation answer".into());
+        runtime
+            .save_created_workspace_pr(&workspace, again)
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime
+                .get_workspace(&owner, workspace.id)
+                .await
+                .unwrap()
+                .pr,
+            shown
         );
     }
 
@@ -2467,10 +2119,12 @@ mod remote_pr_tests {
     #[tokio::test]
     async fn remote_reads_refuse_a_pr_outside_the_registered_repository_before_lending() {
         let dir = tempfile::tempdir().unwrap();
-        let (runtime, lender, owner, mut workspace) = fixture(dir.path()).await;
-        workspace.pr.as_mut().unwrap().url =
-            Some("https://github.com/other/repository/pull/17".into());
-        save_workspace(&runtime.db, &workspace).await.unwrap();
+        let (runtime, lender, owner, workspace) = fixture_with(
+            dir.path(),
+            Some("github.com"),
+            Some(shown_pr("https://github.com/other/repository/pull/17")),
+        )
+        .await;
         assert!(runtime
             .refresh_workspace_pr(&owner, workspace.id)
             .await
@@ -2555,7 +2209,9 @@ mod remote_pr_tests {
             axum::Json(value)
         }
         let dir = tempfile::tempdir().unwrap();
-        let (runtime, lender, owner, mut workspace) = fixture(dir.path()).await;
+        // No pull request yet: the refresh finds it by the workspace branch.
+        let (runtime, lender, owner, workspace) =
+            fixture_with(dir.path(), Some("github.com"), None).await;
         let seen: Seen = Arc::default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -2563,8 +2219,6 @@ mod remote_pr_tests {
             .fallback(forge)
             .with_state((seen.clone(), workspace.branch_name.clone()));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        workspace.pr = None;
-        save_workspace(&runtime.db, &workspace).await.unwrap();
         runtime.set_forge_api_base(Some(base));
         let refreshed = runtime
             .refresh_workspace_pr(&owner, workspace.id)
@@ -2584,6 +2238,14 @@ mod remote_pr_tests {
             attributed[0].1,
             tidebreak_core::CodePullRequestRelation::Contributed
         );
+        // The confirmed row starts with the live state the fetch observed,
+        // not a bare snapshot.
+        let live = attributed[0].0.live.clone().unwrap();
+        assert_eq!(live.review_decision.as_deref(), Some("changes_requested"));
+        assert_eq!(live.mergeable.as_deref(), Some("mergeable"));
+        assert_eq!(live.merge_state_status.as_deref(), Some("clean"));
+        assert_eq!(live.checks, Some(Vec::new()));
+        assert_eq!(live.in_merge_queue, Some(false));
         let comments = runtime
             .workspace_pr_comments(&owner, workspace.id)
             .await

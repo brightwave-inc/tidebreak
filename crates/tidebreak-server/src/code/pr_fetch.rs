@@ -28,8 +28,8 @@ use serde_json::Value;
 
 use crate::obo_gateway::GitCredential;
 use tidebreak_core::{
-    CodePullRequestFact, CodePullRequestState, PullRequestCheck, PullRequestCheckBucket,
-    PullRequestCheckCounts, PullRequestDigest,
+    CodePullRequestState, PullRequestCheck, PullRequestCheckBucket, PullRequestMergeability,
+    PullRequestObjectRead, PullRequestSnapshot,
 };
 
 use super::gh::{run_gh, run_gh_http, RawHttpResponse};
@@ -185,7 +185,7 @@ pub(crate) enum EndpointRead<T> {
     Missing,
 }
 
-/// The digest-relevant fields of one REST pull request.
+/// The fields of one REST pull request the store keeps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RestPull {
     pub number: u64,
@@ -193,12 +193,56 @@ pub(crate) struct RestPull {
     pub state: String,
     pub title: Option<String>,
     pub draft: Option<bool>,
+    pub author: Option<String>,
     pub mergeable: Option<String>,
     pub merge_state_status: Option<String>,
     pub head_branch: Option<String>,
     pub base_branch: Option<String>,
     pub head_sha: Option<String>,
     pub auto_merge_enabled: Option<bool>,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// GitHub's own version of the pull request. The store orders
+    /// snapshots by it.
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub merged_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl RestPull {
+    /// The pull request object as a read observed at `observed_at`, with the
+    /// validator the host sent. The single-pull endpoint carries every field
+    /// the object has, so the read claims mergeability and auto-merge too.
+    /// `None` without a URL: the store cannot name the pull request.
+    pub(crate) fn object_read(
+        &self,
+        observed_at: chrono::DateTime<chrono::Utc>,
+        etag: Option<String>,
+    ) -> Option<PullRequestObjectRead> {
+        let state = CodePullRequestState::from_str(&self.state)?;
+        Some(PullRequestObjectRead {
+            snapshot: PullRequestSnapshot {
+                url: self.url.clone()?,
+                title: self.title.clone().unwrap_or_default(),
+                state,
+                draft: self.draft.unwrap_or(false),
+                author: self.author.clone(),
+                head_branch: self.head_branch.clone().unwrap_or_default(),
+                base_branch: self.base_branch.clone().unwrap_or_default(),
+                head_sha: self.head_sha.clone(),
+                created_at: self.created_at.unwrap_or(observed_at),
+                updated_at: self.updated_at.unwrap_or(observed_at),
+                merged_at: self.merged_at,
+                closed_at: self.closed_at,
+            },
+            mergeability: Some(PullRequestMergeability {
+                mergeable: self.mergeable.clone(),
+                merge_state_status: self.merge_state_status.clone(),
+            }),
+            auto_merge_enabled: self.auto_merge_enabled,
+            observed_at,
+            etag,
+        })
+    }
 }
 
 /// What one review aggregation says, in the lowercased vocabulary
@@ -494,43 +538,6 @@ pub(crate) fn derive_review_decision(
     }
 }
 
-/// Assemble the digest one refresh produced: the pull request's own fields,
-/// the checks read for its exact head, the derived review decision, and
-/// queue membership when it was worth reading.
-pub(crate) fn digest_from_parts(
-    pull: &RestPull,
-    checks: &[PullRequestCheck],
-    review_decision: Option<String>,
-    in_merge_queue: Option<bool>,
-) -> PullRequestDigest {
-    let counts = PullRequestCheckCounts::from_checks(checks);
-    PullRequestDigest {
-        number: pull.number,
-        url: pull.url.clone(),
-        state: pull.state.clone(),
-        title: pull.title.clone(),
-        checks_summary: Some(counts.summary_line()),
-        check_counts: Some(counts),
-        // The fetcher always loads the rollup, so an empty list is a fact
-        // ("no checks") and clears the row, unlike a read that never asked.
-        checks: Some(checks.to_vec()),
-        draft: pull.draft,
-        merged: Some(pull.state == "merged"),
-        review_decision,
-        mergeable: pull.mergeable.clone(),
-        merge_state_status: pull.merge_state_status.clone(),
-        head_branch: pull.head_branch.clone(),
-        base_branch: pull.base_branch.clone(),
-        head_sha: pull.head_sha.clone(),
-        auto_merge_enabled: pull.auto_merge_enabled,
-        in_merge_queue: if pull.state == "open" {
-            in_merge_queue
-        } else {
-            Some(false)
-        },
-    }
-}
-
 /// One gated conditional GET of `path` on `host`, over either transport.
 async fn gated_read(
     gate: &HostGate,
@@ -686,63 +693,7 @@ fn bounded_body(response: &RawHttpResponse) -> String {
     bounded
 }
 
-/// Advance the durable fact snapshot after a fresh pull read, before its new
-/// ETag is stored. A later 304 reconstructs these fields from the fact, so
-/// persisting the validator without the representation it validates would
-/// roll title, lifecycle, or head state back to the previous slow-sweep
-/// snapshot.
-pub(crate) fn apply_fresh_pull_to_fact(
-    fact: &mut CodePullRequestFact,
-    pull: &RestPull,
-    observed_at: chrono::DateTime<chrono::Utc>,
-) {
-    if let Some(url) = &pull.url {
-        fact.url.clone_from(url);
-    }
-    if let Some(title) = &pull.title {
-        fact.title.clone_from(title);
-    }
-    if let Some(state) = CodePullRequestState::from_str(&pull.state) {
-        fact.state = state;
-    }
-    if let Some(draft) = pull.draft {
-        fact.draft = draft;
-    }
-    if let Some(head_branch) = &pull.head_branch {
-        fact.head_branch.clone_from(head_branch);
-    }
-    if let Some(base_branch) = &pull.base_branch {
-        fact.base_branch.clone_from(base_branch);
-    }
-    fact.head_sha.clone_from(&pull.head_sha);
-    fact.last_seen_at = observed_at;
-}
-
-/// The same digest-relevant fields, projected from a stored fact row when a
-/// 304 says nothing moved since the row was written.
-pub(crate) fn rest_pull_from_fact(fact: &CodePullRequestFact) -> RestPull {
-    let live = fact.live.as_ref();
-    RestPull {
-        number: fact.number,
-        url: Some(fact.url.clone()),
-        state: match fact.state {
-            CodePullRequestState::Open => "open",
-            CodePullRequestState::Merged => "merged",
-            CodePullRequestState::Closed => "closed",
-        }
-        .to_owned(),
-        title: Some(fact.title.clone()),
-        draft: Some(fact.draft),
-        mergeable: live.and_then(|live| live.mergeable.clone()),
-        merge_state_status: live.and_then(|live| live.merge_state_status.clone()),
-        head_branch: (!fact.head_branch.is_empty()).then(|| fact.head_branch.clone()),
-        base_branch: (!fact.base_branch.is_empty()).then(|| fact.base_branch.clone()),
-        head_sha: fact.head_sha.clone(),
-        auto_merge_enabled: live.and_then(|live| live.auto_merge_enabled),
-    }
-}
-
-/// The digest-relevant fields of one REST pull request value, in the same
+/// The stored fields of one REST pull request value, in the same
 /// mapping the hosted forge reader applies (`forge_rest`).
 pub(crate) fn rest_pull_from_value(value: &Value) -> Option<RestPull> {
     let number = value.get("number").and_then(Value::as_u64)?;
@@ -767,12 +718,20 @@ pub(crate) fn rest_pull_from_value(value: &Value) -> Option<RestPull> {
             .unwrap_or("open")
             .to_ascii_lowercase()
     };
+    let time = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+            .map(|parsed| parsed.with_timezone(&chrono::Utc))
+    };
     Some(RestPull {
         number,
         url: text("/html_url"),
         state,
         title: text("/title"),
         draft: value.get("draft").and_then(Value::as_bool),
+        author: text("/user/login"),
         mergeable: match value.get("mergeable") {
             Some(Value::Bool(true)) => Some("mergeable".to_owned()),
             Some(Value::Bool(false)) => Some("conflicting".to_owned()),
@@ -787,6 +746,10 @@ pub(crate) fn rest_pull_from_value(value: &Value) -> Option<RestPull> {
                 .get("auto_merge")
                 .is_some_and(|armed| !armed.is_null()),
         ),
+        created_at: time("/created_at"),
+        updated_at: time("/updated_at"),
+        merged_at: time("/merged_at"),
+        closed_at: time("/closed_at"),
     })
 }
 
@@ -904,6 +867,9 @@ mod tests {
             "head": { "ref": "feature", "sha": "abc123" },
             "base": { "ref": "main" },
             "auto_merge": { "merge_method": "squash" },
+            "user": { "login": "octocat" },
+            "created_at": "2026-08-24T09:00:00Z",
+            "updated_at": "2026-08-24T10:30:00Z",
         }))
         .unwrap();
         assert_eq!(pull.number, 12);
@@ -913,6 +879,30 @@ mod tests {
         assert_eq!(pull.head_sha.as_deref(), Some("abc123"));
         assert_eq!(pull.auto_merge_enabled, Some(true));
 
+        // A fresh pull read is a full snapshot, ordered by GitHub's version,
+        // and a complete object whose validator the store may keep.
+        let observed_at = chrono::Utc::now();
+        let object = pull
+            .object_read(observed_at, Some("W/\"pull-1\"".into()))
+            .unwrap();
+        assert_eq!(object.snapshot.author.as_deref(), Some("octocat"));
+        assert_eq!(
+            object.snapshot.updated_at,
+            chrono::DateTime::parse_from_rfc3339("2026-08-24T10:30:00Z").unwrap()
+        );
+        assert_eq!(object.snapshot.state, CodePullRequestState::Open);
+        assert_eq!(object.snapshot.head_branch, "feature");
+        assert_eq!(
+            object
+                .mergeability
+                .as_ref()
+                .and_then(|mergeability| mergeability.mergeable.as_deref()),
+            Some("mergeable")
+        );
+        assert_eq!(object.auto_merge_enabled, Some(true));
+        assert_eq!(object.observed_at, observed_at);
+        assert_eq!(object.etag.as_deref(), Some("W/\"pull-1\""));
+
         let merged = rest_pull_from_value(&serde_json::json!({
             "number": 12,
             "state": "closed",
@@ -920,56 +910,6 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(merged.state, "merged");
-    }
-
-    #[test]
-    fn a_304_must_reuse_the_snapshot_advanced_by_the_fresh_pull() {
-        let now = chrono::Utc::now();
-        let mut fact = CodePullRequestFact {
-            id: tidebreak_core::CodePullRequestId::new(),
-            owner: tidebreak_core::OwnerId::local(),
-            host: "github.com".into(),
-            repo_owner: "acme".into(),
-            repo_name: "demo".into(),
-            number: 12,
-            url: "https://github.com/acme/demo/pull/12".into(),
-            title: "Stale title".into(),
-            state: CodePullRequestState::Open,
-            draft: false,
-            author: None,
-            head_branch: "feature".into(),
-            base_branch: "main".into(),
-            head_sha: Some("deadbeef".into()),
-            created_at: now,
-            updated_at: now,
-            merged_at: None,
-            closed_at: None,
-            first_seen_at: now,
-            last_seen_at: now,
-            live: None,
-        };
-        let fresh = rest_pull_from_value(&serde_json::json!({
-            "number": 12,
-            "html_url": "https://github.com/acme/demo/pull/12",
-            "state": "open",
-            "title": "Fresh title",
-            "draft": false,
-            "head": { "ref": "feature", "sha": "feedfeed" },
-            "base": { "ref": "main" },
-        }))
-        .unwrap();
-
-        apply_fresh_pull_to_fact(&mut fact, &fresh, now);
-
-        let after_304 = rest_pull_from_fact(&fact);
-        assert_eq!(
-            after_304.title, fresh.title,
-            "a 304 must not roll the title back to the pre-200 fact snapshot"
-        );
-        assert_eq!(
-            after_304.head_sha, fresh.head_sha,
-            "a 304 must not reuse the pre-200 head SHA"
-        );
     }
 
     #[test]

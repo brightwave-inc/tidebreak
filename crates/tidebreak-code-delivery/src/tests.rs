@@ -1020,12 +1020,8 @@ impl DeliveryRuntime for FakeDeliveryRuntime {
 
     async fn emit_workspace_digests(&self, _owner: &OwnerId, _workspace_id: WorkspaceId) {}
 
-    async fn record_pull_request_live_state(
-        &self,
-        _owner: &OwnerId,
-        _source: Option<WorkspaceId>,
-        _digest: &PullRequestDigest,
-    ) {
+    async fn apply_pull_request_read(&self, _read: &PullRequestRead) -> Option<CodePullRequestId> {
+        None
     }
 
     fn refresh_workspaces_for_pull_request(&self, _owner: &OwnerId, _pull_request_url: &str) {}
@@ -1840,4 +1836,75 @@ fn a_list_read_without_a_rollup_does_not_claim_to_know_the_checks() {
         )
     );
     assert!(digest.check_counts.is_some());
+}
+
+/// Issues 3339 and 3364: the hosted REST restatement carries no review
+/// decision and, for a list, no mergeability. The read the store merges must
+/// say it did not look, so the merge keeps what another read stored. `gh`
+/// names every requested field, so its null is a real "none".
+#[test]
+fn a_host_answer_only_reports_the_fields_it_carried() {
+    let rest_list = serde_json::json!({
+        "number": 2802,
+        "title": "Hosted read",
+        "state": "open",
+        "url": "https://github.com/brightwave-inc/tidebreak/pull/2802",
+        "headRefName": "thet/hosted",
+        "headRefOid": "abc123",
+        "baseRefName": "main",
+        "autoMergeRequest": null,
+        "createdAt": "2026-09-01T10:00:00Z",
+        "updatedAt": "2026-09-01T11:00:00Z"
+    });
+    let parsed = parse_pull_request(&repository_ref(), &rest_list, &[]).unwrap();
+    assert!(!parsed.review_loaded);
+    assert!(!parsed.mergeability_loaded);
+    assert!(parsed.auto_merge_loaded);
+    let read = read_from_observation(&OwnerId::local(), &parsed, None).unwrap();
+    let object = read.object.as_ref().unwrap();
+    assert_eq!(object.mergeability, None);
+    assert_eq!(object.auto_merge_enabled, Some(false));
+    assert_eq!(object.snapshot.head_sha.as_deref(), Some("abc123"));
+    assert_eq!(object.observed_at, parsed.observed_at);
+    assert_eq!(read.review, None);
+    assert_eq!(read.checks, None);
+    assert_eq!(read.queue, None);
+
+    let gh_list = serde_json::json!({
+        "number": 2802,
+        "title": "Local read",
+        "state": "OPEN",
+        "url": "https://github.com/brightwave-inc/tidebreak/pull/2802",
+        "headRefName": "thet/hosted",
+        "headRefOid": "abc123",
+        "baseRefName": "main",
+        "reviewDecision": null,
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "BLOCKED",
+        "autoMergeRequest": null,
+        "inMergeQueue": false,
+        "statusCheckRollup": []
+    });
+    let parsed = parse_pull_request(&repository_ref(), &gh_list, &[]).unwrap();
+    let read = read_from_observation(&OwnerId::local(), &parsed, Some(false)).unwrap();
+    assert_eq!(
+        read.review.as_ref().map(|review| review.decision.clone()),
+        Some(None),
+        "gh loaded the review decision and found none"
+    );
+    assert_eq!(
+        read.object.as_ref().unwrap().mergeability,
+        Some(PullRequestMergeability {
+            mergeable: Some("mergeable".into()),
+            merge_state_status: Some("blocked".into()),
+        })
+    );
+    assert_eq!(
+        read.checks.as_ref().map(|checks| checks.checks.len()),
+        Some(0)
+    );
+    assert_eq!(
+        read.queue.as_ref().map(|queue| queue.in_merge_queue),
+        Some(false)
+    );
 }

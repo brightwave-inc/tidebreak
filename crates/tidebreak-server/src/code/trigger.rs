@@ -442,7 +442,7 @@ async fn fire_fact_edge(
             if fact.created_at < trigger.created_at || fact.first_seen_at < trigger.created_at {
                 return Ok(());
             }
-            let digest = super::pr_facts::digest_from_fact(fact);
+            let digest = fact.digest();
             fire_one(
                 runtime,
                 owner,
@@ -485,7 +485,7 @@ async fn fire_fact_edge(
                 insert_settled_trigger_fire(&runtime.db, &identity, Utc::now()).await?;
                 return Ok(());
             }
-            let digest = super::pr_facts::digest_from_fact(fact);
+            let digest = fact.digest();
             fire_one(runtime, owner, trigger, workspace_id, &digest, head).await
         }
         _ => Ok(()),
@@ -528,17 +528,13 @@ async fn sweep_pull_requests(
         let mut stale = Vec::new();
         for number in numbers {
             let fresh = repo_facts.iter().find(|fact| {
-                fact.number == number
-                    && fact
-                        .live
-                        .as_ref()
-                        .is_some_and(|live| super::reconcile::live_tier_is_fresh(live, now))
+                fact.number == number && super::reconcile::live_tier_answers(fact, now)
             });
             let Some(fact) = fresh else {
                 stale.push(number);
                 continue;
             };
-            let digest = super::pr_facts::digest_from_fact(fact);
+            let digest = fact.digest();
             // Durable rows record no head repository, so a base branch that
             // matches another row's head proves nothing (decision 77): the
             // durable path cannot tell a stacked child from a fork with the

@@ -15,12 +15,13 @@ use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::db::code::{
     arm_trigger, get_pull_request_fact, insert_repo, insert_workspace, list_fires_for_workspace,
-    list_triggers_for_repo, save_pull_request_fact, trigger_fire_heads_for_pr,
+    list_triggers_for_repo, save_pull_request_read, trigger_fire_heads_for_pr,
+    PullRequestReadOptions,
 };
 use tidebreak_core::{
     CodeRepo, CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerFireState,
-    CodeTriggerId, CodeWorkspace, CodeWorkspaceStatus, OwnerId, PullRequestDigest, RepoId,
-    WorkspaceId,
+    CodeTriggerId, CodeWorkspace, CodeWorkspaceStatus, OwnerId, PullRequestDigest, PullRequestRead,
+    RepoId, WorkspaceId,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -359,13 +360,25 @@ async fn pr_updated_baselines_then_fires_on_a_new_head() {
     assert_eq!(baseline.state, CodeTriggerFireState::Delivered);
     assert!(baseline.payload.is_none());
 
-    // The head moves; the next sweep fires exactly the new head.
+    // The head moves, which GitHub reports as a newer version; the next
+    // sweep fires exactly the new head.
     let mut fact = get_pull_request_fact(&db, &owner, "github.com", "acme", "tools", 412)
         .await
         .unwrap()
         .unwrap();
     fact.head_sha = Some("bbb999".into());
-    save_pull_request_fact(&db, &fact).await.unwrap();
+    fact.updated_at += chrono::Duration::seconds(60);
+    fact.live = None;
+    save_pull_request_read(
+        &db,
+        &PullRequestRead::observing_fact(&fact, chrono::Utc::now()),
+        PullRequestReadOptions {
+            mint_row: true,
+            adopt: None,
+        },
+    )
+    .await
+    .unwrap();
     crate::code::trigger::sweep_triggers(&runtime).await;
 
     let fires = list_fires_for_workspace(&db, &owner, tracked)

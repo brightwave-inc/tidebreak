@@ -43,6 +43,7 @@ mod one_journal;
 mod one_turn_lane;
 mod parent_wait;
 mod project_instructions;
+mod pull_request_observed_times;
 mod session_access;
 mod session_acts_as;
 mod session_context;
@@ -133,6 +134,7 @@ impl MigratorTrait for Migrator {
             Box::new(project_instructions::ProjectInstructions),
             Box::new(memory_evidence_kind::MemoryEvidenceEventKind),
             Box::new(notification_body::NotificationBody),
+            Box::new(pull_request_observed_times::PullRequestObservedTimes),
         ]
     }
 }

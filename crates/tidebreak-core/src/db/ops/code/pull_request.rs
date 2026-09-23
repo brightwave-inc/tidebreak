@@ -5,108 +5,528 @@
 //! no local checkout is representable. An attribution row ties a workspace
 //! to a pull request it authored or contributed to (decision 77). GitHub
 //! stays authoritative; these rows record what was observed and when.
+//!
+//! Every write of pull-request state goes through [`save_pull_request_read`]:
+//! one transaction that locks the row, merges the read into it with
+//! [`merge_pull_request_read`], writes the result, and rewrites the
+//! pull-request column of every active workspace that shows it. The column is
+//! a projection of the row, so no reader can leave it older than the row.
 
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
+    ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, TransactionTrait,
 };
 
 use crate::code::{
-    CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact, CodePullRequestId,
-    CodePullRequestLiveState, CodePullRequestRelation, CodePullRequestState, WorkspaceId,
+    merge_pull_request_read, CodePullRequestAttribution, CodePullRequestDiscovery,
+    CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestRelation,
+    CodePullRequestState, CodeWorkspaceStatus, PullRequestDigest, PullRequestEtags,
+    PullRequestObservedTimes, PullRequestRead, StoredPullRequest, WorkspaceId,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
 
 use super::super::super::{entities, store_err, DbStore};
 
-/// Insert or refresh one observed pull request, returning the canonical id.
+/// How [`save_pull_request_read`] treats a pull request with no row yet, and
+/// which workspace takes the result.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PullRequestReadOptions {
+    /// Create the row when none exists. Readers that track a pull request
+    /// (decision 77) mint; the conditional fetcher does not, so a workspace
+    /// looking at a pull request never makes it tracked by looking.
+    pub mint_row: bool,
+    /// A workspace whose pull-request column should show this pull request
+    /// even when it shows another one now. Every other active workspace
+    /// takes the result only when its column already shows this pull
+    /// request.
+    pub adopt: Option<PullRequestAdoption>,
+}
+
+/// A workspace that takes a pull request into its column: the conditional
+/// fetcher's own workspace, which may find a new pull request for its
+/// branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestAdoption {
+    /// The workspace.
+    pub workspace: WorkspaceId,
+    /// The pull request URL the column showed when the caller began, or
+    /// `None` for an empty column. The column takes the new pull request only
+    /// while it still shows that, or already shows the new one, so a pull
+    /// request another writer adopted in the meantime wins.
+    pub replacing: Option<String>,
+}
+
+/// What one applied read did.
+#[derive(Debug, Clone)]
+pub struct AppliedPullRequestRead {
+    /// The pull request after the merge. When `stored` is false this is the
+    /// read's own first sighting, held nowhere but the adopting workspace's
+    /// column.
+    pub fact: CodePullRequestFact,
+    /// Whether the row exists: it did already, or this read minted it.
+    pub stored: bool,
+    /// Whether a field a reader sees moved. Confirmations report no change.
+    pub changed: bool,
+    /// The active workspaces whose pull-request column this read rewrote.
+    pub workspaces: Vec<WorkspaceId>,
+}
+
+/// Merge one read into its pull request's row, in one transaction.
 ///
-/// Conflict is on the identity `(owner, host, repo_owner, repo_name,
-/// number)`: an existing row keeps its id and its `first_seen_at`, and takes
-/// the fresh snapshot plus `last_seen_at`. Trigger `pr_opened` edges key on
-/// `first_seen_at`, which is why an upsert never moves it.
-pub async fn save_pull_request_fact(
+/// The transaction locks the row, merges the read with
+/// [`merge_pull_request_read`], writes the merged row, and projects it into
+/// the pull-request column of every active workspace that shows this pull
+/// request, plus the adopting workspace. Reads therefore land in commit
+/// order, and a late or partial read cannot erase what a newer or fuller
+/// one stored.
+///
+/// With no row yet, a read that loaded the pull request object mints one
+/// when [`PullRequestReadOptions::mint_row`] allows. Otherwise the read's own
+/// first sighting goes to the adopting workspace's column only, and nothing
+/// is stored. `Ok(None)` when there is no row and the read cannot make one.
+///
+/// The transaction runs as a boxed future built in a plain function. Its
+/// callers sit deep inside turn drivers and sweeps, and a caller that held
+/// the transaction's state inline would grow by all of it.
+pub async fn save_pull_request_read(
     store: &DbStore,
-    fact: &CodePullRequestFact,
-) -> Result<CodePullRequestId> {
-    let number = i64::try_from(fact.number)
-        .map_err(|_| AgentError::Store(format!("pull request number {} overflows", fact.number)))?;
-    entities::code_pull_request::Entity::insert(entities::code_pull_request::ActiveModel {
-        id: Set(fact.id.0),
-        owner: Set(fact.owner.as_str().to_owned()),
-        host: Set(fact.host.clone()),
-        repo_owner: Set(fact.repo_owner.clone()),
-        repo_name: Set(fact.repo_name.clone()),
-        number: Set(number),
-        url: Set(fact.url.clone()),
-        title: Set(fact.title.clone()),
-        state: Set(fact.state.as_str().to_owned()),
-        draft: Set(fact.draft),
-        author: Set(fact.author.clone()),
-        head_branch: Set(fact.head_branch.clone()),
-        base_branch: Set(fact.base_branch.clone()),
-        head_sha: Set(fact.head_sha.clone()),
-        created_at: Set(fact.created_at),
-        updated_at: Set(fact.updated_at),
-        merged_at: Set(fact.merged_at),
-        closed_at: Set(fact.closed_at),
-        first_seen_at: Set(fact.first_seen_at),
-        last_seen_at: Set(fact.last_seen_at),
-        // This snapshot did not arrive with a pull endpoint validator. Clear
-        // any existing validator in the same upsert so a concurrent refresh
-        // cannot leave its ETag naming this writer's unrelated snapshot.
-        pull_etag: Set(None),
-        // The live tier (decision 66) is written by its own setter and never
-        // by a snapshot upsert, so a confirmation cannot blank it.
-        ..Default::default()
+    read: &PullRequestRead,
+    options: PullRequestReadOptions,
+) -> Result<Option<AppliedPullRequestRead>> {
+    save_in_transaction(store, read, options).await
+}
+
+type SaveFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<AppliedPullRequestRead>>> + Send + 'a>,
+>;
+
+fn save_in_transaction<'a>(
+    store: &'a DbStore,
+    read: &'a PullRequestRead,
+    options: PullRequestReadOptions,
+) -> SaveFuture<'a> {
+    Box::pin(async move {
+        let number = i64::try_from(read.number).map_err(|_| {
+            AgentError::Store(format!("pull request number {} overflows", read.number))
+        })?;
+        let transaction = store.conn.begin().await.map_err(store_err)?;
+        match apply_on(&transaction, read, number, &options).await {
+            Ok(applied) => {
+                transaction.commit().await.map_err(store_err)?;
+                Ok(applied)
+            }
+            Err(err) => {
+                let _ = transaction.rollback().await;
+                Err(err)
+            }
+        }
     })
-    .on_conflict(
-        OnConflict::columns([
-            entities::code_pull_request::Column::Owner,
-            entities::code_pull_request::Column::Host,
-            entities::code_pull_request::Column::RepoOwner,
-            entities::code_pull_request::Column::RepoName,
+}
+
+async fn apply_on<C>(
+    conn: &C,
+    read: &PullRequestRead,
+    number: i64,
+    options: &PullRequestReadOptions,
+) -> Result<Option<AppliedPullRequestRead>>
+where
+    C: ConnectionTrait,
+{
+    let (before, merged) = match lock_fact_row(conn, read, number).await? {
+        Some(row) => merge_row(conn, row, read).await?,
+        None => {
+            let Some(first) = StoredPullRequest::first_sighting(read, CodePullRequestId::new())
+            else {
+                return Ok(None);
+            };
+            if !options.mint_row {
+                let workspaces =
+                    project_into_workspaces(conn, &first.fact, options.adopt.as_ref(), false)
+                        .await?;
+                return Ok(Some(AppliedPullRequestRead {
+                    fact: first.fact,
+                    stored: false,
+                    changed: true,
+                    workspaces,
+                }));
+            }
+            if insert_stored(conn, &first).await? {
+                (None, first)
+            } else {
+                // Another writer minted the row first; merge onto theirs.
+                let row = lock_fact_row(conn, read, number).await?.ok_or_else(|| {
+                    AgentError::Store(format!(
+                        "pull request {}/{}/{}#{} disappeared after a conflicting insert",
+                        read.host, read.repo_owner, read.repo_name, read.number
+                    ))
+                })?;
+                merge_row(conn, row, read).await?
+            }
+        }
+    };
+    let changed = before
+        .as_ref()
+        .is_none_or(|before| merged.visibly_differs(before));
+    // Only a changed digest can leave another workspace's column behind. An
+    // unchanged read, a 304 on the hot tier included, looks at no workspace
+    // but the one it adopts into, so it holds the writer only briefly.
+    let digest_changed = before
+        .as_ref()
+        .is_none_or(|before| before.fact.digest() != merged.fact.digest());
+    let workspaces =
+        project_into_workspaces(conn, &merged.fact, options.adopt.as_ref(), digest_changed).await?;
+    Ok(Some(AppliedPullRequestRead {
+        fact: merged.fact,
+        stored: true,
+        changed,
+        workspaces,
+    }))
+}
+
+/// Merge `read` into the locked `row` and write the result when it moved.
+async fn merge_row<C>(
+    conn: &C,
+    row: entities::code_pull_request::Model,
+    read: &PullRequestRead,
+) -> Result<(Option<StoredPullRequest>, StoredPullRequest)>
+where
+    C: ConnectionTrait,
+{
+    let before = stored_from_row(row)?;
+    let merged = merge_pull_request_read(&before, read);
+    if merged != before {
+        write_stored(conn, &merged).await?;
+    }
+    Ok((Some(before), merged))
+}
+
+/// Lock one pull request's row for the rest of the transaction and load it.
+///
+/// A no-op update takes PostgreSQL's row lock; SQLite's `BEGIN IMMEDIATE`
+/// already holds the database write lock. `None` when no row exists.
+async fn lock_fact_row<C>(
+    conn: &C,
+    read: &PullRequestRead,
+    number: i64,
+) -> Result<Option<entities::code_pull_request::Model>>
+where
+    C: ConnectionTrait,
+{
+    let locked = entities::code_pull_request::Entity::update_many()
+        .col_expr(
             entities::code_pull_request::Column::Number,
-        ])
-        .update_columns([
-            entities::code_pull_request::Column::Url,
-            entities::code_pull_request::Column::Title,
-            entities::code_pull_request::Column::State,
-            entities::code_pull_request::Column::Draft,
-            entities::code_pull_request::Column::Author,
-            entities::code_pull_request::Column::HeadBranch,
-            entities::code_pull_request::Column::BaseBranch,
-            entities::code_pull_request::Column::HeadSha,
-            entities::code_pull_request::Column::CreatedAt,
-            entities::code_pull_request::Column::UpdatedAt,
-            entities::code_pull_request::Column::MergedAt,
-            entities::code_pull_request::Column::ClosedAt,
-            entities::code_pull_request::Column::LastSeenAt,
-            entities::code_pull_request::Column::PullEtag,
-        ])
-        .to_owned(),
-    )
-    .exec_without_returning(&store.conn)
-    .await
-    .map_err(store_err)?;
-    let row = find_fact_row(
-        store,
-        &fact.owner,
-        &fact.host,
-        &fact.repo_owner,
-        &fact.repo_name,
+            Expr::col(entities::code_pull_request::Column::Number),
+        )
+        .filter(entities::code_pull_request::Column::Owner.eq(read.owner.as_str()))
+        .filter(entities::code_pull_request::Column::Host.eq(read.host.as_str()))
+        .filter(entities::code_pull_request::Column::RepoOwner.eq(read.repo_owner.as_str()))
+        .filter(entities::code_pull_request::Column::RepoName.eq(read.repo_name.as_str()))
+        .filter(entities::code_pull_request::Column::Number.eq(number))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    if locked.rows_affected == 0 {
+        return Ok(None);
+    }
+    find_fact_row(
+        conn,
+        &read.owner,
+        &read.host,
+        &read.repo_owner,
+        &read.repo_name,
         number,
     )
-    .await?
-    .ok_or_else(|| {
-        AgentError::Store(format!(
-            "pull request {}/{}/{}#{} disappeared after upsert",
-            fact.host, fact.repo_owner, fact.repo_name, fact.number
-        ))
-    })?;
-    Ok(CodePullRequestId(row.id))
+    .await
+}
+
+/// Insert a first sighting. `false` when another writer inserted the same
+/// identity first.
+async fn insert_stored<C>(conn: &C, stored: &StoredPullRequest) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let fact = &stored.fact;
+    let number = i64::try_from(fact.number)
+        .map_err(|_| AgentError::Store(format!("pull request number {} overflows", fact.number)))?;
+    let live = LiveColumns::of(stored)?;
+    let inserted =
+        entities::code_pull_request::Entity::insert(entities::code_pull_request::ActiveModel {
+            id: Set(fact.id.0),
+            owner: Set(fact.owner.as_str().to_owned()),
+            host: Set(fact.host.clone()),
+            repo_owner: Set(fact.repo_owner.clone()),
+            repo_name: Set(fact.repo_name.clone()),
+            number: Set(number),
+            url: Set(fact.url.clone()),
+            title: Set(fact.title.clone()),
+            state: Set(fact.state.as_str().to_owned()),
+            draft: Set(fact.draft),
+            author: Set(fact.author.clone()),
+            head_branch: Set(fact.head_branch.clone()),
+            base_branch: Set(fact.base_branch.clone()),
+            head_sha: Set(fact.head_sha.clone()),
+            created_at: Set(fact.created_at),
+            updated_at: Set(fact.updated_at),
+            merged_at: Set(fact.merged_at),
+            closed_at: Set(fact.closed_at),
+            first_seen_at: Set(fact.first_seen_at),
+            last_seen_at: Set(fact.last_seen_at),
+            checks_summary: Set(live.checks_summary),
+            checks: Set(live.checks),
+            review_decision: Set(live.review_decision),
+            mergeable: Set(live.mergeable),
+            merge_state_status: Set(live.merge_state_status),
+            auto_merge_enabled: Set(live.auto_merge_enabled),
+            in_merge_queue: Set(live.in_merge_queue),
+            live_observed_at: Set(live.observed_at),
+            pull_etag: Set(stored.etags.pull.clone()),
+            checks_etag: Set(stored.etags.checks.clone()),
+            reviews_etag: Set(stored.etags.reviews.clone()),
+            checks_observed_at: Set(stored.observed.checks),
+            review_observed_at: Set(stored.observed.review),
+            mergeability_observed_at: Set(stored.observed.mergeability),
+            auto_merge_observed_at: Set(stored.observed.auto_merge),
+            queue_observed_at: Set(stored.observed.queue),
+        })
+        .on_conflict(
+            OnConflict::columns([
+                entities::code_pull_request::Column::Owner,
+                entities::code_pull_request::Column::Host,
+                entities::code_pull_request::Column::RepoOwner,
+                entities::code_pull_request::Column::RepoName,
+                entities::code_pull_request::Column::Number,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec_without_returning(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(inserted == 1)
+}
+
+/// Write every column the merge owns. Identity, `id`, and `first_seen_at`
+/// never move.
+async fn write_stored<C>(conn: &C, stored: &StoredPullRequest) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    use entities::code_pull_request::Column;
+    let fact = &stored.fact;
+    let live = LiveColumns::of(stored)?;
+    entities::code_pull_request::Entity::update_many()
+        .col_expr(Column::Url, Expr::value(fact.url.clone()))
+        .col_expr(Column::Title, Expr::value(fact.title.clone()))
+        .col_expr(Column::State, Expr::value(fact.state.as_str().to_owned()))
+        .col_expr(Column::Draft, Expr::value(fact.draft))
+        .col_expr(Column::Author, Expr::value(fact.author.clone()))
+        .col_expr(Column::HeadBranch, Expr::value(fact.head_branch.clone()))
+        .col_expr(Column::BaseBranch, Expr::value(fact.base_branch.clone()))
+        .col_expr(Column::HeadSha, Expr::value(fact.head_sha.clone()))
+        .col_expr(Column::CreatedAt, Expr::value(fact.created_at))
+        .col_expr(Column::UpdatedAt, Expr::value(fact.updated_at))
+        .col_expr(Column::MergedAt, Expr::value(fact.merged_at))
+        .col_expr(Column::ClosedAt, Expr::value(fact.closed_at))
+        .col_expr(Column::LastSeenAt, Expr::value(fact.last_seen_at))
+        .col_expr(Column::ChecksSummary, Expr::value(live.checks_summary))
+        .col_expr(Column::Checks, Expr::value(live.checks))
+        .col_expr(Column::ReviewDecision, Expr::value(live.review_decision))
+        .col_expr(Column::Mergeable, Expr::value(live.mergeable))
+        .col_expr(
+            Column::MergeStateStatus,
+            Expr::value(live.merge_state_status),
+        )
+        .col_expr(
+            Column::AutoMergeEnabled,
+            Expr::value(live.auto_merge_enabled),
+        )
+        .col_expr(Column::InMergeQueue, Expr::value(live.in_merge_queue))
+        .col_expr(Column::LiveObservedAt, Expr::value(live.observed_at))
+        .col_expr(Column::PullEtag, Expr::value(stored.etags.pull.clone()))
+        .col_expr(Column::ChecksEtag, Expr::value(stored.etags.checks.clone()))
+        .col_expr(
+            Column::ReviewsEtag,
+            Expr::value(stored.etags.reviews.clone()),
+        )
+        .col_expr(
+            Column::ChecksObservedAt,
+            Expr::value(stored.observed.checks),
+        )
+        .col_expr(
+            Column::ReviewObservedAt,
+            Expr::value(stored.observed.review),
+        )
+        .col_expr(
+            Column::MergeabilityObservedAt,
+            Expr::value(stored.observed.mergeability),
+        )
+        .col_expr(
+            Column::AutoMergeObservedAt,
+            Expr::value(stored.observed.auto_merge),
+        )
+        .col_expr(Column::QueueObservedAt, Expr::value(stored.observed.queue))
+        .filter(Column::Id.eq(fact.id.0))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+/// The live tier as stored columns. The check list travels as JSON text.
+struct LiveColumns {
+    checks_summary: Option<String>,
+    checks: Option<String>,
+    review_decision: Option<String>,
+    mergeable: Option<String>,
+    merge_state_status: Option<String>,
+    auto_merge_enabled: Option<bool>,
+    in_merge_queue: Option<bool>,
+    observed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl LiveColumns {
+    fn of(stored: &StoredPullRequest) -> Result<Self> {
+        let Some(live) = stored.fact.live.as_ref() else {
+            return Ok(Self {
+                checks_summary: None,
+                checks: None,
+                review_decision: None,
+                mergeable: None,
+                merge_state_status: None,
+                auto_merge_enabled: None,
+                in_merge_queue: None,
+                observed_at: None,
+            });
+        };
+        let checks = live
+            .checks
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|err| {
+                AgentError::Store(format!(
+                    "pull request {} live checks are unwritable: {err}",
+                    stored.fact.id.0
+                ))
+            })?;
+        Ok(Self {
+            checks_summary: live.checks_summary.clone(),
+            checks,
+            review_decision: live.review_decision.clone(),
+            mergeable: live.mergeable.clone(),
+            merge_state_status: live.merge_state_status.clone(),
+            auto_merge_enabled: live.auto_merge_enabled,
+            in_merge_queue: live.in_merge_queue,
+            observed_at: Some(live.observed_at),
+        })
+    }
+}
+
+/// Rewrite the pull-request column of the workspaces that should show
+/// `fact`'s digest: with `every_showing`, every active workspace whose column
+/// already shows this pull request; and `adopt`'s workspace, while its column
+/// still shows what the caller began from. Returns the workspaces whose
+/// column changed.
+async fn project_into_workspaces<C>(
+    conn: &C,
+    fact: &CodePullRequestFact,
+    adopt: Option<&PullRequestAdoption>,
+    every_showing: bool,
+) -> Result<Vec<WorkspaceId>>
+where
+    C: ConnectionTrait,
+{
+    if !every_showing && adopt.is_none() {
+        return Ok(Vec::new());
+    }
+    let digest = fact.digest();
+    let takes = |row: &entities::code_workspace::Model| {
+        let current = digest_url(row.pr.as_ref());
+        let shows_it = current.is_some_and(|url| url.eq_ignore_ascii_case(&fact.url));
+        let adopts = adopt.is_some_and(|adopt| {
+            adopt.workspace.0 == row.id
+                && (shows_it || same_url(current, adopt.replacing.as_deref()))
+        });
+        let stale = row
+            .pr
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<PullRequestDigest>(value.clone()).ok())
+            .as_ref()
+            != Some(&digest);
+        ((every_showing && shows_it) || adopts) && stale
+    };
+    let scope = || {
+        let query = entities::code_workspace::Entity::find()
+            .filter(entities::code_workspace::Column::Owner.eq(fact.owner.as_str()))
+            .filter(
+                entities::code_workspace::Column::Status.eq(CodeWorkspaceStatus::Active.as_str()),
+            );
+        match adopt {
+            Some(adopt) if !every_showing => {
+                query.filter(entities::code_workspace::Column::Id.eq(adopt.workspace.0))
+            }
+            _ => query,
+        }
+    };
+    let candidates: Vec<uuid::Uuid> = scope()
+        .all(conn)
+        .await
+        .map_err(store_err)?
+        .iter()
+        .filter(|row| takes(row))
+        .map(|row| row.id)
+        .collect();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Lock the rows this transaction will rewrite and judge them again. On
+    // PostgreSQL an adoption that committed since the scan is seen here and
+    // wins, and one that starts later waits for this commit. SQLite's single
+    // writer already serializes both, and its query builder omits the lock.
+    let locked = scope()
+        .filter(entities::code_workspace::Column::Id.is_in(candidates))
+        .lock_exclusive()
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    let encoded = serde_json::to_value(&digest)?;
+    let mut rewritten = Vec::new();
+    for row in locked.iter().filter(|row| takes(row)) {
+        let result = entities::code_workspace::Entity::update_many()
+            .col_expr(
+                entities::code_workspace::Column::Pr,
+                Expr::value(Some(encoded.clone())),
+            )
+            .filter(entities::code_workspace::Column::Id.eq(row.id))
+            .filter(entities::code_workspace::Column::Owner.eq(fact.owner.as_str()))
+            .filter(
+                entities::code_workspace::Column::Status.eq(CodeWorkspaceStatus::Active.as_str()),
+            )
+            .exec(conn)
+            .await
+            .map_err(store_err)?;
+        if result.rows_affected == 1 {
+            rewritten.push(WorkspaceId(row.id));
+        }
+    }
+    Ok(rewritten)
+}
+
+/// Whether a column's pull request URL is the expected one: both absent, or
+/// the same URL in any case.
+fn same_url(current: Option<&str>, expected: Option<&str>) -> bool {
+    match (current, expected) {
+        (None, None) => true,
+        (Some(current), Some(expected)) => current.eq_ignore_ascii_case(expected),
+        _ => false,
+    }
+}
+
+/// The pull request URL a stored workspace column names.
+pub(super) fn digest_url(pr: Option<&serde_json::Value>) -> Option<&str> {
+    pr?.get("url")?.as_str()
 }
 
 /// Load one observed pull request by identity.
@@ -120,274 +540,30 @@ pub async fn get_pull_request_fact(
 ) -> Result<Option<CodePullRequestFact>> {
     let number = i64::try_from(number)
         .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
-    let Some(row) = find_fact_row(store, owner, host, repo_owner, repo_name, number).await? else {
+    let Some(row) = find_fact_row(&store.conn, owner, host, repo_owner, repo_name, number).await?
+    else {
         return Ok(None);
     };
     Ok(Some(fact_from_row(row)?))
 }
 
-/// How a live-tier write treats `review_decision`.
-///
-/// REST does not load reviews, so it must not assign the column: omitting
-/// it keeps whatever an authoritative write stored, including a concurrent
-/// write between the caller's awaits. `None` on the live struct is
-/// authoritative empty and still needs [`Self::Replace`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PullRequestReviewDecisionWrite {
-    /// Write `live.review_decision`, including `None` to clear the column.
-    Replace,
-    /// Leave the stored decision untouched. The update statement omits
-    /// `review_decision`.
-    Preserve,
-}
-
-/// Write the live tier onto one observed pull request (decision 66).
-///
-/// Authoritative callers replace `review_decision`. REST keep-the-row
-/// writes pass [`PullRequestReviewDecisionWrite::Preserve`].
-pub async fn set_pull_request_live_state(
+/// Load one observed pull request with the observation times and validators
+/// the merge and the conditional fetcher use.
+pub async fn get_stored_pull_request(
     store: &DbStore,
     owner: &OwnerId,
     host: &str,
     repo_owner: &str,
     repo_name: &str,
     number: u64,
-    live: &CodePullRequestLiveState,
-) -> Result<Option<(CodePullRequestId, bool, CodePullRequestLiveState)>> {
-    set_pull_request_live_state_with(
-        store,
-        owner,
-        host,
-        repo_owner,
-        repo_name,
-        number,
-        live,
-        PullRequestReviewDecisionWrite::Replace,
-    )
-    .await
-}
-
-/// Write the live tier onto one observed pull request (decision 66).
-///
-/// Returns the row id, whether any live field actually moved, and the tier
-/// as stored after the write. `observed_at` alone never counts as change, so
-/// callers broadcast real change and nothing else. `Ok(None)` when no fact
-/// row exists for the identity: the live tier decorates decision-62
-/// observations, it never mints them.
-///
-/// A read that did not load checks carries `checks: None`, and that keeps
-/// the row's check list and summary: the reconcile sweep lists pull requests
-/// without their check rollup, and stamping that absence over a rollup the
-/// conditional fetcher wrote would blind the watch and the check triggers
-/// for the length of the sweep interval. A read that loaded checks and found
-/// none carries `Some(vec![])`, which clears them.
-///
-/// [`PullRequestReviewDecisionWrite::Preserve`] omits `review_decision` the
-/// same way: the update never assigns the column, so a concurrent
-/// authoritative write cannot be overwritten by a stale copy.
-#[allow(clippy::too_many_arguments)]
-pub async fn set_pull_request_live_state_with(
-    store: &DbStore,
-    owner: &OwnerId,
-    host: &str,
-    repo_owner: &str,
-    repo_name: &str,
-    number: u64,
-    live: &CodePullRequestLiveState,
-    review_decision_write: PullRequestReviewDecisionWrite,
-) -> Result<Option<(CodePullRequestId, bool, CodePullRequestLiveState)>> {
+) -> Result<Option<StoredPullRequest>> {
     let number = i64::try_from(number)
         .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
-    let Some(row) = find_fact_row(store, owner, host, repo_owner, repo_name, number).await? else {
+    let Some(row) = find_fact_row(&store.conn, owner, host, repo_owner, repo_name, number).await?
+    else {
         return Ok(None);
     };
-    let (checks_summary, checks_json) = match &live.checks {
-        Some(checks) => (
-            live.checks_summary.clone(),
-            Some(serde_json::to_string(checks).map_err(|err| {
-                AgentError::Store(format!(
-                    "pull request {} live checks are unwritable: {err}",
-                    row.id
-                ))
-            })?),
-        ),
-        // The read did not load checks: keep what the row already knows.
-        None => (row.checks_summary.clone(), row.checks.clone()),
-    };
-    let review_decision = match review_decision_write {
-        PullRequestReviewDecisionWrite::Replace => live.review_decision.clone(),
-        PullRequestReviewDecisionWrite::Preserve => row.review_decision.clone(),
-    };
-    let changed = row.checks_summary != checks_summary
-        || row.checks != checks_json
-        || row.review_decision != review_decision
-        || row.mergeable != live.mergeable
-        || row.merge_state_status != live.merge_state_status
-        || row.auto_merge_enabled != live.auto_merge_enabled
-        || row.in_merge_queue != live.in_merge_queue;
-    let id = CodePullRequestId(row.id);
-    let stored_checks = match checks_json.as_deref() {
-        Some(raw) => Some(serde_json::from_str(raw).map_err(|err| {
-            AgentError::Store(format!(
-                "pull request {} live checks are unreadable: {err}",
-                row.id
-            ))
-        })?),
-        None => None,
-    };
-    let mut model: entities::code_pull_request::ActiveModel = row.into();
-    model.checks_summary = Set(checks_summary.clone());
-    model.checks = Set(checks_json);
-    if review_decision_write == PullRequestReviewDecisionWrite::Replace {
-        model.review_decision = Set(live.review_decision.clone());
-    }
-    model.mergeable = Set(live.mergeable.clone());
-    model.merge_state_status = Set(live.merge_state_status.clone());
-    model.auto_merge_enabled = Set(live.auto_merge_enabled);
-    model.in_merge_queue = Set(live.in_merge_queue);
-    model.live_observed_at = Set(Some(live.observed_at));
-    model.update(&store.conn).await.map_err(store_err)?;
-    let stored = CodePullRequestLiveState {
-        checks_summary,
-        checks: stored_checks,
-        review_decision,
-        ..live.clone()
-    };
-    Ok(Some((id, changed, stored)))
-}
-
-/// One observed pull request plus the transport hints the conditional
-/// fetcher sends back to the host (decision 66): the ETag each endpoint
-/// last answered with.
-#[derive(Debug, Clone)]
-pub struct PullRequestFetchState {
-    pub fact: CodePullRequestFact,
-    pub pull_etag: Option<String>,
-    pub checks_etag: Option<String>,
-    pub reviews_etag: Option<String>,
-}
-
-/// The condition that protects one pull-request fetch-state write.
-#[derive(Debug, Clone, Copy)]
-pub enum PullRequestFetchCondition<'a> {
-    /// A fresh 200 response replaces the snapshot and validator together.
-    Unconditional,
-    /// A 304 response writes only if the row still holds the validator sent.
-    PullEtag(Option<&'a str>),
-}
-
-/// Load one observed pull request with its stored fetch ETags.
-pub async fn get_pull_request_fetch_state(
-    store: &DbStore,
-    owner: &OwnerId,
-    host: &str,
-    repo_owner: &str,
-    repo_name: &str,
-    number: u64,
-) -> Result<Option<PullRequestFetchState>> {
-    let number = i64::try_from(number)
-        .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
-    let Some(row) = find_fact_row(store, owner, host, repo_owner, repo_name, number).await? else {
-        return Ok(None);
-    };
-    let pull_etag = row.pull_etag.clone();
-    let checks_etag = row.checks_etag.clone();
-    let reviews_etag = row.reviews_etag.clone();
-    Ok(Some(PullRequestFetchState {
-        fact: fact_from_row(row)?,
-        pull_etag,
-        checks_etag,
-        reviews_etag,
-    }))
-}
-
-/// Store one conditional fetch pass atomically (decision 66).
-///
-/// `fresh_fact` carries the representation a pull-request 200 validated; a
-/// 304 passes `None`. The pull snapshot and its ETag must move in one row
-/// update, or concurrent refreshes can pair one response's validator with
-/// another response's snapshot and make the next 304 reconstruct stale
-/// state. A 304 also compares the stored pull ETag in this update. If another
-/// writer changed or cleared that validator, the stale response updates zero
-/// rows. Endpoint ETags carry the pass's final values. `Ok(false)` when no
-/// fact row matches the identity and condition.
-#[allow(clippy::too_many_arguments)]
-pub async fn set_pull_request_fetch_state(
-    store: &DbStore,
-    owner: &OwnerId,
-    host: &str,
-    repo_owner: &str,
-    repo_name: &str,
-    number: u64,
-    fresh_fact: Option<&CodePullRequestFact>,
-    condition: PullRequestFetchCondition<'_>,
-    pull_etag: Option<&str>,
-    checks_etag: Option<&str>,
-    reviews_etag: Option<&str>,
-) -> Result<bool> {
-    let number = i64::try_from(number)
-        .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
-    let mut update = entities::code_pull_request::Entity::update_many()
-        .col_expr(
-            entities::code_pull_request::Column::PullEtag,
-            Expr::value(pull_etag.map(ToOwned::to_owned)),
-        )
-        .col_expr(
-            entities::code_pull_request::Column::ChecksEtag,
-            Expr::value(checks_etag.map(ToOwned::to_owned)),
-        )
-        .col_expr(
-            entities::code_pull_request::Column::ReviewsEtag,
-            Expr::value(reviews_etag.map(ToOwned::to_owned)),
-        )
-        .filter(entities::code_pull_request::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_pull_request::Column::Host.eq(host))
-        .filter(entities::code_pull_request::Column::RepoOwner.eq(repo_owner))
-        .filter(entities::code_pull_request::Column::RepoName.eq(repo_name))
-        .filter(entities::code_pull_request::Column::Number.eq(number));
-    if let Some(fact) = fresh_fact {
-        update = update
-            .col_expr(
-                entities::code_pull_request::Column::Url,
-                Expr::value(fact.url.clone()),
-            )
-            .col_expr(
-                entities::code_pull_request::Column::Title,
-                Expr::value(fact.title.clone()),
-            )
-            .col_expr(
-                entities::code_pull_request::Column::State,
-                Expr::value(fact.state.as_str().to_owned()),
-            )
-            .col_expr(
-                entities::code_pull_request::Column::Draft,
-                Expr::value(fact.draft),
-            )
-            .col_expr(
-                entities::code_pull_request::Column::HeadBranch,
-                Expr::value(fact.head_branch.clone()),
-            )
-            .col_expr(
-                entities::code_pull_request::Column::BaseBranch,
-                Expr::value(fact.base_branch.clone()),
-            )
-            .col_expr(
-                entities::code_pull_request::Column::HeadSha,
-                Expr::value(fact.head_sha.clone()),
-            )
-            .col_expr(
-                entities::code_pull_request::Column::LastSeenAt,
-                Expr::value(fact.last_seen_at),
-            );
-    }
-    if let PullRequestFetchCondition::PullEtag(expected) = condition {
-        update = match expected {
-            Some(etag) => update.filter(entities::code_pull_request::Column::PullEtag.eq(etag)),
-            None => update.filter(entities::code_pull_request::Column::PullEtag.is_null()),
-        };
-    }
-    let result = update.exec(&store.conn).await.map_err(store_err)?;
-    Ok(result.rows_affected == 1)
+    Ok(Some(stored_from_row(row)?))
 }
 
 /// Every observed pull request on one repository identity.
@@ -612,23 +788,46 @@ pub async fn list_pull_request_attributions(
         .collect()
 }
 
-async fn find_fact_row(
-    store: &DbStore,
+async fn find_fact_row<C>(
+    conn: &C,
     owner: &OwnerId,
     host: &str,
     repo_owner: &str,
     repo_name: &str,
     number: i64,
-) -> Result<Option<entities::code_pull_request::Model>> {
+) -> Result<Option<entities::code_pull_request::Model>>
+where
+    C: ConnectionTrait,
+{
     entities::code_pull_request::Entity::find()
         .filter(entities::code_pull_request::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_pull_request::Column::Host.eq(host))
         .filter(entities::code_pull_request::Column::RepoOwner.eq(repo_owner))
         .filter(entities::code_pull_request::Column::RepoName.eq(repo_name))
         .filter(entities::code_pull_request::Column::Number.eq(number))
-        .one(&store.conn)
+        .one(conn)
         .await
         .map_err(store_err)
+}
+
+fn stored_from_row(row: entities::code_pull_request::Model) -> Result<StoredPullRequest> {
+    let observed = PullRequestObservedTimes {
+        checks: row.checks_observed_at,
+        review: row.review_observed_at,
+        mergeability: row.mergeability_observed_at,
+        auto_merge: row.auto_merge_observed_at,
+        queue: row.queue_observed_at,
+    };
+    let etags = PullRequestEtags {
+        pull: row.pull_etag.clone(),
+        checks: row.checks_etag.clone(),
+        reviews: row.reviews_etag.clone(),
+    };
+    Ok(StoredPullRequest {
+        fact: fact_from_row(row)?,
+        observed,
+        etags,
+    })
 }
 
 fn fact_from_row(row: entities::code_pull_request::Model) -> Result<CodePullRequestFact> {

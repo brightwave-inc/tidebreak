@@ -21,12 +21,13 @@ use tracing::debug;
 
 use tidebreak_core::db::code::{
     get_turn, get_workspace, insert_pull_request_attribution, list_recent_events,
-    promote_attribution_to_authored, save_pull_request_fact,
+    promote_attribution_to_authored, save_pull_request_read, AppliedPullRequestRead,
+    PullRequestReadOptions,
 };
 use tidebreak_core::{
-    CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact, CodePullRequestId,
-    CodePullRequestRelation, CodePullRequestState, DbStore, Event, OwnerId, Session, SessionId,
-    ToolDetail, ToolOutcome, TurnId, WorkspaceId,
+    CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestRelation,
+    CodePullRequestState, DbStore, Event, OwnerId, PullRequestObjectRead, PullRequestRead,
+    PullRequestSnapshot, Session, SessionId, ToolDetail, ToolOutcome, TurnId, WorkspaceId,
 };
 use tidebreak_shell_policy::simple_command_argvs;
 
@@ -81,19 +82,22 @@ struct PushAct {
 /// push moves the head the watch assesses, and nothing else dirties the row
 /// for it: without the mark the next assessment reads a pre-push head, calls
 /// its own fix turn a repeat, and parks the watch.
+///
+/// Returns the workspaces whose pull-request column a confirmed fact
+/// rewrote, so the caller can restate their digests.
 pub async fn sweep_turn_for_pull_request_acts(
     db: &DbStore,
     session: &Session,
     turn_id: TurnId,
     gh_search_path: Option<&str>,
     hot: Option<&super::pr_refresh::HotPullRequests>,
-) {
+) -> Vec<WorkspaceId> {
     let events =
         match list_recent_events(db, &session.owner, session.id, DETECTOR_EVENT_WINDOW).await {
             Ok(events) => events,
             Err(err) => {
                 debug!(session = %session.id, "pr fact detector could not read the journal: {err}");
-                return;
+                return Vec::new();
             }
         };
 
@@ -158,7 +162,7 @@ pub async fn sweep_turn_for_pull_request_acts(
     recorded.sort_by_key(|(_, command)| command.seq);
 
     let mut confirms = 0usize;
-    let mut confirmed_any = false;
+    let mut confirmed = Confirmed::default();
     let mut seen_creates: HashSet<String> = HashSet::new();
     let mut seen_pushes: HashSet<String> = HashSet::new();
     let mut pushes: Vec<(RecordedCommand, PushAct)> = Vec::new();
@@ -190,15 +194,17 @@ pub async fn sweep_turn_for_pull_request_acts(
                     continue;
                 }
                 confirms += 1;
-                confirmed_any |= confirm_create(
-                    db,
-                    session,
-                    &command,
-                    &create,
-                    previews.get(&call_id).map(String::as_str),
-                    gh_search_path,
-                )
-                .await;
+                confirmed.note(
+                    confirm_create(
+                        db,
+                        session,
+                        &command,
+                        &create,
+                        previews.get(&call_id).map(String::as_str),
+                        gh_search_path,
+                    )
+                    .await,
+                );
             } else if let Some(push) = parse_push(argv) {
                 let key = format!(
                     "{}\u{1f}{}\u{1f}{}",
@@ -228,7 +234,7 @@ pub async fn sweep_turn_for_pull_request_acts(
             break;
         }
         confirms += 1;
-        confirmed_any |= confirm_push(db, session, &command, &push, gh_search_path).await;
+        confirmed.note(confirm_push(db, session, &command, &push, gh_search_path).await);
     }
 
     // A long turn can push its create or push command out of the bounded
@@ -239,35 +245,59 @@ pub async fn sweep_turn_for_pull_request_acts(
     // enough to recover that missed tie without attributing a read-only review
     // or an unpushed edit.
     if confirms < MAX_CONFIRM_READS_PER_TURN {
-        confirmed_any |= confirm_changed_checkout(db, session, turn_id, gh_search_path).await;
+        confirmed.note(confirm_changed_checkout(db, session, turn_id, gh_search_path).await);
     }
 
     // The turn moved this workspace's pull request. Nothing else marks it:
     // route mutations dirty the row for the user's own actions, and the
     // agent's push is neither. Left unmarked, the watch's next assessment
     // reads the head from before the fix turn pushed (issue 2799).
-    if confirmed_any {
+    if confirmed.any {
         if let (Some(hot), Some(workspace_id)) = (hot, session.workspace_id) {
             hot.mark(&session.owner, workspace_id);
+        }
+    }
+    confirmed.workspaces
+}
+
+/// What the confirm reads of one turn landed.
+#[derive(Default)]
+struct Confirmed {
+    /// Whether any fact landed.
+    any: bool,
+    /// Workspaces whose pull-request column a landed fact rewrote.
+    workspaces: Vec<WorkspaceId>,
+}
+
+impl Confirmed {
+    fn note(&mut self, applied: Option<AppliedPullRequestRead>) {
+        let Some(applied) = applied else {
+            return;
+        };
+        self.any = true;
+        for workspace in applied.workspaces {
+            if !self.workspaces.contains(&workspace) {
+                self.workspaces.push(workspace);
+            }
         }
     }
 }
 
 /// Confirm the changed workspace checkout against an open pull request head.
 ///
-/// Reports whether a fact landed, so the caller can mark the workspace hot.
+/// Returns the landed fact, so the caller can mark the workspace hot.
 async fn confirm_changed_checkout(
     db: &DbStore,
     session: &Session,
     turn_id: TurnId,
     gh_search_path: Option<&str>,
-) -> bool {
+) -> Option<AppliedPullRequestRead> {
     let turn = match get_turn(db, &session.owner, turn_id).await {
         Ok(Some(turn)) => turn,
-        Ok(None) => return false,
+        Ok(None) => return None,
         Err(err) => {
             debug!("pr fact detector could not read the turn checkpoint: {err}");
-            return false;
+            return None;
         }
     };
     if !turn
@@ -275,49 +305,45 @@ async fn confirm_changed_checkout(
         .as_ref()
         .is_some_and(|diffstat| diffstat.files > 0)
     {
-        return false;
+        return None;
     }
 
-    let Some(workspace_id) = session.workspace_id else {
-        return false;
-    };
+    let workspace_id = session.workspace_id?;
     let workspace = match get_workspace(db, &session.owner, workspace_id).await {
         Ok(Some(workspace)) if !workspace.is_remote() => workspace,
-        Ok(_) => return false,
+        Ok(_) => return None,
         Err(err) => {
             debug!("pr fact detector could not read the changed workspace: {err}");
-            return false;
+            return None;
         }
     };
     let checkout = Path::new(&workspace.worktree_path);
     match git_read(checkout, &["status", "--porcelain"]).await {
         Ok(status) if status.is_empty() => {}
-        Ok(_) => return false,
+        Ok(_) => return None,
         Err(err) => {
             debug!("pr fact detector could not inspect the changed checkout: {err}");
-            return false;
+            return None;
         }
     }
 
-    let Some(branch) = current_branch(checkout).await else {
-        return false;
-    };
+    let branch = current_branch(checkout).await?;
     if branch != workspace.branch_name {
-        return false;
+        return None;
     }
     let head = match git_read(checkout, &["rev-parse", "HEAD"]).await {
         Ok(head) if !head.is_empty() => head,
-        Ok(_) => return false,
+        Ok(_) => return None,
         Err(err) => {
             debug!("pr fact detector could not read the changed checkout head: {err}");
-            return false;
+            return None;
         }
     };
     let target = match repository_target_from_path(checkout).await {
         Ok(target) => target,
         Err(err) => {
             debug!("pr fact detector could not resolve the changed checkout: {err}");
-            return false;
+            return None;
         }
     };
     let values = match list_pull_requests_for_head_raw(
@@ -332,7 +358,7 @@ async fn confirm_changed_checkout(
         Ok(values) => values,
         Err(err) => {
             debug!("pr fact detector could not confirm the changed checkout: {err}");
-            return false;
+            return None;
         }
     };
     let matching = values
@@ -352,9 +378,7 @@ async fn confirm_changed_checkout(
                     .is_some_and(|candidate| candidate == head)
         })
         .collect();
-    let Some(value) = newest_by_created(matching) else {
-        return false;
-    };
+    let value = newest_by_created(matching)?;
     record_confirmed_fact(
         db,
         &session.owner,
@@ -367,12 +391,11 @@ async fn confirm_changed_checkout(
         CodePullRequestDiscovery::Command,
     )
     .await
-    .is_some()
 }
 
 /// Confirm one `gh pr create` against the host and mint an authored fact.
 ///
-/// Reports whether a fact landed, so the caller can mark the workspace hot.
+/// Returns the landed fact, so the caller can mark the workspace hot.
 async fn confirm_create(
     db: &DbStore,
     session: &Session,
@@ -380,16 +403,14 @@ async fn confirm_create(
     create: &CreateAct,
     preview: Option<&str>,
     gh_search_path: Option<&str>,
-) -> bool {
-    let Some(workspace_id) = session.workspace_id else {
-        return false;
-    };
+) -> Option<AppliedPullRequestRead> {
+    let workspace_id = session.workspace_id?;
     let sniffed = preview.and_then(sniff_pull_request_url);
     let target = match resolve_create_target(create, sniffed.as_ref(), &command.cwd).await {
         Some(target) => target,
         None => {
             debug!("pr fact detector could not resolve a repository for a create");
-            return false;
+            return None;
         }
     };
     let value = if let Some((_, number)) = &sniffed {
@@ -415,7 +436,7 @@ async fn confirm_create(
         };
         let Some(head) = head else {
             debug!("pr fact detector could not resolve the created head branch");
-            return false;
+            return None;
         };
         match list_pull_requests_for_head_raw(
             &target.host,
@@ -433,7 +454,6 @@ async fn confirm_create(
             }
         }
     };
-    let Some(value) = value else { return false };
     record_confirmed_fact(
         db,
         &session.owner,
@@ -441,28 +461,25 @@ async fn confirm_create(
         Some(session.id),
         command.parent_call_id.clone(),
         &target,
-        &value,
+        &value?,
         CodePullRequestRelation::Authored,
         CodePullRequestDiscovery::Command,
     )
     .await
-    .is_some()
 }
 
 /// Confirm one `git push` against the host and mint a contributed fact when
 /// the pushed branch is a pull request's head.
 ///
-/// Reports whether a fact landed, so the caller can mark the workspace hot.
+/// Returns the landed fact, so the caller can mark the workspace hot.
 async fn confirm_push(
     db: &DbStore,
     session: &Session,
     command: &RecordedCommand,
     push: &PushAct,
     gh_search_path: Option<&str>,
-) -> bool {
-    let Some(workspace_id) = session.workspace_id else {
-        return false;
-    };
+) -> Option<AppliedPullRequestRead> {
+    let workspace_id = session.workspace_id?;
     let cwd = push
         .cwd_override
         .clone()
@@ -472,7 +489,7 @@ async fn confirm_push(
         Some(target) => target,
         None => {
             debug!("pr fact detector could not resolve a repository for a push");
-            return false;
+            return None;
         }
     };
     let branch = match &push.branch {
@@ -481,7 +498,7 @@ async fn confirm_push(
     };
     let Some(branch) = branch else {
         debug!("pr fact detector could not resolve the pushed branch");
-        return false;
+        return None;
     };
     let values = match list_pull_requests_for_head_raw(
         &target.host,
@@ -495,7 +512,7 @@ async fn confirm_push(
         Ok(values) => values,
         Err(err) => {
             debug!("pr fact detector could not list pull requests for a push: {err}");
-            return false;
+            return None;
         }
     };
     let matching: Vec<Value> = values
@@ -517,7 +534,6 @@ async fn confirm_push(
         Some(value) => Some(value.clone()),
         None => newest_by_created(matching),
     };
-    let Some(value) = value else { return false };
     record_confirmed_fact(
         db,
         &session.owner,
@@ -525,19 +541,20 @@ async fn confirm_push(
         Some(session.id),
         command.parent_call_id.clone(),
         &target,
-        &value,
+        &value?,
         CodePullRequestRelation::Contributed,
         CodePullRequestDiscovery::Command,
     )
     .await
-    .is_some()
 }
 
-/// Write one confirmed observation: upsert the fact, claim the attribution,
-/// and upgrade an existing contributed row when the relation is authored.
+/// Write one confirmed observation: land the pull request's snapshot through
+/// the store's merge, claim the attribution, and upgrade an existing
+/// contributed row when the relation is authored.
 ///
 /// Shared with the user-initiated create and push paths, which confirm the
-/// same way (decision 77).
+/// same way (decision 77). Returns what the read landed, including the
+/// workspaces whose pull-request column it rewrote.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_confirmed_fact(
     db: &DbStore,
@@ -549,16 +566,53 @@ pub(crate) async fn record_confirmed_fact(
     value: &Value,
     relation: CodePullRequestRelation,
     discovered_via: CodePullRequestDiscovery,
-) -> Option<CodePullRequestId> {
+) -> Option<AppliedPullRequestRead> {
+    // The snapshot orders by the host's own `updated_at` first, so dating
+    // the read after the host answered cannot let it pass a newer version.
+    let read = read_from_gh_value(owner, target, value, Utc::now())?;
+    record_confirmed_read(
+        db,
+        &read,
+        workspace_id,
+        session_id,
+        parent_call_id,
+        relation,
+        discovered_via,
+    )
+    .await
+}
+
+/// [`record_confirmed_fact`] for a read the caller already built: land it,
+/// minting the row, then claim the attribution.
+pub(crate) async fn record_confirmed_read(
+    db: &DbStore,
+    read: &PullRequestRead,
+    workspace_id: WorkspaceId,
+    session_id: Option<SessionId>,
+    parent_call_id: Option<String>,
+    relation: CodePullRequestRelation,
+    discovered_via: CodePullRequestDiscovery,
+) -> Option<AppliedPullRequestRead> {
+    let owner = &read.owner;
     let now = Utc::now();
-    let fact = fact_from_gh_value(owner, target, value, now)?;
-    let id = match save_pull_request_fact(db, &fact).await {
-        Ok(id) => id,
+    let applied = match save_pull_request_read(
+        db,
+        read,
+        PullRequestReadOptions {
+            mint_row: true,
+            adopt: None,
+        },
+    )
+    .await
+    {
+        Ok(Some(applied)) if applied.stored => applied,
+        Ok(_) => return None,
         Err(err) => {
-            debug!("pr fact upsert failed: {err}");
+            debug!("pr fact write failed: {err}");
             return None;
         }
     };
+    let id = applied.fact.id;
     let claimed = insert_pull_request_attribution(
         db,
         &CodePullRequestAttribution {
@@ -584,7 +638,7 @@ pub(crate) async fn record_confirmed_fact(
         }
         Err(err) => debug!("pr fact attribution claim failed: {err}"),
     }
-    Some(id)
+    Some(applied)
 }
 
 /// Resolve where a create landed: the `--repo` flag, then the preview URL,
@@ -773,16 +827,18 @@ fn newest_by_created(values: Vec<Value>) -> Option<Value> {
     })
 }
 
-/// Build a fact from one `gh` pull-request JSON object.
+/// Describe one `gh` pull-request JSON object as a read of its snapshot.
 ///
 /// `None` when the object lacks an identity (number, url, or title): a
-/// partial host response mints nothing.
-fn fact_from_gh_value(
+/// partial host response mints nothing. The object's own fields are all the
+/// read observed: [`super::gh::PR_FACT_FIELDS`] carries no checks, review,
+/// or mergeability, so the merge keeps whatever the row holds for those.
+pub(crate) fn read_from_gh_value(
     owner: &OwnerId,
     target: &CodeGitHubRepositoryTarget,
     value: &Value,
     now: DateTime<Utc>,
-) -> Option<CodePullRequestFact> {
+) -> Option<PullRequestRead> {
     let number = value.get("number").and_then(Value::as_u64)?;
     if number == 0 {
         return None;
@@ -802,13 +858,32 @@ fn fact_from_gh_value(
         Some("closed") => CodePullRequestState::Closed,
         _ => return None,
     };
-    Some(CodePullRequestFact {
-        id: CodePullRequestId::new(),
-        owner: owner.clone(),
-        host: target.host.clone(),
-        repo_owner: target.owner.clone(),
-        repo_name: target.name.clone(),
+    let mut read = PullRequestRead::new(
+        owner.clone(),
+        target.host.clone(),
+        target.owner.clone(),
+        target.name.clone(),
         number,
+    );
+    read.object = Some(PullRequestObjectRead {
+        snapshot: snapshot_from_gh_value(value, url, title, state, merged_at, now),
+        mergeability: None,
+        auto_merge_enabled: None,
+        observed_at: now,
+        etag: None,
+    });
+    Some(read)
+}
+
+fn snapshot_from_gh_value(
+    value: &Value,
+    url: String,
+    title: String,
+    state: CodePullRequestState,
+    merged_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> PullRequestSnapshot {
+    PullRequestSnapshot {
         url,
         title,
         state,
@@ -839,10 +914,7 @@ fn fact_from_gh_value(
         updated_at: timestamp(value, "updatedAt").unwrap_or(now),
         merged_at,
         closed_at: timestamp(value, "closedAt"),
-        first_seen_at: now,
-        last_seen_at: now,
-        live: None,
-    })
+    }
 }
 
 /// Parse `(host, repo_owner, repo_name, number)` out of a pull request's own
@@ -865,37 +937,6 @@ pub(crate) fn pull_request_identity_from_url(url: &str) -> Option<(String, Strin
         return None;
     }
     Some((host.to_owned(), owner.to_owned(), name.to_owned(), number))
-}
-
-/// Project one fact row into the digest vocabulary every consumer already
-/// reads. The snapshot fields fill the identity; the live tier (decision 66)
-/// fills checks, review, and mergeability when a read has written it.
-pub(crate) fn digest_from_fact(fact: &CodePullRequestFact) -> tidebreak_core::PullRequestDigest {
-    let live = fact.live.as_ref();
-    tidebreak_core::PullRequestDigest {
-        number: fact.number,
-        url: Some(fact.url.clone()),
-        state: fact.state.as_str().to_owned(),
-        title: Some(fact.title.clone()),
-        checks_summary: live.and_then(|live| live.checks_summary.clone()),
-        // The live tier stores the summary and the check list, not the
-        // counts; rows written with a check list re-derive them, and rows
-        // old enough to carry only the summary stay uncounted.
-        check_counts: live
-            .and_then(|live| live.checks.as_deref())
-            .map(tidebreak_core::PullRequestCheckCounts::from_checks),
-        checks: live.and_then(|live| live.checks.clone()),
-        draft: Some(fact.draft),
-        merged: Some(fact.state == CodePullRequestState::Merged),
-        review_decision: live.and_then(|live| live.review_decision.clone()),
-        mergeable: live.and_then(|live| live.mergeable.clone()),
-        merge_state_status: live.and_then(|live| live.merge_state_status.clone()),
-        head_branch: Some(fact.head_branch.clone()),
-        base_branch: Some(fact.base_branch.clone()),
-        head_sha: fact.head_sha.clone(),
-        auto_merge_enabled: live.and_then(|live| live.auto_merge_enabled),
-        in_merge_queue: live.and_then(|live| live.in_merge_queue),
-    }
 }
 
 fn timestamp(value: &Value, field: &str) -> Option<DateTime<Utc>> {
@@ -1047,14 +1088,24 @@ mod tests {
             "mergedAt": "2026-08-22T11:00:00Z",
             "closedAt": "2026-08-22T11:00:00Z",
         });
-        let fact = fact_from_gh_value(&owner, &target, &value, now).unwrap();
-        assert_eq!(fact.state, CodePullRequestState::Merged);
-        assert_eq!(fact.number, 12);
-        assert_eq!(fact.author.as_deref(), Some("octocat"));
-        assert_eq!(fact.head_branch, "feat");
+        let read = read_from_gh_value(&owner, &target, &value, now).unwrap();
+        assert_eq!(read.number, 12);
+        let object = read.object.as_ref().unwrap();
+        assert_eq!(object.snapshot.state, CodePullRequestState::Merged);
+        assert_eq!(object.snapshot.author.as_deref(), Some("octocat"));
+        assert_eq!(object.snapshot.head_branch, "feat");
+        assert_eq!(
+            object.snapshot.updated_at,
+            timestamp(&value, "updatedAt").unwrap(),
+            "the host's version orders the snapshot"
+        );
+        // The fact fields carry no live state, so the read claims none.
+        assert_eq!(object.mergeability, None);
+        assert_eq!(object.auto_merge_enabled, None);
+        assert!(read.checks.is_none() && read.review.is_none() && read.queue.is_none());
 
         let partial = serde_json::json!({"number": 12, "state": "OPEN"});
-        assert!(fact_from_gh_value(&owner, &target, &partial, now).is_none());
+        assert!(read_from_gh_value(&owner, &target, &partial, now).is_none());
     }
 
     #[test]
@@ -1088,8 +1139,8 @@ mod tests {
     fn fact_digests_carry_the_live_tier_when_present() {
         let owner = OwnerId::local();
         let now = Utc::now();
-        let mut fact = CodePullRequestFact {
-            id: CodePullRequestId::new(),
+        let mut fact = tidebreak_core::CodePullRequestFact {
+            id: tidebreak_core::CodePullRequestId::new(),
             owner,
             host: "github.com".into(),
             repo_owner: "acme".into(),
@@ -1111,7 +1162,7 @@ mod tests {
             last_seen_at: now,
             live: None,
         };
-        let bare = digest_from_fact(&fact);
+        let bare = fact.digest();
         assert_eq!(bare.number, 412);
         assert!(bare.checks.is_none());
         assert!(bare.merge_state_status.is_none());
@@ -1131,7 +1182,7 @@ mod tests {
             in_merge_queue: Some(false),
             observed_at: now,
         });
-        let enriched = digest_from_fact(&fact);
+        let enriched = fact.digest();
         assert_eq!(enriched.merge_state_status.as_deref(), Some("blocked"));
         assert_eq!(enriched.review_decision.as_deref(), Some("review_required"));
         assert_eq!(enriched.checks.as_ref().unwrap().len(), 1);

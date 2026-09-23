@@ -6,7 +6,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 use tidebreak_core::{
-    CodeRepo, CodeWorkspace, DbStore, OwnerId, PullRequestDigest, RepoId, WorkspaceId,
+    CodePullRequestId, CodeRepo, CodeWorkspace, DbStore, OwnerId, PullRequestRead, RepoId,
+    WorkspaceId,
 };
 
 use crate::wire::{
@@ -204,12 +205,10 @@ pub trait DeliveryRuntime: Send + Sync {
 
     async fn emit_workspace_digests(&self, owner: &OwnerId, workspace_id: WorkspaceId);
 
-    async fn record_pull_request_live_state(
-        &self,
-        owner: &OwnerId,
-        source: Option<WorkspaceId>,
-        digest: &PullRequestDigest,
-    );
+    /// Land one host read of a pull request through the store's merge,
+    /// creating the row when none exists, and publish what changed. Returns
+    /// the row's id, or `None` when the read could not be stored.
+    async fn apply_pull_request_read(&self, read: &PullRequestRead) -> Option<CodePullRequestId>;
 
     fn refresh_workspaces_for_pull_request(&self, owner: &OwnerId, pull_request_url: &str);
 

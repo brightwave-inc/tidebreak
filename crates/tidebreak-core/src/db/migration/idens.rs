@@ -848,6 +848,11 @@ pub(crate) enum CodePullRequest {
     PullEtag,
     ChecksEtag,
     ReviewsEtag,
+    ChecksObservedAt,
+    ReviewObservedAt,
+    MergeabilityObservedAt,
+    AutoMergeObservedAt,
+    QueueObservedAt,
 }
 
 #[derive(DeriveIden)]

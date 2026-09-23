@@ -2430,6 +2430,40 @@ async fn continue_parked_turn(
     close_open_turn(session, engine, sink, turn, run, interrupted, None).await
 }
 
+/// Scan a closed turn for pull-request acts (decision 77), then restate the
+/// digest of every workspace whose pull-request column a confirmed fact
+/// rewrote.
+///
+/// A plain function that returns the work boxed, so the turn driver's frame
+/// and future hold only a pointer. The driver's futures are already deep, and
+/// the detector's grows with the store's merge; built inline in the driver,
+/// it overflowed a test thread's stack.
+fn record_turn_pull_request_acts<'a>(
+    sink: &'a LiveSink,
+    session: &'a Session,
+    turn_id: TurnId,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        let rewritten = super::pr_facts::sweep_turn_for_pull_request_acts(
+            &sink.db,
+            session,
+            turn_id,
+            sink.gh_search_path.as_deref(),
+            Some(&sink.hot_prs),
+        )
+        .await;
+        for workspace in rewritten {
+            super::attention::emit_workspace_digests(
+                &sink.db,
+                &sink.bus,
+                &session.owner,
+                workspace,
+            )
+            .await;
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn close_open_turn(
     session: &mut Session,
@@ -2562,14 +2596,7 @@ async fn close_open_turn(
                 .await;
             }
             super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
-            super::pr_facts::sweep_turn_for_pull_request_acts(
-                db,
-                session,
-                turn.id,
-                sink.gh_search_path.as_deref(),
-                Some(&sink.hot_prs),
-            )
-            .await;
+            record_turn_pull_request_acts(sink, session, turn.id).await;
             if let Some(detail) = attachment_cleanup_error.as_ref() {
                 let _ = super::recovery::fence_session(
                     db,
@@ -2612,14 +2639,7 @@ async fn close_open_turn(
         turn = current;
     }
     super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
-    super::pr_facts::sweep_turn_for_pull_request_acts(
-        db,
-        session,
-        turn.id,
-        sink.gh_search_path.as_deref(),
-        Some(&sink.hot_prs),
-    )
-    .await;
+    record_turn_pull_request_acts(sink, session, turn.id).await;
     if let Some(detail) = attachment_cleanup_error {
         let _ = super::recovery::fence_session(
             db,
@@ -3388,14 +3408,7 @@ async fn drive_turn_inner(
             // the turn's edits can still be checkpointed. The engine may have
             // rewritten files before the stream broke.
             super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
-            super::pr_facts::sweep_turn_for_pull_request_acts(
-                db,
-                session,
-                turn.id,
-                sink.gh_search_path.as_deref(),
-                Some(&sink.hot_prs),
-            )
-            .await;
+            record_turn_pull_request_acts(sink, session, turn.id).await;
             if let Some(detail) = attachment_cleanup_error.as_ref() {
                 let _ = super::recovery::fence_session(
                     db,
@@ -3441,14 +3454,7 @@ async fn drive_turn_inner(
         turn = current;
     }
     super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
-    super::pr_facts::sweep_turn_for_pull_request_acts(
-        db,
-        session,
-        turn.id,
-        sink.gh_search_path.as_deref(),
-        Some(&sink.hot_prs),
-    )
-    .await;
+    record_turn_pull_request_acts(sink, session, turn.id).await;
     if let Some(detail) = attachment_cleanup_error {
         let _ = super::recovery::fence_session(
             db,
