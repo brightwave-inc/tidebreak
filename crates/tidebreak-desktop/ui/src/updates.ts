@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -7,9 +7,14 @@ const UPDATE_STATE_EVENT = "desktop-update-state";
 export const UPDATE_CHECK_REQUESTED_EVENT = "desktop-update-check-requested";
 const UPDATE_CONTROL_ERROR = "Update controls are temporarily unavailable.";
 const UPDATE_RESTART_ERROR = "Could not restart Tidebreak. Try again.";
+const UPDATE_PREFERENCE_ERROR = "Could not save the setting. Try again.";
 
 export type DesktopUpdateState = {
-  status: "idle" | "checking" | "downloading" | "ready";
+  /**
+   * `available` means a newer release is published but not downloaded yet,
+   * because automatic downloads are off.
+   */
+  status: "idle" | "checking" | "available" | "downloading" | "ready";
   version: string | null;
   error: string | null;
   enabled: boolean;
@@ -23,11 +28,24 @@ export type DesktopUpdatesController = {
   upToDate: boolean;
 };
 
+/** Whether Tidebreak downloads a published update without asking. */
+export type DesktopUpdatePreferences = {
+  automaticDownloads: boolean;
+  /** Your organization's managed policy sets `automaticDownloads`. */
+  managed: boolean;
+};
+
 export const INITIAL_UPDATE_STATE: DesktopUpdateState = {
   status: "idle",
   version: null,
   error: null,
   enabled: false,
+};
+
+/** What the setting reads before the desktop reports it, and outside one. */
+export const DEFAULT_UPDATE_PREFERENCES: DesktopUpdatePreferences = {
+  automaticDownloads: true,
+  managed: false,
 };
 
 function unavailableUpdateState(): DesktopUpdateState {
@@ -51,6 +69,20 @@ async function checkForDesktopUpdate(): Promise<DesktopUpdateState> {
   if (!isTauri()) return INITIAL_UPDATE_STATE;
   try {
     return await invoke<DesktopUpdateState>("check_for_update");
+  } catch {
+    return unavailableUpdateState();
+  }
+}
+
+/**
+ * Download the published update now, whatever the automatic-download setting
+ * says. Progress and the result arrive as update-state events, so every
+ * surface that shows the update follows along.
+ */
+export async function downloadDesktopUpdate(): Promise<DesktopUpdateState> {
+  if (!isTauri()) return INITIAL_UPDATE_STATE;
+  try {
+    return await invoke<DesktopUpdateState>("download_update");
   } catch {
     return unavailableUpdateState();
   }
@@ -125,4 +157,65 @@ export function useDesktopUpdates(): DesktopUpdatesController {
   }, []);
 
   return { state, check, restart, upToDate };
+}
+
+/**
+ * The automatic-download setting, saved as soon as it changes.
+ *
+ * `preferences` is `null` until the desktop reports it. Outside the desktop
+ * there is nothing to save, so it reads as the default.
+ */
+export function useDesktopUpdatePreferences(): {
+  preferences: DesktopUpdatePreferences | null;
+  saving: boolean;
+  error: string | null;
+  setAutomaticDownloads: (enabled: boolean) => Promise<void>;
+} {
+  const [preferences, setPreferences] =
+    useState<DesktopUpdatePreferences | null>(() =>
+      isTauri() ? null : DEFAULT_UPDATE_PREFERENCES,
+    );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const preferencesRef = useRef(preferences);
+  preferencesRef.current = preferences;
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    void invoke<DesktopUpdatePreferences>("desktop_update_preferences").then(
+      (value) => {
+        if (!cancelled) setPreferences(value);
+      },
+      () => {
+        if (!cancelled) setPreferences(DEFAULT_UPDATE_PREFERENCES);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const setAutomaticDownloads = useCallback(async (enabled: boolean) => {
+    const previous = preferencesRef.current;
+    if (!isTauri() || !previous) return;
+    setError(null);
+    setSaving(true);
+    setPreferences({ ...previous, automaticDownloads: enabled });
+    try {
+      setPreferences(
+        await invoke<DesktopUpdatePreferences>(
+          "set_automatic_update_downloads",
+          { enabled },
+        ),
+      );
+    } catch (reason) {
+      setPreferences(previous);
+      setError(typeof reason === "string" ? reason : UPDATE_PREFERENCE_ERROR);
+    } finally {
+      setSaving(false);
+    }
+  }, []);
+
+  return { preferences, saving, error, setAutomaticDownloads };
 }

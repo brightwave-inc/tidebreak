@@ -85,6 +85,9 @@ install_node_runtime: installs the local Node runtime the sandbox image expects.
 desktop_update_state: reports the native auto-updater's state.
 check_for_update: asks the native auto-updater to check.
 restart_for_update: relaunches the app to apply a staged native update.
+download_update: asks the native auto-updater to download a found update when automatic downloads are off.
+desktop_update_preferences: reports whether the native auto-updater downloads on its own, and whether policy locks it.
+set_automatic_update_downloads: turns the native auto-updater's automatic downloads on or off.
 
 # TODO(record 7): commands that predate the gate and do not fit the native-only
 # set. Each should become a server route with a CLI client; until then they are

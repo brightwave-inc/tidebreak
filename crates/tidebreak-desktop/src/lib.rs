@@ -73,6 +73,8 @@ mod office_sandbox;
 mod remote;
 mod skill_import;
 mod trusted_folders;
+mod update_preferences;
+mod update_staging;
 mod updater;
 mod voice_transcription;
 mod whisper_install;
@@ -952,7 +954,10 @@ pub fn run() {
             skill_import::import_skills,
             updater::desktop_update_state,
             updater::check_for_update,
-            updater::restart_for_update
+            updater::restart_for_update,
+            updater::download_update,
+            updater::desktop_update_preferences,
+            updater::set_automatic_update_downloads
         ])
         .on_menu_event(menu::handle_menu_event)
         .setup(move |app| {

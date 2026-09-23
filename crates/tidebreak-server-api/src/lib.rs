@@ -14,6 +14,7 @@ use uuid::Uuid;
 use tidebreak_server_core as core;
 
 pub use core::chrome;
+pub use core::managed_policy::desktop_update_downloads_policy;
 pub(crate) use core::{
     agent_control_tools, agent_run_scratch_reaper, approvals, auth, chat_titling, chatgpt_runtime,
     code, connected_apps, diagnostics, document_decode, engine, error, event_projection,
