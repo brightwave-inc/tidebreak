@@ -11,9 +11,10 @@ use tracing::warn;
 
 use tidebreak_core::db::code::{
     count_attributed_prs_for_workspace, count_turns, get_session, get_workspace,
-    latest_event_created_at, latest_turn, latest_watch_for_session, list_approvals,
-    list_recent_events, list_sessions_by_lifecycle_all_owners, list_sessions_for_workspace,
-    list_turns, replace_session_attention, save_session,
+    latest_event_created_at, latest_turn, latest_turn_narrative, latest_turn_started_at,
+    latest_watch_for_session, list_approvals, list_recent_events,
+    list_sessions_by_lifecycle_all_owners, list_sessions_for_workspace, replace_session_attention,
+    save_session,
 };
 use tidebreak_core::{
     preview_formatting_character, ApprovalState, Attention, AttentionSource, AttentionState,
@@ -21,7 +22,7 @@ use tidebreak_core::{
     SessionLifecycle, Store, ToolDetail, TurnStatus, WorkspaceId,
 };
 
-use super::bus::{CodeEventBus, CodeLiveUpdate, SessionDigest};
+use super::bus::{CodeEventBus, CodeLiveUpdate, DigestSlot, SessionDigest};
 use super::trigger_target_at;
 
 /// Running-but-silent threshold. A periodic sweep applies
@@ -363,7 +364,38 @@ pub async fn note_activity(
 /// session has direct or inherited `deployment` access — every principal
 /// watching `/updates`. Deployment visibility admits any authenticated
 /// principal, which the store cannot enumerate (decision 0086).
+///
+/// Paced per session by [`super::bus::DIGEST_INTERVAL`]: the first request
+/// after a quiet spell publishes at once, and a burst of requests folds into
+/// one more digest when the interval ends, built from the session row as it
+/// stands then.
 pub async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
+    match bus.claim_digest(session.id) {
+        DigestSlot::Now => publish_digest(db, bus, session).await,
+        DigestSlot::Scheduled => {}
+        DigestSlot::At(due) => {
+            let db = db.clone();
+            let bus = bus.clone();
+            let owner = session.owner.clone();
+            let session_id = session.id;
+            tokio::spawn(async move {
+                tokio::time::sleep_until(due).await;
+                bus.deferred_digest_due(session_id);
+                match get_session(&db, &owner, session_id).await {
+                    Ok(Some(session)) => publish_digest(&db, &bus, &session).await,
+                    Ok(None) => {}
+                    Err(err) => warn!(
+                        session = %session_id,
+                        error = %err,
+                        "failed to reload a code session for its deferred digest"
+                    ),
+                }
+            });
+        }
+    }
+}
+
+async fn publish_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
     super::session_tree::publish_for_child(db, bus, session).await;
     let digest = match build_digest(db, session).await {
         Ok(digest) => digest,
@@ -377,7 +409,13 @@ pub async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
         }
     };
     for reader in digest_readers(db, bus, session).await {
-        let visible = super::session_tree::authorize_digest(db, &reader, digest.clone()).await;
+        // The digest was just built from the owner's own rows, so the owner
+        // needs no second pass to filter it.
+        let visible = if reader == session.owner {
+            digest.clone()
+        } else {
+            super::session_tree::authorize_digest(db, &reader, digest.clone()).await
+        };
         bus.publish_update(&reader, CodeLiveUpdate::Digest(Box::new(visible)));
     }
 }
@@ -458,20 +496,45 @@ pub async fn list_accessible_digests(
     db: &DbStore,
     principal: &OwnerId,
 ) -> Result<Vec<SessionDigest>, tidebreak_core::AgentError> {
+    Ok(list_accessible_digests_by_owner(db, principal)
+        .await?
+        .into_iter()
+        .map(|entry| entry.digest)
+        .collect())
+}
+
+/// [`list_accessible_digests`], saying for each digest whether the principal
+/// owns its session. An owned digest was built from the principal's own rows
+/// and needs no further filtering.
+pub async fn list_accessible_digests_by_owner(
+    db: &DbStore,
+    principal: &OwnerId,
+) -> Result<Vec<AccessibleDigest>, tidebreak_core::AgentError> {
     let mut out = Vec::new();
     for session in tidebreak_core::db::code::list_accessible_sessions(db, principal).await? {
-        if session.lifecycle != SessionLifecycle::Ended {
-            out.push(
-                super::session_tree::authorize_digest(
-                    db,
-                    principal,
-                    build_digest(db, &session).await?,
-                )
-                .await,
-            );
+        if session.lifecycle == SessionLifecycle::Ended {
+            continue;
         }
+        let owned = session.owner == *principal;
+        let digest = build_digest(db, &session).await?;
+        out.push(AccessibleDigest {
+            digest: if owned {
+                digest
+            } else {
+                super::session_tree::authorize_digest(db, principal, digest).await
+            },
+            owned,
+        });
     }
     Ok(out)
+}
+
+/// One digest in a principal's snapshot.
+#[derive(Debug, Clone)]
+pub struct AccessibleDigest {
+    pub digest: SessionDigest,
+    /// The principal owns the session, so no access check can narrow it.
+    pub owned: bool,
 }
 
 async fn build_digest(
@@ -516,14 +579,12 @@ async fn build_digest(
         }
         None => 0,
     };
-    let turns = list_turns(db, &session.owner, session.id).await?;
     // Keep this timestamp aligned with trigger delivery's ranking rule. The
     // interface uses it to name the same session that a fire would reach.
-    let trigger_target_at =
-        trigger_target_at(session.created_at, turns.last().map(|turn| turn.started_at));
-    let input_title = turns
-        .iter()
-        .find_map(|turn| conversation_title(&turn.user_input));
+    let trigger_target_at = trigger_target_at(
+        session.created_at,
+        latest_turn_started_at(db, &session.owner, session.id).await?,
+    );
     let external_origin =
         tidebreak_core::db::code::list_bindings_for_session(db, &session.owner, session.id)
             .await?
@@ -541,20 +602,23 @@ async fn build_digest(
     let recap = if session.harness_kind == tidebreak_core::HarnessKind::ClaudeCode {
         None
     } else {
-        turns.into_iter().rev().find_map(|turn| turn.narrative)
+        latest_turn_narrative(db, &session.owner, session.id).await?
     };
     // Internal sessions share their title with the chat route.
     let (title, pr_state) = match workspace {
         Some(workspace) => (workspace.title, workspace.pr),
-        None => (
-            db.get_chat_scoped(&session.owner, session.id)
+        None => {
+            let chat_title = db
+                .get_chat_scoped(&session.owner, session.id)
                 .await?
                 .and_then(|chat| chat.title)
-                .filter(|title| !title.trim().is_empty())
-                .or(input_title)
-                .unwrap_or_default(),
-            None,
-        ),
+                .filter(|title| !title.trim().is_empty());
+            let title = match chat_title {
+                Some(title) => title,
+                None => first_input_title(db, session).await?.unwrap_or_default(),
+            };
+            (title, None)
+        }
     };
     Ok(SessionDigest {
         workspace: session.workspace_id,
@@ -594,34 +658,40 @@ async fn build_digest(
 }
 
 async fn memory_proposal_count(db: &DbStore, session: &Session) -> Option<u64> {
-    use tidebreak_core::{MemoryBackend, MemoryEvidence, MemoryListFilter, MemoryStatus};
-    let records = db
-        .list(
-            &session.owner,
-            MemoryListFilter {
-                scope: None,
-                statuses: vec![MemoryStatus::Proposed],
-                kinds: Vec::new(),
-            },
-        )
-        .await
-        .ok()?;
     // Only what this session's own turns produced: the origin names the
     // session and the evidence cites its journal, so a record that merely
     // mentions the session id elsewhere does not inflate the chip.
-    let count = records
-        .into_iter()
-        .filter(|record| {
-            record.provenance.origin.code_session_id == Some(session.id)
-                && record.provenance.evidence.iter().any(|evidence| {
-                    matches!(
-                        evidence,
-                        MemoryEvidence::Event { session_id, .. } if *session_id == session.id
-                    )
-                })
-        })
-        .count() as u64;
+    let count =
+        tidebreak_core::db::code::count_session_memory_proposals(db, &session.owner, session.id)
+            .await
+            .ok()?;
     (count > 0).then_some(count)
+}
+
+/// A title from the first turn whose input yields one, for a session with no
+/// stored title. Reads the inputs a few turns at a time, oldest first, and
+/// almost always stops at the first.
+async fn first_input_title(
+    db: &DbStore,
+    session: &Session,
+) -> Result<Option<String>, tidebreak_core::AgentError> {
+    const PAGE: u64 = 8;
+    let mut after = None;
+    loop {
+        let inputs =
+            tidebreak_core::db::code::list_turn_inputs(db, &session.owner, session.id, after, PAGE)
+                .await?;
+        if let Some(title) = inputs
+            .iter()
+            .find_map(|(_, input)| conversation_title(input))
+        {
+            return Ok(Some(title));
+        }
+        match inputs.last() {
+            Some((ordinal, _)) if inputs.len() as u64 == PAGE => after = Some(*ordinal),
+            _ => return Ok(None),
+        }
+    }
 }
 
 /// Whether a running session is parked on work that is silent by design: a
@@ -851,6 +921,64 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn a_burst_of_digest_requests_publishes_once_at_once_and_once_with_the_last_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("digest-pace.db").display()
+        ))
+        .await
+        .unwrap();
+        let mut session = session_with(auto_working());
+        session.workspace_id = None;
+        session.harness_kind = tidebreak_core::HarnessKind::Internal;
+        tidebreak_core::db::code::insert_session(&db, &session)
+            .await
+            .unwrap();
+        let bus = CodeEventBus::default();
+        let mut updates = bus.subscribe_updates(&session.owner);
+
+        emit_digest(&db, &bus, &session).await;
+        let Ok(CodeLiveUpdate::Digest(first)) = updates.try_recv() else {
+            panic!("the first digest after a quiet spell is published at once");
+        };
+        assert_eq!(first.attention, auto_working());
+
+        // Every tool call asks for a digest. Inside the interval, the
+        // requests fold into one digest that reads the row when it is built.
+        for note in ["one", "two", "three"] {
+            tidebreak_core::db::code::replace_session_attention(
+                &db,
+                &session.owner,
+                session.id,
+                &Attention::manual(note.to_owned()),
+                true,
+            )
+            .await
+            .unwrap();
+            emit_digest(&db, &bus, &session).await;
+        }
+        assert!(
+            updates.try_recv().is_err(),
+            "a digest inside the interval was published at once"
+        );
+        let deferred = tokio::time::timeout(Duration::from_secs(3), updates.recv())
+            .await
+            .expect("the folded digest is published when the interval ends")
+            .unwrap();
+        let CodeLiveUpdate::Digest(deferred) = deferred else {
+            panic!("expected a digest, got {deferred:?}");
+        };
+        assert_eq!(deferred.attention, Attention::manual("three".to_owned()));
+        assert!(
+            tokio::time::timeout(super::super::bus::DIGEST_INTERVAL * 2, updates.recv())
+                .await
+                .is_err(),
+            "the burst published more than one deferred digest"
+        );
+    }
+
+    #[tokio::test]
     async fn workspace_less_digest_uses_its_conversation_title() {
         let dir = tempfile::tempdir().unwrap();
         let db = DbStore::connect(&format!(
@@ -921,9 +1049,12 @@ mod tests {
         assert!(public[0].can_open_chat);
         let mut public_updates = bus.subscribe_updates(&public_reader);
         emit_digest(&db, &bus, &session).await;
-        assert!(
-            matches!(public_updates.try_recv().unwrap(), CodeLiveUpdate::Digest(digest) if digest.can_open_chat)
-        );
+        // A second digest inside the pacing interval arrives when it ends.
+        let deferred = tokio::time::timeout(Duration::from_secs(3), public_updates.recv())
+            .await
+            .expect("the deferred digest reaches the public reader")
+            .unwrap();
+        assert!(matches!(deferred, CodeLiveUpdate::Digest(digest) if digest.can_open_chat));
 
         let mut foreign = session.clone();
         foreign.owner = OwnerId::new("other").unwrap();

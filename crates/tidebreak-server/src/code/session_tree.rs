@@ -192,12 +192,23 @@ pub async fn authorize_digest(
 }
 
 /// Publish a parent `session_tree` event when this session is a child.
+///
+/// A child that stopped running, or that waits on its owner, may be the last
+/// one a parked parent waits for, so the parent's worker is woken to reread
+/// its park. The tree event wakes it too when the tree changed; the explicit
+/// wake also covers a tree that did not change and a journal write that
+/// failed.
 pub async fn publish_for_child(db: &DbStore, bus: &CodeEventBus, child: &Session) {
     match session_context(db, &child.owner, child.id)
         .await
         .map(|context| context.and_then(|context| context.parent_session_id))
     {
-        Ok(Some(parent_id)) => publish_for_parent(db, bus, &child.owner, parent_id).await,
+        Ok(Some(parent_id)) => {
+            publish_for_parent(db, bus, &child.owner, parent_id).await;
+            if child_may_release_parent(child) {
+                bus.wake_parked(parent_id);
+            }
+        }
         Ok(None) => {}
         Err(error) => {
             tracing::warn!(
@@ -280,6 +291,16 @@ pub(crate) fn child_status(
             _ => SessionTreeChildStatus::Completed,
         },
     }
+}
+
+/// Whether this child's state could let a parked parent's wait settle. A
+/// wait settles once no child it names is running, and a child waiting on
+/// an approval no longer counts as running.
+fn child_may_release_parent(child: &Session) -> bool {
+    matches!(
+        child.lifecycle,
+        SessionLifecycle::Idle | SessionLifecycle::Ended | SessionLifecycle::Fenced
+    ) || matches!(child.attention.state, AttentionState::NeedsYou { .. })
 }
 
 fn child_needs_attention(session: &Session) -> bool {
@@ -445,6 +466,39 @@ mod tests {
         }
     }
 
+    /// The parent's newest journaled tree, once `accept` holds for it. A
+    /// child's second change inside the digest interval reaches its parent
+    /// when that interval ends, not when the child's write returns.
+    async fn wait_for_tree(
+        db: &DbStore,
+        owner: &OwnerId,
+        parent: SessionId,
+        accept: impl Fn(&[SessionTreeChild]) -> bool,
+    ) -> (Vec<SessionTreeChild>, Option<SessionTreeWait>) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let page = tidebreak_core::db::code::list_events(db, owner, parent, 0, 50)
+                .await
+                .unwrap();
+            let last = page
+                .events
+                .iter()
+                .rev()
+                .find_map(|entry| match &entry.event {
+                    Event::SessionTree { children, wait } => Some((children.clone(), wait.clone())),
+                    _ => None,
+                });
+            if let Some(tree) = last.filter(|(children, _)| accept(children)) {
+                return tree;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the parent journal never carried the expected tree: {page:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
     async fn store() -> (tempfile::TempDir, DbStore) {
         let dir = tempfile::tempdir().unwrap();
         let db = DbStore::connect(&format!(
@@ -583,6 +637,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_child_that_stops_running_wakes_its_parked_parent() {
+        let (_dir, db) = store().await;
+        let bus = CodeEventBus::default();
+        let owner = OwnerId::local();
+        let parent = session(&owner, SessionLifecycle::Running);
+        let mut child = session(&owner, SessionLifecycle::Running);
+        insert_session(&db, &parent).await.unwrap();
+        insert_session(&db, &child).await.unwrap();
+        set_session_context(&db, &owner, child.id, None, Some(parent.id), Some("one"))
+            .await
+            .unwrap();
+        let wake = bus.park_wake(parent.id);
+
+        persist_session(&db, &bus, &child).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), wake.notified())
+                .await
+                .is_err(),
+            "a child that is still running woke its parent"
+        );
+
+        child.lifecycle = SessionLifecycle::Idle;
+        persist_session(&db, &bus, &child).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), wake.notified())
+            .await
+            .expect("an idle child did not wake its parked parent");
+    }
+
+    #[tokio::test]
     async fn live_child_status_reaches_a_quiet_parent_journal() {
         let (_dir, db) = store().await;
         let bus = CodeEventBus::default();
@@ -614,19 +697,12 @@ mod tests {
         child.lifecycle = SessionLifecycle::Fenced;
         child.fence_reason = Some(FenceReason::OrphanAlive);
         persist_session(&db, &bus, &child).await.unwrap();
-        let page = tidebreak_core::db::code::list_events(&db, &owner, parent.id, 0, 20)
-            .await
-            .unwrap();
-        assert!(
-            page.events.iter().any(|entry| matches!(
-                &entry.event,
-                Event::SessionTree { children, wait }
-                    if wait.is_none()
-                        && children.len() == 1
-                        && children[0].status == SessionTreeChildStatus::Fenced
-            )),
-            "child fence did not reach the parent journal: {page:?}"
-        );
+        let (children, wait) = wait_for_tree(&db, &owner, parent.id, |children| {
+            children.len() == 1 && children[0].status == SessionTreeChildStatus::Fenced
+        })
+        .await;
+        assert!(wait.is_none());
+        assert_eq!(children[0].id, child.id);
     }
 
     #[tokio::test]
@@ -817,19 +893,13 @@ mod tests {
         first_ok.unwrap();
         second_ok.unwrap();
 
+        let last = wait_for_tree(&db, &owner, parent.id, |children| {
+            children
+                .iter()
+                .all(|child| child.status != SessionTreeChildStatus::Running)
+        })
+        .await;
         let expected = compute(&db, &owner, parent.id, None).await.unwrap();
-        let page = tidebreak_core::db::code::list_events(&db, &owner, parent.id, 0, 50)
-            .await
-            .unwrap();
-        let last = page
-            .events
-            .iter()
-            .rev()
-            .find_map(|entry| match &entry.event {
-                Event::SessionTree { children, wait } => Some((children.clone(), wait.clone())),
-                _ => None,
-            })
-            .expect("parent journal must carry a session_tree");
         assert_eq!(last, expected);
         assert!(
             last.0

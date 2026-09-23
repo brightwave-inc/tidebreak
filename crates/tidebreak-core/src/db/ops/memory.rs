@@ -5,7 +5,7 @@ use chrono::Utc;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseTransaction, EntityTrait,
-    QueryFilter, QueryOrder, Set, TransactionTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 
 use crate::memory::{
@@ -508,6 +508,41 @@ fn write_receipt(record: MemoryRecord) -> MemoryWriteReceipt {
         state: MemoryWriteState::Committed,
         record,
     }
+}
+
+/// How many proposed memories one code session's own turns produced.
+///
+/// A proposal counts when its origin names the session and its evidence cites
+/// that session's journal, so a record that only mentions the session
+/// elsewhere does not. One query: the `(owner, status)` index narrows it to
+/// the owner's proposals, and the provenance is matched in the database, so
+/// no record is loaded.
+pub async fn count_session_memory_proposals(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: crate::SessionId,
+) -> crate::error::Result<u64> {
+    // A session id renders as a bare UUID, so it is safe to inline.
+    let from_session = match store.conn.get_database_backend() {
+        sea_orm::DatabaseBackend::Postgres => format!(
+            "provenance -> 'origin' ->> 'code_session_id' = '{session_id}' \
+             AND provenance -> 'evidence' @> \
+             '[{{\"kind\":\"event\",\"session_id\":\"{session_id}\"}}]'::jsonb"
+        ),
+        _ => format!(
+            "json_extract(provenance, '$.origin.code_session_id') = '{session_id}' \
+             AND EXISTS (SELECT 1 FROM json_each(provenance, '$.evidence') AS evidence \
+             WHERE json_extract(evidence.value, '$.kind') = 'event' \
+             AND json_extract(evidence.value, '$.session_id') = '{session_id}')"
+        ),
+    };
+    entities::memory_record::Entity::find()
+        .filter(entities::memory_record::Column::Owner.eq(owner.as_str()))
+        .filter(entities::memory_record::Column::Status.eq(MemoryStatus::Proposed.as_str()))
+        .filter(Expr::cust(from_session))
+        .count(&store.conn)
+        .await
+        .map_err(super::super::store_err)
 }
 
 #[async_trait]

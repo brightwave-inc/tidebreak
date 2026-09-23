@@ -27,7 +27,7 @@ use tokio::time::Instant;
 use tidebreak_core::{OwnerId, SessionId};
 
 use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
-use crate::code::attention::list_accessible_digests;
+use crate::code::attention::{list_accessible_digests_by_owner, AccessibleDigest};
 use crate::code::bus::CodeLiveUpdate;
 use crate::code::ScopedCode;
 use crate::error::ServerError;
@@ -237,7 +237,7 @@ async fn send_snapshot(
     runtime: &crate::code::runtime::CodeRuntime,
     owner: &OwnerId,
 ) -> Result<HashMap<SessionId, Instant>, ()> {
-    let sessions = list_accessible_digests(&runtime.db, owner)
+    let sessions = list_accessible_digests_by_owner(&runtime.db, owner)
         .await
         .map_err(|_| ())?;
     let sessions = authorized_snapshot_sessions(&runtime.db, owner, sessions).await;
@@ -279,15 +279,24 @@ async fn send_notice(socket: &mut WebSocket, notice: &UpdateNotice) -> Result<()
 }
 
 /// Drop access lost while the snapshot's digest queries were running.
+///
+/// The principal's own sessions skip the check: no access row can narrow
+/// what an owner reads, and their digests were built from the owner's rows.
 async fn authorized_snapshot_sessions(
     store: &tidebreak_core::DbStore,
     principal: &OwnerId,
-    sessions: Vec<crate::code::bus::SessionDigest>,
+    sessions: Vec<AccessibleDigest>,
 ) -> Vec<SessionDigest> {
     let mut authorized = Vec::with_capacity(sessions.len());
-    for digest in sessions {
-        if super::session_events::reader_still_authorized(store, Some(principal), digest.session)
-            .await
+    for AccessibleDigest { digest, owned } in sessions {
+        if owned {
+            authorized.push(SessionDigest::from(digest));
+        } else if super::session_events::reader_still_authorized(
+            store,
+            Some(principal),
+            digest.session,
+        )
+        .await
         {
             authorized.push(SessionDigest::from(
                 crate::code::session_tree::authorize_digest(store, principal, digest).await,
@@ -392,9 +401,11 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        let built = list_accessible_digests(&db, &reader).await.unwrap();
+        let built = list_accessible_digests_by_owner(&db, &reader)
+            .await
+            .unwrap();
         assert_eq!(built.len(), 3);
-        assert!(built.iter().any(|digest| digest.session == child.id));
+        assert!(built.iter().any(|entry| entry.digest.session == child.id));
         assert_eq!(
             authorized_snapshot_sessions(&db, &reader, built.clone())
                 .await

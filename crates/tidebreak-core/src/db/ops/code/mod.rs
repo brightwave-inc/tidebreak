@@ -117,3 +117,5 @@ where
 
 mod native_turn_identity;
 pub use native_turn_identity::*;
+
+pub use super::memory::count_session_memory_proposals;

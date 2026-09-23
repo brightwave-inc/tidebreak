@@ -30,7 +30,7 @@
 //! receives only what was addressed to it.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 use chrono::{DateTime, Utc};
 use tidebreak_core::code::SequencedEvent;
@@ -40,6 +40,7 @@ use tidebreak_core::{
     SessionTreeWait, TurnId, WorkspaceId, MAX_EVENT_TEXT_CHARS,
 };
 use tokio::sync::{broadcast, Notify};
+use tokio::time::Instant;
 
 const LIVE_BUFFER: usize = 256;
 const UPDATES_BUFFER: usize = 256;
@@ -161,9 +162,26 @@ pub enum TurnRewriteState {
 
 type SessionTreeProjection = (Vec<SessionTreeChild>, Option<SessionTreeWait>);
 
+/// How often one session's digest may be rebuilt and published.
+///
+/// Tool calls, attention changes, and lifecycle moves all ask for a digest,
+/// and a busy session asks many times a second. The first request after a
+/// quiet spell publishes at once; later ones inside the interval fold into
+/// one digest published when it ends, built from the session as it stands
+/// then. So no change is lost, and a digest is built at most twice a second.
+pub const DIGEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Per-session broadcast channels for live journal events, plus one digest
 /// channel per owner.
+///
+/// A cheap handle: clones share one bus, so background work (a deferred
+/// digest, say) can hold its own.
+#[derive(Clone, Default)]
 pub struct CodeEventBus {
+    shared: Arc<BusState>,
+}
+
+struct BusState {
     channels: Mutex<HashMap<SessionId, LiveSession>>,
     updates: Mutex<HashMap<OwnerId, broadcast::Sender<CodeLiveUpdate>>>,
     /// Last `session_tree` published on each parent, so a child persist that
@@ -174,6 +192,27 @@ pub struct CodeEventBus {
     /// Fires when a client subscribes to `/updates`, so background work
     /// that slows down while nobody is looking can speed back up at once.
     updates_attached: Notify,
+    /// When each session last published a digest, and whether a deferred one
+    /// is already scheduled. See [`DIGEST_INTERVAL`].
+    digest_pace: Mutex<HashMap<SessionId, DigestPace>>,
+    /// One wake per session whose turn is parked, held by the waiting worker.
+    park_wakes: Mutex<HashMap<SessionId, Weak<Notify>>>,
+}
+
+struct DigestPace {
+    last: Instant,
+    deferred: bool,
+}
+
+/// What a caller asking for a digest should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DigestSlot {
+    /// Build and publish it now.
+    Now,
+    /// A deferred digest is already scheduled and will carry this change.
+    Scheduled,
+    /// Schedule one deferred digest for this moment.
+    At(Instant),
 }
 
 /// One session's live state: the channel, plus the small facts that only the
@@ -238,7 +277,7 @@ pub struct LiveTail {
     pub cursor: i64,
 }
 
-impl Default for CodeEventBus {
+impl Default for BusState {
     fn default() -> Self {
         Self {
             channels: Mutex::new(HashMap::new()),
@@ -246,13 +285,15 @@ impl Default for CodeEventBus {
             session_trees: Mutex::new(HashMap::new()),
             session_tree_gates: Mutex::new(HashMap::new()),
             updates_attached: Notify::new(),
+            digest_pace: Mutex::new(HashMap::new()),
+            park_wakes: Mutex::new(HashMap::new()),
         }
     }
 }
 
 impl CodeEventBus {
     fn with_session<T>(&self, session: SessionId, act: impl FnOnce(&mut LiveSession) -> T) -> T {
-        let mut channels = self.channels.lock().expect("code event bus lock");
+        let mut channels = self.shared.channels.lock().expect("code event bus lock");
         act(channels.entry(session).or_default())
     }
 
@@ -328,7 +369,8 @@ impl CodeEventBus {
     /// and nothing else would look silent, because the deltas carrying that
     /// answer no longer touch a row's `created_at`.
     pub fn last_activity(&self, session: SessionId) -> Option<DateTime<Utc>> {
-        self.channels
+        self.shared
+            .channels
             .lock()
             .expect("code event bus lock")
             .get(&session)
@@ -338,11 +380,13 @@ impl CodeEventBus {
     /// Drop the live channel and transient tail for a session that ended.
     /// A late publisher safely creates a fresh entry through [`Self::with_session`].
     pub fn forget(&self, session: SessionId) {
-        self.channels
+        self.shared
+            .channels
             .lock()
             .expect("code event bus lock")
             .remove(&session);
-        self.session_trees
+        self.shared
+            .session_trees
             .lock()
             .expect("code session tree lock")
             .remove(&session);
@@ -351,6 +395,7 @@ impl CodeEventBus {
     /// Lock covering one parent's tree compute and journal write.
     pub fn session_tree_gate(&self, session: SessionId) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         let mut gates = self
+            .shared
             .session_tree_gates
             .lock()
             .expect("code session tree gate lock");
@@ -370,7 +415,8 @@ impl CodeEventBus {
         children: &[SessionTreeChild],
         wait: &Option<SessionTreeWait>,
     ) -> bool {
-        self.session_trees
+        self.shared
+            .session_trees
             .lock()
             .expect("code session tree lock")
             .get(&session)
@@ -386,7 +432,8 @@ impl CodeEventBus {
         children: Vec<SessionTreeChild>,
         wait: Option<SessionTreeWait>,
     ) {
-        self.session_trees
+        self.shared
+            .session_trees
             .lock()
             .expect("code session tree lock")
             .insert(session, (children, wait));
@@ -398,7 +445,8 @@ impl CodeEventBus {
     /// first caller that reads the row. Its job is to spare the common path —
     /// a running session that is not stalled — a `get_session` per event.
     pub fn maybe_stalled(&self, session: SessionId) -> bool {
-        self.channels
+        self.shared
+            .channels
             .lock()
             .expect("code event bus lock")
             .get(&session)
@@ -411,8 +459,93 @@ impl CodeEventBus {
         self.with_session(session, |live| live.maybe_stalled = stalled);
     }
 
+    /// Ask to publish this session's digest, and learn when to.
+    ///
+    /// The first request after [`DIGEST_INTERVAL`] of quiet may publish now.
+    /// A request inside the interval schedules one deferred digest for its
+    /// end, and every later request folds into that one. The caller that
+    /// gets [`DigestSlot::At`] must publish then, after calling
+    /// [`Self::deferred_digest_due`].
+    pub fn claim_digest(&self, session: SessionId) -> DigestSlot {
+        let now = Instant::now();
+        let mut pace = self
+            .shared
+            .digest_pace
+            .lock()
+            .expect("code digest pace lock");
+        if pace.len() > 256 {
+            pace.retain(|_, entry| entry.deferred || now - entry.last < DIGEST_INTERVAL);
+        }
+        match pace.get_mut(&session) {
+            Some(entry) if entry.deferred => DigestSlot::Scheduled,
+            Some(entry) if now - entry.last < DIGEST_INTERVAL => {
+                entry.deferred = true;
+                DigestSlot::At(entry.last + DIGEST_INTERVAL)
+            }
+            _ => {
+                pace.insert(
+                    session,
+                    DigestPace {
+                        last: now,
+                        deferred: false,
+                    },
+                );
+                DigestSlot::Now
+            }
+        }
+    }
+
+    /// A deferred digest is about to be built. Requests from here on ask
+    /// for a new one, because this one may already have read the session.
+    pub fn deferred_digest_due(&self, session: SessionId) {
+        self.shared
+            .digest_pace
+            .lock()
+            .expect("code digest pace lock")
+            .insert(
+                session,
+                DigestPace {
+                    last: Instant::now(),
+                    deferred: false,
+                },
+            );
+    }
+
+    /// The wake a worker waits on while this session's turn is parked.
+    ///
+    /// Take it before the first read of the park: a wake that lands between
+    /// that read and the wait is kept, not lost. The wake lives as long as
+    /// the worker holds it.
+    pub fn park_wake(&self, session: SessionId) -> Arc<Notify> {
+        let mut wakes = self.shared.park_wakes.lock().expect("code park wake lock");
+        wakes.retain(|_, wake| wake.strong_count() > 0);
+        if let Some(wake) = wakes.get(&session).and_then(Weak::upgrade) {
+            return wake;
+        }
+        let wake = Arc::new(Notify::new());
+        wakes.insert(session, Arc::downgrade(&wake));
+        wake
+    }
+
+    /// Tell a worker parked on this session that what it waits on may have
+    /// settled, so it rereads its park now rather than at its next poll. A
+    /// session with no parked worker ignores it.
+    pub fn wake_parked(&self, session: SessionId) {
+        let wake = self
+            .shared
+            .park_wakes
+            .lock()
+            .expect("code park wake lock")
+            .get(&session)
+            .and_then(Weak::upgrade);
+        if let Some(wake) = wake {
+            wake.notify_one();
+        }
+    }
+
     fn updates_sender(&self, owner: &OwnerId) -> broadcast::Sender<CodeLiveUpdate> {
-        self.updates
+        self.shared
+            .updates
             .lock()
             .expect("code updates bus lock")
             .entry(owner.clone())
@@ -429,7 +562,7 @@ impl CodeEventBus {
     /// their fast cadence.
     pub fn subscribe_updates(&self, owner: &OwnerId) -> broadcast::Receiver<CodeLiveUpdate> {
         let receiver = self.updates_sender(owner).subscribe();
-        self.updates_attached.notify_one();
+        self.shared.updates_attached.notify_one();
         receiver
     }
 
@@ -440,7 +573,8 @@ impl CodeEventBus {
     /// opens it to watch. Counting receivers is exact because a dropped
     /// socket drops its receiver with it.
     pub fn has_updates_subscribers(&self) -> bool {
-        self.updates
+        self.shared
+            .updates
             .lock()
             .expect("code updates bus lock")
             .values()
@@ -455,7 +589,7 @@ impl CodeEventBus {
     /// is at most one spurious wake, which callers absorb by re-reading the
     /// subscriber count.
     pub async fn updates_attached(&self) {
-        self.updates_attached.notified().await;
+        self.shared.updates_attached.notified().await;
     }
 
     /// Publish a notice to one owner. Publishers name the owner the notice
@@ -471,7 +605,8 @@ impl CodeEventBus {
     /// could observe a notice at all, so a session readable by everyone
     /// reaches its readers through it.
     pub fn attached_owners(&self) -> Vec<OwnerId> {
-        self.updates
+        self.shared
+            .updates
             .lock()
             .expect("code updates bus lock")
             .iter()
@@ -534,7 +669,37 @@ mod tests {
         drop(gate);
         let other = SessionId::new();
         let _other_gate = bus.session_tree_gate(other);
-        assert!(!bus.session_tree_gates.lock().unwrap().contains_key(&parent));
+        assert!(!bus
+            .shared
+            .session_tree_gates
+            .lock()
+            .unwrap()
+            .contains_key(&parent));
+    }
+
+    #[tokio::test]
+    async fn a_park_wake_sent_before_the_worker_waits_is_kept() {
+        let bus = CodeEventBus::default();
+        let session = SessionId::new();
+        // Nobody is parked yet, so there is nothing to wake.
+        bus.wake_parked(session);
+        let wake = bus.park_wake(session);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), wake.notified())
+                .await
+                .is_err(),
+            "a wake sent before anyone parked reached a later worker"
+        );
+
+        // A settlement between the worker's read of its park and its wait.
+        bus.wake_parked(session);
+        tokio::time::timeout(std::time::Duration::from_secs(1), wake.notified())
+            .await
+            .expect("the wake sent before the wait was lost");
+
+        drop(wake);
+        let _other = bus.park_wake(SessionId::new());
+        assert!(!bus.shared.park_wakes.lock().unwrap().contains_key(&session));
     }
 
     #[tokio::test]
