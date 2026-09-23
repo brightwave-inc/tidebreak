@@ -136,12 +136,19 @@ async fn execute(client: &Client, command: Command) -> Result<()> {
                 .await
                 .map_err(map_install_error)?;
             if format == OutputFormat::Json {
-                return crate::json_output::print_document(&outcome);
+                println!("{}", install_document(&outcome)?);
+                return Ok(());
             }
             print_text(&outcome);
             Ok(())
         }
     }
+}
+
+/// The `--json` document for an install: the server's outcome plus the
+/// CLI's `schema_version`, like every other JSON document the CLI prints.
+fn install_document(outcome: &serde_json::Value) -> Result<serde_json::Value> {
+    crate::json_output::document(outcome)
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,6 +231,22 @@ mod tests {
 
     fn parse_line(args: &[&str]) -> std::result::Result<Command, String> {
         parse(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn the_install_document_carries_the_schema_version() {
+        let outcome = serde_json::json!({
+            "plugin": "meeting-notes",
+            "revision": "v1.0.0",
+            "skipped": [],
+        });
+        let document = install_document(&outcome).expect("encode");
+        assert_eq!(
+            document[crate::json_output::SCHEMA_VERSION_KEY],
+            crate::json_output::SCHEMA_VERSION
+        );
+        assert_eq!(document["plugin"], "meeting-notes");
+        assert_eq!(document["revision"], "v1.0.0");
     }
 
     #[test]
