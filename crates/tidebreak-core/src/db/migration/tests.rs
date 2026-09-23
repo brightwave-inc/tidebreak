@@ -1,6 +1,6 @@
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
 use sea_orm_migration::prelude::{PostgresQueryBuilder, SchemaManager, SqliteQueryBuilder};
-use sea_orm_migration::MigratorTrait;
+use sea_orm_migration::{MigrationTrait, MigratorTrait};
 
 #[cfg(feature = "sqlite")]
 use super::rebuild_sqlite_code_workspace_for_archiving_inner;
@@ -112,6 +112,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260917_000001_code_parent_wait",
             "m20260922_000001_incarnation_wip_time",
             "m20260923_000001_project_instructions",
+            "m20260923_000002_memory_evidence_event_kind",
         ]
     );
     assert!(db
@@ -2188,4 +2189,63 @@ async fn steer_recovery_migration_preserves_admission() {
     let fresh = Database::connect("sqlite::memory:").await.unwrap();
     Migrator::up(&fresh, None).await.unwrap();
     assert_eq!(schema_of(&db).await, schema_of(&fresh).await);
+}
+
+/// Memory saved before the shared-noun rename spells code-session evidence
+/// `code_event`; the rename migration rewrites records and their revision
+/// snapshots to `event`, and leaves other evidence alone.
+#[tokio::test]
+async fn saved_memory_evidence_takes_the_renamed_kind() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(&db, None).await.unwrap();
+    let legacy = r#"{"author":"model","origin":{},"evidence":[{"kind":"code_event","session_id":"00000000-0000-0000-0000-00000000b001","seq":3}]}"#;
+    let message = r#"{"author":"model","origin":{},"evidence":[{"kind":"message","message_id":"00000000-0000-0000-0000-00000000b002"}]}"#;
+    for (id, provenance) in [("c001", legacy), ("c002", message)] {
+        db.execute_unprepared(&format!(
+            r#"INSERT INTO memory_record (id, owner, scope_kind, repo_id, kind, status, title,
+body, provenance, links, expires_at, superseded_by, observation_count, revision,
+created_at, updated_at) VALUES (X'0000000000000000000000000000{id}', 'user:alice',
+'personal', NULL, 'lesson', 'proposed', 'Run the smoke test', 'Always.', '{provenance}',
+'[]', NULL, NULL, 1, 1, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')"#
+        ))
+        .await
+        .unwrap();
+    }
+    db.execute_unprepared(&format!(
+        r#"INSERT INTO memory_revision (id, record_id, owner, ordinal, snapshot, created_at)
+VALUES (X'0000000000000000000000000000d001', X'0000000000000000000000000000c001',
+'user:alice', 1, '{{"provenance":{legacy}}}', '2026-09-01T00:00:00Z')"#
+    ))
+    .await
+    .unwrap();
+
+    super::memory_evidence_kind::MemoryEvidenceEventKind
+        .up(&SchemaManager::new(&db))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        count(&db, "memory_record WHERE provenance LIKE '%code_event%'").await,
+        0
+    );
+    assert_eq!(
+        count(&db, "memory_revision WHERE snapshot LIKE '%code_event%'").await,
+        0
+    );
+    assert_eq!(
+        count(
+            &db,
+            r#"memory_record WHERE provenance LIKE '%"kind":"event"%'"#
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &db,
+            r#"memory_record WHERE provenance LIKE '%"kind":"message"%'"#
+        )
+        .await,
+        1
+    );
 }

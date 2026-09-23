@@ -278,7 +278,10 @@ impl From<tidebreak_core::MemoryError> for ServerError {
             MemoryError::ActiveRecordCapExceeded { .. } | MemoryError::DigestCapExceeded { .. } => {
                 Self::conflict_kind("memory_cap_exceeded", error.to_string())
             }
-            MemoryError::Backend(_) => Self::internal("memory storage failed"),
+            MemoryError::Backend(detail) => {
+                tracing::error!(%detail, "memory storage failed");
+                Self::internal("memory storage failed")
+            }
             _ => Self::internal("memory storage failed"),
         }
     }

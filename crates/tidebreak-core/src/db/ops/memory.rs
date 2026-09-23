@@ -200,6 +200,27 @@ fn parse_status(status: &str) -> MemoryResult<MemoryStatus> {
     }
 }
 
+/// Decode stored rows, leaving out any this build cannot read.
+///
+/// One record written by another version, or damaged on disk, must not hide
+/// every other record from the memory page and the prompt digest. Each row
+/// left out is logged with its id so it can be repaired.
+fn records_from_models(models: Vec<entities::memory_record::Model>) -> Vec<MemoryRecord> {
+    models
+        .into_iter()
+        .filter_map(|model| {
+            let id = model.id;
+            match record_from_model(model) {
+                Ok(record) => Some(record),
+                Err(error) => {
+                    tracing::warn!(record = %id, %error, "left out a memory record this build cannot read");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 fn record_from_model(model: entities::memory_record::Model) -> MemoryResult<MemoryRecord> {
     let observation_count = u32::try_from(model.observation_count)
         .map_err(|_| MemoryError::Backend("memory observation count is invalid".to_owned()))?;
@@ -426,10 +447,8 @@ where
         .order_by_asc(entities::memory_record::Column::Id)
         .all(conn)
         .await
-        .map_err(backend_err)?
-        .into_iter()
-        .map(record_from_model)
-        .collect()
+        .map_err(backend_err)
+        .map(records_from_models)
 }
 
 /// Deterministic digest renderer. An unchanged store re-renders byte-identical markdown.
@@ -630,10 +649,8 @@ impl MemoryBackend for DbStore {
             .order_by_asc(entities::memory_record::Column::Id)
             .all(&self.conn)
             .await
-            .map_err(backend_err)?
-            .into_iter()
-            .map(record_from_model)
-            .collect()
+            .map_err(backend_err)
+            .map(records_from_models)
     }
 
     async fn update(

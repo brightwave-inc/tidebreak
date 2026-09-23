@@ -34,6 +34,7 @@ mod grant_kind;
 mod idens;
 mod incarnation_wip_time;
 mod managed_decision;
+mod memory_evidence_kind;
 mod native_tool_receipt;
 mod native_turn_identity;
 mod one_approval_surface;
@@ -129,6 +130,7 @@ impl MigratorTrait for Migrator {
             Box::new(parent_wait::ParentWait),
             Box::new(incarnation_wip_time::IncarnationWipTime),
             Box::new(project_instructions::ProjectInstructions),
+            Box::new(memory_evidence_kind::MemoryEvidenceEventKind),
         ]
     }
 }
