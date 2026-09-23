@@ -180,6 +180,7 @@ export function DiffOverviewContent({
         <ul
           className="min-h-0 flex-1 overflow-y-auto px-1 pb-4 pt-1"
           aria-label="Changed files"
+          tabIndex={0}
         >
           {tree.map((node) => (
             <ChangeTreeRow

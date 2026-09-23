@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
+import { prefersReducedMotion } from "./ChatScroll";
+
 /** How long a whole label takes to type, however long the label is. */
 const TYPE_DURATION_MS = 360;
 
@@ -15,9 +17,11 @@ const TYPE_INTERVAL_MS = 16;
  */
 export function useTypewriterOnce(text: string, active: boolean): string {
   const [displayed, setDisplayed] = useState(() =>
-    active ? text.slice(0, 1) : text,
+    active && !prefersReducedMotion() ? text.slice(0, 1) : text,
   );
-  const displayedRef = useRef(active ? text.slice(0, 1) : text);
+  const displayedRef = useRef(
+    active && !prefersReducedMotion() ? text.slice(0, 1) : text,
+  );
   const timerRef = useRef<number | null>(null);
   const mountedRef = useRef(false);
   const hasTypedRef = useRef(false);
@@ -39,7 +43,11 @@ export function useTypewriterOnce(text: string, active: boolean): string {
       stop();
       // A backgrounded tab never sees the motion, so skip straight to the
       // final label rather than animating into a pane no one is watching.
-      if (document.visibilityState !== "visible" || target.length === 0) {
+      if (
+        document.visibilityState !== "visible" ||
+        target.length === 0 ||
+        prefersReducedMotion()
+      ) {
         showImmediately(target);
         return;
       }

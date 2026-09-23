@@ -44,6 +44,9 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
 
   return (
     <div className="flex min-w-0 items-center gap-2 text-sm">
+      <h1 className="sr-only" tabIndex={-1}>
+        {title}
+      </h1>
       <button
         type="button"
         className="shrink-0 font-medium text-muted-foreground hover:underline cursor-pointer"

@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import { cloneElement, isValidElement, useId, type ReactNode } from "react";
 import { CircleAlert, CircleCheck, CircleMinus } from "lucide-react";
 
 import { Card } from "@/components/ui/card";
@@ -27,7 +27,9 @@ export function SettingsPanel({
     <div className="settings-panel" aria-busy={busy}>
       <div className="settings-panel-inner">
         <header className="settings-panel-header">
-          <h1 className="settings-panel-title">{title}</h1>
+          <h1 className="settings-panel-title" tabIndex={-1}>
+            {title}
+          </h1>
           {description && (
             <p className="settings-panel-description">{description}</p>
           )}
@@ -53,12 +55,27 @@ export function SettingsField({
   hint?: ReactNode;
   children: ReactNode;
 }) {
+  const hintId = useId();
+  const control =
+    hint && isValidElement<{ "aria-describedby"?: string }>(children)
+      ? cloneElement(children, {
+          "aria-describedby": [children.props["aria-describedby"], hintId]
+            .filter(Boolean)
+            .join(" "),
+        })
+      : children;
   return (
-    <label className="settings-field">
-      <span className="settings-field-label">{label}</span>
-      {children}
-      {hint && <span className="settings-field-hint">{hint}</span>}
-    </label>
+    <div className="settings-field">
+      <label>
+        <span className="settings-field-label">{label}</span>
+        {control}
+      </label>
+      {hint && (
+        <span id={hintId} className="settings-field-hint">
+          {hint}
+        </span>
+      )}
+    </div>
   );
 }
 

@@ -33,6 +33,7 @@ export function PanelDragHandle({
         disabled ? "pointer-events-none opacity-0" : "cursor-col-resize",
       )}
       disabled={disabled}
+      aria-label="Resize transcript and inspector"
       onPointerDown={handlePointerDown}
     >
       <div className="absolute top-0 right-1 bottom-0 w-[0.5px] bg-border transition-all group-hover:w-px group-hover:translate-x-[0.5px] group-hover:bg-foreground/35 group-hover:delay-75 group-data-[separator=active]:bg-foreground/75" />

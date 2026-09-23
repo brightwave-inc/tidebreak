@@ -6,6 +6,7 @@ import {
   type CSSProperties,
 } from "react";
 import { Outlet, useNavigate, useRouter } from "@tanstack/react-router";
+import { DocumentTitle } from "./DocumentTitle";
 import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -1307,6 +1308,7 @@ export function AppShell() {
             )}
           {/* Each route renders its own rail beside its content — see RouteFrame. */}
           <div className="app-body">
+            <DocumentTitle />
             <Outlet />
           </div>
         </div>

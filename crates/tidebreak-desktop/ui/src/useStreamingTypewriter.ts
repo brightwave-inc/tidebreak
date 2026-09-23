@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { prefersReducedMotion } from "./ChatScroll";
+
 const TICK_INTERVAL_MS = 20;
 const SMOOTHING_FACTOR = 18;
 const FINISH_SMOOTHING_FACTOR = 5;
@@ -105,6 +107,11 @@ export function useStreamingTypewriter(text: string, live: boolean): string {
       return;
     }
     if (text === previousTarget) return;
+    if (prefersReducedMotion()) {
+      stop();
+      showImmediately(text);
+      return;
+    }
 
     if (timerRef.current === null) tick();
   }, [live, showImmediately, stop, text, tick]);

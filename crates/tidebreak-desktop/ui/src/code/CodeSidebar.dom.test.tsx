@@ -654,8 +654,8 @@ describe("CodeSidebar", () => {
     fireEvent.click(first, { metaKey: true });
     fireEvent.click(second, { metaKey: true });
     expect(router.state.location.pathname).toBe("/code");
-    expect(first).toHaveAttribute("aria-selected", "true");
-    expect(second).toHaveAttribute("aria-selected", "true");
+    expect(first).toHaveAttribute("aria-pressed", "true");
+    expect(second).toHaveAttribute("aria-pressed", "true");
 
     fireEvent.contextMenu(first);
     expect(
@@ -701,8 +701,8 @@ describe("CodeSidebar", () => {
     const open = await screen.findByRole("button", { name: /^Fix login/ });
     const other = await screen.findByRole("button", { name: /^Fix logout/ });
     fireEvent.click(other, { metaKey: true });
-    expect(open).toHaveAttribute("aria-selected", "true");
-    expect(other).toHaveAttribute("aria-selected", "true");
+    expect(open).toHaveAttribute("aria-pressed", "true");
+    expect(other).toHaveAttribute("aria-pressed", "true");
   });
 
   it("clears selection when you click away from the cards", async () => {
@@ -714,9 +714,9 @@ describe("CodeSidebar", () => {
     );
     const card = await screen.findByRole("button", { name: /^Fix login/ });
     fireEvent.click(card, { metaKey: true });
-    expect(card).toHaveAttribute("aria-selected", "true");
+    expect(card).toHaveAttribute("aria-pressed", "true");
     fireEvent.pointerDown(screen.getByRole("button", { name: "Workspaces" }));
-    expect(card).not.toHaveAttribute("aria-selected");
+    expect(card).not.toHaveAttribute("aria-pressed");
   });
 
   it("restores saved browser tabs when you enter a workspace from the rail", async () => {
@@ -942,8 +942,8 @@ describe("CodeSidebar", () => {
     const first = await screen.findByRole("button", { name: /^Fix login/ });
     const second = await screen.findByRole("button", { name: /^Fix logout/ });
     fireEvent.click(second, { metaKey: true });
-    expect(first).toHaveAttribute("aria-selected", "true");
-    expect(second).toHaveAttribute("aria-selected", "true");
+    expect(first).toHaveAttribute("aria-pressed", "true");
+    expect(second).toHaveAttribute("aria-pressed", "true");
 
     // Cmd+Shift+A with the rail focused must not widen the selection first.
     fireEvent.keyDown(second, { key: "A", metaKey: true, shiftKey: true });
@@ -1055,12 +1055,12 @@ describe("CodeSidebar", () => {
     );
     const card = await screen.findByRole("button", { name: /^Fix login/ });
     fireEvent.click(card, { metaKey: true });
-    expect(card).toHaveAttribute("aria-selected", "true");
+    expect(card).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(card);
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/code/w/ws-1"),
     );
-    expect(card).not.toHaveAttribute("aria-selected");
+    expect(card).not.toHaveAttribute("aria-pressed");
   });
 });
 

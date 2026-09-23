@@ -372,7 +372,7 @@ function CodeDeliveryBody({
               if (view) applySavedView(view);
             }}
           >
-            <SelectTrigger size="sm" className="w-40">
+            <SelectTrigger size="sm" className="w-40" aria-label="Saved views">
               <SelectValue placeholder="Saved views" />
             </SelectTrigger>
             <SelectContent>

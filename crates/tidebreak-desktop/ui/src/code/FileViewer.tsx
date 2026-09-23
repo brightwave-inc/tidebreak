@@ -198,7 +198,7 @@ function BlobBody({
           Showing the first part of this file.
         </p>
       )}
-      <div className="min-h-0 flex-1">
+      <div className="min-h-0 flex-1" tabIndex={0} aria-label="File contents">
         <Editor
           height="100%"
           language={monacoLanguage(blob.path)}
