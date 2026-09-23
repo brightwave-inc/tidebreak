@@ -21,7 +21,6 @@ pub(crate) use core::{
     managed_policy, mcp_config, mcp_curated, mcp_oauth_runtime, memory_sweep, model_registry,
     model_roles, obo_gateway, openapi_discovery, plugin_install, plugin_state, principal,
     providers, runtime_settings, scoped_memory, scoped_store, state, ui_bundle, view_frames,
-    workspace_config,
 };
 #[cfg(test)]
 pub(crate) use core::{
@@ -35,11 +34,11 @@ pub use core::{
     ensure_home_dir, host_folders, listen_endpoint, logging, media_type, openapi_catalog,
     output_files, register_pending_pairing, register_replacing_pairing, rehome_configured_secrets,
     rest_executor, sandbox_container_run, sandbox_docker, secret_rehome, voice_transcription,
-    web_search, AppState, BrowserChannelBinding, BrowserRuntime, BrowserRuntimeError,
-    BrowserRuntimeScope, DeprovisionTarget, DurableOperationStore, LocalVoiceError,
-    LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus, NativeChannelBinding, NativeRuntime,
-    NativeRuntimeError, NativeRuntimeScope, PairingError, PairingHandle, PendingRegistration,
-    Server, ServerError, UpdateQuiesce,
+    web_search, workspace_config, AppState, BrowserChannelBinding, BrowserRuntime,
+    BrowserRuntimeError, BrowserRuntimeScope, DeprovisionTarget, DurableOperationStore,
+    LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus, NativeChannelBinding,
+    NativeRuntime, NativeRuntimeError, NativeRuntimeScope, PairingError, PairingHandle,
+    PendingRegistration, Server, ServerError, UpdateQuiesce,
 };
 
 pub mod routes;
@@ -172,6 +171,13 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/native/mcp/servers",
             axum::routing::put(routes::put_mcp_servers)
+                .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
+        )
+        // The native twin of `/workspace-config/apply`: the desktop reaches it
+        // only after an OS dialog listed the local commands the import starts.
+        .route(
+            "/native/workspace-config/apply",
+            post(routes::apply_workspace_config)
                 .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
         )
         .route(

@@ -269,7 +269,10 @@ import {
   type WorkspaceConfigApplyRequest,
   type WorkspaceConfigApplyResult,
   type WorkspaceConfigAction,
+  type WorkspaceConfigDecision,
   type WorkspaceConfigSectionId,
+  type ExportedCodeRepository,
+  type ExportedMcpServer,
 } from "../generated/wire";
 
 export type {
@@ -280,7 +283,10 @@ export type {
   WorkspaceConfigApplyRequest,
   WorkspaceConfigApplyResult,
   WorkspaceConfigAction,
+  WorkspaceConfigDecision,
   WorkspaceConfigSectionId,
+  ExportedCodeRepository,
+  ExportedMcpServer,
   ApprovalClass,
   ApprovalGrantRung,
   InboxItemKind,

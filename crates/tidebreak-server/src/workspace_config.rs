@@ -113,7 +113,7 @@ pub struct WorkspaceConfigPreviewEntry {
     pub remap_fields: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceConfigSectionId {
     CodeRepositories,
@@ -138,6 +138,15 @@ pub struct WorkspaceConfigDecision {
     pub action: WorkspaceConfigAction,
     #[serde(default)]
     pub remaps: BTreeMap<String, String>,
+    /// For an MCP server: whether it runs on this machine. Absent keeps the
+    /// file's own flag, except that a remote server that sends a credential
+    /// from this machine's environment imports turned off. The desktop sends
+    /// `false` for a local command server or a credential-sending remote
+    /// server the person has not chosen to start. Refused on a code
+    /// repository entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -359,7 +368,9 @@ fn preview_mcp(
     }
 }
 
-fn repo_key(exported: &ExportedCodeRepository) -> String {
+/// The key a repository entry is previewed and decided under: its origin URL,
+/// else the remote it was cloned from, else its display name.
+pub fn repo_key(exported: &ExportedCodeRepository) -> String {
     exported
         .origin_url
         .clone()
@@ -367,7 +378,13 @@ fn repo_key(exported: &ExportedCodeRepository) -> String {
         .unwrap_or_else(|| exported.display_name.clone())
 }
 
-fn find_repo<'a>(exported: &ExportedCodeRepository, repos: &'a [CodeRepo]) -> Option<&'a CodeRepo> {
+/// The registration on this machine an imported repository matches, if any.
+/// Preview and apply share it, so an entry previewed as new is never refused
+/// by apply as already present.
+pub fn find_repo<'a>(
+    exported: &ExportedCodeRepository,
+    repos: &'a [CodeRepo],
+) -> Option<&'a CodeRepo> {
     let origin = exported
         .origin_url
         .as_deref()
@@ -523,6 +540,70 @@ pub fn apply_mcp_remap(
         definition.cwd = Some(PathBuf::from(cwd));
     }
     definition
+}
+
+/// The definition an MCP decision writes: the file's entry of that name, with
+/// this machine's remaps and the decision's enabled choice applied. `None`
+/// when the file has no entry of that name.
+///
+/// Apply and the desktop's native confirmation both resolve through here, so
+/// the commands the confirmation lists are exactly the ones apply writes.
+pub fn imported_mcp_definition(
+    document: &WorkspaceConfigDocument,
+    decision: &WorkspaceConfigDecision,
+) -> Option<McpServerDefinition> {
+    let exported = document
+        .sections
+        .mcp_servers
+        .iter()
+        .find(|item| item.name == decision.key)?;
+    let mut definition = apply_mcp_remap(exported_mcp_to_definition(exported), &decision.remaps);
+    // An explicit choice wins. Without one, a remote server that sends a
+    // credential from this machine's environment imports turned off: the
+    // file names the URL the value would go to, so only the person's switch
+    // for this row turns it on. Everything else keeps the file's flag.
+    definition.enabled = match decision.enabled {
+        Some(enabled) => enabled,
+        None => definition.enabled && !sends_environment_credential(&definition),
+    };
+    Some(definition)
+}
+
+/// Whether a definition starts a program on this machine as soon as it is
+/// saved: an enabled `command` server.
+pub fn starts_local_command(definition: &McpServerDefinition) -> bool {
+    definition.enabled && definition.command.is_some()
+}
+
+/// Whether a remote server sends a value from this machine's environment to
+/// the URL it names. Today that is its bearer token variable: validation
+/// keeps process environment names off remote servers, and the check covers
+/// them anyway so a later schema cannot slip one past it. An imported server
+/// like this starts turned off unless the person turns it on.
+pub fn sends_environment_credential(definition: &McpServerDefinition) -> bool {
+    definition.url.is_some()
+        && (definition.bearer_token_env.is_some()
+            || !definition.env_from.is_empty()
+            || !definition.env.is_empty())
+}
+
+/// Every local command an apply would start: the imported MCP servers that
+/// run a command and stay enabled. On the desktop, apply refuses these from
+/// any caller but the native host (decision 27), and the native host lists
+/// exactly this set in its confirmation before it forwards the request.
+pub fn local_commands_to_confirm(
+    request: &WorkspaceConfigApplyRequest,
+) -> Vec<McpServerDefinition> {
+    request
+        .decisions
+        .iter()
+        .filter(|decision| {
+            decision.section == WorkspaceConfigSectionId::McpServers
+                && decision.action != WorkspaceConfigAction::Skip
+        })
+        .filter_map(|decision| imported_mcp_definition(&request.document, decision))
+        .filter(starts_local_command)
+        .collect()
 }
 
 pub fn apply_repo_path(
@@ -767,8 +848,96 @@ mod tests {
             key: repo_key(&exported),
             action: WorkspaceConfigAction::Skip,
             remaps: BTreeMap::new(),
+            enabled: None,
         };
         assert_eq!(decision.action, WorkspaceConfigAction::Skip);
         assert_ne!(decision.action, WorkspaceConfigAction::Replace);
+    }
+
+    fn mcp_decision(
+        key: &str,
+        action: WorkspaceConfigAction,
+        enabled: Option<bool>,
+    ) -> WorkspaceConfigDecision {
+        WorkspaceConfigDecision {
+            section: WorkspaceConfigSectionId::McpServers,
+            key: key.into(),
+            action,
+            remaps: BTreeMap::new(),
+            enabled,
+        }
+    }
+
+    /// The set the native confirmation lists is the set apply would start:
+    /// enabled command servers the import adds or replaces, after this
+    /// machine's remaps. A server imported turned off, a skipped one, and a
+    /// remote one start nothing here.
+    #[test]
+    fn only_enabled_imported_commands_need_confirmation() {
+        let mut remote = sample_mcp();
+        remote.name = "remote".into();
+        remote.command = None;
+        remote.args = vec![];
+        remote.url = Some("https://mcp.example.com/mcp".into());
+        let mut skipped = sample_mcp();
+        skipped.name = "skipped".into();
+        let mut off = sample_mcp();
+        off.name = "off".into();
+        let request = WorkspaceConfigApplyRequest {
+            document: envelope(vec![], vec![sample_mcp(), remote, skipped, off]),
+            decisions: vec![
+                WorkspaceConfigDecision {
+                    remaps: BTreeMap::from([("command".into(), "/opt/mcp/docs".into())]),
+                    ..mcp_decision("docs", WorkspaceConfigAction::Add, None)
+                },
+                mcp_decision("remote", WorkspaceConfigAction::Add, None),
+                mcp_decision("skipped", WorkspaceConfigAction::Skip, None),
+                mcp_decision("off", WorkspaceConfigAction::Add, Some(false)),
+            ],
+        };
+
+        let commands = local_commands_to_confirm(&request);
+        assert_eq!(commands.len(), 1, "{commands:?}");
+        assert_eq!(commands[0].name, "docs");
+        assert_eq!(commands[0].command.as_deref(), Some("/opt/mcp/docs"));
+
+        let off = imported_mcp_definition(&request.document, &request.decisions[3])
+            .expect("the file names the server");
+        assert!(!off.enabled, "the decision turns the server off");
+    }
+
+    /// A remote server that sends a credential from this machine's
+    /// environment imports turned off unless the decision turns it on. A
+    /// remote server that sends nothing keeps the file's flag.
+    #[test]
+    fn a_remote_server_that_sends_a_credential_imports_turned_off_by_default() {
+        let mut sends = sample_mcp();
+        sends.name = "search".into();
+        sends.command = None;
+        sends.args = vec![];
+        sends.env = vec![];
+        sends.env_from = vec![];
+        sends.url = Some("https://mcp.example.com/search".into());
+        sends.bearer_token_env = Some("SEARCH_TOKEN".into());
+        let mut quiet = sends.clone();
+        quiet.name = "status".into();
+        quiet.bearer_token_env = None;
+        let document = envelope(vec![], vec![sends, quiet]);
+        let resolve = |key: &str, enabled: Option<bool>| {
+            imported_mcp_definition(
+                &document,
+                &mcp_decision(key, WorkspaceConfigAction::Add, enabled),
+            )
+            .expect("the file names the server")
+        };
+
+        let default = resolve("search", None);
+        assert!(sends_environment_credential(&default));
+        assert!(!default.enabled, "the file's flag is not consent");
+        assert!(resolve("search", Some(true)).enabled);
+        assert!(
+            resolve("status", None).enabled,
+            "a remote server that sends no credential keeps the file's flag"
+        );
     }
 }

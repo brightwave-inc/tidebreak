@@ -61,6 +61,10 @@ grant_folder_capability: widens a folder's capability only after the native perm
 resolve_folder_access_request: carries the user's in-turn folder decision into the native picker and the host broker that owns the grant.
 resolve_output_writeback_request: executes the approved write into a connected host folder, which only the desktop-side broker can reach.
 put_native_mcp_servers: shows the OS-native local-command warning and uses the host-only executor credential to save an approved configuration.
+apply_native_workspace_config: shows the same OS-native local-command warning for an import that would start local MCP commands, and uses the host-only executor credential to apply the approved import.
+
+# Gateway pairing, which no HTTP route may reach (docs/gateway-boundary.md)
+leave_provisioned_gateway: deletes this computer's provisioned gateway policy through the embedded server's pairing handle; policy writes are deliberately kept off every HTTP route.
 
 # Computer-use control indicator, Stop, and native permission setup
 computer_use_permission_status: checks this desktop's native helper permissions and running bundle identity, which macOS uses to attribute screen recording and accessibility access.

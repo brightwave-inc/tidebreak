@@ -344,6 +344,19 @@ export function onPairingChanged(handler: () => void): () => void {
 }
 
 /**
+ * Leave the gateway this computer's profile was paired with, after the
+ * Model Gateway panel's confirmation. The shell runs the same
+ * compare-and-swap delete a `tidebreak://deprovision` link does, anchored to
+ * `gatewayUrl`, refuses a gateway the operating system's device policy
+ * asserts, and nudges the gate to re-read policy once the profile is open
+ * again. See `leave_provisioned_gateway` in
+ * `crates/tidebreak-desktop/src/deep_link.rs`.
+ */
+export function leaveProvisionedGateway(gatewayUrl: string): Promise<void> {
+  return invoke("leave_provisioned_gateway", { gatewayUrl });
+}
+
+/**
  * Render this chat's diagnostic bundle for the clipboard. Built natively from
  * the event journal, not from what is on screen, and bounded so a chat with a
  * huge tool result cannot stall the clipboard write. See

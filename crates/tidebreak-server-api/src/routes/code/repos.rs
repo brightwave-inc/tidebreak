@@ -37,8 +37,11 @@ const MAX_QUICK_ACTION_COMMAND: usize = 1024;
 /// whose second entry never runs.
 ///
 /// Lengths are counted in `char`s, so a limit means the same thing to a reader
-/// as it does to the check.
-fn normalize_quick_actions(actions: Vec<QuickAction>) -> Result<Vec<QuickAction>, ServerError> {
+/// as it does to the check. Portable configuration import runs imported lists
+/// through here too, so a file cannot store a list this route would refuse.
+pub(crate) fn normalize_quick_actions(
+    actions: Vec<QuickAction>,
+) -> Result<Vec<QuickAction>, ServerError> {
     if actions.len() > MAX_QUICK_ACTIONS {
         return Err(ServerError::bad_request(format!(
             "a repository takes at most {MAX_QUICK_ACTIONS} quick actions; got {}",

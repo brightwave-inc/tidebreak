@@ -101,6 +101,8 @@ function GatewaySection() {
     <GatewayPanel
       client={client}
       managed={policy.managed}
+      source={policy.source}
+      provisionedAt={policy.provisioned_at ?? null}
       gatewayUrl={policy.gateway_url ?? null}
       hostedGatewayUrl={policy.hosted_gateway_url ?? null}
       onChanged={() => void refreshCatalog()}

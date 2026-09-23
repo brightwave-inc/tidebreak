@@ -27,6 +27,8 @@ import type {
   WorkspaceConfigDocument,
   WorkspaceConfigPreview,
 } from "../types";
+import { attachedRemotely } from "../../host";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { type Constructor, HttpCore, throwIfNotOk } from "./http";
 
 /** Providers, models, voice, web search, exec, and the settings document. */
@@ -293,6 +295,17 @@ export function withSettingsApi<TBase extends Constructor<HttpCore>>(
     applyWorkspaceConfig(
       body: WorkspaceConfigApplyRequest,
     ): Promise<WorkspaceConfigApplyResult> {
+      // An import can start local MCP commands, which on the desktop need the
+      // native confirmation (decision 27). The native command shows it when
+      // the import starts any, then applies through the host-only surface.
+      // Attached to another machine, the import is that machine's, so it
+      // goes over HTTP like every other write.
+      if (isTauri() && !attachedRemotely()) {
+        return invoke<WorkspaceConfigApplyResult>(
+          "apply_native_workspace_config",
+          { request: body },
+        );
+      }
       return this.json("/workspace-config/apply", {
         method: "POST",
         headers: this.headers(true),

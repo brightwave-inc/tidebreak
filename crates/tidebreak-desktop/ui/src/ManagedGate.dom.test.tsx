@@ -252,13 +252,22 @@ describe("ManagedGate", () => {
     // visible behind a pairing prompt, and the named gateway is the one the
     // shell registered from the link.
     expect(
-      await screen.findByText("Connect to your model gateway"),
+      await screen.findByText("Connect to a model gateway?"),
     ).toBeInTheDocument();
     expect(screen.getByText("https://new-gw.example/")).toBeInTheDocument();
+    // It says a link asked, names the host, and says what the gateway
+    // would control.
     expect(
-      screen.getByText(/which will manage this device/),
+      screen.getByText(/A link asked Tidebreak to let/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("new-gw.example")).toBeInTheDocument();
+    expect(screen.getByText(/hide your own provider keys/)).toBeInTheDocument();
+    expect(
+      screen.getByText("Continue only if your organization asked you to."),
     ).toBeInTheDocument();
     expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+    // Pressing Enter on a screen a link raised declines.
+    expect(screen.getByRole("button", { name: "Not now" })).toHaveFocus();
 
     // The consent is the sign-in itself.
     await user.click(
@@ -296,7 +305,7 @@ describe("ManagedGate", () => {
     const user = userEvent.setup();
     mount(client);
 
-    await screen.findByText("Connect to your model gateway");
+    await screen.findByText("Connect to a model gateway?");
     await user.click(screen.getByRole("button", { name: "Not now" }));
     expect(await screen.findByText("the open product")).toBeInTheDocument();
     expect(client.dismissGatewayPairing).toHaveBeenCalled();
@@ -328,13 +337,11 @@ describe("ManagedGate", () => {
 
     // The prompt names the new gateway and what it replaces.
     expect(
-      await screen.findByText("Connect to your model gateway"),
+      await screen.findByText("Connect to a model gateway?"),
     ).toBeInTheDocument();
     expect(screen.getByText("https://new-gw.example/")).toBeInTheDocument();
-    expect(
-      screen.getByText(/currently manages this device/),
-    ).toBeInTheDocument();
-    expect(screen.getByText("https://gateway.example/")).toBeInTheDocument();
+    expect(screen.getByText(/manages\s+this device now/)).toBeInTheDocument();
+    expect(screen.getByText("gateway.example")).toBeInTheDocument();
     expect(screen.queryByText("the open product")).not.toBeInTheDocument();
 
     // "Not now" abandons the re-pair and returns the signed-in app.
@@ -342,6 +349,66 @@ describe("ManagedGate", () => {
     expect(await screen.findByText("the open product")).toBeInTheDocument();
     expect(client.dismissGatewayPairing).toHaveBeenCalled();
     expect(client.gatewaySignIn).not.toHaveBeenCalled();
+  });
+
+  it("a gateway you connected can be left from its sign-in gate", async () => {
+    // Signed out, the gate hides Settings, so the sign-in screen itself is
+    // the way back to the person's own provider keys.
+    const provisioned: ManagedPolicy = { ...managed, source: "provisioned" };
+    const client = api({
+      getPolicy: vi
+        .fn()
+        .mockResolvedValueOnce(provisioned)
+        .mockResolvedValue({
+          managed: false,
+          source: "unmanaged",
+          misconfigured: false,
+          allow_local_mcp_servers: false,
+        } satisfies ManagedPolicy),
+    });
+    const leave = {
+      available: true,
+      leave: vi.fn().mockResolvedValue(undefined),
+    };
+    const user = userEvent.setup();
+    render(
+      <ManagedGate client={client} leave={leave}>
+        <p>the open product</p>
+      </ManagedGate>,
+    );
+
+    expect(
+      await screen.findByText(/You connected this device to the gateway/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/managed by your organization/)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Leave gateway" }));
+    await screen.findByRole("alertdialog");
+    const confirmLeave = screen.getAllByRole("button", {
+      name: "Leave gateway",
+    });
+    await user.click(confirmLeave[confirmLeave.length - 1]);
+
+    await waitFor(() =>
+      expect(leave.leave).toHaveBeenCalledWith("https://gateway.example/"),
+    );
+    expect(await screen.findByText("the open product")).toBeInTheDocument();
+  });
+
+  it("an organization's gateway offers no way to leave from the gate", async () => {
+    const leave = { available: true, leave: vi.fn() };
+    render(
+      <ManagedGate client={api()} leave={leave}>
+        <p>the open product</p>
+      </ManagedGate>,
+    );
+
+    expect(
+      await screen.findByText(/managed by your organization/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Leave gateway" }),
+    ).not.toBeInTheDocument();
   });
 
   it("a session on the wrong gateway does not lift the gate", async () => {
@@ -653,7 +720,7 @@ describe("ManagedGate", () => {
       pairingNudge.fire?.();
     });
     expect(
-      await screen.findByText("Connect to your model gateway"),
+      await screen.findByText("Connect to a model gateway?"),
     ).toBeInTheDocument();
     expect(
       screen.getByText("https://next-gateway.example/"),

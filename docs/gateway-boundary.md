@@ -47,7 +47,8 @@ Policy resolution has three tiers, strongest first:
    and no fallback to the open product.
 2. **Provisioned.** The sticky policy file `gateway-policy.json` in the
    profile's data directory, written only by a completed pairing (below).
-   User-consented, and replaceable by the same consent that created it. It
+   User-consented, replaceable by the same consent that created it, and
+   removable by the person from **Settings → Model Gateway**. It
    is deliberately a sidecar file rather than a database row: a profile
    below the migration pin is deleted and rebuilt on first boot, and the
    policy must survive that — losing it would resolve the profile unmanaged
@@ -90,7 +91,9 @@ is that **the link never writes anything**:
   the developer-deployment exception — the pairing spends an OAuth code and
   stores the tokens it buys, so cleartext to anywhere but this machine would
   hand the whole exchange to whoever is on the path.
-- The sign-in gate presents the pending pairing full-window. The consent is
+- The sign-in gate presents the pending pairing full-window. The screen says
+  that a link made the request, names the gateway's host, and says what the
+  gateway would control, and **Not now** holds the focus. The consent is
   the sign-in: only an OAuth flow the user completes against that gateway
   commits the provision, inside the exchange's finish, before the session is
   stored. Dismissing ("Not now") clears the slot and returns the app.
@@ -108,6 +111,23 @@ is that **the link never writes anything**:
 
 The result is that a drive-by link can, at worst, raise a sign-in screen the
 user ignores, or one dialog that defaults to changing nothing.
+
+### Leaving a gateway you connected
+
+The provisioned row is the person's own consent, so the person can take it
+back. The Model Gateway settings panel names the policy's source: "Managed
+by your organization's device policy" for the OS tier, and "You connected
+this gateway on" a date for the provisioned tier. That date is the policy
+file's modification time. For the provisioned tier only, the panel's danger
+zone offers **Leave gateway** behind the app's own confirmation.
+
+Leaving runs the same compare-and-swap delete as the
+`tidebreak://deprovision` link, through a native command
+(`leave_provisioned_gateway`) rather than an HTTP route. The delete is
+anchored to the URL the confirmation named, and an OS assertion refuses it.
+This is the one path from the renderer to a policy write, and it can only
+remove the row the person added. Provisioning and re-pairing stay reachable
+only from a link and a completed sign-in.
 
 ## Authentication
 
@@ -207,8 +227,8 @@ probe the UI offers.
 ## Who may touch what
 
 - **The shell** (Rust, Tauri) owns link validation, the native
-  confirmation and refusal dialogs, `pairing.log`, and the only path into
-  pairing registration.
+  confirmation and refusal dialogs, `pairing.log`, the only path into
+  pairing registration, and the in-app leave that deletes a provisioned row.
 - **The embedded server** owns policy resolution, the pending-pairing slot,
   the OAuth exchange, the commit, session storage, and lockdown
   enforcement. Renderer-reachable routes (`/policy`, `/gateway/*`) expose
@@ -218,7 +238,8 @@ probe the UI offers.
   demands it and lifts only for a session on the policy's own gateway. It
   re-reads `/policy` on a poll and on the shell's nudge, and treats a
   missing policy route as the open product — a renderer running ahead of an
-  older server has nothing to enforce.
+  older server has nothing to enforce. It can ask the shell to leave a
+  gateway the person connected, and never to pair one.
 
 The division is the boundary's summary: the gateway decides entitlements,
 the server decides state transitions, the shell mediates consent, and the

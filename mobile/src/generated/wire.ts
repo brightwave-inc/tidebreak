@@ -3236,6 +3236,14 @@ export type ManagedPolicy = { managed: boolean, gateway_url?: string,
  */
 hosted_gateway_url?: string, source: ManagedPolicySource,
 /**
+ * When the person paired this profile with its provisioned gateway: the
+ * time the pairing was written. Present only for the provisioned tier,
+ * and only when that time is readable. Display only, so a surface can
+ * say when the person connected the gateway rather than naming an
+ * organization that asserted nothing.
+ */
+provisioned_at?: string,
+/**
  * True when `source` asserted management but its gateway URL is missing,
  * unreadable, or invalid. The profile stays managed with no usable URL —
  * fail closed — and surfaces can name the authority that needs repair
@@ -6181,7 +6189,16 @@ export type WorkspaceConfigApplyResult = { applied: number, skipped: number, };
 /**
  * Per-entry decision sent with apply.
  */
-export type WorkspaceConfigDecision = { section: WorkspaceConfigSectionId, key: string, action: WorkspaceConfigAction, remaps: { [key in string]: string }, };
+export type WorkspaceConfigDecision = { section: WorkspaceConfigSectionId, key: string, action: WorkspaceConfigAction, remaps: { [key in string]: string },
+/**
+ * For an MCP server: whether it runs on this machine. Absent keeps the
+ * file's own flag, except that a remote server that sends a credential
+ * from this machine's environment imports turned off. The desktop sends
+ * `false` for a local command server or a credential-sending remote
+ * server the person has not chosen to start. Refused on a code
+ * repository entry.
+ */
+enabled?: boolean, };
 
 /**
  * Exported JSON envelope.

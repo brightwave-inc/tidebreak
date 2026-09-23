@@ -93,8 +93,8 @@ pub(crate) use llm::{
 pub(crate) use native::{native_execute, native_result};
 pub(crate) use repos::{
     clone_defaults, create_repo, delete_repo, get_clone_job, get_repo, get_repo_trust,
-    get_workspace_trust, list_github_repositories, list_repos, patch_repo, put_repo_trust,
-    repo_sources, start_clone,
+    get_workspace_trust, list_github_repositories, list_repos, normalize_quick_actions, patch_repo,
+    put_repo_trust, repo_sources, start_clone,
 };
 pub(crate) use session_events::session_events;
 pub(crate) use sessions::{

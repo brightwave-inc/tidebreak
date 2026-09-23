@@ -2,7 +2,13 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, GatewayStatus, RemoteMachineState } from "../api";
+import type {
+  ApiClient,
+  GatewayStatus,
+  ManagedPolicySource,
+  RemoteMachineState,
+} from "../api";
+import type { GatewayLeaveControl } from "../gatewayLeave";
 import { GatewayPanel, type MachineControls } from "./GatewayPanel";
 
 const GATEWAY_URL = "http://127.0.0.1:28081/";
@@ -63,20 +69,29 @@ function managedPanel(
     onChanged = () => undefined,
     onOpenConnectedApps = () => undefined,
     machine = machineStub(),
+    source = "os",
+    provisionedAt = null,
+    leave = { available: false, leave: vi.fn() },
   }: {
     onChanged?: () => void;
     onOpenConnectedApps?: () => void;
     machine?: MachineControls;
+    source?: ManagedPolicySource;
+    provisionedAt?: string | null;
+    leave?: GatewayLeaveControl;
   } = {},
 ) {
   return (
     <GatewayPanel
       client={client}
       managed
+      source={source}
+      provisionedAt={provisionedAt}
       gatewayUrl={GATEWAY_URL}
       onChanged={onChanged}
       onOpenConnectedApps={onOpenConnectedApps}
       machine={machine}
+      leave={leave}
     />
   );
 }
@@ -94,6 +109,7 @@ describe("GatewayPanel", () => {
       <GatewayPanel
         client={client}
         managed={false}
+        source="unmanaged"
         gatewayUrl={null}
         onChanged={() => undefined}
         onOpenConnectedApps={() => undefined}
@@ -134,6 +150,7 @@ describe("GatewayPanel", () => {
       <GatewayPanel
         client={client}
         managed={false}
+        source="unmanaged"
         gatewayUrl={null}
         hostedGatewayUrl="https://gateway.example/"
         onChanged={() => undefined}
@@ -177,7 +194,9 @@ describe("GatewayPanel", () => {
     // The origin comes from policy and is display-only: no input to edit
     // it, no toggle to turn the gateway off, and no credential prompt.
     expect(screen.getByText(GATEWAY_URL)).toBeInTheDocument();
-    expect(screen.getByText(/not editable here/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Managed by your organization's device policy/),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/API key/i)).not.toBeInTheDocument();
     // The one text field on the page is the machine address below. Nothing
@@ -215,6 +234,124 @@ describe("GatewayPanel", () => {
 
     await user.click(screen.getByRole("button", { name: /Disconnect/ }));
     await waitFor(() => expect(client.gatewaySignOut).toHaveBeenCalled());
+  });
+
+  it("device policy: names the organization and offers no way to leave", async () => {
+    const leave = { available: true, leave: vi.fn() };
+    render(
+      managedPanel(
+        api({ getGatewayStatus: vi.fn().mockResolvedValue(signedIn) }),
+        {
+          source: "os",
+          leave,
+        },
+      ),
+    );
+
+    expect(await screen.findByText("Signed in")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Managed by your organization's device policy/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/You connected/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Leave gateway" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("connected through a link: says so, and leaves after a confirmation", async () => {
+    const leave = {
+      available: true,
+      leave: vi.fn().mockResolvedValue(undefined),
+    };
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    render(
+      managedPanel(
+        api({ getGatewayStatus: vi.fn().mockResolvedValue(signedIn) }),
+        {
+          source: "provisioned",
+          provisionedAt: "2026-09-21T15:30:00Z",
+          leave,
+          onChanged,
+        },
+      ),
+    );
+
+    expect(await screen.findByText("Signed in")).toBeInTheDocument();
+    expect(
+      screen.getByText(/^You connected this gateway on .*2026\.$/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/your organization's device policy/),
+    ).not.toBeInTheDocument();
+
+    // Cancel changes nothing.
+    await user.click(screen.getByRole("button", { name: "Leave gateway" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("127.0.0.1:28081");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(leave.leave).not.toHaveBeenCalled();
+
+    // Confirming leaves exactly the policy's own gateway.
+    await user.click(screen.getByRole("button", { name: "Leave gateway" }));
+    await screen.findByRole("alertdialog");
+    await user.click(
+      screen.getAllByRole("button", { name: "Leave gateway" }).at(-1)!,
+    );
+    await waitFor(() => expect(leave.leave).toHaveBeenCalledWith(GATEWAY_URL));
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("shows a refused leave beside the control", async () => {
+    const leave = {
+      available: true,
+      leave: vi
+        .fn()
+        .mockRejectedValue(
+          "The gateway managing this device changed while disconnecting. Nothing was changed; try again from the new state.",
+        ),
+    };
+    const user = userEvent.setup();
+    render(
+      managedPanel(
+        api({ getGatewayStatus: vi.fn().mockResolvedValue(signedIn) }),
+        {
+          source: "provisioned",
+          leave,
+        },
+      ),
+    );
+
+    expect(
+      await screen.findByText("You connected this gateway."),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Leave gateway" }));
+    await screen.findByRole("alertdialog");
+    await user.click(
+      screen.getAllByRole("button", { name: "Leave gateway" }).at(-1)!,
+    );
+    expect(
+      await screen.findByText(/changed while disconnecting/),
+    ).toBeInTheDocument();
+  });
+
+  it("offers no leave where this window cannot reach the shell", async () => {
+    render(
+      managedPanel(
+        api({ getGatewayStatus: vi.fn().mockResolvedValue(signedIn) }),
+        {
+          source: "provisioned",
+          leave: { available: false, leave: vi.fn() },
+        },
+      ),
+    );
+
+    expect(
+      await screen.findByText("You connected this gateway."),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Leave gateway" }),
+    ).not.toBeInTheDocument();
   });
 
   it("watches a pending browser sign-in and refreshes the catalog on completion", async () => {
@@ -360,6 +497,7 @@ describe("GatewayPanel", () => {
       <GatewayPanel
         client={client}
         managed
+        source="os"
         gatewayUrl={null}
         onChanged={() => undefined}
         onOpenConnectedApps={() => undefined}
