@@ -322,6 +322,24 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
     );
     assert!(store.get_chat(rooted.id).await.unwrap().is_some());
 
+    let busy_root = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let mut busy_rooted = sample_chat();
+    busy_rooted.attachment_revision = 1;
+    busy_rooted.root_attachments = vec![ChatRootAttachment {
+        root_id: busy_root,
+        origin: RootAttachmentOrigin::Conversation,
+    }];
+    store.create_chat(&busy_rooted).await.unwrap();
+    store
+        .accept_turn(TurnId::new(), busy_rooted.id, "test", "still working")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.delete_chat(busy_rooted.id).await.unwrap(),
+        DeleteChatOutcome::ActiveWork
+    );
+    assert!(store.get_chat(busy_rooted.id).await.unwrap().is_some());
+
     // The store still refuses an unknown broker observation, even though the
     // desktop no longer records one: a rejected mutation now settles on the
     // state the broker reports. This keeps the gate honest for a row written by

@@ -677,6 +677,35 @@ pub(in crate::db) async fn delete_chat(
         return Ok(DeleteChatOutcome::NotFound);
     }
 
+    // Report running work before attached folders. A refused delete that
+    // still has a live turn must say ActiveWork even when roots are attached,
+    // so the client does not detach folders and then lose the delete to
+    // chat_active.
+    let active_turn = entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::turn::Column::Status.is_not_in([
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+        ]))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    let active_sandbox = entities::agent_run::Entity::find()
+        .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::agent_run::Column::Tier.eq("background"))
+        .filter(entities::agent_run::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if active_turn || active_sandbox {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DeleteChatOutcome::ActiveWork);
+    }
+
     let roots_attached = entities::chat_root_attachment::Entity::find()
         .filter(entities::chat_root_attachment::Column::ChatId.eq(chat_id.0))
         .one(&transaction)
@@ -709,31 +738,6 @@ pub(in crate::db) async fn delete_chat(
     if attachment_state_unresolved {
         transaction.rollback().await.map_err(store_err)?;
         return Ok(DeleteChatOutcome::RootAttachmentStateUnresolved);
-    }
-
-    let active_turn = entities::turn::Entity::find()
-        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
-        .filter(entities::turn::Column::Status.is_not_in([
-            "completed",
-            "failed",
-            "cancelled",
-            "interrupted",
-        ]))
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-        .is_some();
-    let active_sandbox = entities::agent_run::Entity::find()
-        .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
-        .filter(entities::agent_run::Column::Tier.eq("background"))
-        .filter(entities::agent_run::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-        .is_some();
-    if active_turn || active_sandbox {
-        transaction.rollback().await.map_err(store_err)?;
-        return Ok(DeleteChatOutcome::ActiveWork);
     }
 
     // Sources are product state owned by the conversation. Their

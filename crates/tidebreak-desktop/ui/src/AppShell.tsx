@@ -19,6 +19,7 @@ import {
   type ProviderInfo,
   type ServerInfo,
 } from "./api";
+import { HttpError } from "./api/client/http";
 import { AppContextProvider, type AppContextValue } from "./AppContext";
 
 import {
@@ -53,6 +54,7 @@ import {
   purgeDeletedChatHostAuthority,
   prependReplacementChat,
   stopLiveChatWork,
+  tryDeleteChat,
   waitForChatQuiescent,
 } from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
@@ -918,31 +920,51 @@ export function AppShell() {
     // by the time the request lands this is no longer the route we are on.
     const deletingOpenChat = openChatId === target.id;
     try {
-      if (stopping) {
+      const inspectWork = () =>
+        inspectLiveChatWork({
+          chatId: target.id,
+          openChatId,
+          session: useChatSessionStore.getState(),
+          listAgentRuns: (chatId) => client.listAgentRuns(chatId),
+        });
+      const stopWork = async (live: typeof work) => {
         await stopLiveChatWork({
           chatId: target.id,
-          work,
+          work: live,
           cancelTurn: (chatId, turnId) => client.cancel(chatId, turnId),
           cancelAgentRun: (chatId, runId) =>
             client.cancelAgentRun(chatId, runId).then(() => undefined),
         });
-        const quiet = await waitForChatQuiescent({
-          inspect: () =>
-            inspectLiveChatWork({
-              chatId: target.id,
-              openChatId,
-              session: useChatSessionStore.getState(),
-              listAgentRuns: (chatId) => client.listAgentRuns(chatId),
-            }),
-        });
+        const quiet = await waitForChatQuiescent({ inspect: inspectWork });
         if (!quiet) {
           throw new Error(
             "Could not stop the active work. Finish or cancel it, then try deleting again.",
           );
         }
+      };
+      if (stopping) {
+        await stopWork(work);
       }
-      await detachChatFolders(current);
-      await client.deleteChat(target.id);
+      let attempt = await tryDeleteChat(() => client.deleteChat(target.id));
+      if (attempt === "chat_active") {
+        const stopConfirmed = await confirm({
+          title: `Delete ${label}?`,
+          description:
+            "This conversation is still working. Stop it and delete it?",
+          confirmLabel: "Stop and delete",
+          destructive: true,
+        });
+        if (!stopConfirmed) return;
+        await stopWork(await inspectWork());
+        attempt = await tryDeleteChat(() => client.deleteChat(target.id));
+      }
+      if (attempt === "chat_roots_attached") {
+        await detachChatFolders(current);
+        attempt = await tryDeleteChat(() => client.deleteChat(target.id));
+      }
+      if (attempt !== "deleted") {
+        throw new HttpError(409, "", attempt);
+      }
       // Chat ids are never reused; residual broker grants for this subject are
       // leftover authority and would otherwise haunt Permissions as a ghost chat.
       try {

@@ -1077,16 +1077,6 @@ function withoutConnectionState(status: string): string {
 }
 
 /**
- * Park the composer's message on the server queue, and empty the composer only
- * once the server has it.
- *
- * A refused queue is the one send that has nothing to show for itself: no
- * optimistic bubble goes into the transcript and no turn follows, so a
- * swallowed rejection would take the message away and leave the reader
- * watching a queue that never grew. The text stays where it was typed and the
- * failure is said out loud, the same way the queue tray reports its own.
- */
-/**
  * Drop the files and skills a queued turn already took, the same way send
  * does. Queue used to leave them in the composer, so the next message sent
  * the same attachments and re-invoked the same skills.
@@ -1106,6 +1096,16 @@ export function clearQueuedComposerAttachments(
   drafts.setFolders(chatId, []);
 }
 
+/**
+ * Park the composer's message on the server queue, and empty the composer only
+ * once the server has it.
+ *
+ * A refused queue is the one send that has nothing to show for itself: no
+ * optimistic bubble goes into the transcript and no turn follows, so a
+ * swallowed rejection would take the message away and leave the reader
+ * watching a queue that never grew. The text stays where it was typed and the
+ * failure is said out loud, the same way the queue tray reports its own.
+ */
 export async function queueComposerMessage(
   post: () => Promise<unknown>,
   onQueued: () => void,
