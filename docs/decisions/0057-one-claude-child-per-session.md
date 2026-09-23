@@ -199,3 +199,27 @@ that makes eager spawn worth taking.
   completes, rather than failing or fencing the session.
 - The existing failed-child test, unchanged: a child that exits non-zero
   without a `result` still reports its status and stderr as an incomplete turn.
+
+## Amendment (2026-09-23): the child's own turns, and whose `result` ends a turn
+
+Point 2 assumed the child writes only while a turn runs. It does not. When a
+background task ends after a turn's `result`, Claude Code 2.1.259 reports the
+end and runs a turn of its own, with its own `result` (captured). Nothing read
+stdout between turns, so the next user turn read that `result` and ended
+early.
+
+- A task reads the child's stdout for the child's whole life.
+- Each user line carries a client `uuid`. The engine reports the line's fate
+  in `command_lifecycle` lines (`queued`, `started`, `completed`) and names
+  the uuid on the `result` of a turn the line started. A `result` ends the
+  user's turn once the engine has started the line, or when it names the
+  line. A `result` before that ends a turn that was already running when the
+  line arrived. An engine that reports no lifecycle falls back to the first
+  `result` after the write, unless it names only other lines.
+- Output nobody asked for reaches the transcript as background activity:
+  notices, messages, and tool calls, without streaming text and without a
+  turn end. A failed turn of the engine's own becomes a warning notice.
+
+The consequence about approvals above no longer holds in full: a background
+task can run between turns, and nothing here gives it an open turn to attach
+an approval to.
