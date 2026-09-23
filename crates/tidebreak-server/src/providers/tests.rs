@@ -1431,6 +1431,176 @@ async fn a_configured_row_a_catalog_update_curated_gives_way_to_the_curated_row(
     );
 }
 
+/// Someone who added a model by hand before a release built it in is never
+/// blocked by that row: the card leaves it out and says why, and the next
+/// save drops it even when the client re-sends the whole list. A new row
+/// that repeats a built-in id is still refused.
+#[tokio::test]
+async fn a_row_the_catalog_builds_in_leaves_the_card_and_goes_on_the_next_save() {
+    let (store, _directory) = provider_test_store().await;
+    let secrets = TestSecrets::default();
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
+    let row = |id: &str| CustomModelConfig {
+        id: id.into(),
+        ..Default::default()
+    };
+    // Saved while `grok-4.7` was not built in.
+    write_config(
+        &store,
+        ProviderKind::Xai,
+        &ProviderConfig {
+            enabled: true,
+            base_url: None,
+            models: vec![row("grok-4.7"), row("grok-account-model")],
+        },
+    )
+    .await
+    .unwrap();
+
+    let xai = |providers: Vec<ProviderInfo>| {
+        providers
+            .into_iter()
+            .find(|provider| provider.kind == ProviderKind::Xai)
+            .unwrap()
+    };
+    let listed = xai(list_providers(&store, &secrets, &policy, None)
+        .await
+        .unwrap());
+    assert_eq!(listed.models, vec![row("grok-account-model")]);
+    assert_eq!(listed.replaced_by_built_in, vec!["grok-4.7".to_owned()]);
+
+    // A client that still holds the old list re-sends it with one more row.
+    let update = |models: Vec<CustomModelConfig>| ProviderUpdate {
+        enabled: None,
+        base_url: None,
+        credential: None,
+        models: Some(models),
+    };
+    let saved = update_provider(
+        &store,
+        &secrets,
+        ProviderKind::Xai,
+        update(vec![
+            row("grok-4.7"),
+            row("grok-account-model"),
+            row("grok-next"),
+        ]),
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .expect("a row the catalog built in never blocks a save");
+    assert_eq!(
+        saved.models,
+        vec![row("grok-account-model"), row("grok-next")]
+    );
+    assert_eq!(saved.replaced_by_built_in, vec!["grok-4.7".to_owned()]);
+    assert_eq!(
+        read_config(&store, ProviderKind::Xai).await.unwrap().models,
+        vec![row("grok-account-model"), row("grok-next")]
+    );
+    let listed = xai(list_providers(&store, &secrets, &policy, None)
+        .await
+        .unwrap());
+    assert!(listed.replaced_by_built_in.is_empty(), "said once");
+
+    // Adding a built-in id as a new custom model is still refused.
+    let refused = update_provider(
+        &store,
+        &secrets,
+        ProviderKind::Xai,
+        update(vec![row("grok-account-model"), row("grok-4.6")]),
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.message().contains("grok-4.6"),
+        "{}",
+        refused.message()
+    );
+}
+
+/// Reading a configured row back ignores keys a newer release added, so a
+/// client a release behind still reads the provider list and a stored row
+/// still loads. Saving one refuses a key this server does not know.
+#[test]
+fn a_configured_row_reads_tolerantly_and_saves_strictly() {
+    let listing = serde_json::json!({
+        "kind": "openai_compatible",
+        "enabled": true,
+        "has_credential": false,
+        "models": [{ "id": "vendor/model", "future_field": true }],
+    });
+    let info: ProviderInfo = serde_json::from_value(listing).expect("a listing reads");
+    assert_eq!(info.models[0].id, "vendor/model");
+    // An older server sends neither of the lists this release added.
+    assert!(info.custom_reasoning_efforts.is_empty());
+    assert!(info.replaced_by_built_in.is_empty());
+
+    let stored: ProviderConfig = serde_json::from_value(serde_json::json!({
+        "enabled": true,
+        "models": [{ "id": "vendor/model", "future_field": true }],
+    }))
+    .expect("a stored row a newer release wrote still loads");
+    assert_eq!(stored.models[0].id, "vendor/model");
+
+    let error = serde_json::from_value::<ProviderUpdate>(serde_json::json!({
+        "models": [{ "id": "vendor/model", "future_field": true }],
+    }))
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("unknown field `future_field`"),
+        "{error}"
+    );
+}
+
+/// The strict key list for a saved row names exactly the fields a row
+/// serializes, and a row with every field set survives a save body.
+#[test]
+fn the_save_body_accepts_every_key_a_configured_row_carries() {
+    let row = CustomModelConfig {
+        id: "vendor/model".into(),
+        display_name: Some("Vendor model".into()),
+        upstream_id: Some("vendor/model-upstream".into()),
+        aliases: vec!["vendor/model-alias".into()],
+        context_window: 65_536,
+        max_output_tokens: 8_192,
+        input_modalities: vec![InputModality::Text, InputModality::Image],
+        supports_reasoning: true,
+        reasoning_efforts: vec![ReasoningEffort::Low, ReasoningEffort::High],
+        // Off, so the key serializes.
+        supports_tools: false,
+    };
+    let value = serde_json::to_value(&row).unwrap();
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let mut known = CONFIGURED_MODEL_KEYS.to_vec();
+    keys.sort_unstable();
+    known.sort_unstable();
+    assert_eq!(keys, known);
+
+    let update: ProviderUpdate =
+        serde_json::from_value(serde_json::json!({ "models": [value] })).unwrap();
+    assert_eq!(update.models, Some(vec![row]));
+
+    // Tools on is the default, so the key stays out of the JSON and an older
+    // server, which does not know it, still accepts the row.
+    let tools_on = serde_json::to_value(CustomModelConfig {
+        id: "vendor/model".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(tools_on.get("supports_tools").is_none(), "{tools_on}");
+}
+
 #[tokio::test]
 async fn chatgpt_sign_in_leaves_custom_openai_rows_unavailable() {
     let (store, _directory) = provider_test_store().await;

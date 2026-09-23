@@ -1569,6 +1569,8 @@ mod tests {
                     custom_reasoning_efforts: ProviderKind::Anthropic
                         .custom_reasoning_efforts()
                         .to_vec(),
+                    // Added by hand before a release built it in.
+                    replaced_by_built_in: vec!["claude-opus-5-5".into()],
                 },
                 ProviderInfo {
                     kind: ProviderKind::OpenaiCompatible,
@@ -1584,6 +1586,7 @@ mod tests {
                     custom_reasoning_efforts: ProviderKind::OpenaiCompatible
                         .custom_reasoning_efforts()
                         .to_vec(),
+                    replaced_by_built_in: Vec::new(),
                 },
             ],
         };

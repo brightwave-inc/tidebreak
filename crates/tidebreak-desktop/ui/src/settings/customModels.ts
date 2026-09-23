@@ -77,7 +77,8 @@ export function draftFromConfig(model: CustomModelConfig): ModelDraft {
     imageInput: model.input_modalities.includes("image"),
     supportsReasoning: model.supports_reasoning,
     reasoningEfforts: [...model.reasoning_efforts],
-    supportsTools: model.supports_tools,
+    // The server leaves the flag out while tools are on.
+    supportsTools: model.supports_tools !== false,
   };
 }
 
@@ -198,24 +199,41 @@ export function configFromDraft(
     reasoning_efforts: draft.supportsReasoning
       ? accepted.filter((effort) => draft.reasoningEfforts.includes(effort))
       : [],
-    supports_tools: draft.supportsTools,
+    ...toolsFlag(draft.supportsTools),
   };
+}
+
+/**
+ * The tools flag as a saved row carries it: only when tools are off. On is
+ * the server's default, and leaving it out lets a server that predates the
+ * flag accept the row.
+ */
+function toolsFlag(
+  supportsTools: boolean,
+): Pick<CustomModelConfig, "supports_tools"> {
+  return supportsTools ? {} : { supports_tools: false };
 }
 
 /**
  * A stored row as the next save sends it. A row saved by an older build may
  * list a reasoning level this provider no longer accepts; sending it back
- * would fail the whole save, so it is dropped here.
+ * would fail the whole save, so it is dropped here. A server that predates
+ * the accepted list sends none, and then the row's levels go back as they
+ * are.
  */
 export function rowForSave(
   model: CustomModelConfig,
-  accepted: readonly ReasoningEffort[],
+  accepted: readonly ReasoningEffort[] | undefined,
 ): CustomModelConfig {
+  const { supports_tools: supportsTools, ...row } = model;
   return {
-    ...model,
-    reasoning_efforts: model.supports_reasoning
-      ? accepted.filter((effort) => model.reasoning_efforts.includes(effort))
-      : [],
+    ...row,
+    reasoning_efforts: !model.supports_reasoning
+      ? []
+      : accepted === undefined
+        ? model.reasoning_efforts
+        : accepted.filter((effort) => model.reasoning_efforts.includes(effort)),
+    ...toolsFlag(supportsTools !== false),
   };
 }
 
@@ -291,8 +309,8 @@ export function discoveredModelFacts(model: DiscoveredModel): string[] {
 
 /**
  * The ids of a provider's built-in models: the catalog rows it lists that
- * are not the reader's own. A custom row the catalog has since curated reads
- * as custom here; the server still refuses to save it twice.
+ * are not the reader's own. A saved row the catalog has since built in is no
+ * longer among `info.models`, so its id counts as built in here.
  */
 export function builtInModelIds(
   info: ProviderInfo,

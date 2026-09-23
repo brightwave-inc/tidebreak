@@ -1497,6 +1497,88 @@ async fn writing_a_provider_credential_enables_the_provider() {
     assert_eq!(off_info["has_credential"], true);
 }
 
+/// A row in the shape an older client saves, without the fields this
+/// release added, saves and reads back unchanged, so that client still reads
+/// what it wrote. A chat-only row keeps its tools flag, and a key this server
+/// does not know is refused on save rather than stored as a default.
+#[tokio::test]
+async fn an_older_shape_model_row_saves_and_reads_back_unchanged() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let put = |body: serde_json::Value| {
+        router.clone().oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/openai_compatible")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+    };
+    let older_row = serde_json::json!({
+        "id": "vendor/model",
+        "display_name": "Vendor model",
+        "context_window": 65536,
+        "max_output_tokens": 8192,
+        "input_modalities": ["text"],
+        "supports_reasoning": false,
+        "reasoning_efforts": []
+    });
+    let chat_only = serde_json::json!({
+        "id": "vendor/chat-only",
+        "context_window": 32768,
+        "max_output_tokens": 4096,
+        "input_modalities": ["text"],
+        "supports_reasoning": false,
+        "reasoning_efforts": [],
+        "supports_tools": false
+    });
+
+    let saved = put(serde_json::json!({
+        "enabled": true,
+        "base_url": "https://compat.example/v1",
+        "models": [older_row, chat_only]
+    }))
+    .await
+    .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved: serde_json::Value = json_body(saved).await;
+    assert_eq!(saved["models"], serde_json::json!([older_row, chat_only]));
+
+    let listed = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/providers")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let listed: serde_json::Value = json_body(listed).await;
+    let compatible = listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["kind"] == "openai_compatible")
+        .unwrap();
+    assert_eq!(
+        compatible["models"],
+        serde_json::json!([older_row, chat_only])
+    );
+
+    let refused = put(serde_json::json!({
+        "models": [{ "id": "vendor/model", "future_field": true }]
+    }))
+    .await
+    .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(refused).await;
+    assert!(error.message.contains("future_field"), "{}", error.message);
+}
+
 #[tokio::test]
 async fn openai_compatible_requires_base_url_when_enabled() {
     let (router, token, _store, _dir) = test_app().await;

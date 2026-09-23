@@ -948,13 +948,24 @@ fn default_custom_supports_tools() -> bool {
     true
 }
 
+fn is_default_custom_supports_tools(supports_tools: &bool) -> bool {
+    *supports_tools == default_custom_supports_tools()
+}
+
 /// User-inspectable routing limits and capabilities for one configured model.
 ///
 /// The reader declares what the model accepts. Validation holds each
 /// declaration to what the provider's adapter carries end to end: image input
 /// on every direct route, and only the reasoning levels that route sends.
+//
+// Read tolerantly, like every REST record: `GET /providers` carries these
+// rows, so a key a newer server adds must not break a client a release
+// behind, and a stored row a newer release wrote must not fail to load. The
+// `PUT /providers/{kind}` body checks its rows' keys strictly instead; see
+// [`CONFIGURED_MODEL_KEYS`]. A field added here serializes only when it
+// differs from its default, so an older server still accepts the rows a
+// newer client saves unless they use the new field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct CustomModelConfig {
     /// Exact model id sent to the endpoint.
     pub id: String,
@@ -997,9 +1008,61 @@ pub struct CustomModelConfig {
     /// as a chat-only model: Tidebreak sends it no tool schemas.
     ///
     /// Defaults to on, which is how every configured row behaved before the
-    /// field existed.
-    #[serde(default = "default_custom_supports_tools")]
+    /// field existed, and is left out of the JSON while on.
+    #[serde(
+        default = "default_custom_supports_tools",
+        skip_serializing_if = "is_default_custom_supports_tools"
+    )]
     pub supports_tools: bool,
+}
+
+/// Keys a configured-model row in a `PUT /providers/{kind}` body may carry.
+///
+/// Reading a row back is tolerant, but saving one is strict: a key this
+/// server does not know is refused, so a misspelled or newer field never
+/// saves as its default without a word. A test pins this list to the fields
+/// [`CustomModelConfig`] serializes.
+pub(crate) const CONFIGURED_MODEL_KEYS: &[&str] = &[
+    "id",
+    "display_name",
+    "upstream_id",
+    "aliases",
+    "context_window",
+    "max_output_tokens",
+    "input_modalities",
+    "supports_reasoning",
+    "reasoning_efforts",
+    "supports_tools",
+];
+
+/// Deserialize the configured-model list of a provider update, refusing any
+/// row key outside [`CONFIGURED_MODEL_KEYS`].
+fn strict_configured_models<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<CustomModelConfig>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let Some(rows) =
+        Option::<Vec<serde_json::Map<String, serde_json::Value>>>::deserialize(deserializer)?
+    else {
+        return Ok(None);
+    };
+    rows.into_iter()
+        .map(|row| {
+            if let Some(key) = row
+                .keys()
+                .find(|key| !CONFIGURED_MODEL_KEYS.contains(&key.as_str()))
+            {
+                return Err(D::Error::custom(format!(
+                    "unknown field `{key}` in a configured model"
+                )));
+            }
+            serde_json::from_value(serde_json::Value::Object(row)).map_err(D::Error::custom)
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 impl Default for CustomModelConfig {
@@ -1481,6 +1544,18 @@ async fn bare_model_owners(store: &dyn Store, value: &str) -> Result<Vec<Resolve
     Ok(owners)
 }
 
+/// Split saved rows into the ones that still describe a model of their own
+/// and the ids a built-in model of the same provider now covers.
+fn split_replaced_rows(
+    provider: ProviderKind,
+    models: Vec<CustomModelConfig>,
+) -> (Vec<CustomModelConfig>, Vec<String>) {
+    let (replaced, kept): (Vec<_>, Vec<_>) = models
+        .into_iter()
+        .partition(|model| model_registry::find_for(provider, &model.id).is_some());
+    (kept, replaced.into_iter().map(|model| model.id).collect())
+}
+
 /// The configured rows that still describe a model of their own.
 ///
 /// A row whose id a later catalog curated under the same provider is inert:
@@ -1613,9 +1688,15 @@ pub struct ProviderInfo {
     /// Explicit configured model entries for this endpoint.
     pub models: Vec<CustomModelConfig>,
     /// The reasoning-effort levels a configured row on this provider may
-    /// list, ascending: what the provider's adapter actually sends. Empty for
-    /// the gateway, whose rows come from its own catalog.
+    /// list, ascending: what the provider's adapter actually sends. Absent
+    /// for the gateway, whose rows come from its own catalog.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_reasoning_efforts: Vec<ReasoningEffort>,
+    /// Saved custom model ids that a built-in model of this provider now
+    /// covers. Tidebreak uses the built-in model and leaves these out of
+    /// `models`; the next save to this provider drops them for good.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaced_by_built_in: Vec<String>,
 }
 
 /// How a provider's credential was established.
@@ -1661,8 +1742,9 @@ pub struct ProviderUpdate {
     #[serde(default)]
     pub credential: Option<ProviderCredential>,
     /// Replacement configured-model list. Valid for every direct provider;
-    /// the gateway refuses every write.
-    #[serde(default)]
+    /// the gateway refuses every write. Each row's keys are checked
+    /// strictly, unlike a row read back.
+    #[serde(default, deserialize_with = "strict_configured_models")]
     pub models: Option<Vec<CustomModelConfig>>,
 }
 
@@ -1848,6 +1930,7 @@ pub async fn list_providers(
                     auth_mode: None,
                     models: snapshot.models.clone(),
                     custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
+                    replaced_by_built_in: Vec::new(),
                 });
                 continue;
             }
@@ -1866,6 +1949,7 @@ pub async fn list_providers(
                 auth_mode: None,
                 models: gateway_models(store, policy, caller_gateway).await?,
                 custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
+                replaced_by_built_in: Vec::new(),
             });
             continue;
         }
@@ -1880,14 +1964,16 @@ pub async fn list_providers(
         } else {
             has_credential
         };
+        let (models, replaced_by_built_in) = split_replaced_rows(kind, config.models);
         out.push(ProviderInfo {
             kind,
             enabled: config.enabled,
             base_url: kind.effective_base_url(config.base_url.as_deref()),
             has_credential,
             auth_mode,
-            models: config.models,
+            models,
             custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
+            replaced_by_built_in,
         });
     }
     Ok(out)
@@ -1944,6 +2030,12 @@ pub async fn update_provider(
     }
 
     let mut config = read_config(store, kind).await?;
+    // A row saved before a catalog update built its id in gives way to the
+    // built-in model. Every save drops it, so a client that re-sends the
+    // whole list is never blocked by it, and the response names what went.
+    let (kept, replaced_by_built_in) =
+        split_replaced_rows(kind, std::mem::take(&mut config.models));
+    config.models = kept;
 
     if let Some(enabled) = update.enabled {
         config.enabled = enabled;
@@ -1974,6 +2066,12 @@ pub async fn update_provider(
                 "configured models are not supported by {kind}"
             )));
         }
+        // A re-sent copy of a dropped row goes too. A new row that repeats a
+        // built-in id is still refused by the validation below.
+        let models: Vec<_> = models
+            .into_iter()
+            .filter(|model| !replaced_by_built_in.contains(&model.id))
+            .collect();
         validate_configured_models(kind, &models)?;
         config.models = models;
     }
@@ -2024,6 +2122,7 @@ pub async fn update_provider(
         auth_mode: auth_mode_for(secrets, kind).await,
         models: config.models,
         custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
+        replaced_by_built_in,
     })
 }
 

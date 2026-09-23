@@ -29,6 +29,7 @@ export function CustomModelDialog({
   onOpenChange,
   mode,
   providerName,
+  requestNote,
   initial,
   acceptedEfforts,
   takenIds,
@@ -39,6 +40,8 @@ export function CustomModelDialog({
   onOpenChange: (open: boolean) => void;
   mode: "add" | "edit";
   providerName: string;
+  /** How this provider's requests go out, such as with the saved key. */
+  requestNote: string;
   initial: ModelDraft;
   acceptedEfforts: readonly ReasoningEffort[];
   /** The ids of this provider's other custom models. */
@@ -98,8 +101,7 @@ export function CustomModelDialog({
         <DialogHeader className="gap-1 pr-6">
           <DialogTitle className="text-base">{title}</DialogTitle>
           <DialogDescription className="text-xs leading-relaxed">
-            Tidebreak sends this model&apos;s requests to {providerName} with
-            the key you saved. Leave a limit blank to use the default.
+            {requestNote} Leave a limit blank to use the default.
           </DialogDescription>
         </DialogHeader>
         <form className="flex flex-col gap-5" noValidate onSubmit={submit}>

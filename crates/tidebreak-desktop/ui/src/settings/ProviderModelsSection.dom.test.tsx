@@ -22,6 +22,7 @@ import {
 } from "../stories/fixtures";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 
+// As the server sends it: tools on leaves the flag out.
 const saved: CustomModelConfig = {
   id: "claude-sonnet-5-5",
   display_name: "Claude Sonnet 5.5",
@@ -30,7 +31,6 @@ const saved: CustomModelConfig = {
   input_modalities: ["text", "image"],
   supports_reasoning: true,
   reasoning_efforts: ["low", "high"],
-  supports_tools: true,
 };
 
 function anthropic(overrides: Partial<ProviderInfo> = {}): ProviderInfo {
@@ -165,6 +165,70 @@ describe("ProviderModelsSection", () => {
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
+  });
+
+  it("says when a custom model is built in now", () => {
+    renderSection({}, anthropic({ replaced_by_built_in: ["claude-opus-5-5"] }));
+
+    expect(
+      screen.getByText(
+        "Claude Opus 5.5 is built in now, so Tidebreak uses the built-in model instead of your custom one. The next save removes your copy.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps working against a server that predates the accepted levels", async () => {
+    const older: Partial<ProviderInfo> = anthropic();
+    delete older.custom_reasoning_efforts;
+    const putProvider = vi.fn().mockResolvedValue(older);
+    renderSection({ putProvider }, older as ProviderInfo);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
+    const dialog = await screen.findByRole("dialog");
+    // With no accepted levels to offer, the form offers no reasoning.
+    expect(
+      within(dialog).queryByRole("switch", { name: "Reasons" }),
+    ).not.toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText("Model ID"), {
+      target: { value: "claude-next" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add model" }));
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("anthropic", {
+        models: [
+          // The saved row's own levels go back as they are.
+          saved,
+          {
+            id: "claude-next",
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+            input_modalities: ["text"],
+            supports_reasoning: false,
+            reasoning_efforts: [],
+          },
+        ],
+      }),
+    );
+  });
+
+  it("does not claim a saved key on a local endpoint that needs none", async () => {
+    renderSection(
+      {},
+      providerInfoFixture("ollama", {
+        enabled: true,
+        base_url: "http://127.0.0.1:11434/v1",
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText(/This endpoint needs no key\./),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(/the key you saved/),
+    ).not.toBeInTheDocument();
   });
 
   it("points at each field that is wrong before saving anything", async () => {
@@ -380,7 +444,6 @@ describe("ProviderModelsSection", () => {
             input_modalities: ["text", "image"],
             supports_reasoning: true,
             reasoning_efforts: ["low", "medium", "high", "xhigh", "max"],
-            supports_tools: true,
           },
         ],
       }),

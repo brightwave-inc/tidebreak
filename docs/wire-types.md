@@ -158,9 +158,9 @@ Four more things are shared through it:
 - **REST records.** The model catalog, the provider list, the MCP server
   listing, agent runs, and conversation outputs are the routes' own response
   types, re-exported from `tidebreak_server::wire` with `Deserialize`. They
-  ignore unknown keys like the frames do. One nested type stays strict:
-  `CustomModelConfig`, because the provider update body shares it. The output
-  records carry
+  ignore unknown keys like the frames do, `CustomModelConfig` included. Only
+  the provider update body checks a configured model's keys strictly, when the
+  server saves it. The output records carry
   typed timestamps and a `producedBy` enum rather than preformatted strings.
   `crates/tidebreak-server-api/fixtures/rest-records.json` holds one real value
   per record (`{ name, type, value }`, the type naming the wire type it

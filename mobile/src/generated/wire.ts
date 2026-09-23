@@ -2107,9 +2107,9 @@ reasoning_efforts: Array<ReasoningEffort>,
  * as a chat-only model: Tidebreak sends it no tool schemas.
  *
  * Defaults to on, which is how every configured row behaved before the
- * field existed.
+ * field existed, and is left out of the JSON while on.
  */
-supports_tools: boolean, };
+supports_tools?: boolean, };
 
 /**
  * Wire mirror of the admission gate's typed denial reasons
@@ -4488,10 +4488,16 @@ auth_mode?: ProviderAuthMode,
 models: Array<CustomModelConfig>,
 /**
  * The reasoning-effort levels a configured row on this provider may
- * list, ascending: what the provider's adapter actually sends. Empty for
- * the gateway, whose rows come from its own catalog.
+ * list, ascending: what the provider's adapter actually sends. Absent
+ * for the gateway, whose rows come from its own catalog.
  */
-custom_reasoning_efforts: Array<ReasoningEffort>, };
+custom_reasoning_efforts?: Array<ReasoningEffort>,
+/**
+ * Saved custom model ids that a built-in model of this provider now
+ * covers. Tidebreak uses the built-in model and leaves these out of
+ * `models`; the next save to this provider drops them for good.
+ */
+replaced_by_built_in?: Array<string>, };
 
 /**
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without

@@ -107,14 +107,18 @@ const catalog: ModelInfo[] = [
   catalogRow("xai", "grok-4.5", "Grok 4.5"),
 ];
 
-type ProvidersStoryProps = { expand: ProviderInfo["kind"] };
+type ProvidersStoryProps = {
+  expand: ProviderInfo["kind"];
+  /** Replaces the default provider list. */
+  providerList?: ProviderInfo[];
+};
 
-function ProvidersStory({ expand }: ProvidersStoryProps) {
+function ProvidersStory({ expand, providerList }: ProvidersStoryProps) {
   return (
     <SettingsStoryHarness state="configured">
       {(client) => (
         <ProvidersPanel
-          providers={providers}
+          providers={providerList ?? providers}
           models={catalog}
           client={client}
           onChanged={fn()}
@@ -215,6 +219,7 @@ function FormStory({ mode, initial }: FormStoryProps) {
       onOpenChange={setOpen}
       mode={mode}
       providerName="Anthropic"
+      requestNote="Tidebreak sends this model's requests to Anthropic with the key you saved."
       initial={initial}
       acceptedEfforts={customReasoningEfforts.anthropic}
       takenIds={new Set(["claude-sonnet-5-5"])}
@@ -240,6 +245,27 @@ export const CustomModelsInACard: Story = {
 export const CustomModelsInACardCompact: Story = {
   render: () => <ProvidersStory expand="anthropic" />,
   globals: { viewport: { value: "compact", isRotated: false } },
+};
+
+/**
+ * A model someone added by hand before a release built it in: the card says
+ * the built-in model answers now and the next save drops the copy.
+ */
+export const CustomModelBuiltInNow: Story = {
+  render: () => (
+    <ProvidersStory
+      expand="anthropic"
+      providerList={[
+        providerInfoFixture("anthropic", {
+          enabled: true,
+          has_credential: true,
+          models: [sonnetPreview],
+          replaced_by_built_in: ["claude-opus-5-5"],
+        }),
+        ...providers.slice(1),
+      ]}
+    />
+  ),
 };
 
 /** A fine-tune on OpenAI that reasons but never calls tools. */

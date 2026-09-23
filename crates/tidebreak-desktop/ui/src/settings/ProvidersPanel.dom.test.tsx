@@ -120,7 +120,6 @@ describe("ProvidersPanel", () => {
             input_modalities: ["text"],
             supports_reasoning: false,
             reasoning_efforts: [],
-            supports_tools: true,
           },
         ],
       }),
@@ -157,7 +156,6 @@ describe("ProvidersPanel", () => {
       input_modalities: ["text"],
       supports_reasoning: false,
       reasoning_efforts: [],
-      supports_tools: true,
     });
     expect("display_name" in sent.models[0]).toBe(false);
   });

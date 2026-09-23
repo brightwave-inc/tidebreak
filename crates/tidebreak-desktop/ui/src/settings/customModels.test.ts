@@ -28,9 +28,10 @@ describe("custom model drafts", () => {
       input_modalities: ["text"],
       supports_reasoning: false,
       reasoning_efforts: [],
-      supports_tools: true,
     });
     expect("display_name" in config).toBe(false);
+    // Tools on is the server's default, so the flag stays out of the row.
+    expect("supports_tools" in config).toBe(false);
   });
 
   it("keeps only the levels the route sends, in scale order", () => {
@@ -152,6 +153,32 @@ describe("custom model drafts", () => {
     ).toEqual([]);
   });
 
+  it("saves a row a server that predates this release still accepts", () => {
+    const row: CustomModelConfig = {
+      id: "grok-account-model",
+      context_window: 500_000,
+      max_output_tokens: 32_768,
+      input_modalities: ["text"],
+      supports_reasoning: true,
+      reasoning_efforts: ["low", "xhigh"],
+      supports_tools: true,
+    };
+    // Tools on goes out without the flag an older server does not know.
+    expect("supports_tools" in rowForSave(row, ["low", "xhigh"])).toBe(false);
+    // A chat-only row still says so.
+    expect(
+      rowForSave({ ...row, supports_tools: false }, ["low"]).supports_tools,
+    ).toBe(false);
+    // An older server lists no accepted levels, so the row's own go back.
+    expect(rowForSave(row, undefined).reasoning_efforts).toEqual([
+      "low",
+      "xhigh",
+    ]);
+    // A row read from an older server has no flag at all: tools on.
+    const { supports_tools: _omitted, ...older } = row;
+    expect(draftFromConfig(older).supportsTools).toBe(true);
+  });
+
   it("summarizes only the facts it knows", () => {
     expect(
       modelFacts({
@@ -185,7 +212,6 @@ describe("custom model drafts", () => {
           input_modalities: ["text"],
           supports_reasoning: false,
           reasoning_efforts: [],
-          supports_tools: true,
         },
       ],
     });

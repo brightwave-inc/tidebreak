@@ -81,7 +81,10 @@
           "enabled": true,
           "has_credential": true,
           "kind": "anthropic",
-          "models": []
+          "models": [],
+          "replaced_by_built_in": [
+            "claude-opus-5-5"
+          ]
         },
         {
           "base_url": "http://localhost:11434/v1",
@@ -105,8 +108,7 @@
               ],
               "max_output_tokens": 4096,
               "reasoning_efforts": [],
-              "supports_reasoning": false,
-              "supports_tools": true
+              "supports_reasoning": false
             }
           ]
         }

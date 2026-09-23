@@ -49,11 +49,16 @@ export function ProviderModelsSection({
 }) {
   const headingId = useId();
   const name = providerLabel(info.kind);
-  const accepted = info.custom_reasoning_efforts;
+  // A server that predates the list sends none; the forms then offer no
+  // reasoning levels, and saves send stored levels back unchanged.
+  const accepted = info.custom_reasoning_efforts ?? [];
   const builtIn = builtInModelIds(info, catalogModels);
   const builtInNames = catalogModels
     .filter((model) => builtIn.has(model.id))
     .map((model) => model.display_name);
+  const replaced = (info.replaced_by_built_in ?? []).map(
+    (id) => catalogModels.find((model) => model.id === id)?.display_name ?? id,
+  );
   const blocker = discoveryBlocker(info);
   const [form, setForm] = useState<FormState | null>(null);
   const [discovering, setDiscovering] = useState(false);
@@ -63,7 +68,9 @@ export function ProviderModelsSection({
 
   async function save(models: CustomModelConfig[]) {
     await client.putProvider(info.kind, {
-      models: models.map((model) => rowForSave(model, accepted)),
+      models: models.map((model) =>
+        rowForSave(model, info.custom_reasoning_efforts),
+      ),
     });
     onChanged();
   }
@@ -154,11 +161,12 @@ export function ProviderModelsSection({
           </Button>
         </div>
       </div>
-      {(builtInNames.length > 0 || status) && (
+      {(builtInNames.length > 0 || status || replaced.length > 0) && (
         <div className="flex flex-col gap-1 text-xs text-muted-foreground">
           {builtInNames.length > 0 && (
             <p>Built in: {builtInNames.join(", ")}</p>
           )}
+          {replaced.length > 0 && <p>{replacedNote(replaced)}</p>}
           {status && <p>{status}</p>}
         </div>
       )}
@@ -193,6 +201,7 @@ export function ProviderModelsSection({
         }}
         mode={form?.mode ?? "add"}
         providerName={name}
+        requestNote={modelRequestNote(info, name)}
         initial={form?.initial ?? EMPTY_DRAFT}
         acceptedEfforts={accepted}
         takenIds={takenIds}
@@ -219,6 +228,34 @@ const EMPTY_DRAFT = emptyDraft();
 
 function modelName(model: CustomModelConfig): string {
   return model.display_name?.trim() || model.id;
+}
+
+/**
+ * What happened to custom models a release has since built in: Tidebreak
+ * uses the built-in model, and the next save drops the reader's copy.
+ */
+export function replacedNote(names: readonly string[]): string {
+  return names.length === 1
+    ? `${names[0]} is built in now, so Tidebreak uses the built-in model instead of your custom one. The next save removes your copy.`
+    : `These are built in now, so Tidebreak uses the built-in models instead of your custom ones: ${names.join(", ")}. The next save removes your copies.`;
+}
+
+/**
+ * How a custom model on this provider reaches it, for the Add model form:
+ * with the saved key, with no key on a local endpoint, or not until a key is
+ * saved.
+ */
+export function modelRequestNote(info: ProviderInfo, name: string): string {
+  if (info.kind === "openai" && info.auth_mode === "chatgpt") {
+    return "Custom OpenAI models need an API key. ChatGPT sign-in runs only the built-in models.";
+  }
+  if (info.has_credential) {
+    return `Tidebreak sends this model's requests to ${name} with the key you saved.`;
+  }
+  if (info.kind === "ollama" || info.kind === "openai_compatible") {
+    return `Tidebreak sends this model's requests to ${name}. This endpoint needs no key.`;
+  }
+  return `Tidebreak sends this model's requests to ${name} once you save an API key.`;
 }
 
 /**
