@@ -1196,11 +1196,14 @@ mod tests {
     async fn parent_wait_timeout_clears_the_lease_without_stopping_children() {
         let (_dir, runtime, _host, parent) = setup().await;
         let child = wait_child(&runtime, &parent, "timeout").await;
+        // The wait expires this long after it starts. Too short a window lets a
+        // slow runner pass the expiry before the wait is first published, so
+        // the journal never records it as active.
         let result = wait_for_children(
             &runtime,
             &parent,
             std::slice::from_ref(&child),
-            Duration::from_millis(50),
+            Duration::from_millis(750),
         )
         .await
         .unwrap();
