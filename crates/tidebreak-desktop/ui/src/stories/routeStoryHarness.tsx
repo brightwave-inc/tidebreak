@@ -47,6 +47,7 @@ export const routeProjects = [
     title: "Desktop release",
     attachment_revision: 4,
     root_attachments: [],
+    instructions: "",
     created_at: "2026-08-20T10:00:00.000Z",
   },
   {
@@ -54,6 +55,7 @@ export const routeProjects = [
     title: "Research archive",
     attachment_revision: 2,
     root_attachments: [],
+    instructions: "",
     created_at: "2026-08-18T14:30:00.000Z",
   },
   {
@@ -61,9 +63,19 @@ export const routeProjects = [
     title: "Customer onboarding and launch readiness",
     attachment_revision: 1,
     root_attachments: [],
+    instructions: "",
     created_at: "2026-08-16T09:15:00.000Z",
   },
 ] satisfies Project[];
+
+/** A project brief as someone would write one: short, specific, and plain. */
+export const routeProjectInstructions = [
+  "This project ships the 1.0 desktop release.",
+  "",
+  "- Treat the release checklist in docs/releases.md as the source of truth.",
+  "- Name the pull request and the commit for every change you mention.",
+  "- Flag anything that would break a 0.x profile on upgrade.",
+].join("\n");
 
 const baseChats = [
   {
@@ -589,6 +601,9 @@ type RouteClientMethods = Pick<
   | "getGatewayApps"
   | "listConsentStatements"
   | "revokeStandingGrant"
+  | "getPersonalInstructions"
+  | "putPersonalInstructions"
+  | "patchProjectInstructions"
   | "listProjectDocuments"
   | "listApps"
   | "getApp"
@@ -782,6 +797,13 @@ export function storyClient(
     }),
     listConsentStatements: async () => [],
     revokeStandingGrant: async () => {},
+    getPersonalInstructions: async () => ({ instructions: "" }),
+    putPersonalInstructions: async (instructions) => ({ instructions }),
+    patchProjectInstructions: async (projectId, instructions) => ({
+      ...(routeProjects.find((project) => project.id === projectId) ??
+        routeProjects[0]),
+      instructions,
+    }),
     listProjectDocuments: async () => ({
       documents: routeProjectDocuments,
       next_cursor: null,

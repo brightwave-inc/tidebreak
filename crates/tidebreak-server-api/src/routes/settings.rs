@@ -22,6 +22,7 @@ use crate::exec_write_snapshot::{
     ExecFilePreviewRequest, ExecFilePreviewRevision, ExecFileUndoOutcome, ExecTurnUndoOutcome,
 };
 use crate::extract::{double_option, Json, Path};
+use crate::instructions::{self, PersonalInstructions};
 use crate::model_roles::{self, ModelRole};
 use crate::principal::AuthContext;
 pub(crate) use crate::runtime_settings::read_compaction_policy;
@@ -473,6 +474,39 @@ pub async fn put_settings(
     Ok(Json(
         read_settings(&state, &auth.principal.owner_id()).await?,
     ))
+}
+
+/// The largest `PUT /settings/instructions` body. JSON escapes a control
+/// character to six bytes, so the bound leaves room for instructions at the
+/// cap in the worst case rather than refusing text the cap allows.
+pub const MAX_PERSONAL_INSTRUCTIONS_BODY_BYTES: usize = 64 * 1_024;
+
+/// `GET /settings/instructions` — the caller's personal instructions.
+pub async fn get_personal_instructions(
+    State(state): State<AppState>,
+    auth: AuthContext,
+) -> Result<Json<PersonalInstructions>, ServerError> {
+    let owner = auth.principal.owner_id();
+    Ok(Json(PersonalInstructions {
+        instructions: instructions::read_personal(&*state.store, &owner).await?,
+    }))
+}
+
+/// `PUT /settings/instructions` — replace the caller's personal instructions,
+/// returning what was stored. An empty string clears them.
+///
+/// Each person owns their own instructions, so this sits on the member plane:
+/// any signed-in caller writes their own and nobody else's.
+pub async fn put_personal_instructions(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<PersonalInstructions>,
+) -> Result<Json<PersonalInstructions>, ServerError> {
+    let owner = auth.principal.owner_id();
+    instructions::write_personal(&*state.store, &owner, &body.instructions).await?;
+    Ok(Json(PersonalInstructions {
+        instructions: instructions::read_personal(&*state.store, &owner).await?,
+    }))
 }
 
 /// The settings both handlers return, read back from the store so a response

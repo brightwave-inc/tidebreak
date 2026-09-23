@@ -460,6 +460,11 @@ pub struct Project {
     /// Ordered opaque root defaults for conversations created in this project.
     /// These ids are product state, never host authorization.
     pub root_attachments: Vec<HostRootId>,
+    /// Standing instructions for every conversation in this project. The
+    /// internal engine adds them to its system prompt after the owner's
+    /// personal instructions. Empty means none.
+    #[serde(default)]
+    pub instructions: String,
     /// When the project was created.
     pub created_at: DateTime<Utc>,
 }

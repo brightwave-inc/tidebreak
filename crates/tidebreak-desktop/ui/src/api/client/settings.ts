@@ -12,6 +12,7 @@ import type {
   ModelRoleInfo,
   ModelSelectionKey,
   ModelVisibility,
+  PersonalInstructions,
   PromptCacheRetention,
   ProviderInfo,
   ProviderKind,
@@ -145,6 +146,25 @@ export function withSettingsApi<TBase extends Constructor<HttpCore>>(
 
     getSettings(): Promise<RuntimeSettings> {
       return this.json("/settings", { headers: this.headers() });
+    }
+
+    /** The caller's own standing instructions for every conversation. */
+    getPersonalInstructions(): Promise<PersonalInstructions> {
+      return this.json("/settings/instructions", { headers: this.headers() });
+    }
+
+    /**
+     * Replace the caller's standing instructions, returning what was stored.
+     * An empty string clears them. The server refuses text over 8,192 bytes.
+     */
+    putPersonalInstructions(
+      instructions: string,
+    ): Promise<PersonalInstructions> {
+      return this.json("/settings/instructions", {
+        method: "PUT",
+        headers: this.headers(true),
+        body: JSON.stringify({ instructions }),
+      });
     }
 
     /**

@@ -116,6 +116,7 @@ fn sample_project() -> Project {
         title: Some("proj".into()),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        instructions: String::new(),
         created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
     }
 }

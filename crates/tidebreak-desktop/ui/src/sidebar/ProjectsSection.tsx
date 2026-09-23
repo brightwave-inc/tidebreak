@@ -8,6 +8,7 @@ import {
   FolderOpen,
   Pencil,
   Plus,
+  ScrollText,
   SquarePen,
   Trash2,
 } from "lucide-react";
@@ -26,6 +27,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { PROJECT_INSTRUCTIONS_HASH } from "@/ProjectFilesView";
 import { NewProjectDialog } from "./NewProjectDialog";
 import { RecentChatRow } from "./RecentChatRow";
 
@@ -128,6 +130,13 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
                 onRenameDraftChange={setProjectRenameDraft}
                 onToggle={() => toggleProjectExpanded(project.id)}
                 onNewChat={() => newChatInProject(project.id)}
+                onOpenInstructions={() =>
+                  void navigate({
+                    to: "/p/$projectId",
+                    params: { projectId: project.id },
+                    hash: PROJECT_INSTRUCTIONS_HASH,
+                  })
+                }
                 onOpenFiles={() =>
                   void navigate({
                     to: "/p/$projectId",
@@ -199,6 +208,7 @@ function ProjectRow({
   onRenameDraftChange,
   onToggle,
   onNewChat,
+  onOpenInstructions,
   onOpenFiles,
   onStartRename,
   onCommitRename,
@@ -214,6 +224,7 @@ function ProjectRow({
   onRenameDraftChange: (draft: string) => void;
   onToggle: () => void;
   onNewChat: () => void;
+  onOpenInstructions: () => void;
   onOpenFiles: () => void;
   onStartRename: () => void;
   onCommitRename: () => void;
@@ -295,6 +306,10 @@ function ProjectRow({
           <DropdownMenuItem onSelect={onNewChat}>
             <SquarePen />
             New work
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onOpenInstructions}>
+            <ScrollText />
+            Instructions
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={onOpenFiles}>
             <Files />

@@ -4099,6 +4099,16 @@ export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions
 export type PermissionMode = "plan" | "ask" | "auto" | "allow";
 
 /**
+ * One person's standing instructions, as `GET /settings/instructions`
+ * returns them and `PUT /settings/instructions` accepts them.
+ */
+export type PersonalInstructions = {
+/**
+ * The instructions as written. Empty means none.
+ */
+instructions: string, };
+
+/**
  * The two decisions a reader can make about a proposed plan.
  */
 export type PlanDecisionChoice = "accept" | "reject";
@@ -4287,6 +4297,12 @@ attachment_revision: number,
  * These ids are product state, never host authorization.
  */
 root_attachments: Array<HostRootId>,
+/**
+ * Standing instructions for every conversation in this project. The
+ * internal engine adds them to its system prompt after the owner's
+ * personal instructions. Empty means none.
+ */
+instructions: string,
 /**
  * When the project was created.
  */

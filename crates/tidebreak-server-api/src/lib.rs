@@ -17,7 +17,7 @@ pub use core::chrome;
 pub(crate) use core::{
     agent_control_tools, agent_run_scratch_reaper, approvals, auth, chat_titling, chatgpt_runtime,
     code, connected_apps, diagnostics, document_decode, engine, error, event_projection,
-    exec_write_snapshot, extract, gateway_drafts, gateway_runtime, image_attachment,
+    exec_write_snapshot, extract, gateway_drafts, gateway_runtime, image_attachment, instructions,
     managed_policy, mcp_config, mcp_curated, mcp_oauth_runtime, memory_sweep, model_registry,
     model_roles, obo_gateway, openapi_discovery, plugin_install, plugin_state, principal,
     providers, runtime_settings, scoped_memory, scoped_store, state, ui_bundle, view_frames,
@@ -629,6 +629,16 @@ pub fn app(state: AppState) -> Router {
 
     let api = Router::new()
         .route("/settings", get(routes::get_settings))
+        // Personal instructions belong to the caller, not the deployment, so
+        // they sit on the member plane beside the deployment's `PUT /settings`.
+        .route(
+            "/settings/instructions",
+            get(routes::get_personal_instructions)
+                .put(routes::put_personal_instructions)
+                .layer(DefaultBodyLimit::max(
+                    routes::MAX_PERSONAL_INSTRUCTIONS_BODY_BYTES,
+                )),
+        )
         .route("/workspace-config", get(routes::export_workspace_config))
         .route(
             "/workspace-config/preview",
@@ -653,9 +663,7 @@ pub fn app(state: AppState) -> Router {
             get(routes::get_project)
                 .patch(routes::patch_project)
                 .delete(routes::delete_project)
-                .layer(DefaultBodyLimit::max(
-                    routes::MAX_PROJECT_METADATA_BODY_BYTES,
-                )),
+                .layer(DefaultBodyLimit::max(routes::MAX_PROJECT_UPDATE_BODY_BYTES)),
         )
         .route("/models", get(routes::list_models))
         .route("/memory/capabilities", get(routes::capabilities))

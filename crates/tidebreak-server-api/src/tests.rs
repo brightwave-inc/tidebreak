@@ -84,6 +84,7 @@ mod conversations;
 mod documents;
 mod gateway_drafts;
 mod image_attachment;
+mod instructions;
 mod lifecycle;
 #[cfg(feature = "keychain")]
 mod listener;
@@ -901,6 +902,15 @@ impl Store for PauseTerminalStore {
     }
     async fn list_projects(&self) -> Result<Vec<Project>> {
         self.inner.list_projects().await
+    }
+    async fn update_project_instructions(
+        &self,
+        id: ProjectId,
+        instructions: String,
+    ) -> Result<bool> {
+        self.inner
+            .update_project_instructions(id, instructions)
+            .await
     }
     async fn create_document(&self, document: &tidebreak_core::DocumentRecord) -> Result<()> {
         self.inner.create_document(document).await

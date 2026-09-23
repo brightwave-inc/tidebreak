@@ -23,6 +23,8 @@ import {
   pending,
   resetRouteStoryStores,
   routeProjectDocuments,
+  routeProjectInstructions,
+  routeProjects,
   RouteStoryProviders,
   storyClient,
   unmanagedPolicy,
@@ -37,7 +39,9 @@ type RouteScenario =
   | "project-empty"
   | "project-failure"
   | "project-dense"
+  | "project-instructions"
   | "settings-unmanaged"
+  | "settings-instructions"
   | "settings-managed"
   | "settings-connected-apps"
   | "apps-list"
@@ -157,6 +161,14 @@ function clientForScenario(scenario: RouteScenario): ApiClient {
       }),
     });
   }
+  if (scenario === "settings-instructions") {
+    return storyClient({
+      getPersonalInstructions: async () => ({
+        instructions:
+          "Answer in British English.\n\nLead with the answer, then the detail.",
+      }),
+    });
+  }
   if (scenario === "project-dense") {
     return storyClient({
       listProjectDocuments: async () => ({
@@ -170,7 +182,9 @@ function clientForScenario(scenario: RouteScenario): ApiClient {
 
 function initialPathFor(scenario: RouteScenario): string {
   if (scenario.startsWith("inbox")) return "/inbox";
+  if (scenario === "project-instructions") return "/p/project-1#instructions";
   if (scenario.startsWith("project")) return "/p/project-1";
+  if (scenario === "settings-instructions") return "/settings/instructions";
   if (scenario === "settings-managed") return "/settings/gateway";
   if (scenario === "settings-connected-apps") return "/settings/connected-apps";
   if (scenario === "settings-unmanaged") return "/settings/providers";
@@ -193,6 +207,14 @@ function RoutesStory({ scenario }: { scenario: RouteScenario }) {
       inboxEntries: inboxDense ? denseInboxEntries : [],
       inboxLoaded: !inboxLoading,
       attentionChatIds: inboxDense ? ["chat-2"] : [],
+      projects:
+        scenario === "project-instructions"
+          ? routeProjects.map((project) =>
+              project.id === "project-1"
+                ? { ...project, instructions: routeProjectInstructions }
+                : project,
+            )
+          : routeProjects,
     });
     return {
       client: clientForScenario(scenario),
@@ -265,6 +287,20 @@ export const ProjectFilesDense: Story = {
 export const ProjectFilesDenseMinimumWindow: Story = {
   args: { scenario: "project-dense" },
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
+};
+
+/** Opened from the project menu's Instructions item: the brief is in focus. */
+export const ProjectInstructions: Story = {
+  args: { scenario: "project-instructions" },
+};
+
+export const ProjectInstructionsMinimumWindow: Story = {
+  args: { scenario: "project-instructions" },
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+};
+
+export const SettingsInstructions: Story = {
+  args: { scenario: "settings-instructions" },
 };
 
 export const SettingsProvidersUnmanaged: Story = {

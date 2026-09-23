@@ -775,6 +775,7 @@ mod tests {
             title: Some("Q3".into()),
             attachment_revision: 0,
             root_attachments: Vec::new(),
+            instructions: String::new(),
             created_at: Utc::now(),
         };
         store.create_project(&project).await.unwrap();
@@ -783,6 +784,7 @@ mod tests {
             title: Some("Q4".into()),
             attachment_revision: 0,
             root_attachments: Vec::new(),
+            instructions: String::new(),
             created_at: Utc::now(),
         };
         store.create_project(&elsewhere).await.unwrap();

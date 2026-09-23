@@ -36,6 +36,10 @@ use super::settings::{
 pub const MAX_PROJECT_TITLE_CHARS: usize = 120;
 /// Project metadata requests need only a compact JSON object.
 pub const MAX_PROJECT_METADATA_BODY_BYTES: usize = 1_024;
+/// A project update can carry instructions up to the 8 KiB cap. JSON escapes a
+/// control character to six bytes, so the body bound leaves room for the
+/// worst case rather than refusing text the cap allows.
+pub const MAX_PROJECT_UPDATE_BODY_BYTES: usize = 64 * 1_024;
 
 /// Body of `POST /projects`.
 #[derive(Debug, Deserialize)]
@@ -53,6 +57,10 @@ pub struct CreateProject {
 pub struct ProjectUpdate {
     #[serde(default, deserialize_with = "double_option")]
     pub title: Option<Option<String>>,
+    /// Replace the project's standing instructions. Absent leaves them
+    /// unchanged, and an empty string clears them.
+    #[serde(default)]
+    pub instructions: Option<String>,
 }
 
 fn normalize_project_title(title: Option<String>) -> Result<Option<String>, ServerError> {
@@ -100,21 +108,32 @@ pub async fn create_project(
         title: normalize_project_title(body.title)?,
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        instructions: String::new(),
         created_at: Utc::now(),
     };
     store.create_project(&project).await?;
     Ok((StatusCode::CREATED, Json(project)))
 }
 
-/// `PATCH /projects/{id}` — update bounded human-facing project metadata.
+/// `PATCH /projects/{id}` — update bounded human-facing project metadata and
+/// the project's standing instructions. Every field is checked before any is
+/// written.
 pub async fn patch_project(
     store: ScopedStore,
     Path(id): Path<ProjectId>,
     Json(body): Json<ProjectUpdate>,
 ) -> Result<Json<Project>, ServerError> {
     let title = body.title.map(normalize_project_title).transpose()?;
+    if let Some(instructions) = body.instructions.as_deref() {
+        crate::instructions::validate(instructions)?;
+    }
     if let Some(title) = title {
         if !store.update_project_title(id, title).await? {
+            return Err(ServerError::not_found(format!("project {id} not found")));
+        }
+    }
+    if let Some(instructions) = body.instructions {
+        if !store.update_project_instructions(id, instructions).await? {
             return Err(ServerError::not_found(format!("project {id} not found")));
         }
     }

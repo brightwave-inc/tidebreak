@@ -111,6 +111,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260915_000002_trigger_queue_sink",
             "m20260917_000001_code_parent_wait",
             "m20260922_000001_incarnation_wip_time",
+            "m20260923_000001_project_instructions",
         ]
     );
     assert!(db

@@ -2435,6 +2435,7 @@ async fn postgres_ordered_root_projection_roundtrips_and_snapshots_atomically() 
         title: Some("postgres roots".into()),
         attachment_revision: 1,
         root_attachments: vec![root_b, root_a],
+        instructions: String::new(),
         created_at: utc_now_at_postgres_precision(),
     };
     store.create_project(&project).await.unwrap();
@@ -2479,6 +2480,7 @@ async fn postgres_project_deletion_serializes_with_staged_source_ingestion() {
         title: Some("postgres deletion race".into()),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        instructions: String::new(),
         created_at: utc_now_at_postgres_precision(),
     };
     store.create_project(&project).await.unwrap();

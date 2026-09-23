@@ -20,6 +20,7 @@ pub(crate) enum Project {
     AttachmentRevision,
     CreatedAt,
     Owner,
+    Instructions,
 }
 
 #[derive(DeriveIden)]
