@@ -57,8 +57,23 @@ preferences, transcripts, and worktrees.
 On import, Tidebreak previews each entry as new, identical, or conflicting
 (same repo remote or same MCP name with different fields). Device-specific
 `root_path`, `command`, and `cwd` that do not exist here are marked for
-remap. Apply never overwrites a record unless you choose Replace. A newer
+remap. Each row shows what the entry runs and connects to: the command and
+its arguments, the working directory, the URL, the environment names it
+reads, and a repository's path, origin, and scripts. Only a new entry starts
+on Add; a conflict or an entry that needs a remap starts on Skip, and Apply
+never overwrites a record unless you choose Replace. A newer
 `tidebreak_config` version is refused with a message to upgrade or re-export.
+
+Apply checks every entry before it writes anything, so a refused entry
+leaves this machine unchanged. A local command server imports turned off
+unless you turn on **Start after import** for it. On the desktop, starting
+one needs the same native confirmation as saving an enabled command server
+(decision 27): the app lists the commands in an OS dialog, and nothing is
+imported if you decline. `POST /workspace-config/apply` refuses an import
+that would start a local command on the desktop with
+`native_confirmation_required`. On a multi-user deployment, only an
+administrator can import MCP servers, the same rule `PUT /mcp/servers`
+follows; a member can still import repository entries.
 
 The child environment starts empty, and **no environment value of any kind
 lives in a definition**. Executables, arguments, working directories, and URLs

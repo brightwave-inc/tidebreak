@@ -211,10 +211,13 @@ impl ChatTitler {
                 // to tell a declined title from a broken one is to read the
                 // database.
                 let should_run_pending = match titler.derive_title(chat_id, &utility).await {
+                    // The title is derived from the conversation, so the log
+                    // names the chat and the length, never the text.
                     Ok(Some(title)) => {
                         tracing::info!(
-                            "tidebreak: titled chat {chat_id} on {}: {title}",
-                            utility.model
+                            "tidebreak: titled chat {chat_id} on {} ({} characters)",
+                            utility.model,
+                            title.chars().count()
                         );
                         false
                     }
@@ -405,17 +408,22 @@ pub(crate) async fn derive_text_with_retries<P: Proposal>(
     loop {
         match request_proposal::<P>(provider, utility, system_prompt, schema_name, material).await {
             Ok(None) => return Ok(None),
+            // The answer is derived from the conversation, so neither the log
+            // line nor the error (which callers log) carries it: only its
+            // length.
             Ok(Some(proposed)) => match normalize_derived(&proposed, P::MAX_CHARS) {
                 Some(text) => return Ok(Some(text)),
                 None if attempt < DERIVATION_ATTEMPTS => {
                     tracing::warn!(
-                        "tidebreak: {kind} attempt {attempt}/{DERIVATION_ATTEMPTS} returned an unusable answer for {subject}: {proposed:?}"
+                        "tidebreak: {kind} attempt {attempt}/{DERIVATION_ATTEMPTS} returned an unusable answer for {subject} ({} characters)",
+                        proposed.chars().count()
                     );
                     attempt += 1;
                 }
                 None => {
                     return Err(AgentError::msg(format!(
-                        "{kind} model returned an unusable answer: {proposed:?}"
+                        "{kind} model returned an unusable answer ({} characters)",
+                        proposed.chars().count()
                     )))
                 }
             },
@@ -495,10 +503,12 @@ async fn request_proposal<P: Proposal>(
             }
             // `ProviderEvent` is open. A variant this build has not learned is
             // not an answer either, and guessing at one is what this whole path
-            // exists to avoid.
-            other => {
+            // exists to avoid. The event itself stays out of the error: a
+            // provider-executed tool carries its input and output, which come
+            // from the conversation.
+            _ => {
                 return Err(AgentError::msg(format!(
-                    "{kind} call returned an unexpected event: {other:?}"
+                    "{kind} call returned an unexpected event"
                 )))
             }
         }
@@ -568,5 +578,58 @@ mod tests {
             "a model must still be able to answer that there is nothing to name",
         );
         assert_eq!(strict["required"], serde_json::json!(["title"]));
+    }
+
+    /// Answers every call with the same completion text.
+    struct FixedAnswer(String);
+
+    #[async_trait::async_trait]
+    impl ModelProvider for FixedAnswer {
+        fn id(&self) -> tidebreak_core::ProviderId {
+            tidebreak_core::ProviderId::new("fixed-answer")
+        }
+
+        async fn stream(
+            &self,
+            _request: ChatRequest,
+        ) -> Result<futures::stream::BoxStream<'static, ProviderEvent>> {
+            Ok(futures::stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: self.0.clone(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    /// The answer is derived from the conversation, and the error this path
+    /// returns is logged by every caller. It names the answer's length, never
+    /// the answer.
+    #[tokio::test]
+    async fn an_unusable_answer_is_reported_by_length_not_by_text() {
+        let overlong = "confidential launch plan ".repeat(10);
+        let provider = FixedAnswer(serde_json::json!({ "title": overlong }).to_string());
+        let utility = UtilityModel {
+            provider: None,
+            model: "utility".into(),
+            reasoning_model: false,
+            reasoning_effort: None,
+        };
+        let error = derive_text_with_retries::<TitleProposal>(
+            &provider,
+            &utility,
+            "Name this chat.",
+            CHAT_TITLE_SCHEMA_NAME,
+            "material",
+            "chat 1",
+        )
+        .await
+        .expect_err("an overlong title is unusable on every attempt");
+        let message = error.to_string();
+        assert!(!message.contains("confidential"), "{message}");
+        assert!(message.contains("characters"), "{message}");
     }
 }

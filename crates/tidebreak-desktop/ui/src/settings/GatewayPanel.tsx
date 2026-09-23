@@ -12,6 +12,7 @@ import type {
   ApiClient,
   GatewayApps,
   GatewayStatus,
+  ManagedPolicySource,
   RemoteMachineState,
 } from "../api";
 import { openInBrowser } from "../openInBrowser";
@@ -34,6 +35,11 @@ import {
   remoteMachineState,
 } from "@/remoteMachine";
 import { hasNativeHost } from "@/host";
+import {
+  type GatewayLeaveControl,
+  leaveGatewayConfirmation,
+  nativeGatewayLeave,
+} from "@/gatewayLeave";
 import { friendlyErrorMessage } from "@/lib/utils";
 import {
   SettingsError,
@@ -83,6 +89,19 @@ const NATIVE_MACHINE: MachineControls = {
   reattach: () => window.location.reload(),
 };
 
+/** A pairing time as a date a reader recognizes, or null if it is unusable. */
+function connectedOn(timestamp: string | null): string | null {
+  if (!timestamp) return null;
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime())
+    ? null
+    : date.toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      });
+}
+
 /**
  * Readiness copy for one entitled app, from the gateway's member catalog.
  * `ready` (and an absent value, on gateways that predate the catalog) render
@@ -131,15 +150,23 @@ function appReadinessLabel(connection: string | undefined): string | null {
 export function GatewayPanel({
   client,
   managed,
+  source,
+  provisionedAt = null,
   gatewayUrl,
   hostedGatewayUrl = null,
   onChanged,
   onOpenConnectedApps,
   machine = NATIVE_MACHINE,
+  leave = nativeGatewayLeave(),
 }: {
   client: ApiClient;
   /** Whether the resolved policy manages this profile. */
   managed: boolean;
+  /** Who asserted the policy: the organization's device management (`os`),
+   * or the person's own pairing through a link (`provisioned`). */
+  source: ManagedPolicySource;
+  /** When the person paired this profile, for a provisioned policy. */
+  provisionedAt?: string | null;
   /** The policy's locked gateway origin, shown read-only. */
   gatewayUrl: string | null;
   /** The gateway the machine this window works on authenticates its callers
@@ -152,6 +179,7 @@ export function GatewayPanel({
    * toggles. */
   onOpenConnectedApps: () => void;
   machine?: MachineControls;
+  leave?: GatewayLeaveControl;
 }) {
   if (!managed && hostedGatewayUrl !== null) {
     // Read-only, with no sign in and no sign out, because there is nothing
@@ -196,10 +224,13 @@ export function GatewayPanel({
   return (
     <ManagedGatewayPanel
       client={client}
+      source={source}
+      provisionedAt={provisionedAt}
       gatewayUrl={gatewayUrl}
       onChanged={onChanged}
       onOpenConnectedApps={onOpenConnectedApps}
       machine={machine}
+      leave={leave}
     />
   );
 }
@@ -208,24 +239,36 @@ export function GatewayPanel({
  * Authentication is the gateway's own OAuth flow in the system browser —
  * Tidebreak never sees a password or IdP credential, only the gateway's
  * rotating tokens, which live in the keychain.
+ *
+ * The panel names who put the gateway here. An organization's device policy
+ * is the administrator's to change. A gateway the person connected through a
+ * link is theirs to leave, from the danger zone at the bottom.
  */
 function ManagedGatewayPanel({
   client,
+  source,
+  provisionedAt,
   gatewayUrl,
   onChanged,
   onOpenConnectedApps,
   machine,
+  leave,
 }: {
   client: ApiClient;
+  source: ManagedPolicySource;
+  provisionedAt: string | null;
   gatewayUrl: string | null;
   onChanged: () => void;
   onOpenConnectedApps: () => void;
   machine: MachineControls;
+  leave: GatewayLeaveControl;
 }) {
   const [status, setStatus] = useState<GatewayStatus | null>(null);
   const [apps, setApps] = useState<GatewayApps | null>(null);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [leaveError, setLeaveError] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   // A ref, not a state read, inside `reload`: transition detection must not
   // live in a state updater (updaters are pure and StrictMode double-invokes
   // them).
@@ -294,6 +337,26 @@ function ManagedGatewayPanel({
     await openInBrowser(started.authorization_url);
   }
 
+  // A link paired this profile, so the person may undo it here. The shell
+  // deletes exactly the policy this confirmation names, and the gate then
+  // re-reads policy and brings back the open product with the person's own
+  // provider keys, which replaces this panel.
+  async function leaveGateway(url: string) {
+    const accepted = await confirm(leaveGatewayConfirmation(url));
+    if (!accepted) return;
+    setWorking(true);
+    setLeaveError(null);
+    try {
+      await leave.leave(url);
+      onChanged();
+      toast.success("Left the gateway");
+    } catch (err) {
+      setLeaveError(String(err));
+    } finally {
+      setWorking(false);
+    }
+  }
+
   if (!status) {
     return (
       <SettingsPanel title="Model Gateway" description="Loading…" busy>
@@ -309,6 +372,11 @@ function ManagedGatewayPanel({
   // The policy names the deployment; the status echoes it. Prefer the policy
   // (it is what the profile is locked to) and fall back to the echo.
   const origin = gatewayUrl ?? status.base_url ?? null;
+  const connectedByYou = source === "provisioned";
+  const connectedDate = connectedOn(provisionedAt);
+  // Only the policy's own URL can anchor the delete: the shell refuses any
+  // other, so without it there is nothing this control could leave.
+  const leavable = connectedByYou && leave.available && gatewayUrl !== null;
   // The one route to mounting, shown whenever signed in: a gateway without
   // the apps surface still mounts endpoints by slug from the Connected apps
   // page's MCP section.
@@ -327,7 +395,11 @@ function ManagedGatewayPanel({
   return (
     <SettingsPanel
       title="Model Gateway"
-      description="This profile is managed by your organization's model gateway: models and governed tools come from the deployment below."
+      description={
+        connectedByYou
+          ? "You connected this profile to the model gateway below. Models and governed tools come from it."
+          : "Your organization manages this profile through its model gateway. Models and governed tools come from the deployment below."
+      }
       busy={working}
     >
       <SettingsSection title="Gateway">
@@ -335,7 +407,11 @@ function ManagedGatewayPanel({
           <code className="break-all font-medium">{origin ?? "—"}</code>
         </p>
         <p className="text-xs text-muted-foreground">
-          Set by your organization&apos;s policy and not editable here.
+          {connectedByYou
+            ? connectedDate
+              ? `You connected this gateway on ${connectedDate}.`
+              : "You connected this gateway."
+            : "Managed by your organization's device policy. Only your administrator can change it."}
         </p>
       </SettingsSection>
 
@@ -523,6 +599,31 @@ function ManagedGatewayPanel({
       {error && <SettingsError>{error}</SettingsError>}
 
       <MachineSections client={client} managed machine={machine} />
+
+      {leavable && gatewayUrl !== null && (
+        <SettingsSection title="Danger zone">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Leave this gateway</p>
+              <p className="text-xs text-muted-foreground">
+                Sign out, stop being managed by this gateway, and go back to
+                your own provider keys.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              disabled={working}
+              onClick={() => void leaveGateway(gatewayUrl)}
+            >
+              Leave gateway
+            </Button>
+          </div>
+          {leaveError && <SettingsError>{leaveError}</SettingsError>}
+        </SettingsSection>
+      )}
+      {confirmDialog}
     </SettingsPanel>
   );
 }

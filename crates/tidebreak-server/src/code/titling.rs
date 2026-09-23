@@ -95,8 +95,13 @@ pub fn spawn_for_turn(state: &AppState, owner: &OwnerId, session_id: SessionId, 
     let owner = owner.clone();
     tokio::spawn(async move {
         match derive_workspace_title(&state, &code, &owner, session_id, &message).await {
+            // The title is derived from the person's message, so the log
+            // names the session and the length, never the text.
             Ok(Outcome::Named(title)) => {
-                tracing::info!("tidebreak: named a code workspace: {title}");
+                tracing::info!(
+                    "tidebreak: named the code workspace for session {session_id} ({} characters)",
+                    title.chars().count()
+                );
             }
             Ok(Outcome::Declined) => {
                 tracing::debug!("tidebreak: left a code workspace on its generated name");

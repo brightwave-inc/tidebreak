@@ -1,10 +1,15 @@
-//! Native save and open dialogs for portable workspace configuration files.
+//! Native save and open dialogs for portable workspace configuration files,
+//! and the native path for applying an import.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::Deserialize;
+use serde_json::Value;
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::oneshot;
+
+use tidebreak_server::workspace_config::{local_commands_to_confirm, WorkspaceConfigApplyRequest};
 
 use crate::host_access::HostAccess;
 
@@ -61,6 +66,46 @@ pub(crate) async fn pick_workspace_config(
         .await
         .map_err(|_| "Could not read the workspace configuration".to_owned())?;
     Ok(Some(contents))
+}
+
+/// Apply an imported workspace configuration through the native-only server
+/// surface (decision 27).
+///
+/// When the import would start local MCP commands, an OS dialog lists them
+/// first, and only an affirmative answer forwards the request with the
+/// client-executor credential. The request is parsed here and forwarded as
+/// parsed, and the list comes from the same resolution the server's apply
+/// uses, so the dialog names exactly the commands the import writes. An
+/// import that starts nothing is forwarded without a dialog.
+#[tauri::command]
+pub(crate) async fn apply_native_workspace_config(
+    app: AppHandle,
+    state: State<'_, Arc<crate::AppState>>,
+    request: Value,
+) -> Result<Value, String> {
+    let request: WorkspaceConfigApplyRequest = serde_json::from_value(request)
+        .map_err(|error| format!("The import request is not valid: {error}"))?;
+    let commands = local_commands_to_confirm(&request);
+    if !commands.is_empty() {
+        let config = serde_json::json!({ "servers": commands });
+        if !crate::approve_local_mcp_commands(&app, &config, "Allow and import").await? {
+            return Err(
+                "You did not allow the local MCP commands, so nothing was imported.".to_owned(),
+            );
+        }
+    }
+
+    let info = crate::wait_server_info(state.inner()).await?;
+    let response = crate::documents::native_auth(
+        crate::documents::local_client()
+            .post(format!("{}/native/workspace-config/apply", info.base_url))
+            .json(&request),
+        &info,
+    )
+    .send()
+    .await
+    .map_err(|error| format!("import workspace configuration: {error}"))?;
+    crate::native_json_response(response, "workspace configuration import").await
 }
 
 async fn pick_open_path(app: &AppHandle) -> Result<Option<PathBuf>, String> {

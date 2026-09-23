@@ -100,6 +100,14 @@ pub struct ManagedPolicy {
     #[ts(optional)]
     pub hosted_gateway_url: Option<String>,
     pub source: ManagedPolicySource,
+    /// When the person paired this profile with its provisioned gateway: the
+    /// time the pairing was written. Present only for the provisioned tier,
+    /// and only when that time is readable. Display only, so a surface can
+    /// say when the person connected the gateway rather than naming an
+    /// organization that asserted nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub provisioned_at: Option<chrono::DateTime<chrono::Utc>>,
     /// True when `source` asserted management but its gateway URL is missing,
     /// unreadable, or invalid. The profile stays managed with no usable URL —
     /// fail closed — and surfaces can name the authority that needs repair
@@ -137,6 +145,7 @@ impl ManagedPolicy {
             gateway_url: None,
             hosted_gateway_url: None,
             source,
+            provisioned_at: None,
             misconfigured: true,
             pending_gateway_url: None,
             permission_mode_ceiling: None,
@@ -235,6 +244,13 @@ pub trait ProvisionedPolicySource: Send + Sync {
     /// Drop the provisioned URL. Already-absent is a success: deprovisioning
     /// an open profile is a no-op here.
     fn clear(&self) -> Result<()>;
+
+    /// When the provisioned URL on record was written, if this source knows.
+    /// Display only: surfaces use it to say when the person connected the
+    /// gateway, and nothing decides policy on it.
+    fn provisioned_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
 }
 
 /// The provisioned policy as one JSON file in the data directory,
@@ -304,6 +320,16 @@ impl ProvisionedPolicySource for ProvisionedPolicyFile {
                 self.path.display()
             ))),
         }
+    }
+
+    /// The file's modification time. Only a completed pairing (or the
+    /// one-time legacy import) writes the file, so its write time is when the
+    /// person connected the gateway.
+    fn provisioned_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        std::fs::metadata(&self.path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .map(chrono::DateTime::<chrono::Utc>::from)
     }
 }
 
@@ -980,7 +1006,11 @@ fn resolve_gateway(
     }
     match provisioned.read() {
         Ok(Some(gateway_url)) => {
-            return Ok(asserted(ManagedPolicySource::Provisioned, &gateway_url));
+            let mut policy = asserted(ManagedPolicySource::Provisioned, &gateway_url);
+            if !policy.misconfigured {
+                policy.provisioned_at = provisioned.provisioned_at();
+            }
+            return Ok(policy);
         }
         Err(error) => {
             // A policy file that exists but cannot be read fails closed the
@@ -998,6 +1028,7 @@ fn resolve_gateway(
         gateway_url: None,
         hosted_gateway_url: None,
         source: ManagedPolicySource::Unmanaged,
+        provisioned_at: None,
         misconfigured: false,
         pending_gateway_url: None,
         permission_mode_ceiling: None,
@@ -1014,6 +1045,7 @@ fn asserted(source: ManagedPolicySource, gateway_url: &str) -> ManagedPolicy {
             gateway_url: Some(gateway_url),
             hosted_gateway_url: None,
             source,
+            provisioned_at: None,
             misconfigured: false,
             pending_gateway_url: None,
             permission_mode_ceiling: None,
@@ -1290,6 +1322,30 @@ mod tests {
         // that a rejected write leaves the profile unmanaged.
         assert!(provision(&*provisioned, "http://user:pw@gw.example").is_err());
         assert!(!resolve(&*provisioned, &NoOsPolicy).unwrap().managed);
+    }
+
+    /// A provisioned policy says when the person connected the gateway, so
+    /// settings can name that instead of an organization. An OS assertion
+    /// and the open profile carry no such time.
+    #[tokio::test]
+    async fn a_provisioned_policy_carries_the_time_it_was_paired() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = ProvisionedPolicyFile::at(directory.path().join(PROVISIONED_POLICY_FILE));
+        assert!(resolve(&file, &NoOsPolicy)
+            .unwrap()
+            .provisioned_at
+            .is_none());
+
+        let before = chrono::Utc::now() - chrono::Duration::minutes(1);
+        provision(&file, "https://gw.example").unwrap();
+        let policy = resolve(&file, &NoOsPolicy).unwrap();
+        assert_eq!(policy.source, ManagedPolicySource::Provisioned);
+        let paired = policy.provisioned_at.expect("the pairing time is readable");
+        assert!(paired >= before, "{paired} is before {before}");
+
+        let asserted = resolve(&file, &OsAsserted("https://mdm.example")).unwrap();
+        assert_eq!(asserted.source, ManagedPolicySource::Os);
+        assert!(asserted.provisioned_at.is_none());
     }
 
     /// Deprovision shares reprovision's CAS discipline: it deletes only the

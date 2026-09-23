@@ -47,6 +47,13 @@
 //! resolves, rather than trusting a URL the link asserted. The same
 //! [`PAIRING_CHANGED_EVENT`] nudge makes the gate re-read policy and unlock
 //! without a restart.
+//!
+//! The Model Gateway settings panel reaches the same delete through the
+//! [`leave_provisioned_gateway`] command, behind the panel's own
+//! confirmation. That is the one renderer path to a policy write, and it only
+//! removes: the provisioned row the person consented to, compare-and-swap
+//! anchored like the link's, never an OS assertion. Provisioning and
+//! re-pairing stay reachable only from a link and a completed sign-in.
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -358,6 +365,51 @@ fn spawn_deprovision(app: tauri::AppHandle) {
             }
         }
     });
+}
+
+/// Leave the provisioned gateway from the Model Gateway settings panel: the
+/// in-app way back from a pairing, and the twin of `tidebreak://deprovision`.
+///
+/// The consent here is the settings panel's own confirmation. Unlike a link,
+/// which any page can raise, this request comes from the app's settings, and
+/// it can only remove management the person added themselves: it runs the
+/// same compare-and-swap delete, anchored to the URL that confirmation named,
+/// so a row that moved in between refuses, and an OS (MDM) asserted gateway
+/// refuses outright. Nothing here can provision or replace a gateway. Once
+/// the row is gone the profile resolves open, which brings back the person's
+/// own provider keys, and the pairing nudge makes the gate and settings
+/// re-read policy at once.
+#[tauri::command]
+pub(crate) async fn leave_provisioned_gateway(
+    app: tauri::AppHandle,
+    attachment: tauri::State<'_, std::sync::Arc<crate::remote::RemoteAttachment>>,
+    gateway_url: String,
+) -> Result<(), String> {
+    // The policy a remote machine's panel shows is that machine's, and the
+    // pairing this would delete is this computer's.
+    if attachment.current().await.is_some() {
+        return Err(
+            "This window works on another machine, so it cannot leave this computer's gateway. \
+             Work on this computer first."
+                .to_owned(),
+        );
+    }
+    let handle = wait_pairing_handle(&app).await?;
+    let origin = origin_of(&gateway_url);
+    match tidebreak_server::deprovision_provisioned_gateway(&handle, &gateway_url).await {
+        Ok(()) => {
+            log_pairing(&app, &format!("left {origin} from settings"));
+            notify_pairing_changed(&app);
+            Ok(())
+        }
+        Err(failure) => {
+            log_pairing(
+                &app,
+                &format!("leaving {origin} from settings refused: {failure}"),
+            );
+            Err(disconnect_refusal_message(&failure))
+        }
+    }
 }
 
 /// Escalate to the user's explicit choice: a native dialog naming the

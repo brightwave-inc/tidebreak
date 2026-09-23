@@ -1,7 +1,8 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { fn, userEvent, within } from "storybook/test";
 
 import type { ApiClient, GatewayStatus, RemoteMachineState } from "@/api";
+import type { GatewayLeaveControl } from "@/gatewayLeave";
 import { GatewayPanel, type MachineControls } from "@/settings/GatewayPanel";
 import {
   gatewayApps,
@@ -46,6 +47,15 @@ function stubMachine(
 }
 
 /**
+ * Leaving without a native shell. The story resolves and stays on the
+ * managed panel; in the app, the gate re-reads policy and the panel turns
+ * into the unmanaged one.
+ */
+function stubLeave(available = true): GatewayLeaveControl {
+  return { available, leave: fn(async () => undefined) };
+}
+
+/**
  * Model Gateway settings, which now also say which machine this window works
  * on. The states that matter are the two questions a reader arrives with: who
  * governs this profile, and where does my work run.
@@ -70,10 +80,12 @@ const meta = {
   args: {
     client: stubClient(gatewaySignedIn),
     managed: true,
+    source: "os",
     gatewayUrl: "https://gateway.example.com",
     onChanged: fn(),
     onOpenConnectedApps: fn(),
     machine: stubMachine(machineLocal),
+    leave: stubLeave(),
   },
 } satisfies Meta<typeof GatewayPanel>;
 
@@ -89,6 +101,7 @@ export const Unmanaged: Story = {
   args: {
     client: stubClient(gatewaySignedOut),
     managed: false,
+    source: "unmanaged",
     gatewayUrl: null,
   },
 };
@@ -111,8 +124,69 @@ export const PendingSignIn: Story = {
   },
 };
 
-/** Signed in, with the entitled apps the deployment grants. */
+/**
+ * Signed in, with the entitled apps the deployment grants. The organization's
+ * device policy put the gateway here, so the panel names it and offers no way
+ * to leave: that is the administrator's to change.
+ */
 export const SignedIn: Story = {};
+
+/**
+ * The person connected this gateway through a link. The panel says so and
+ * when, and the danger zone at the bottom lets them leave it.
+ */
+export const ConnectedThroughALink: Story = {
+  args: {
+    source: "provisioned",
+    provisionedAt: "2026-09-21T15:30:00Z",
+  },
+};
+
+/**
+ * Leaving asks first. The confirmation names the gateway and what comes back:
+ * the person's own provider keys and settings.
+ */
+export const LeaveConfirmation: Story = {
+  args: {
+    source: "provisioned",
+    provisionedAt: "2026-09-21T15:30:00Z",
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Leave gateway" }),
+    );
+    await within(canvasElement.ownerDocument.body).findByRole("alertdialog");
+  },
+};
+
+/**
+ * The shell refused: the policy changed between the confirmation and the
+ * delete. The reason shows beside the control the person used.
+ */
+export const LeaveRefused: Story = {
+  args: {
+    source: "provisioned",
+    provisionedAt: "2026-09-21T15:30:00Z",
+    leave: {
+      available: true,
+      leave: fn(async () => {
+        throw "The gateway managing this device changed while disconnecting. Nothing was changed; try again from the new state.";
+      }),
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Leave gateway" }),
+    );
+    const body = within(canvasElement.ownerDocument.body);
+    await body.findByRole("alertdialog");
+    const confirm = body.getAllByRole("button", { name: "Leave gateway" });
+    await userEvent.click(confirm[confirm.length - 1]);
+    await canvas.findByText(/changed while disconnecting/);
+  },
+};
 
 /**
  * The gateway names the machine it hosts, so the address is already filled
@@ -149,6 +223,7 @@ export const HostedMachine: Story = {
   args: {
     client: stubClient(gatewaySignedOut),
     managed: false,
+    source: "unmanaged",
     gatewayUrl: null,
     hostedGatewayUrl: "https://gateway.example.com/",
     machine: stubMachine(machineAttached),
@@ -166,6 +241,7 @@ export const HostedMachineInBrowser: Story = {
   args: {
     client: stubClient(gatewaySignedOut),
     managed: false,
+    source: "unmanaged",
     gatewayUrl: null,
     hostedGatewayUrl: "https://gateway.example.com/",
     machine: stubMachine(machineAttached, { detachable: false }),

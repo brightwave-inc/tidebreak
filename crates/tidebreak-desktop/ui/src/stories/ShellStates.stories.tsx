@@ -16,10 +16,17 @@ const unmanaged: ManagedPolicy = {
 
 const managed: ManagedPolicy = {
   managed: true,
-  source: "provisioned",
+  source: "os",
   misconfigured: false,
   allow_local_mcp_servers: false,
   gateway_url: "https://gateway.example.com",
+};
+
+/** The same gateway, connected by the person through a link. */
+const connected: ManagedPolicy = {
+  ...managed,
+  source: "provisioned",
+  provisioned_at: "2026-09-21T15:30:00Z",
 };
 
 function pending<T>(): Promise<T> {
@@ -93,6 +100,18 @@ export const Starting: Story = {
 
 export const SignInRequired: Story = {};
 
+/**
+ * Signed out of a gateway the person connected through a link. The gate hides
+ * Settings, so the sign-in screen itself offers the way back to their own
+ * provider keys.
+ */
+export const SignInRequiredConnectedByYou: Story = {
+  args: {
+    client: gateClient({ policy: connected }),
+    leave: { available: true, leave: fn(async () => undefined) },
+  },
+};
+
 export const SignInPending: Story = {
   args: {
     client: gateClient({
@@ -121,6 +140,10 @@ export const SignInFailure: Story = {
   },
 };
 
+/**
+ * A link asked to connect a gateway. The screen says a link asked, names the
+ * host and what it would control, and focuses Not now.
+ */
 export const PairingRequested: Story = {
   args: {
     client: gateClient({
@@ -128,6 +151,22 @@ export const PairingRequested: Story = {
         ...unmanaged,
         pending_gateway_url: "https://gateway.new-company.example.com",
       },
+    }),
+  },
+};
+
+/**
+ * A link asked to replace the gateway the person connected earlier, and they
+ * confirmed the native dialog. The screen also names what it would replace.
+ */
+export const RepairRequested: Story = {
+  args: {
+    client: gateClient({
+      policy: {
+        ...connected,
+        pending_gateway_url: "https://gateway.new-company.example.com",
+      },
+      status: gatewaySignedIn,
     }),
   },
 };

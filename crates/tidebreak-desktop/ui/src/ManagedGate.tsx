@@ -3,8 +3,15 @@ import { ExternalLink, Laptop, RefreshCw } from "lucide-react";
 
 import type { ApiClient, GatewayStatus, ManagedPolicy } from "./api";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { HostedSignIn } from "./HostedSignIn";
 import { BootBrand } from "./Logomark";
+import {
+  type GatewayLeaveControl,
+  gatewayHost,
+  leaveGatewayConfirmation,
+  nativeGatewayLeave,
+} from "./gatewayLeave";
 import { ManagedPolicyContext } from "./managedPolicy";
 import { hasNativeHost, onPairingChanged } from "./host";
 import { composerKeyForRoute, useComposerDrafts } from "./ComposerDrafts";
@@ -105,7 +112,8 @@ function samePolicy(a: ManagedPolicy, b: ManagedPolicy): boolean {
     a.misconfigured === b.misconfigured &&
     (a.gateway_url ?? null) === (b.gateway_url ?? null) &&
     (a.hosted_gateway_url ?? null) === (b.hosted_gateway_url ?? null) &&
-    (a.pending_gateway_url ?? null) === (b.pending_gateway_url ?? null)
+    (a.pending_gateway_url ?? null) === (b.pending_gateway_url ?? null) &&
+    (a.provisioned_at ?? null) === (b.provisioned_at ?? null)
   );
 }
 
@@ -129,6 +137,7 @@ export function ManagedGate({
   client,
   children,
   onHostedToken,
+  leave = nativeGatewayLeave(),
 }: {
   client: ApiClient;
   children: ReactNode;
@@ -136,12 +145,17 @@ export function ManagedGate({
    * machine. Only that gate branch uses it; the desktop app never renders
    * one, because it has a shell to refresh a bearer from. */
   onHostedToken?: (token: string) => Promise<boolean>;
+  /** How the sign-in screen leaves a gateway the person connected through a
+   * link. The gate hides Settings, so a signed-out profile would otherwise
+   * have no way back to its own provider keys short of signing in again. */
+  leave?: GatewayLeaveControl;
 }) {
   const [policyState, setPolicyState] = useState<PolicyState>({
     kind: "loading",
   });
   const [status, setStatus] = useState<GatewayStatus | null>(null);
   const [working, setWorking] = useState(false);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   // Two error channels on purpose: the watch clears its own stale fetch
   // errors on a successful poll, which must not wipe a Connect failure the
   // reader is still looking at.
@@ -343,6 +357,24 @@ export function ManagedGate({
     }
   }
 
+  // The way back from a gateway the person connected, while its sign-in gate
+  // hides Settings. The shell deletes exactly the policy the confirmation
+  // named; the re-read that follows resolves the open product and lifts the
+  // gate.
+  async function leaveGateway(url: string) {
+    if (!(await confirm(leaveGatewayConfirmation(url)))) return;
+    setWorking(true);
+    setActionError(null);
+    try {
+      await leave.leave(url);
+      refreshPolicy();
+    } catch (err) {
+      setActionError(String(err));
+    } finally {
+      setWorking(false);
+    }
+  }
+
   if (policyState.kind === "loading") return <BootScreen>starting…</BootScreen>;
 
   // A managed policy without a gateway URL has nothing the gate could ever
@@ -515,6 +547,10 @@ export function ManagedGate({
       : null;
   const failure =
     status?.sign_in.state === "failed" ? status.sign_in.message : null;
+  // A gateway the person connected through a link is theirs to leave, even
+  // signed out. An organization's device policy is not.
+  const connectedByYou = !pairing && policy?.source === "provisioned";
+  const leavableUrl = connectedByYou && leave.available ? lockedUrl : null;
 
   return (
     <div
@@ -525,25 +561,36 @@ export function ManagedGate({
       <BootBrand />
       <div className="welcome-copy">
         {pairing ? (
+          // A provision link is an unauthenticated trigger any page can
+          // raise, so this screen says where the request came from and what
+          // the gateway would control, and never presumes the gateway is
+          // the reader's own.
           <>
-            <h1>Connect to your model gateway</h1>
+            <h1>Connect to a model gateway?</h1>
             <p>
-              Sign in to connect Tidebreak to the gateway below, which will
-              manage this device.
+              A link asked Tidebreak to let{" "}
+              <code className="font-medium">
+                {gatewayHost(pendingPairingUrl)}
+              </code>{" "}
+              manage this device. It would decide which models and tools you can
+              use, and hide your own provider keys.
             </p>
             {managed && lockedUrl && (
               <p>
-                This replaces <code className="font-medium">{lockedUrl}</code>,
-                which currently manages this device.
+                It would replace{" "}
+                <code className="font-medium">{gatewayHost(lockedUrl)}</code>,
+                which manages this device now.
               </p>
             )}
+            <p>Continue only if your organization asked you to.</p>
           </>
         ) : (
           <>
             <h1>Sign in to continue</h1>
             <p>
-              This device is managed by your organization. Sign in to get
-              started.
+              {connectedByYou
+                ? "You connected this device to the gateway below. Sign in to keep using it, or leave it to use your own provider keys again."
+                : "This device is managed by your organization. Sign in to get started."}
             </p>
           </>
         )}
@@ -592,22 +639,35 @@ export function ManagedGate({
         </p>
       ) : (
         <div className="flex items-center gap-2">
+          {pairing && (
+            // The safe answer leads and holds focus: pressing Enter on a
+            // screen a link raised declines rather than connects.
+            <Button
+              type="button"
+              autoFocus
+              disabled={working}
+              onClick={() => void dismissPairing()}
+            >
+              Not now
+            </Button>
+          )}
           <Button
             type="button"
+            variant={pairing ? "outline" : "default"}
             disabled={working}
             onClick={() => void connect()}
           >
             <ExternalLink size={14} />
             {pairing ? "Sign in and connect" : "Connect"}
           </Button>
-          {pairing && (
+          {leavableUrl && (
             <Button
               type="button"
               variant="ghost"
               disabled={working}
-              onClick={() => void dismissPairing()}
+              onClick={() => void leaveGateway(leavableUrl)}
             >
-              Not now
+              Leave gateway
             </Button>
           )}
         </div>
@@ -617,6 +677,7 @@ export function ManagedGate({
       <p className="text-muted-foreground max-w-md text-xs leading-relaxed">
         Sign-in opens in your browser. Tidebreak never sees your password.
       </p>
+      {confirmDialog}
     </div>
   );
 }

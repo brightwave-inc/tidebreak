@@ -61,6 +61,30 @@ Deploy it root-owned and not world-writable, as `/etc` content should be.
 Unlike the macOS reader, the file reader does not verify ownership today —
 the permissions are deployment guidance, not an enforced guarantee.
 
+## A gateway you connected through a link
+
+A profile can also become managed without any device management. A gateway's
+own web page offers a `tidebreak://provision` link, and the link raises a
+full-window screen in Tidebreak. That screen says a link made the request,
+names the gateway's host, and says what the gateway would control: which
+models and tools you can use. It also says the gateway would hide your own
+provider keys. **Not now** has the focus, so pressing Enter declines. Only
+the sign-in that **Sign in and connect** starts commits the pairing, which
+writes the provisioned policy file described in the following section.
+
+**Settings → Model Gateway** names who put the gateway there. An OS-managed
+profile reads "Managed by your organization's device policy," and offers no
+way to leave, because only your administrator can change that policy. A
+profile you paired reads "You connected this gateway on" and the date, and
+its **Danger zone** offers **Leave gateway**.
+
+To leave a gateway you connected, choose **Leave gateway** and confirm.
+Tidebreak signs out of the gateway, deletes the provisioned policy, and
+returns to the open profile with your own provider keys. The delete names
+the gateway you confirmed, so a policy that changed in the meantime is left
+alone. The payload-free `tidebreak://deprovision` link does the same after a
+native confirmation. An OS-managed gateway refuses both.
+
 ## Developer flow — the provisioned policy file
 
 There is no unmanaged gateway settings surface: the hand-typed gateway URL
@@ -77,8 +101,10 @@ printf '%s\n' '{"gateway_url":"http://127.0.0.1:8081"}' \
 ```
 
 Restart Tidebreak. The profile starts managed (`source: provisioned`), and
-sign-in, model sync, and routing use the gateway URL that you provided. To
-return to the open profile, quit Tidebreak and delete the file:
+sign-in, model sync, and routing use the gateway URL that you provided. The
+settings panel reports the file's modification time as the day you connected
+the gateway. To return to the open profile, choose **Leave gateway** in
+**Settings → Model Gateway**, or quit Tidebreak and delete the file:
 
 ```sh
 rm "<data dir>/gateway-policy.json"
@@ -90,6 +116,5 @@ provisioned to one gateway refuses a bare provision link for another;
 opening such a link instead asks, in a native dialog naming both gateways,
 whether to re-pair. Confirming parks the replacement, and completing a
 sign-in against the new gateway commits it — the old gateway's session is
-revoked and cleared in the same step. Deleting the file remains the
-way to return to the open profile; an OS-asserted gateway can never be
-replaced by re-pairing.
+revoked and cleared in the same step. An OS-asserted gateway can never be
+replaced by re-pairing or left from settings.

@@ -1,9 +1,13 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { userEvent, within } from "storybook/test";
 
-import type { WorkspaceConfigPreviewEntry } from "@/api/types";
+import type {
+  WorkspaceConfigDocument,
+  WorkspaceConfigPreviewEntry,
+} from "@/api/types";
 import { PortableConfigSection } from "@/settings/PortableConfigSection";
 
-const document = {
+const document: WorkspaceConfigDocument = {
   tidebreak_config: 1,
   exported_at: "2026-09-02T12:00:00Z",
   sections: {
@@ -14,22 +18,42 @@ const document = {
         root_path: "/Users/alex/src/tidebreak",
         default_base_ref: "main",
         branch_prefix: "tidebreak/",
-        quick_actions: [],
+        setup_script: "pnpm install --frozen-lockfile",
+        quick_actions: [
+          {
+            name: "Start dev server",
+            command: "scripts/dev.sh",
+            auto_run_on_create: true,
+          },
+        ],
       },
     ],
     mcp_servers: [
       {
         name: "docs",
         command: "/opt/mcp/docs",
+        args: ["--stdio", "--root", "Team Docs"],
+        env: ["DOCS_TOKEN"],
+        env_from: ["PATH"],
+        cwd: "/Users/alex/src/docs",
+        request_timeout_ms: 60_000,
+        enabled: true,
+      },
+      {
+        name: "search",
         args: [],
-        env: ["TOKEN"],
+        env: [],
         env_from: [],
+        url: "https://mcp.example.com/search",
+        bearer_token_env: "SEARCH_TOKEN",
         request_timeout_ms: 60_000,
         enabled: true,
       },
     ],
   },
 };
+
+const repoKey = "https://github.com/brightwave-inc/tidebreak.git";
 
 function previewClient(entries: WorkspaceConfigPreviewEntry[]) {
   return {
@@ -39,68 +63,121 @@ function previewClient(entries: WorkspaceConfigPreviewEntry[]) {
   };
 }
 
+function entry(
+  section: WorkspaceConfigPreviewEntry["section"],
+  key: string,
+  status: WorkspaceConfigPreviewEntry["status"],
+  fields: Partial<
+    Pick<WorkspaceConfigPreviewEntry, "differing_fields" | "remap_fields">
+  > = {},
+): WorkspaceConfigPreviewEntry {
+  return {
+    section,
+    key,
+    status,
+    differing_fields: fields.differing_fields ?? [],
+    remap_fields: fields.remap_fields ?? [],
+  };
+}
+
+/** Import the file the way a reader does, then wait for the preview. */
+async function openPreview(canvasElement: HTMLElement) {
+  const file = new File([JSON.stringify(document)], "tidebreak-config.json", {
+    type: "application/json",
+  });
+  await userEvent.upload(
+    within(canvasElement).getByLabelText("Import workspace configuration"),
+    file,
+  );
+  return within(canvasElement.ownerDocument.body).findByRole("dialog");
+}
+
+/**
+ * The import preview. Every row shows what the entry runs and connects to,
+ * only new entries start on Add, and a local MCP server imports turned off
+ * unless the reader starts it, which the desktop then confirms natively.
+ */
 const meta = {
   title: "Settings/Portable configuration preview",
   component: PortableConfigSection,
   parameters: { layout: "fullscreen" },
+  play: async ({ canvasElement }) => {
+    await openPreview(canvasElement);
+  },
 } satisfies Meta<typeof PortableConfigSection>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
+/** A new local command server, a new remote server, and a repository that
+ * already matches. The local server waits turned off. */
 export const Clean: Story = {
   args: {
     client: previewClient([
-      {
-        section: "mcp_servers",
-        key: "docs",
-        status: "new",
-        differing_fields: [],
-        remap_fields: [],
-      },
-      {
-        section: "code_repositories",
-        key: "https://github.com/brightwave-inc/tidebreak.git",
-        status: "identical",
-        differing_fields: [],
-        remap_fields: [],
-      },
+      entry("mcp_servers", "docs", "new"),
+      entry("mcp_servers", "search", "new"),
+      entry("code_repositories", repoKey, "identical"),
     ]),
   },
 };
 
+/** The reader chose to start the local server. Apply then shows the
+ * desktop's native dialog listing the command before anything runs. */
+export const StartLocalServer: Story = {
+  args: {
+    client: previewClient([entry("mcp_servers", "docs", "new")]),
+  },
+  play: async ({ canvasElement }) => {
+    const dialog = within(await openPreview(canvasElement));
+    await userEvent.click(
+      dialog.getByRole("switch", { name: "Start docs after import" }),
+    );
+  },
+};
+
+/** A conflict starts on Skip and offers only Skip or Replace. */
 export const Conflicts: Story = {
   args: {
     client: previewClient([
-      {
-        section: "mcp_servers",
-        key: "docs",
-        status: "conflict",
+      entry("mcp_servers", "docs", "conflict", {
         differing_fields: ["command", "args"],
-        remap_fields: [],
-      },
+      }),
     ]),
   },
 };
 
+/** Entries that need a path or command on this machine start on Skip. */
 export const RemapsNeeded: Story = {
   args: {
     client: previewClient([
-      {
-        section: "code_repositories",
-        key: "https://github.com/brightwave-inc/tidebreak.git",
-        status: "needs_remap",
-        differing_fields: [],
+      entry("code_repositories", repoKey, "needs_remap", {
         remap_fields: ["root_path"],
-      },
-      {
-        section: "mcp_servers",
-        key: "docs",
-        status: "needs_remap",
-        differing_fields: [],
-        remap_fields: ["command"],
-      },
+      }),
+      entry("mcp_servers", "docs", "needs_remap", {
+        remap_fields: ["command", "cwd"],
+      }),
     ]),
+  },
+};
+
+/** The desktop's native dialog was declined, so nothing was imported. The
+ * preview stays open so the reader can import the server turned off. */
+export const StartDeclined: Story = {
+  args: {
+    client: {
+      ...previewClient([entry("mcp_servers", "docs", "new")]),
+      applyWorkspaceConfig: async () => {
+        throw "You did not allow the local MCP commands, so nothing was imported.";
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const dialog = within(await openPreview(canvasElement));
+    await userEvent.click(
+      dialog.getByRole("switch", { name: "Start docs after import" }),
+    );
+    await userEvent.click(dialog.getByRole("button", { name: "Apply" }));
+    await dialog.findByText(/did not allow the local MCP commands/);
   },
 };
 
@@ -115,5 +192,15 @@ export const UnsupportedVersion: Story = {
       },
       applyWorkspaceConfig: async () => ({ applied: 0, skipped: 0 }),
     },
+  },
+  play: async ({ canvasElement }) => {
+    const file = new File(["{}"], "tidebreak-config.json", {
+      type: "application/json",
+    });
+    await userEvent.upload(
+      within(canvasElement).getByLabelText("Import workspace configuration"),
+      file,
+    );
+    await within(canvasElement).findByRole("alert");
   },
 };

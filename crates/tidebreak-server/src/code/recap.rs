@@ -556,8 +556,13 @@ impl TurnRecap for TurnRecapper {
                 // to tell a declined recap from a broken one is to read the
                 // database.
                 match recapper.derive(&owner, session_id, turn_id).await {
+                    // The recap summarizes the conversation, so the log names
+                    // the turn and the length, never the text.
                     Ok(Outcome::Recapped(recap)) => {
-                        tracing::info!("tidebreak: recapped code turn {turn_id}: {recap}");
+                        tracing::info!(
+                            "tidebreak: recapped code turn {turn_id} ({} characters)",
+                            recap.chars().count()
+                        );
                     }
                     Ok(Outcome::Declined) => {
                         tracing::warn!("tidebreak: left code turn {turn_id} without a recap");

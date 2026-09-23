@@ -247,28 +247,8 @@ async fn put_native_mcp_servers(
     state: tauri::State<'_, Arc<AppState>>,
     config: Value,
 ) -> Result<Value, String> {
-    let commands = native_command_previews(&config)?;
-    if !commands.is_empty() {
-        let preview = commands.join("\n");
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let mut dialog = app
-            .dialog()
-            .message(native_mcp_command_confirmation(&preview))
-            .title("Allow local MCP commands?")
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "Allow and save".to_owned(),
-                "Cancel".to_owned(),
-            ));
-        if let Some(window) = app.get_window("main") {
-            dialog = dialog.parent(&window);
-        }
-        dialog.show(move |approved| {
-            let _ = sender.send(approved);
-        });
-        if !receiver.await.unwrap_or(false) {
-            return Err("local MCP command configuration was not approved".to_owned());
-        }
+    if !approve_local_mcp_commands(&app, &config, "Allow and save").await? {
+        return Err("local MCP command configuration was not approved".to_owned());
     }
 
     let info = wait_server_info(state.inner()).await?;
@@ -281,11 +261,53 @@ async fn put_native_mcp_servers(
     .send()
     .await
     .map_err(|error| format!("save MCP servers: {error}"))?;
+    native_json_response(response, "MCP server").await
+}
+
+/// Ask, in an OS dialog, whether the enabled local MCP commands in `config`
+/// (`{"servers": [...]}`) may run. `Ok(true)` means the person allowed them,
+/// or that `config` starts no local command and there was nothing to ask.
+/// Renderer JavaScript can request the prompt but cannot answer it.
+pub(crate) async fn approve_local_mcp_commands(
+    app: &tauri::AppHandle,
+    config: &Value,
+    allow_label: &str,
+) -> Result<bool, String> {
+    let commands = native_command_previews(config)?;
+    if commands.is_empty() {
+        return Ok(true);
+    }
+    let preview = commands.join("\n");
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(native_mcp_command_confirmation(&preview))
+        .title("Allow local MCP commands?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            allow_label.to_owned(),
+            "Cancel".to_owned(),
+        ));
+    if let Some(window) = app.get_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show(move |approved| {
+        let _ = sender.send(approved);
+    });
+    Ok(receiver.await.unwrap_or(false))
+}
+
+/// Read the embedded server's answer to a native request: its JSON body, or
+/// the message of the error it returned.
+pub(crate) async fn native_json_response(
+    response: reqwest::Response,
+    noun: &str,
+) -> Result<Value, String> {
     let status = response.status();
     let body = response
         .bytes()
         .await
-        .map_err(|error| format!("read MCP server response: {error}"))?;
+        .map_err(|error| format!("read {noun} response: {error}"))?;
     if !status.is_success() {
         let message = serde_json::from_slice::<Value>(&body)
             .ok()
@@ -294,10 +316,10 @@ async fn put_native_mcp_servers(
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             })
-            .unwrap_or_else(|| format!("MCP server returned {status}"));
+            .unwrap_or_else(|| format!("{noun} returned {status}"));
         return Err(message);
     }
-    serde_json::from_slice(&body).map_err(|error| format!("decode MCP server response: {error}"))
+    serde_json::from_slice(&body).map_err(|error| format!("decode {noun} response: {error}"))
 }
 
 fn native_mcp_command_confirmation(preview: &str) -> String {
@@ -871,6 +893,7 @@ pub fn run() {
             remote_machine_access_token,
             disconnect_remote_machine,
             put_native_mcp_servers,
+            deep_link::leave_provisioned_gateway,
             request_user_attention,
             is_window_focused,
             present_native_notification,
@@ -890,6 +913,7 @@ pub fn run() {
             chat_debug::save_chat_debug_bundle,
             workspace_config::save_workspace_config,
             workspace_config::pick_workspace_config,
+            workspace_config::apply_native_workspace_config,
             office_pdf::convert_office_to_pdf,
             office_install::install_presentation_converter,
             office_install::cancel_presentation_converter_install,
@@ -1447,6 +1471,61 @@ mod server_info_tests {
             "desktop_process_current_directory"
         );
         assert_eq!(approval["environment"]["ambient_environment"], "cleared");
+    }
+
+    /// The import's native confirmation reads the definitions the server
+    /// resolution produces, serialized. It lists the command an import would
+    /// start, with its arguments, directory, and environment, and leaves out
+    /// a server the person chose to import turned off.
+    #[test]
+    fn an_import_previews_exactly_the_commands_it_would_start() {
+        use tidebreak_server::workspace_config::{
+            local_commands_to_confirm, WorkspaceConfigApplyRequest,
+        };
+        let request: WorkspaceConfigApplyRequest = serde_json::from_value(serde_json::json!({
+            "document": {
+                "tidebreak_config": 1,
+                "exported_at": "2026-09-02T00:00:00Z",
+                "sections": {
+                    "mcp_servers": [
+                        {
+                            "name": "docs",
+                            "command": "/opt/mcp/docs",
+                            "args": ["--stdio"],
+                            "env_from": ["PATH"],
+                            "cwd": "/srv/docs",
+                            "request_timeout_ms": 60000,
+                            "enabled": true
+                        },
+                        {
+                            "name": "held",
+                            "command": "/opt/mcp/held",
+                            "request_timeout_ms": 60000,
+                            "enabled": true
+                        }
+                    ]
+                }
+            },
+            "decisions": [
+                {"section": "mcp_servers", "key": "docs", "action": "add"},
+                {"section": "mcp_servers", "key": "held", "action": "add", "enabled": false}
+            ]
+        }))
+        .expect("a valid import request");
+        let approval = single_native_approval(serde_json::json!({
+            "servers": local_commands_to_confirm(&request)
+        }));
+        assert_eq!(approval["server"], "docs");
+        assert_eq!(
+            approval["argv"],
+            serde_json::json!(["/opt/mcp/docs", "--stdio"])
+        );
+        assert_eq!(approval["cwd"]["source"], "configured");
+        assert_eq!(approval["cwd"]["path"], "/srv/docs");
+        assert_eq!(
+            approval["environment"]["inherited_from_desktop_process"],
+            serde_json::json!(["PATH"])
+        );
     }
 
     #[test]
