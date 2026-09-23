@@ -135,11 +135,14 @@ cursor-pull contract. It never runs an engine session, and nothing parses its
 bytes, so "the harness never gets a PTY" still holds: adapters have no PTY API.
 
 **Workspace shells see the engines Tidebreak runs.** A workspace shell starts
-with the login environment the harness probe captures (decision 34), with each
-pinned engine's `bin` directory first on `PATH` and the managed Node runtime
-last. The shell starts interactive but not as a login shell when that capture
-exists: a login shell reruns `/etc/profile`, where macOS's `path_helper` moves
-prepended directories behind the system ones and Debian resets `PATH`. Without
-a capture, the shell loads the login profile itself. Managed Node goes last so
-a project's own `node` and `npm` keep winning, while Codex and Grok, which
-start through `#!/usr/bin/env node`, still find one.
+with the login environment the harness probe captures (decision 34). Its
+`PATH` lists the user's own directories first, then each pinned engine's `bin`
+directory, then the managed Node runtime. An engine or a Node the user
+installed keeps winning, so Tidebreak never shadows the user's tools. A user
+who never installed an engine still finds the one Tidebreak downloaded, and
+Codex and Grok, which start through `#!/usr/bin/env node`, still find a Node.
+Sign-in does not depend on this order, because it runs the pinned binary by
+its path. The shell starts interactive but not as a login shell when that
+capture exists: a login shell reruns `/etc/profile`, and Debian's resets
+`PATH`, which drops the appended directories. Without a capture, the shell
+loads the login profile itself.

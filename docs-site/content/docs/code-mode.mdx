@@ -105,9 +105,10 @@ worktree, so you are always in the checkout the agent is working in. Use it
 for the things that are faster to type than to ask for — a test run, a git
 command, a quick look at a file.
 
-The terminal starts with your login shell's environment, and the engines
-Tidebreak downloaded come first on its `PATH`. So `claude`, `codex`,
-`opencode`, and `grok` there are the same engines your sessions run.
+The terminal starts with your login shell's environment. Tidebreak adds the
+engines it downloaded to the end of its `PATH`, so `claude`, `codex`,
+`opencode`, and `grok` work there even if you never installed them. If you
+installed an engine yourself, your copy runs instead.
 
 ## Pull requests
 

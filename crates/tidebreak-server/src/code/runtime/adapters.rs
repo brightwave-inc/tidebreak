@@ -220,8 +220,8 @@ impl CodeRuntime {
     }
 
     /// What a workspace terminal in `cwd` runs: the user's shell, with the
-    /// engines Tidebreak drives first on `PATH`. See
-    /// [`crate::code::terminal::shell_environment`].
+    /// engines Tidebreak drives on `PATH` after the user's own directories.
+    /// See [`crate::code::terminal::shell_environment`].
     pub(crate) async fn shell_launch(&self, cwd: &Path) -> crate::code::terminal::TerminalLaunch {
         let (base, captured) = match self.login_env().await {
             Some(env) => (env.as_ref().clone(), true),

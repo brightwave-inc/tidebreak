@@ -7,7 +7,8 @@
 //! The same machinery runs one other kind of terminal: an engine's own
 //! sign-in command, outside any workspace ([`SignInTerminals`]). Tidebreak
 //! drives pinned engine binaries that are not on the user's `PATH`, so a
-//! person who pressed Download has no `claude` to sign in with anywhere else.
+//! person who pressed Download has no `claude` in their own terminal to sign
+//! in with.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -639,11 +640,11 @@ impl TerminalLaunch {
     ///
     /// With `captured_login`, `env` is the login environment the harness
     /// probe captured (decision 34), and the shell starts interactive but not
-    /// as a login shell. A login shell would rerun `/etc/profile`, where
-    /// macOS's `path_helper` moves every directory Tidebreak put first on
-    /// `PATH` behind the system ones, and Debian resets `PATH` outright.
-    /// Without a capture, the shell loads the login profile itself, so an app
-    /// started from Finder still gets the `PATH` a person's own terminal has.
+    /// as a login shell. A login shell would rerun `/etc/profile`, which on
+    /// Debian resets `PATH` outright and drops the engine directories appended
+    /// to it. Without a capture, the shell loads the login profile itself, so
+    /// an app started from Finder still gets the `PATH` a person's own
+    /// terminal has.
     pub fn shell(cwd: &Path, env: Vec<(OsString, OsString)>, captured_login: bool) -> Self {
         let args = if captured_login || cfg!(windows) {
             Vec::new()
@@ -704,14 +705,14 @@ fn sign_in_argv(binary: &Path, sign_in: &[&str], windows: bool) -> (PathBuf, Vec
 /// The environment a workspace shell starts with.
 ///
 /// `base` is the user's captured login environment, or the process
-/// environment when there is none. Each engine's pinned `bin` directory goes
-/// first on `PATH`, so `claude`, `codex`, `opencode`, and `grok` in a
-/// Tidebreak terminal are the engines Tidebreak drives (decision 41): the
-/// ones a person who pressed Download has, and the ones whose sign-in the
-/// doctor checks. The managed Node directory goes last. Codex and Grok start
-/// through `#!/usr/bin/env node`, so a person who never installed Node still
-/// needs one, while a Node they did install keeps winning and a project's own
-/// `node` and `npm` stay the ones its terminal runs.
+/// environment when there is none. `PATH` keeps the user's own directories
+/// first, then each engine's pinned `bin` directory, then the managed Node
+/// directory. A `claude`, `codex`, `opencode`, or `grok` the person installed
+/// themselves keeps winning, the same way their own `node` and `npm` do, so
+/// Tidebreak never shadows their tools. A person who never installed an
+/// engine still finds the one Tidebreak downloaded (decision 41), and Codex
+/// and Grok, which start through `#!/usr/bin/env node`, still find a Node.
+/// Sign-in does not rely on this order: it runs the pinned binary by path.
 pub fn shell_environment(
     base: Vec<(OsString, OsString)>,
     engine_dirs: &[PathBuf],
@@ -720,10 +721,10 @@ pub fn shell_environment(
     let mut env = base;
     let prior = take_env(&mut env, "PATH");
     let mut dirs: Vec<PathBuf> = Vec::new();
-    let candidates = engine_dirs
+    let candidates = prior
         .iter()
-        .cloned()
-        .chain(prior.iter().flat_map(std::env::split_paths))
+        .flat_map(std::env::split_paths)
+        .chain(engine_dirs.iter().cloned())
         .chain(node_dir.map(Path::to_path_buf));
     for dir in candidates {
         if !dir.as_os_str().is_empty() && !dirs.contains(&dir) {
@@ -1685,11 +1686,11 @@ mod tests {
             .map(|(_, value)| value)
     }
 
-    /// The engines a Tidebreak terminal runs are the pinned ones, and the
-    /// Node a person installed stays theirs.
+    /// The person's own directories come first, then the pinned engines, then
+    /// managed Node, so nothing Tidebreak adds shadows a tool they installed.
     #[cfg(unix)]
     #[test]
-    fn a_shell_puts_the_pinned_engines_first_and_managed_node_last() {
+    fn a_shell_keeps_the_users_path_ahead_of_the_pinned_engines_and_node() {
         let env = shell_environment(
             os_env(&[
                 ("PATH", "/opt/homebrew/bin:/usr/bin:/bin"),
@@ -1705,11 +1706,11 @@ mod tests {
         assert_eq!(
             path_of(&env),
             [
-                "/data/tools/harnesses/claude_code/2.1.259/node_modules/.bin",
-                "/data/tools/harnesses/codex/0.153.4/node_modules/.bin",
                 "/opt/homebrew/bin",
                 "/usr/bin",
                 "/bin",
+                "/data/tools/harnesses/claude_code/2.1.259/node_modules/.bin",
+                "/data/tools/harnesses/codex/0.153.4/node_modules/.bin",
                 "/data/tools/node/20.20.2/bin",
             ]
             .map(PathBuf::from)
@@ -1728,13 +1729,13 @@ mod tests {
     #[test]
     fn a_directory_already_on_path_keeps_its_first_place() {
         let env = shell_environment(
-            os_env(&[("PATH", "/pinned/bin:/usr/bin:/managed/node")]),
+            os_env(&[("PATH", "/managed/node:/usr/bin:/pinned/bin")]),
             &[PathBuf::from("/pinned/bin")],
             Some(Path::new("/managed/node")),
         );
         assert_eq!(
             path_of(&env),
-            ["/pinned/bin", "/usr/bin", "/managed/node"].map(PathBuf::from)
+            ["/managed/node", "/usr/bin", "/pinned/bin"].map(PathBuf::from)
         );
         // No PATH at all still yields the engines.
         let bare = shell_environment(Vec::new(), &[PathBuf::from("/pinned/bin")], None);
@@ -1742,7 +1743,7 @@ mod tests {
     }
 
     /// Only a shell with no captured login environment loads the profile
-    /// itself; one with a capture must not rerun `path_helper` over it.
+    /// itself; one with a capture must not rerun `/etc/profile` over it.
     #[cfg(unix)]
     #[test]
     fn a_shell_logs_in_only_without_a_captured_environment() {
@@ -1838,12 +1839,13 @@ mod tests {
         }
     }
 
-    /// A terminal built from [`shell_environment`] runs the pinned engine
-    /// even when the person's own `PATH` holds another one, and runs the
-    /// person's own Node rather than the managed one.
+    /// A terminal built from [`shell_environment`] runs the person's own
+    /// engine and Node where they installed one, and the pinned engine where
+    /// they did not. An engine directory placed ahead of the person's own
+    /// fails the first assertion: their `claude` would lose to the pin.
     #[cfg(unix)]
     #[test]
-    fn a_terminal_resolves_engines_to_the_pins() {
+    fn a_terminal_prefers_the_users_engines_and_falls_back_to_the_pins() {
         let root = tempfile::tempdir().unwrap();
         let pinned = root.path().join("pinned");
         let user = root.path().join("user");
@@ -1855,6 +1857,10 @@ mod tests {
             &pinned.join("claude"),
             "#!/bin/sh\necho \"pinned claude $*\"\n",
         );
+        write_script(
+            &pinned.join("codex"),
+            "#!/bin/sh\necho \"pinned codex $*\"\n",
+        );
         write_script(&user.join("claude"), "#!/bin/sh\necho \"user claude $*\"\n");
         write_script(&user.join("node"), "#!/bin/sh\necho user node\n");
         write_script(&managed_node.join("node"), "#!/bin/sh\necho managed node\n");
@@ -1865,7 +1871,7 @@ mod tests {
         )];
         let launch = TerminalLaunch {
             program: PathBuf::from("/bin/sh"),
-            args: vec!["-c".into(), "claude auth login; node".into()],
+            args: vec!["-c".into(), "claude auth login; codex login; node".into()],
             cwd: root.path().to_path_buf(),
             env: shell_environment(base, &[pinned], Some(&managed_node)),
         };
@@ -1875,9 +1881,11 @@ mod tests {
             .open(&OwnerId::local(), ws, &launch, None, None)
             .unwrap();
         let output = read_until_ended(|cursor| hub.read(ws, snap.id, cursor), "the terminal");
-        assert!(output.contains("pinned claude auth login"), "{output}");
+        assert!(output.contains("user claude auth login"), "{output}");
+        assert!(!output.contains("pinned claude"), "{output}");
+        assert!(output.contains("pinned codex login"), "{output}");
         assert!(output.contains("user node"), "{output}");
-        assert!(!output.contains("user claude"), "{output}");
+        assert!(!output.contains("managed node"), "{output}");
     }
 
     /// A sign-in belongs to one person and one engine. Another person reading
