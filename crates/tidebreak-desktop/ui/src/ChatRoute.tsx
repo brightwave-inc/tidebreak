@@ -76,8 +76,8 @@ import { PanelLayout } from "./panel/PanelLayout";
 import type { PanelContent } from "./panel/panelTypes";
 import { usePanelNav } from "./panel/usePanelNav";
 import { SourceNavProvider, useStableSourceNav } from "./panel/SourceNav";
-import { RouteFrame } from "./RouteFrame";
-import { AppSidebar } from "./sidebar/AppSidebar";
+import { ArchivedChatNotice } from "./ArchivedChatNotice";
+import { useDocumentVisible } from "./lib/useDocumentVisible";
 import { useRefreshSignals } from "./RefreshSignals";
 import { TranscriptVisibilityProvider } from "./TranscriptVisibility";
 import { useTurnLifecycle } from "./TurnLifecycleSignals";
@@ -162,7 +162,27 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   // the only writer on this route.
   const draftRef = useRef(useComposerDrafts.getState().drafts[chatId] ?? "");
 
-  const chat = chats.find((candidate) => candidate.id === chatId) ?? null;
+  const archivedChats = useChatListStore((state) => state.archivedChats);
+  // An archived conversation still opens: archiving keeps everything.
+  const chat =
+    chats.find((candidate) => candidate.id === chatId) ??
+    archivedChats.find((candidate) => candidate.id === chatId) ??
+    null;
+  const unread = chat?.unread ?? false;
+  const windowVisible = useDocumentVisible();
+
+  // Looking at the conversation is what reads it. A turn that finishes while
+  // it is open marks it unread on the server, the list refresh that follows
+  // brings that here, and this clears it again. A hidden window has not seen
+  // anything, so the mark waits until the window is back.
+  useEffect(() => {
+    if (!unread || !windowVisible) return;
+    chatListActions.markChatRead(chatId);
+    void client.markChatRead(chatId).catch(() => {
+      // The mark is a hint. The next list refresh shows it again, and opening
+      // the conversation clears it then.
+    });
+  }, [client, chatId, unread, windowVisible]);
   const memorySummary = useChatMemoryPresence(client, chat);
   const memorySettingsPath: string = "/settings/memory";
   const nativeHost = hasNativeHost();
@@ -324,12 +344,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         return;
       case "turn_began":
         signalRefresh("queuedTurns");
+        signalRefresh("chats");
         signalTurnLifecycle(
           effect.startsDifferentTurn ? "began" : "began_same_turn",
         );
         return;
       case "turn_resolved":
         signalRefresh("queuedTurns");
+        signalRefresh("chats");
         signalTurnLifecycle("resolved");
         return;
       case "invalidate_terminal_hydration":
@@ -1035,69 +1057,68 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   return (
-    <RouteFrame sidebar={<AppSidebar chat={chat} />}>
-      <div className="relative mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* Padded rather than offset from the top, so the band above the
+    <div className="relative mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Padded rather than offset from the top, so the band above the
             title belongs to the header and drags the window with it. */}
-        <header
-          className="window-chrome-row flex h-11 w-full shrink-0 items-center justify-between gap-2 pt-2 pr-1"
-          {...paneHeaderDragRegion()}
-        >
-          <ChatHeaderTitle chat={chat} />
-          {/* The activity card hangs from the header over the transcript. It
+      <header
+        className="window-chrome-row flex h-11 w-full shrink-0 items-center justify-between gap-2 pt-2 pr-1"
+        {...paneHeaderDragRegion()}
+      >
+        <ChatHeaderTitle chat={chat} />
+        {/* The activity card hangs from the header over the transcript. It
               is content, not chrome, so it never drags the window. */}
-          <div
-            className="relative z-20 flex shrink-0 items-center gap-2 self-start"
-            data-tauri-drag-region="false"
-          >
-            <ChatStatusChip
-              compact={layout.tabs.length > 0}
-              outputCount={deliverables.length}
-              folders={folders.items}
-              runs={chatAgentRuns}
-              onOpenOutputs={() => openPanel({ type: "outputs" })}
-              onOpenFolders={() => openPanel({ type: "folders" })}
-              onOpenPermissions={() => openPanel({ type: "permissions" })}
-              onOpenAgents={() => openPanel({ type: "agents" })}
-              onOpenBrowser={
-                hasLocalHostAuthority() ? () => openBrowser() : undefined
-              }
-              memory={
-                memorySummary
-                  ? {
-                      summary: memorySummary,
-                      onOpen: () => void navigate({ to: memorySettingsPath }),
-                    }
-                  : undefined
-              }
-            />
-          </div>
-        </header>
-        <PinnedOutputsStrip
-          chatId={chatId}
-          outputs={deliverables}
-          panelOpen={layout.tabs.length > 0}
-          onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
-          onOpenOutputs={() => openPanel({ type: "outputs" })}
-        />
-        {/* Citations live in the transcript but open into the panel beside it,
-            so the way there is provided above both slots. */}
-        <MarkdownLinkProvider
-          onOpenInApp={
-            hasLocalHostAuthority() ? (url) => openBrowser(url) : undefined
-          }
+        <div
+          className="relative z-20 flex shrink-0 items-center gap-2 self-start"
+          data-tauri-drag-region="false"
         >
-          <SourceNavProvider value={sourceNav}>
-            <PanelLayout
-              layout={layout}
-              tabLabel={tabLabel}
-              renderChat={renderChat}
-              renderPanel={renderPanel}
-            />
-          </SourceNavProvider>
-        </MarkdownLinkProvider>
-      </div>
-    </RouteFrame>
+          <ChatStatusChip
+            compact={layout.tabs.length > 0}
+            outputCount={deliverables.length}
+            folders={folders.items}
+            runs={chatAgentRuns}
+            onOpenOutputs={() => openPanel({ type: "outputs" })}
+            onOpenFolders={() => openPanel({ type: "folders" })}
+            onOpenPermissions={() => openPanel({ type: "permissions" })}
+            onOpenAgents={() => openPanel({ type: "agents" })}
+            onOpenBrowser={
+              hasLocalHostAuthority() ? () => openBrowser() : undefined
+            }
+            memory={
+              memorySummary
+                ? {
+                    summary: memorySummary,
+                    onOpen: () => void navigate({ to: memorySettingsPath }),
+                  }
+                : undefined
+            }
+          />
+        </div>
+      </header>
+      {chat.archived_at ? <ArchivedChatNotice chat={chat} /> : null}
+      <PinnedOutputsStrip
+        chatId={chatId}
+        outputs={deliverables}
+        panelOpen={layout.tabs.length > 0}
+        onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
+        onOpenOutputs={() => openPanel({ type: "outputs" })}
+      />
+      {/* Citations live in the transcript but open into the panel beside it,
+            so the way there is provided above both slots. */}
+      <MarkdownLinkProvider
+        onOpenInApp={
+          hasLocalHostAuthority() ? (url) => openBrowser(url) : undefined
+        }
+      >
+        <SourceNavProvider value={sourceNav}>
+          <PanelLayout
+            layout={layout}
+            tabLabel={tabLabel}
+            renderChat={renderChat}
+            renderPanel={renderPanel}
+          />
+        </SourceNavProvider>
+      </MarkdownLinkProvider>
+    </div>
   );
 }
 

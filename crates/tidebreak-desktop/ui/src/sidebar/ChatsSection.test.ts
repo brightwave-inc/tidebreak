@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { Chat } from "@/api";
-import { listedChats, matchesChatSearch } from "./ChatsSection";
+import type { ChatListGroup } from "@/chatListGroups";
+import {
+  listedChats,
+  matchesChatSearch,
+  OLDER_PREVIEW_ROWS,
+  visibleGroupRows,
+} from "./ChatsSection";
 
 function chat(title: string | null, projectId: string | null = null): Chat {
   return { id: "chat-1", title, project_id: projectId } as unknown as Chat;
@@ -47,5 +53,64 @@ describe("listedChats", () => {
       loose,
     ]);
     expect(listedChats([loose], "budget")).toEqual([]);
+  });
+});
+
+describe("chats nothing happened in", () => {
+  const empty = {
+    id: "empty",
+    title: null,
+    project_id: null,
+    turn_count: 0,
+    pinned_at: null,
+  } as unknown as Chat;
+
+  it("stay out of the list, so an abandoned start leaves no row", () => {
+    expect(listedChats([empty], "")).toEqual([]);
+  });
+
+  it("show while they are the conversation on screen", () => {
+    expect(listedChats([empty], "", "empty")).toEqual([empty]);
+  });
+
+  it("show once they are named or pinned", () => {
+    const named = { ...empty, title: "Offsite plan" };
+    const pinned = { ...empty, pinned_at: "2026-09-20T10:00:00Z" };
+    expect(listedChats([named, pinned], "")).toEqual([named, pinned]);
+  });
+});
+
+describe("the Older preview", () => {
+  const older = (count: number): ChatListGroup => ({
+    key: "older",
+    label: "Older",
+    chats: Array.from(
+      { length: count },
+      (_, index) => ({ id: `older-${index}` }) as unknown as Chat,
+    ),
+  });
+
+  it("shows every row of a short group", () => {
+    const group = older(OLDER_PREVIEW_ROWS);
+    expect(visibleGroupRows(group, false)).toEqual({
+      rows: group.chats,
+      hidden: 0,
+    });
+  });
+
+  it("stops a long group at the preview and counts the rest", () => {
+    const { rows, hidden } = visibleGroupRows(older(30), false);
+    expect(rows).toHaveLength(OLDER_PREVIEW_ROWS);
+    expect(hidden).toBe(30 - OLDER_PREVIEW_ROWS);
+  });
+
+  it("never hides the conversation on screen", () => {
+    const { rows, hidden } = visibleGroupRows(older(30), false, "older-27");
+    expect(rows.at(-1)?.id).toBe("older-27");
+    expect(hidden).toBe(30 - OLDER_PREVIEW_ROWS - 1);
+  });
+
+  it("shows everything once asked", () => {
+    expect(visibleGroupRows(older(30), true).rows).toHaveLength(30);
   });
 });

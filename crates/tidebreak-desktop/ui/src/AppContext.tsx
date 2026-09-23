@@ -49,10 +49,19 @@ export type AppContextValue = {
   refreshChats: () => Promise<void>;
   status: string;
   setStatus: (next: string | ((current: string) => string)) => void;
-  /** Start a conversation and open it. Fenced against a second in-flight create. */
+  /**
+   * Start new work: open the home composer, which creates the conversation on
+   * the first send. Every "new work" control and the shortcut call this.
+   */
   newChat: () => void;
   /** Confirm, then delete, then land somewhere real. */
   deleteChat: (chat: Chat) => void;
+  /** Pin a conversation to the top of the list, or unpin it. */
+  togglePinChat: (chat: Chat) => void;
+  /** Move a conversation to the archive, with a way to undo. */
+  archiveChat: (chat: Chat) => void;
+  /** Bring an archived conversation back into the list. */
+  unarchiveChat: (chat: Chat) => void;
   startRename: (chat: Chat) => void;
   commitRename: (chat: Chat) => void;
   cancelRename: () => void;

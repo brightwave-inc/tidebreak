@@ -2,7 +2,6 @@ import { type ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { LayoutGrid, Puzzle } from "lucide-react";
 
-import type { Chat } from "@/api";
 import { useApp } from "@/AppContext";
 import { useChatListStore } from "@/ChatListStore";
 import { CodeModeSwitch } from "@/code/CodeModeSwitch";
@@ -12,20 +11,23 @@ import { NotificationBellButton } from "@/NotificationBellButton";
 import { ProjectsSection } from "./ProjectsSection";
 import { SidebarButton } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
+import { useActiveChatId } from "@/useActiveChatId";
 
 /**
  * The one navigation rail, used by every route that is not settings.
  *
- * Its subject is the chat list: a slim block of install-wide destinations at
- * the top, and the conversations filling everything below it. Home and a
- * conversation see the same rail so that moving between them does not
- * rearrange the furniture. Everything that describes one conversation —
- * outputs, folders, agents — lives in the chat header's status chip instead,
- * beside the conversation it describes.
+ * Its subject is the list of work: a slim block of install-wide destinations
+ * at the top, and the conversations filling everything below it. It is
+ * mounted once, by the Work layout route, so moving between home, the
+ * libraries, and conversations swaps only the pane and the list keeps its
+ * scroll. Everything that describes one conversation — outputs, folders,
+ * agents — lives in the chat header's status chip instead, beside the
+ * conversation it describes.
  *
- * `chat` is the conversation the route is showing, when it is showing one.
+ * The conversation on screen comes from the URL, the one record of it.
  */
-export function AppSidebar({ chat }: { chat?: Chat }) {
+export function AppSidebar() {
+  const activeChatId = useActiveChatId() ?? undefined;
   const navigate = useNavigate();
   const { refreshChats } = useApp();
   const chatsError = useChatListStore((state) => state.chatsError);
@@ -66,8 +68,8 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
         />
       </nav>
 
-      <ProjectsSection activeChatId={chat?.id} />
-      <ChatsSection activeChatId={chat?.id} />
+      <ProjectsSection activeChatId={activeChatId} />
+      <ChatsSection activeChatId={activeChatId} />
       {chatsError && (
         <div className="flex shrink-0 flex-col gap-1 px-2 py-1">
           <p className="text-xs text-critical">{chatsError}</p>

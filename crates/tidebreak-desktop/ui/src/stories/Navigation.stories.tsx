@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import {
   createMemoryHistory,
@@ -8,15 +8,24 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { fn, userEvent, within } from "storybook/test";
+import type { Chat } from "@/api";
 import { ChatHeaderTitle } from "@/ChatHeaderTitle";
-import { RouteFrame } from "@/RouteFrame";
-import { AppSidebar } from "@/sidebar/AppSidebar";
+import { useChatListStore } from "@/ChatListStore";
+import { useConfirm } from "@/components/ConfirmDialog";
+import { deletionDescription } from "@/ChatDeletion";
 import { NewProjectDialog } from "@/sidebar/NewProjectDialog";
 import { SidebarExpandStrip } from "@/sidebar/SidebarExpandStrip";
+import { useActiveChatId } from "@/useActiveChatId";
+import { WorkArchivePage } from "@/WorkArchivePage";
+import { WorkLayout } from "@/WorkLayout";
 import {
+  activityAt,
   denseInboxEntries,
   denseRouteChats,
+  groupedRouteChats,
+  longTitleRouteChats,
   resetRouteStoryStores,
+  routeChat,
   routeChats,
   RouteStoryProviders,
   storyClient,
@@ -30,141 +39,225 @@ type NavigationScenario =
   | "failure"
   | "narrow"
   | "collapsed"
-  | "collapsed-mac";
+  | "collapsed-mac"
+  | "grouped"
+  | "running"
+  | "unread"
+  | "pinned"
+  | "long-titles"
+  | "archive"
+  | "archive-empty";
 
-function NavigationSurface({ activeChatId }: { activeChatId?: string }) {
-  const activeChat = routeChats.find((chat) => chat.id === activeChatId);
+function NavigationSurface() {
+  const activeChatId = useActiveChatId();
+  const activeChat = useChatListStore(
+    (state) =>
+      state.chats.find((chat) => chat.id === activeChatId) ??
+      state.archivedChats.find((chat) => chat.id === activeChatId),
+  );
   return (
-    <RouteFrame sidebar={<AppSidebar chat={activeChat} />}>
-      <div className="content-container flex h-full min-h-0 flex-col">
-        {activeChat && (
-          <header
-            className="window-chrome-row flex h-12 shrink-0 items-center border-b border-border-subtle pr-3"
-            data-testid="work-window-chrome"
-          >
-            <ChatHeaderTitle chat={activeChat} />
-          </header>
-        )}
-        <div className="grid min-h-0 flex-1 place-items-center p-8">
-          <div className="max-w-md text-center">
-            <h1 className="text-2xl font-semibold tracking-tight">
-              Navigation review surface
-            </h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              This canvas keeps the production rail in context while you inspect
-              active routes, list density, loading, and failure states.
-            </p>
-          </div>
+    <div className="content-container flex h-full min-h-0 flex-col">
+      {activeChat && (
+        <header
+          className="window-chrome-row flex h-12 shrink-0 items-center border-b border-border-subtle pr-3"
+          data-testid="work-window-chrome"
+        >
+          <ChatHeaderTitle chat={activeChat} />
+        </header>
+      )}
+      <div className="grid min-h-0 flex-1 place-items-center p-8">
+        <div className="max-w-md text-center">
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Navigation review surface
+          </h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            This canvas keeps the production rail in context while you inspect
+            active routes, list density, loading, and failure states.
+          </p>
         </div>
       </div>
-    </RouteFrame>
+    </div>
   );
 }
 
+/**
+ * The same shape as the app's router: one pathless Work layout that mounts
+ * the rail once, with every Work route as its child.
+ */
 function createNavigationRouter(initialPath: string) {
   const rootRoute = createRootRoute();
-  const homeRoute = createRoute({
+  const layoutRoute = createRoute({
     getParentRoute: () => rootRoute,
-    path: "/",
-    component: NavigationSurface,
+    id: "work-layout",
+    component: WorkLayout,
   });
-  const inboxRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/inbox",
-    component: NavigationSurface,
-  });
-  const appsRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/apps",
-    component: NavigationSurface,
-  });
-  const pluginsRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/plugins",
-    component: NavigationSurface,
-  });
-  const settingsRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/settings",
-    component: NavigationSurface,
-  });
-  const codeRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/code",
-    component: NavigationSurface,
-  });
-  const projectRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/p/$projectId",
-    component: NavigationSurface,
-  });
-  const chatRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/c/$chatId",
-    component: () => <NavigationSurface activeChatId="chat-1" />,
-  });
-  const projectChatRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/p/$projectId/c/$chatId",
-    component: () => <NavigationSurface activeChatId="chat-3" />,
+  const surface = (path: string) =>
+    createRoute({
+      getParentRoute: () => layoutRoute,
+      path,
+      component: NavigationSurface,
+    });
+  const archiveRoute = createRoute({
+    getParentRoute: () => layoutRoute,
+    path: "/archive",
+    component: WorkArchivePage,
   });
 
   return createRouter({
     routeTree: rootRoute.addChildren([
-      homeRoute,
-      inboxRoute,
-      appsRoute,
-      pluginsRoute,
-      settingsRoute,
-      codeRoute,
-      projectRoute,
-      chatRoute,
-      projectChatRoute,
+      layoutRoute.addChildren([
+        surface("/"),
+        surface("/inbox"),
+        surface("/apps"),
+        surface("/plugins"),
+        surface("/settings"),
+        surface("/code"),
+        surface("/p/$projectId"),
+        surface("/c/$chatId"),
+        surface("/p/$projectId/c/$chatId"),
+        archiveRoute,
+      ]),
     ]),
     history: createMemoryHistory({ initialEntries: [initialPath] }),
   });
 }
 
+/** Two turns in flight, one of them in the conversation on screen. */
+const runningChats: Chat[] = [
+  routeChat({
+    id: "running-1",
+    title: "Draft the launch announcement",
+    last_activity_at: activityAt(0, 1),
+    running: true,
+  }),
+  routeChat({
+    id: "running-2",
+    title: "Build the churn analysis workbook",
+    last_activity_at: activityAt(0, 4),
+    running: true,
+  }),
+  routeChat({
+    id: "running-3",
+    title: "Plan the offsite agenda",
+    last_activity_at: activityAt(0, 40),
+  }),
+];
+
+/** Turns that finished while the reader was in another conversation. */
+const unreadChats: Chat[] = [
+  routeChat({
+    id: "unread-1",
+    title: "Summarize the pricing survey",
+    last_activity_at: activityAt(0, 6),
+    unread: true,
+  }),
+  routeChat({
+    id: "unread-2",
+    title: "Reconcile the September invoices",
+    last_activity_at: activityAt(0, 25),
+    unread: true,
+  }),
+  routeChat({
+    id: "unread-3",
+    title: "Compare vendor security reviews",
+    last_activity_at: activityAt(0, 55),
+  }),
+];
+
+const pinnedChats: Chat[] = [
+  routeChat({
+    id: "pin-1",
+    title: "Quarterly board deck",
+    pinned_at: activityAt(0, 10),
+    last_activity_at: activityAt(6),
+  }),
+  routeChat({
+    id: "pin-2",
+    title: "Customer interview synthesis",
+    pinned_at: activityAt(3),
+    last_activity_at: activityAt(1),
+    unread: true,
+  }),
+  routeChat({
+    id: "pin-3",
+    title: "Hiring plan",
+    pinned_at: activityAt(8),
+    last_activity_at: activityAt(20),
+  }),
+  routeChat({
+    id: "pin-4",
+    title: "Draft the launch announcement",
+    last_activity_at: activityAt(0, 3),
+  }),
+];
+
+const scenarioChats: Partial<Record<NavigationScenario, Chat[]>> = {
+  grouped: groupedRouteChats,
+  running: runningChats,
+  unread: unreadChats,
+  pinned: pinnedChats,
+  "long-titles": longTitleRouteChats,
+  archive: groupedRouteChats.slice(0, 6),
+  "archive-empty": groupedRouteChats.slice(0, 6),
+};
+
+const scenarioPaths: Partial<Record<NavigationScenario, string>> = {
+  "active-work": "/c/chat-1",
+  dense: "/inbox",
+  narrow: "/apps",
+  collapsed: "/apps",
+  "collapsed-mac": "/c/chat-1",
+  grouped: "/c/today-3",
+  running: "/c/running-1",
+  unread: "/c/unread-3",
+  pinned: "/c/pin-4",
+  "long-titles": "/c/long-2",
+  archive: "/archive",
+  "archive-empty": "/archive",
+};
+
 function NavigationStory({ scenario }: { scenario: NavigationScenario }) {
   const [state] = useState(() => {
     const dense = scenario === "dense";
+    const chats =
+      scenarioChats[scenario] ??
+      (scenario === "empty" || scenario === "loading"
+        ? []
+        : dense
+          ? denseRouteChats
+          : routeChats);
     resetRouteStoryStores({
-      chats:
-        scenario === "empty" || scenario === "loading"
-          ? []
-          : dense
-            ? denseRouteChats
-            : routeChats,
+      chats,
       chatsLoaded: scenario !== "loading",
       chatsError:
         scenario === "failure"
           ? "Work could not be loaded from this machine."
           : null,
-      projects: scenario === "empty" || scenario === "loading" ? [] : undefined,
+      projects:
+        scenario === "empty" ||
+        scenario === "loading" ||
+        scenario in scenarioChats
+          ? []
+          : undefined,
       projectsLoaded: scenario !== "loading",
       inboxEntries: dense ? denseInboxEntries : [],
       inboxLoaded: scenario !== "loading",
-      attentionChatIds: dense ? ["chat-2", "dense-chat-2"] : ["chat-2"],
+      attentionChatIds:
+        scenario === "grouped"
+          ? ["yesterday-2"]
+          : dense
+            ? ["chat-2", "dense-chat-2"]
+            : ["chat-2"],
       sidebarWidth: scenario === "narrow" ? 220 : 280,
       sidebarCollapsed:
         scenario === "collapsed" || scenario === "collapsed-mac",
     });
 
-    const initialPath =
-      scenario === "active-work"
-        ? "/c/chat-1"
-        : scenario === "dense"
-          ? "/inbox"
-          : scenario === "narrow"
-            ? "/apps"
-            : scenario === "collapsed"
-              ? "/apps"
-              : scenario === "collapsed-mac"
-                ? "/c/chat-1"
-                : "/";
     return {
-      client: storyClient(),
-      router: createNavigationRouter(initialPath),
+      client: storyClient(
+        scenario === "archive-empty" ? { listChats: async () => [] } : {},
+      ),
+      router: createNavigationRouter(scenarioPaths[scenario] ?? "/"),
     };
   });
 
@@ -234,6 +327,43 @@ export const CollapseAndRestoreActiveRoute: Story = {
   args: { scenario: "narrow" },
 };
 
+/**
+ * The list of work by date: Pinned, Today, Yesterday, Previous 7 days, and
+ * Older. The untitled conversation nothing happened in is left out.
+ */
+export const GroupedList: Story = {
+  args: { scenario: "grouped" },
+};
+
+/** A turn in flight carries the live mark, the open conversation included. */
+export const RunningWork: Story = {
+  args: { scenario: "running" },
+};
+
+/** A turn that finished while you were in another conversation. */
+export const UnreadWork: Story = {
+  args: { scenario: "unread" },
+};
+
+/** Pinned conversations sit in their own group at the top. */
+export const PinnedWork: Story = {
+  args: { scenario: "pinned" },
+};
+
+/** Long titles truncate on one line and keep their status mark. */
+export const LongTitles: Story = {
+  args: { scenario: "long-titles" },
+};
+
+/** The archive, reached from the Work list's options. */
+export const ArchivedView: Story = {
+  args: { scenario: "archive" },
+};
+
+export const EmptyArchive: Story = {
+  args: { scenario: "archive-empty" },
+};
+
 /** A project's row menu, where Instructions opens the project's brief. */
 export const ProjectMenu: Story = {
   play: async ({ canvasElement }) => {
@@ -244,6 +374,48 @@ export const ProjectMenu: Story = {
       }),
     );
   },
+};
+
+/** A row's menu: pin and archive beside rename, move, and delete. */
+export const WorkRowMenu: Story = {
+  args: { scenario: "grouped" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", {
+        name: "Actions for Summarize the pricing survey",
+      }),
+    );
+  },
+};
+
+function DeleteConfirmationStory({
+  outputs,
+  folders,
+}: {
+  outputs: number | null;
+  folders: number;
+}) {
+  const { decide, dialog } = useConfirm();
+  useEffect(() => {
+    void decide({
+      title: "Delete Quarterly board deck?",
+      description: deletionDescription({ folders, outputs }),
+      alternativeLabel: "Archive",
+      confirmLabel: "Delete work",
+      destructive: true,
+    });
+  }, [decide, folders, outputs]);
+  return dialog;
+}
+
+/** Deleting says which outputs go with the conversation, and offers Archive. */
+export const DeleteConfirmation: Story = {
+  render: () => <DeleteConfirmationStory outputs={3} folders={0} />,
+};
+
+export const DeleteConfirmationWithFolders: Story = {
+  render: () => <DeleteConfirmationStory outputs={1} folders={2} />,
 };
 
 export const NewProject: Story = {

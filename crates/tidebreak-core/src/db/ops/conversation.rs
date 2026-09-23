@@ -1009,10 +1009,10 @@ where
 ///
 /// A conversation is safe to prune only when deleting it loses nothing: it
 /// has no turns, no title, no pin, and is not archived, and it holds no
-/// sources, images, connected folders, folder changes, or background runs.
-/// Each candidate is checked again under its write lock, and then erased by
-/// the same cascade a delete uses, so one that gains a first message between
-/// the scan and the delete stays. Returns the ids it removed.
+/// sources, images, outputs, connected folders, folder changes, or background
+/// runs. Each candidate is checked again under its write lock, and then
+/// erased by the same cascade a delete uses, so one that gains a first
+/// message between the scan and the delete stays. Returns the ids it removed.
 pub(in crate::db) async fn prune_empty_chats(
     store: &DbStore,
     created_before: chrono::DateTime<Utc>,
@@ -1079,6 +1079,17 @@ where
             .column(entities::chat_image_publication::Column::ChatId)
             .distinct()
             .filter(entities::chat_image_publication::Column::ChatId.is_in(ids.clone()))
+            .into_tuple::<uuid::Uuid>()
+            .all(conn)
+            .await
+            .map_err(store_err)?,
+    );
+    occupied.extend(
+        entities::output::Entity::find()
+            .select_only()
+            .column(entities::output::Column::ChatId)
+            .distinct()
+            .filter(entities::output::Column::ChatId.is_in(ids.clone()))
             .into_tuple::<uuid::Uuid>()
             .all(conn)
             .await

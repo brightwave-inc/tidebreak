@@ -13,6 +13,12 @@ const pendingChat = {
   created_at: "2026-08-10T00:00:00Z",
   attachment_revision: 0,
   memory_incognito: false,
+  last_activity_at: "2026-08-24T13:00:00Z",
+  pinned_at: null,
+  archived_at: null,
+  running: false,
+  unread: false,
+  turn_count: 1,
   root_attachments: [],
 };
 

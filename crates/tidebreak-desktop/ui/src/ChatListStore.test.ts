@@ -14,6 +14,12 @@ function chat(id: string, title: string | null): Chat {
     network_policy: { mode: "off" },
     attachment_revision: 0,
     memory_incognito: false,
+    last_activity_at: "2026-07-28T12:00:00Z",
+    pinned_at: null,
+    archived_at: null,
+    running: false,
+    unread: false,
+    turn_count: 1,
     root_attachments: [],
     created_at: "2026-07-28T12:00:00Z",
   };
@@ -118,5 +124,87 @@ describe("a title the server derived", () => {
     const state = useChatListStore.getState();
     expect(state.chats[0].title).toBeNull();
     expect(state.streamedTitles).toEqual({});
+  });
+});
+
+describe("a list refresh", () => {
+  beforeEach(() => {
+    useChatListStore.setState({
+      chats: [],
+      archivedChats: [],
+      revision: 0,
+      streamedTitles: {},
+    });
+  });
+
+  it("applies when nothing changed locally while it was in flight", () => {
+    const startedAt = useChatListStore.getState().revision;
+    expect(
+      useChatListStore
+        .getState()
+        .acceptFetchedChats([chat("chat-1", "Roadmap")], startedAt),
+    ).toBe(true);
+    expect(useChatListStore.getState().chats.map((item) => item.id)).toEqual([
+      "chat-1",
+    ]);
+  });
+
+  /**
+   * The race a background refresh would otherwise lose: the list is read,
+   * the reader starts new work, and the older answer lands after. Applying it
+   * would drop the conversation that was just created, and the chat route
+   * would send the reader home mid-send.
+   */
+  it("is dropped when a chat was created while it was in flight", () => {
+    const store = useChatListStore.getState();
+    const startedAt = store.revision;
+    store.prependChat(chat("new-chat", null));
+    expect(
+      useChatListStore
+        .getState()
+        .acceptFetchedChats([chat("chat-1", "Roadmap")], startedAt),
+    ).toBe(false);
+    expect(useChatListStore.getState().chats.map((item) => item.id)).toEqual([
+      "new-chat",
+    ]);
+  });
+});
+
+describe("archiving", () => {
+  beforeEach(() => {
+    useChatListStore.setState({
+      chats: [chat("chat-1", "Roadmap"), chat("chat-2", "Budget")],
+      archivedChats: [],
+      streamedTitles: {},
+    });
+  });
+
+  it("moves a row into the archive and back", () => {
+    const store = useChatListStore.getState();
+    store.replaceChat({
+      ...chat("chat-1", "Roadmap"),
+      archived_at: "2026-09-20T10:00:00Z",
+    });
+    let state = useChatListStore.getState();
+    expect(state.chats.map((item) => item.id)).toEqual(["chat-2"]);
+    expect(state.archivedChats.map((item) => item.id)).toEqual(["chat-1"]);
+
+    state.replaceChat(chat("chat-1", "Roadmap"));
+    state = useChatListStore.getState();
+    expect(state.chats.map((item) => item.id).sort()).toEqual([
+      "chat-1",
+      "chat-2",
+    ]);
+    expect(state.archivedChats).toEqual([]);
+  });
+
+  it("adopts an archived chat opened by id into the archive", () => {
+    useChatListStore.getState().adoptChat({
+      ...chat("chat-9", "Old plan"),
+      archived_at: "2026-09-01T10:00:00Z",
+    });
+    const state = useChatListStore.getState();
+    expect(state.archivedChats.map((item) => item.id)).toEqual(["chat-9"]);
+    expect(state.chats.map((item) => item.id)).toEqual(["chat-1", "chat-2"]);
   });
 });

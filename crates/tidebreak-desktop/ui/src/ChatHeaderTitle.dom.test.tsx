@@ -31,6 +31,9 @@ async function openMenu() {
           commitRename: vi.fn(),
           cancelRename: vi.fn(),
           deleteChat: vi.fn(),
+          togglePinChat: vi.fn(),
+          archiveChat: vi.fn(),
+          unarchiveChat: vi.fn(),
         } as unknown as AppContextValue
       }
     >

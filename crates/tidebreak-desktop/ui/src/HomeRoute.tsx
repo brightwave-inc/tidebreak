@@ -28,8 +28,6 @@ import {
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { pluginsApisFromClient } from "./plugins/pluginsApis";
 import { useComposerPlugins } from "./plugins/useComposerPlugins";
-import { RouteFrame } from "./RouteFrame";
-import { AppSidebar } from "./sidebar/AppSidebar";
 import { WelcomeState } from "./WelcomeState";
 import { PaneDragBand } from "./WindowDragStrip";
 import type { AttachedFiles } from "./attachments";
@@ -437,7 +435,7 @@ export function HomeRoute() {
   // as panels here are routes of their own now, so nothing beside the
   // conversation starter needs hosting.
   return (
-    <RouteFrame sidebar={<AppSidebar />}>
+    <>
       <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
         {/* The panel slot this used to sit in was a plain block, so nothing
             stretches the column to the slot's height — it has to claim it
@@ -613,6 +611,6 @@ export function HomeRoute() {
           setWalkthroughAvailable(false);
         }}
       />
-    </RouteFrame>
+    </>
   );
 }

@@ -74,8 +74,43 @@ export function withChatApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
       return chat;
     }
 
-    listChats(): Promise<Chat[]> {
-      return this.json("/chats", { headers: this.headers() });
+    /**
+     * The list of work: pinned conversations first, then the rest by latest
+     * activity. With `archived`, the archive instead, most recently archived
+     * first.
+     */
+    listChats(options: { archived?: boolean } = {}): Promise<Chat[]> {
+      const query = options.archived ? "?archived=true" : "";
+      return this.json(`/chats${query}`, { headers: this.headers() });
+    }
+
+    /** Pin a conversation to the top of the list, or unpin it. */
+    setChatPinned(chatId: string, pinned: boolean): Promise<Chat> {
+      return this.json(`/chats/${encodeURIComponent(chatId)}`, {
+        method: "PATCH",
+        headers: this.headers(true),
+        body: JSON.stringify({ pinned }),
+      });
+    }
+
+    /**
+     * Archive a conversation out of the list, or bring it back. Archiving
+     * keeps everything; a new message brings it back too.
+     */
+    setChatArchived(chatId: string, archived: boolean): Promise<Chat> {
+      return this.json(`/chats/${encodeURIComponent(chatId)}`, {
+        method: "PATCH",
+        headers: this.headers(true),
+        body: JSON.stringify({ archived }),
+      });
+    }
+
+    /** Clear the unread mark a finished turn left on this conversation. */
+    markChatRead(chatId: string): Promise<void> {
+      return this.json(`/chats/${encodeURIComponent(chatId)}/read`, {
+        method: "POST",
+        headers: this.headers(),
+      });
     }
 
     getChat(chatId: string): Promise<Chat> {

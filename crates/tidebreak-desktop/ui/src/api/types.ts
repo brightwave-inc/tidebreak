@@ -20,7 +20,7 @@ import {
   type AgentRunCancellationSnapshot,
   type AgentRunSnapshot,
   type AgentRunTaskPlan as WireAgentRunTaskPlan,
-  type Chat as WireChat,
+  type ChatListing as WireChatListing,
   type ChatTranscript as WireChatTranscript,
   type CredentialRefusalReason as WireCredentialRefusalReason,
   type ExecConfigInfo as WireExecConfigInfo,
@@ -620,7 +620,11 @@ export type RestCredentialUpdate =
 export type ManagedPolicy = WireManagedPolicy;
 export type ManagedPolicySource = WireManagedPolicySource;
 
-export type Chat = WireChat;
+/**
+ * A conversation as the list of work shows it: the conversation, and where it
+ * sits in the list. Every chat route answers with this shape.
+ */
+export type Chat = WireChatListing;
 
 /**
  * One visible, durable transcript entry in conversation order.

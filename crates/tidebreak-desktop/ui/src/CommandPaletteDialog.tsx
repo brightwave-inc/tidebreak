@@ -8,6 +8,7 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { isListableChat, sortChats } from "./chatListGroups";
 import { useChatListStore } from "./ChatListStore";
 import { useProjectListStore } from "./ProjectListStore";
 import { useCodeCatalogStore } from "./code/CodeCatalogStore";
@@ -56,7 +57,7 @@ const TREE_LIMIT = 5000;
  * as well as opening it.
  */
 export function CommandPaletteDialog() {
-  const { client } = useApp();
+  const { client, newChat } = useApp();
   const navigate = useNavigate();
   const { managed } = useManagedPolicy();
   const open = useUiStore((state) => state.commandPaletteOpen);
@@ -104,7 +105,9 @@ export function CommandPaletteDialog() {
     if (mode === "chat") {
       return [
         ...chatPaletteRows({
-          chats,
+          // The rail's rows in the rail's order, so with nothing typed the
+          // palette opens on the conversations the reader already sees.
+          chats: sortChats(chats.filter((chat) => isListableChat(chat))),
           projects,
           activeChatId: chatIdFromPath(pathname),
           onOpen: (chat) => go(`/c/${chat.id}`),
@@ -115,7 +118,7 @@ export function CommandPaletteDialog() {
         }),
         ...chatNavigationPaletteRows({
           navigate: go,
-          onNewChat: () => go("/"),
+          onNewChat: newChat,
         }),
         ...settings,
       ];
@@ -192,6 +195,7 @@ export function CommandPaletteDialog() {
     mode,
     managed,
     navigate,
+    newChat,
     pathname,
     workspaceId,
     workspaces,

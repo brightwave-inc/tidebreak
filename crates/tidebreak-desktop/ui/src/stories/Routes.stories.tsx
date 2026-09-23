@@ -13,10 +13,9 @@ import { HomeRoute } from "@/HomeRoute";
 import { InboxView } from "@/InboxView";
 import { PluginsPage } from "@/plugins/PluginsPage";
 import { ProjectFilesView } from "@/ProjectFilesView";
-import { RouteFrame } from "@/RouteFrame";
 import { SETTINGS_SECTIONS } from "@/settings/sections";
 import { SettingsRoute } from "@/SettingsRoute";
-import { AppSidebar } from "@/sidebar/AppSidebar";
+import { WorkLayout } from "@/WorkLayout";
 import {
   denseInboxEntries,
   managedPolicy,
@@ -52,47 +51,50 @@ type RouteScenario =
 
 function InboxRouteComposition() {
   return (
-    <RouteFrame sidebar={<AppSidebar />}>
-      <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
-        <InboxView />
-      </div>
-    </RouteFrame>
+    <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      <InboxView />
+    </div>
   );
 }
 
 function createRouteRouter(initialPath: string) {
   const rootRoute = createRootRoute();
-  const homeRoute = createRoute({
+  // The app's shape: every Work route hangs off one layout that mounts the
+  // rail once.
+  const workLayoutRoute = createRoute({
     getParentRoute: () => rootRoute,
+    id: "work-layout",
+    component: WorkLayout,
+  });
+  const homeRoute = createRoute({
+    getParentRoute: () => workLayoutRoute,
     path: "/",
     component: HomeRoute,
   });
   const inboxRoute = createRoute({
-    getParentRoute: () => rootRoute,
+    getParentRoute: () => workLayoutRoute,
     path: "/inbox",
     component: InboxRouteComposition,
   });
   const projectRoute = createRoute({
-    getParentRoute: () => rootRoute,
+    getParentRoute: () => workLayoutRoute,
     path: "/p/$projectId",
     component: () => {
       const { projectId } = projectRoute.useParams();
       return (
-        <RouteFrame sidebar={<AppSidebar />}>
-          <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-auto">
-            <ProjectFilesView projectId={projectId} />
-          </div>
-        </RouteFrame>
+        <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-auto">
+          <ProjectFilesView projectId={projectId} />
+        </div>
       );
     },
   });
   const appsRoute = createRoute({
-    getParentRoute: () => rootRoute,
+    getParentRoute: () => workLayoutRoute,
     path: "/apps",
     component: () => <AppsPage />,
   });
   const appDetailRoute = createRoute({
-    getParentRoute: () => rootRoute,
+    getParentRoute: () => workLayoutRoute,
     path: "/apps/$appId",
     component: () => {
       const { appId } = appDetailRoute.useParams();
@@ -100,12 +102,12 @@ function createRouteRouter(initialPath: string) {
     },
   });
   const pluginsRoute = createRoute({
-    getParentRoute: () => rootRoute,
+    getParentRoute: () => workLayoutRoute,
     path: "/plugins",
     component: () => <PluginsPage />,
   });
   const pluginDetailRoute = createRoute({
-    getParentRoute: () => rootRoute,
+    getParentRoute: () => workLayoutRoute,
     path: "/plugins/$pluginId",
     component: () => {
       const { pluginId } = pluginDetailRoute.useParams();
@@ -130,13 +132,15 @@ function createRouteRouter(initialPath: string) {
 
   return createRouter({
     routeTree: rootRoute.addChildren([
-      homeRoute,
-      inboxRoute,
-      projectRoute,
-      appsRoute,
-      appDetailRoute,
-      pluginsRoute,
-      pluginDetailRoute,
+      workLayoutRoute.addChildren([
+        homeRoute,
+        inboxRoute,
+        projectRoute,
+        appsRoute,
+        appDetailRoute,
+        pluginsRoute,
+        pluginDetailRoute,
+      ]),
       settingsRoute.addChildren(settingsSectionRoutes),
     ]),
     history: createMemoryHistory({ initialEntries: [initialPath] }),

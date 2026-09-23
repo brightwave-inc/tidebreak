@@ -1,4 +1,5 @@
 import type { AgentRun, Chat } from "./api";
+import { isListableChat, sortChats } from "./chatListGroups";
 import { HttpError } from "./api/client/http";
 import {
   disconnectFolder,
@@ -7,12 +8,16 @@ import {
 } from "./host";
 import { friendlyErrorMessage } from "./lib/utils";
 
-/** Retain every refreshed chat when a new loose replacement is required. */
-export function prependReplacementChat(
-  chats: Chat[],
-  replacement: Chat,
-): Chat[] {
-  return [replacement, ...chats];
+/**
+ * Where the reader lands after deleting the conversation they had open: the
+ * top of the list of work, or `null` for home when nothing is left.
+ *
+ * A conversation nothing has happened in is not somewhere to land. Opening it
+ * would put the reader on a page the rail does not list, and creating a new
+ * one here is what used to leave empty rows behind.
+ */
+export function nextChatAfterDelete(refreshed: readonly Chat[]): Chat | null {
+  return sortChats(refreshed).find((chat) => isListableChat(chat)) ?? null;
 }
 
 /**
@@ -47,22 +52,51 @@ export async function purgeDeletedChatHostAuthority(
   await purgeDeletedConversationSubject(chatId);
 }
 
-/** How the delete confirmation describes what else goes with the chat. */
-export function deletionDescription(
-  folderCount: number,
+function counted(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/**
+ * How the delete confirmation describes what else goes with the chat.
+ *
+ * Its outputs go too, so the dialog says how many and how to keep them rather
+ * than leaving the reader to find out from an empty Outputs panel. `outputs`
+ * is `null` when the count could not be read. With `offerArchive`, the last
+ * sentence explains the Archive button the dialog offers beside Delete.
+ */
+export function deletionDescription({
+  folders,
+  outputs,
   stopping = false,
-): string {
-  const folders =
-    folderCount === 1
-      ? "1 connected folder"
-      : `${folderCount} connected folders`;
+  offerArchive = true,
+}: {
+  folders: number;
+  outputs: number | null;
+  stopping?: boolean;
+  offerArchive?: boolean;
+}): string {
+  const sentences: string[] = [];
   if (stopping) {
-    return folderCount < 1
-      ? "This stops the running response and background agents, then deletes the conversation. This cannot be undone."
-      : `This stops the running response and background agents, disconnects ${folders}, then deletes the conversation. This cannot be undone.`;
+    sentences.push("Stops the running response and background agents.");
   }
-  if (folderCount < 1) return "This cannot be undone.";
-  return `Disconnects ${folders} first. This cannot be undone.`;
+  if (folders > 0) {
+    sentences.push(`Disconnects ${counted(folders, "connected folder")}.`);
+  }
+  if (outputs === null) {
+    sentences.push(
+      "Deletes any outputs it made. Export them first if you need them.",
+    );
+  } else if (outputs > 0) {
+    const them = outputs === 1 ? "it" : "them";
+    sentences.push(
+      `Deletes ${counted(outputs, "output")}. Export ${them} first if you need ${them}.`,
+    );
+  }
+  sentences.push("This cannot be undone.");
+  if (offerArchive) {
+    sentences.push("Archive keeps everything and takes it out of your list.");
+  }
+  return sentences.join(" ");
 }
 
 /** In-flight work that makes the server refuse `DELETE /chats/{id}`. */
