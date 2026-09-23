@@ -48,6 +48,20 @@ export const STATUS_TEXT: Record<StatusTone, string> = {
 };
 
 /**
+ * Secondary status copy under a heading that already carries the tone.
+ * The muted foreground rung keeps the detail quieter than the title.
+ */
+export const STATUS_TEXT_MUTED: Record<StatusTone, string> = {
+  neutral: "text-muted-foreground",
+  running: "text-live-foreground-muted",
+  ready: "text-success-foreground-muted",
+  pending: "text-info-foreground-muted",
+  warning: "text-warning-foreground-muted",
+  critical: "text-critical-foreground-muted",
+  merged: "text-merged-foreground-muted",
+};
+
+/**
  * A glyph carrying the state on its own — a PR mark, an alert circle. Nothing
  * next to it says what it is, so it takes the full-strength value.
  */

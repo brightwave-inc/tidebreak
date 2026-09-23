@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 
 /**
  * The shared shell for a transcript card that parks the turn on the person.
@@ -13,6 +13,7 @@ export function AttentionCard({
   subtitle,
   busy,
   error,
+  headingRef,
   children,
 }: {
   title: ReactNode;
@@ -20,6 +21,7 @@ export function AttentionCard({
   subtitle?: ReactNode;
   busy?: boolean;
   error?: string;
+  headingRef?: Ref<HTMLHeadingElement>;
   children: ReactNode;
 }) {
   return (
@@ -28,7 +30,12 @@ export function AttentionCard({
       aria-labelledby={titleId}
       aria-busy={busy}
     >
-      <h3 id={titleId} className="font-medium break-words">
+      <h3
+        id={titleId}
+        ref={headingRef}
+        tabIndex={headingRef ? -1 : undefined}
+        className="font-medium break-words outline-hidden"
+      >
         {title}
       </h3>
       {subtitle != null && (

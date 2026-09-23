@@ -447,16 +447,6 @@ export function StartSessionPrompt({
               </p>
             ) : null}
           </div>
-          <HarnessPicker
-            harnesses={choices}
-            value={selected?.kind ?? null}
-            disabled={starting}
-            onChange={(next) => {
-              setModelOptions([]);
-              setModelLoading(true);
-              setPicked(next);
-            }}
-          />
           <CodeComposer
             disabled={starting || !selected || !installed || policyBlocksStart}
             running={starting}
@@ -466,6 +456,19 @@ export function StartSessionPrompt({
               policyBlocksStart ? PERMISSION_MODE_POLICY_BLOCKED : undefined
             }
             harness={selected?.kind}
+            harnessMenu={
+              <HarnessPicker
+                variant="composer"
+                harnesses={choices}
+                value={selected?.kind ?? null}
+                disabled={starting}
+                onChange={(next) => {
+                  setModelOptions([]);
+                  setModelLoading(true);
+                  setPicked(next);
+                }}
+              />
+            }
             model={model}
             modelOptions={modelOptions}
             modelLoading={modelLoading}
