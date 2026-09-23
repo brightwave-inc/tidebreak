@@ -32,9 +32,8 @@
 //! the restart with a retryable message rather than being interrupted.
 
 use std::future::Future;
-#[cfg(any(test, target_os = "macos"))]
-use std::path::Path;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -61,6 +60,9 @@ const UPDATE_WITHDRAWN_ERROR: &str =
     "The downloaded update is no longer published. Tidebreak will keep checking.";
 const UPDATE_PREFERENCE_MANAGED_ERROR: &str = "Your organization manages this setting.";
 const UPDATE_PREFERENCE_SAVE_ERROR: &str = "Could not save the setting. Try again.";
+const UPDATE_DISK_FULL_ERROR: &str =
+    "Not enough disk space to download the update. Free up space, then try again.";
+const UPDATE_SAVE_ERROR: &str = "Could not save the update on this computer. Try again later.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -152,10 +154,58 @@ enum CheckIntent {
 }
 
 /// Whether a check that finds a release it has not staged downloads it now,
-/// or only reports it as available. Download is always yours to ask for;
-/// the setting and the policy only decide whether Tidebreak asks first.
-fn downloads_now(intent: CheckIntent, preferences: DesktopUpdatePreferences) -> bool {
-    intent == CheckIntent::Download || preferences.automatic_downloads
+/// or only reports it as available. Download is always yours to ask for.
+/// Otherwise the setting and the policy decide, and a failure to save an
+/// earlier download holds automatic downloads until you ask, because the
+/// next attempt would fail the same way after pulling the whole archive again.
+fn downloads_now(
+    intent: CheckIntent,
+    preferences: DesktopUpdatePreferences,
+    save_failed: bool,
+) -> bool {
+    intent == CheckIntent::Download || (preferences.automatic_downloads && !save_failed)
+}
+
+/// Why an attempt to download and stage an update failed.
+#[derive(Debug)]
+enum StageFailure {
+    /// The download or its signature check failed. The next check tries again.
+    Download { detail: String },
+    /// This computer could not save the update: the disk is full, or the
+    /// updates folder cannot be written. That repeats on every attempt, so
+    /// automatic downloads stop until the next launch or until you ask.
+    Save { message: String, detail: String },
+}
+
+impl StageFailure {
+    fn save(error: &io::Error, directory: &Path) -> Self {
+        Self::Save {
+            message: save_failure_message(error, directory),
+            detail: format!("{}: {error}", directory.display()),
+        }
+    }
+
+    /// What the log records.
+    fn detail(&self) -> &str {
+        match self {
+            Self::Download { detail } | Self::Save { detail, .. } => detail,
+        }
+    }
+}
+
+/// What you see when this computer cannot save an update: the reason, and
+/// what to do about it.
+fn save_failure_message(error: &io::Error, directory: &Path) -> String {
+    match error.kind() {
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => {
+            UPDATE_DISK_FULL_ERROR.to_owned()
+        }
+        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => format!(
+            "Tidebreak cannot save updates in {}. Make sure you can write to that folder, then try again.",
+            directory.display()
+        ),
+        _ => UPDATE_SAVE_ERROR.to_owned(),
+    }
 }
 
 /// The update waiting for a restart: the feed entry that describes it and the
@@ -195,6 +245,33 @@ pub(crate) struct UpdateManager {
     /// Whether this process has created the staging folder and deleted what
     /// earlier runs left in it.
     staging_prepared: Mutex<bool>,
+    /// Why the last attempt to save an update failed, while that holds
+    /// automatic downloads. Cleared by the next save that works.
+    save_failure: Mutex<Option<String>>,
+}
+
+impl UpdateManager {
+    /// Remember what an attempt to stage an update says about this
+    /// computer. A failed download says nothing about the disk, so it leaves
+    /// an earlier save failure in place.
+    fn record_save<T>(&self, result: &Result<T, StageFailure>) {
+        let hold = match result {
+            Ok(_) => None,
+            Err(StageFailure::Save { message, .. }) => Some(message.clone()),
+            Err(StageFailure::Download { .. }) => return,
+        };
+        *self
+            .save_failure
+            .lock()
+            .expect("save failure mutex poisoned") = hold;
+    }
+
+    fn save_failure(&self) -> Option<String> {
+        self.save_failure
+            .lock()
+            .expect("save failure mutex poisoned")
+            .clone()
+    }
 }
 
 pub(crate) const fn updates_enabled() -> bool {
@@ -303,22 +380,28 @@ fn discard_archive(archive: &StagedArchive) {
 
 /// The folder staged updates live in. The first call in a process creates it
 /// and deletes whatever earlier runs left there, before anything is staged in
-/// this one; later calls only return it. Blocking: call it off the async
-/// runtime.
-fn staging_directory(app: &AppHandle) -> Result<PathBuf, String> {
+/// this one. Later calls only make sure it still exists. Blocking: call it
+/// off the async runtime.
+fn staging_directory(app: &AppHandle) -> Result<PathBuf, StageFailure> {
     let directory = app
         .path()
         .app_cache_dir()
-        .map_err(|error| format!("app cache dir: {error}"))?
+        .map_err(|error| StageFailure::Save {
+            message: UPDATE_SAVE_ERROR.to_owned(),
+            detail: format!("app cache dir: {error}"),
+        })?
         .join(update_staging::STAGING_DIRECTORY);
     let manager = app.state::<UpdateManager>();
     let mut prepared = manager
         .staging_prepared
         .lock()
         .expect("update staging mutex poisoned");
-    if !*prepared {
+    if *prepared {
+        update_staging::ensure_directory(&directory)
+            .map_err(|error| StageFailure::save(&error, &directory))?;
+    } else {
         let removed = update_staging::prepare_directory(&directory)
-            .map_err(|error| format!("prepare {}: {error}", directory.display()))?;
+            .map_err(|error| StageFailure::save(&error, &directory))?;
         if removed > 0 {
             eprintln!("tidebreak-desktop: deleted {removed} stale staged update file(s)");
         }
@@ -329,22 +412,49 @@ fn staging_directory(app: &AppHandle) -> Result<PathBuf, String> {
 
 /// Download `update`, verify its signature, and write it to the staging
 /// folder. The archive is in memory only from the download to the write.
-async fn download_to_disk(app: &AppHandle, update: Update) -> Result<StagedUpdate, String> {
+/// Records what the attempt says about this computer's disk, so a save that
+/// fails holds automatic downloads.
+async fn download_to_disk(app: &AppHandle, update: Update) -> Result<StagedUpdate, StageFailure> {
+    let result = download_and_save(app, update).await;
+    app.state::<UpdateManager>().record_save(&result);
+    result
+}
+
+async fn download_and_save(app: &AppHandle, update: Update) -> Result<StagedUpdate, StageFailure> {
+    // Check that the archive has somewhere to go before pulling hundreds of
+    // megabytes: a folder that cannot take a file fails here, not after.
+    let folder_app = app.clone();
+    let directory = off_runtime(move || {
+        let directory = staging_directory(&folder_app)?;
+        update_staging::probe_writable(&directory)
+            .map_err(|error| StageFailure::save(&error, &directory))?;
+        Ok(directory)
+    })
+    .await?;
     // `download` checks the archive against the feed's signature before it
     // returns, so nothing unverified reaches the disk.
     let download = update.download(|_chunk, _total| {}, || {});
-    let bytes = download
-        .await
-        .map_err(|error| format!("download failed: {error}"))?;
-    let app = app.clone();
-    let archive = tauri::async_runtime::spawn_blocking(move || {
-        let directory = staging_directory(&app)?;
-        StagedArchive::write(&directory, &bytes)
-            .map_err(|error| format!("could not write the staged update: {error}"))
-    })
-    .await
-    .map_err(|error| format!("staging task failed: {error}"))??;
+    let bytes = download.await.map_err(|error| StageFailure::Download {
+        detail: format!("download failed: {error}"),
+    })?;
+    let archive = off_runtime(move || save_archive(&directory, &bytes)).await?;
     Ok(StagedUpdate { update, archive })
+}
+
+/// Write a verified archive into the staging folder.
+fn save_archive(directory: &Path, bytes: &[u8]) -> Result<StagedArchive, StageFailure> {
+    StagedArchive::write(directory, bytes).map_err(|error| StageFailure::save(&error, directory))
+}
+
+/// Run blocking file work off the async runtime.
+async fn off_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, StageFailure> + Send + 'static,
+) -> Result<T, StageFailure> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| StageFailure::Download {
+            detail: format!("staging task failed: {error}"),
+        })?
 }
 
 /// Read a staged update back into memory for the install. A file that is gone
@@ -408,23 +518,48 @@ async fn download_and_stage(app: &AppHandle, update: Update, mode: DownloadMode)
                 },
             );
         }
-        Err(error) => {
-            eprintln!("tidebreak-desktop: could not stage update {version}: {error}");
-            match mode {
-                DownloadMode::Shown => {
+        Err(failure) => {
+            eprintln!(
+                "tidebreak-desktop: could not stage update {version}: {}",
+                failure.detail()
+            );
+            match (mode, failure) {
+                // This computer cannot save the update, so automatic
+                // downloads hold. Offer the release with the reason, so you
+                // can fix the cause and choose Download.
+                (
+                    DownloadMode::Shown | DownloadMode::Requested,
+                    StageFailure::Save { message, .. },
+                ) => set_update_state(
+                    app,
+                    DesktopUpdateState {
+                        error: Some(message),
+                        ..DesktopUpdateState::available(version)
+                    },
+                ),
+                (DownloadMode::Shown, StageFailure::Download { .. }) => {
                     set_update_state(app, DesktopUpdateState::failed(UPDATE_PREPARE_ERROR));
                 }
-                DownloadMode::Requested => set_update_state(
+                (DownloadMode::Requested, StageFailure::Download { .. }) => set_update_state(
                     app,
                     DesktopUpdateState {
                         error: Some(UPDATE_PREPARE_ERROR.to_owned()),
                         ..DesktopUpdateState::available(version)
                     },
                 ),
+                // The older staged update stays installable. Say why the
+                // newer one could not be saved.
+                (DownloadMode::Silent, StageFailure::Save { message, .. }) => set_update_state(
+                    app,
+                    DesktopUpdateState {
+                        error: Some(message),
+                        ..current_update_state(app)
+                    },
+                ),
                 // A silent refresh keeps the previously staged (older but
                 // valid) update on download failure instead of surfacing an
                 // error over a still-installable state.
-                DownloadMode::Silent => {}
+                (DownloadMode::Silent, StageFailure::Download { .. }) => {}
             }
         }
     }
@@ -527,25 +662,35 @@ async fn perform_update_check(app: &AppHandle, intent: CheckIntent) {
     };
 
     let preferences = update_preferences(app);
+    let save_failure = app.state::<UpdateManager>().save_failure();
+    let downloads = downloads_now(intent, preferences, save_failure.is_some());
     match staged {
         None => match update {
-            Some(update) if downloads_now(intent, preferences) => {
+            Some(update) if downloads => {
                 let mode = match intent {
                     CheckIntent::Download => DownloadMode::Requested,
                     CheckIntent::Check => DownloadMode::Shown,
                 };
                 download_and_stage(app, update, mode).await;
             }
-            Some(update) => set_update_state(app, DesktopUpdateState::available(update.version)),
+            // Offered, not downloaded. A save that failed earlier stays on
+            // screen, because it is why automatic downloads are holding.
+            Some(update) => set_update_state(
+                app,
+                DesktopUpdateState {
+                    error: save_failure,
+                    ..DesktopUpdateState::available(update.version)
+                },
+            ),
             None => set_update_state(app, DesktopUpdateState::idle()),
         },
         Some(staged) => {
             match reconcile_staged(update.as_ref().map(|u| u.version.as_str()), &staged) {
                 StagedAction::Keep => {}
-                // With automatic downloads off, the older staged update stays
-                // installable. Restarting to update fetches the newest release
-                // then, because that restart is you asking for the update.
-                StagedAction::Replace if !downloads_now(intent, preferences) => {}
+                // With automatic downloads off or holding, the older staged
+                // update stays installable. Restarting to update fetches the
+                // newest release then, because that restart is you asking.
+                StagedAction::Replace if !downloads => {}
                 StagedAction::Replace => {
                     let update = update.expect("replace implies an advertised update");
                     download_and_stage(app, update, DownloadMode::Silent).await;
@@ -597,12 +742,11 @@ pub(crate) fn spawn_update_loop(app: AppHandle) {
             // Clear out what earlier runs staged before this run stages
             // anything, whether or not a check ever downloads.
             let sweep = app.clone();
-            let prepared = tauri::async_runtime::spawn_blocking(move || staging_directory(&sweep))
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|prepared| prepared);
-            if let Err(error) = prepared {
-                eprintln!("tidebreak-desktop: could not prepare the update folder: {error}");
+            if let Err(failure) = off_runtime(move || staging_directory(&sweep)).await {
+                eprintln!(
+                    "tidebreak-desktop: could not prepare the update folder: {}",
+                    failure.detail()
+                );
             }
             tokio::time::sleep(UPDATE_CHECK_STARTUP_DELAY).await;
             loop {
@@ -702,11 +846,17 @@ async fn resolve_latest_for_install(
                     discard_archive(&staged.archive);
                     Ok(newer)
                 }
-                Err(error) => {
-                    eprintln!("tidebreak-desktop: install-time update download failed: {error}");
+                Err(failure) => {
+                    eprintln!(
+                        "tidebreak-desktop: install-time update download failed: {}",
+                        failure.detail()
+                    );
                     Err(InstallResolutionError {
                         staged: Some(staged),
-                        message: UPDATE_PREPARE_ERROR,
+                        message: match failure {
+                            StageFailure::Save { message, .. } => message,
+                            StageFailure::Download { .. } => UPDATE_PREPARE_ERROR.to_owned(),
+                        },
                     })
                 }
             }
@@ -715,7 +865,7 @@ async fn resolve_latest_for_install(
             discard_archive(&staged.archive);
             Err(InstallResolutionError {
                 staged: None,
-                message: UPDATE_WITHDRAWN_ERROR,
+                message: UPDATE_WITHDRAWN_ERROR.to_owned(),
             })
         }
     }
@@ -726,7 +876,7 @@ struct InstallResolutionError {
     /// artifacts are deliberately omitted so no subsequent action can install
     /// them without downloading them from a newly authoritative feed.
     staged: Option<StagedUpdate>,
-    message: &'static str,
+    message: String,
 }
 
 fn retryable_update_state(version: String, message: impl Into<String>) -> DesktopUpdateState {
@@ -820,15 +970,21 @@ async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
             if let Some(staged) = error.staged {
                 let version = staged.update.version.clone();
                 store_staged(&app, Some(staged));
-                set_update_state(&app, retryable_update_state(version, error.message));
+                set_update_state(&app, retryable_update_state(version, error.message.clone()));
             } else {
                 store_staged(&app, None);
-                set_update_state(&app, DesktopUpdateState::failed(error.message));
+                set_update_state(
+                    &app,
+                    DesktopUpdateState {
+                        error: Some(error.message.clone()),
+                        ..DesktopUpdateState::idle()
+                    },
+                );
             }
             app.state::<UpdateManager>()
                 .busy
                 .store(false, Ordering::Release);
-            return Err(error.message.to_owned());
+            return Err(error.message);
         }
     };
 
@@ -1021,21 +1177,77 @@ mod tests {
     fn the_setting_and_the_policy_each_stop_an_automatic_download() {
         let default = DesktopUpdatePreferences::resolve(None, || true);
         assert!(!default.managed);
-        assert!(downloads_now(CheckIntent::Check, default));
+        assert!(downloads_now(CheckIntent::Check, default, false));
 
         let turned_off = DesktopUpdatePreferences::resolve(None, || false);
         assert!(!turned_off.managed);
-        assert!(!downloads_now(CheckIntent::Check, turned_off));
-        assert!(downloads_now(CheckIntent::Download, turned_off));
+        assert!(!downloads_now(CheckIntent::Check, turned_off, false));
+        assert!(downloads_now(CheckIntent::Download, turned_off, false));
 
         let policy_off = DesktopUpdatePreferences::resolve(Some(false), || true);
         assert!(policy_off.managed);
-        assert!(!downloads_now(CheckIntent::Check, policy_off));
-        assert!(downloads_now(CheckIntent::Download, policy_off));
+        assert!(!downloads_now(CheckIntent::Check, policy_off, false));
+        assert!(downloads_now(CheckIntent::Download, policy_off, false));
 
         let policy_on = DesktopUpdatePreferences::resolve(Some(true), || false);
         assert!(policy_on.managed);
-        assert!(downloads_now(CheckIntent::Check, policy_on));
+        assert!(downloads_now(CheckIntent::Check, policy_on, false));
+    }
+
+    /// A download whose archive cannot be saved would fail the same way on
+    /// the next hourly check, after pulling the whole archive again. The
+    /// failed save holds automatic downloads until you choose Download, and
+    /// the next save that works releases the hold.
+    #[test]
+    fn a_failed_save_holds_automatic_downloads_until_you_ask() {
+        let parent = tempfile::tempdir().unwrap();
+        // A file stands where the cache folder should be, so the verified
+        // archive has nowhere to go.
+        let cache = parent.path().join("cache");
+        std::fs::write(&cache, b"not a folder").unwrap();
+        let manager = UpdateManager::default();
+        let on = DesktopUpdatePreferences::resolve(None, || true);
+
+        let failed = save_archive(
+            &cache.join(update_staging::STAGING_DIRECTORY),
+            b"verified archive",
+        );
+        assert!(matches!(failed, Err(StageFailure::Save { .. })));
+        manager.record_save(&failed);
+
+        let held = manager.save_failure();
+        assert_eq!(held.as_deref(), Some(UPDATE_SAVE_ERROR));
+        assert!(!downloads_now(CheckIntent::Check, on, held.is_some()));
+        assert!(downloads_now(CheckIntent::Download, on, held.is_some()));
+
+        // A failed download says nothing about the disk: the hold stays.
+        manager.record_save::<()>(&Err(StageFailure::Download {
+            detail: "offline".to_owned(),
+        }));
+        assert!(manager.save_failure().is_some());
+
+        let folder = parent.path().join(update_staging::STAGING_DIRECTORY);
+        std::fs::create_dir(&folder).unwrap();
+        manager.record_save(&save_archive(&folder, b"verified archive"));
+        assert!(manager.save_failure().is_none());
+        assert!(downloads_now(CheckIntent::Check, on, false));
+    }
+
+    #[test]
+    fn a_failed_save_says_why() {
+        let folder = Path::new("/cache/updates");
+        assert_eq!(
+            save_failure_message(&io::Error::from(io::ErrorKind::StorageFull), folder),
+            "Not enough disk space to download the update. Free up space, then try again."
+        );
+        assert_eq!(
+            save_failure_message(&io::Error::from(io::ErrorKind::PermissionDenied), folder),
+            "Tidebreak cannot save updates in /cache/updates. Make sure you can write to that folder, then try again."
+        );
+        assert_eq!(
+            save_failure_message(&io::Error::from(io::ErrorKind::InvalidData), folder),
+            UPDATE_SAVE_ERROR
+        );
     }
 
     #[test]

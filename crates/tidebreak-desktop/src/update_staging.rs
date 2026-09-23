@@ -101,19 +101,15 @@ impl StagedArchive {
 /// files it deleted. Call it before anything is staged in this run, or it
 /// deletes that too.
 pub(crate) fn prepare_directory(directory: &Path) -> io::Result<usize> {
-    fs::create_dir_all(directory)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-    }
+    ensure_directory(directory)?;
     let mut removed = 0;
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
-        if entry.file_type()?.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
             continue;
         }
-        match fs::remove_file(entry.path()) {
+        match remove_entry(&entry.path(), file_type) {
             Ok(()) => removed += 1,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => eprintln!(
@@ -123,6 +119,56 @@ pub(crate) fn prepare_directory(directory: &Path) -> io::Result<usize> {
         }
     }
     Ok(removed)
+}
+
+/// Make sure the staging folder exists as a real folder that only you can
+/// open. A symlink, or anything else, at its path is removed as an entry of
+/// its own, and a real folder takes its place: following a link would lock
+/// down and empty whatever it points to.
+pub(crate) fn ensure_directory(directory: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(metadata) => remove_entry(directory, metadata.file_type())?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::create_dir_all(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Prove that `directory` takes a new file, before a download spends its
+/// bandwidth on an archive that would have nowhere to go.
+pub(crate) fn probe_writable(directory: &Path) -> io::Result<()> {
+    let probe = directory.join(format!(".probe-{}", Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let written = options
+        .open(&probe)
+        .and_then(|mut file| file.write_all(b"."));
+    let _ = fs::remove_file(&probe);
+    written
+}
+
+/// Remove the entry at `path` itself. A symlink goes, and what it points to
+/// stays. Windows keeps a link to a folder as a folder entry, so it leaves
+/// through `remove_dir`, which deletes the link and not the folder behind it.
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn remove_entry(path: &Path, file_type: fs::FileType) -> io::Result<()> {
+    #[cfg(windows)]
+    if file_type.is_symlink() {
+        return fs::remove_dir(path).or_else(|_| fs::remove_file(path));
+    }
+    fs::remove_file(path)
 }
 
 #[cfg(test)]
@@ -218,5 +264,57 @@ mod tests {
             let mode = fs::metadata(&directory).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o700);
         }
+    }
+
+    /// A link where the folder belongs is removed as a link. Following it
+    /// would lock down and empty the folder it points to.
+    #[cfg(unix)]
+    #[test]
+    fn preparing_the_directory_replaces_a_symlink_without_touching_its_target() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("elsewhere");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep.txt"), b"keep").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let directory = parent.path().join(STAGING_DIRECTORY);
+        std::os::unix::fs::symlink(&target, &directory).unwrap();
+
+        prepare_directory(&directory).unwrap();
+
+        let metadata = fs::symlink_metadata(&directory).unwrap();
+        assert!(
+            metadata.file_type().is_dir(),
+            "the link became a real folder"
+        );
+        assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"keep");
+        let mode = fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "the link's target keeps its mode");
+    }
+
+    #[test]
+    fn preparing_the_directory_replaces_a_file_in_its_place() {
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join(STAGING_DIRECTORY);
+        fs::write(&directory, b"not a folder").unwrap();
+
+        prepare_directory(&directory).unwrap();
+
+        assert!(fs::symlink_metadata(&directory).unwrap().is_dir());
+        probe_writable(&directory).unwrap();
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_exist_fails_before_any_download() {
+        let parent = tempfile::tempdir().unwrap();
+        // A file stands where the cache folder should be, so nothing can be
+        // created under it.
+        let cache = parent.path().join("cache");
+        fs::write(&cache, b"not a folder").unwrap();
+
+        assert!(prepare_directory(&cache.join(STAGING_DIRECTORY)).is_err());
+        assert!(probe_writable(&cache.join(STAGING_DIRECTORY)).is_err());
     }
 }
