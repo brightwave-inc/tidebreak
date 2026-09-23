@@ -23,6 +23,16 @@ const LOGOMARK_PATH = `
  * so it reads as ink on the page in the light theme and inverts with it in the
  * dark one, the same way the app's other glyphs do.
  */
+/** Wordmark lockup for first-run screens. The page heading is the message. */
+export function BootBrand() {
+  return (
+    <div className="boot-brand">
+      <Logomark />
+      <p className="boot-brand-name">Tidebreak</p>
+    </div>
+  );
+}
+
 export function Logomark(props: ComponentPropsWithoutRef<"svg">) {
   return (
     <svg

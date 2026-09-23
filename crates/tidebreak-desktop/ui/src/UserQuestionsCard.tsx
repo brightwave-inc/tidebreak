@@ -1,4 +1,11 @@
-import { useCallback, useMemo, useState } from "react";
+import {
+  cloneElement,
+  isValidElement,
+  useCallback,
+  useId,
+  useMemo,
+  useState,
+} from "react";
 import { ChevronDown, CornerDownLeft, X } from "lucide-react";
 import type { PendingUserQuestions, UserQuestionAnswer } from "./api";
 import { Button } from "@/components/ui/button";
@@ -25,45 +32,43 @@ function QuestionOption({
   description,
   selected,
   disabled,
-  onSelect,
   children,
 }: {
   label: string;
   description: string | null;
   selected: boolean;
   disabled: boolean;
-  onSelect: () => void;
   children: React.ReactNode;
 }) {
+  const descriptionId = useId();
+  const control = isValidElement(children)
+    ? cloneElement(children, {
+        "aria-describedby": description ? descriptionId : undefined,
+      } as never)
+    : children;
   return (
-    <div
+    <label
       className={cn(
-        "hover:bg-accent/50 flex cursor-pointer items-start space-x-3 rounded-md p-2 transition-colors",
+        "hover:bg-accent/50 flex cursor-pointer items-start space-x-3 rounded-md p-2 text-left transition-colors",
         selected && "bg-accent",
         disabled && "pointer-events-none opacity-60",
       )}
-      role="button"
-      tabIndex={0}
-      onClick={onSelect}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onSelect();
-        }
-      }}
     >
-      {children}
+      {control}
       <div className="grid min-w-0 flex-1 gap-1.5 leading-none">
-        <div className="cursor-pointer text-sm leading-none font-medium break-words">
+        <span className="cursor-pointer text-sm leading-none font-medium break-words">
           {label}
-        </div>
+        </span>
         {description && (
-          <p className="text-muted-foreground cursor-pointer text-sm break-words">
+          <p
+            id={descriptionId}
+            className="text-muted-foreground cursor-pointer text-sm break-words"
+          >
             {description}
           </p>
         )}
       </div>
-    </div>
+    </label>
   );
 }
 
@@ -313,7 +318,6 @@ export function UserQuestionsCard({
                     description={option.description}
                     selected={selected}
                     disabled={working}
-                    onSelect={() => chooseOption(option.id)}
                   >
                     <Checkbox
                       checked={selected}
@@ -342,7 +346,6 @@ export function UserQuestionsCard({
                   description={option.description}
                   selected={draft.selectedOptionIds[0] === option.id}
                   disabled={working}
-                  onSelect={() => chooseOption(option.id)}
                 >
                   <RadioGroupItem
                     value={option.id}

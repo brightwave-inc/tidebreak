@@ -13,7 +13,7 @@ export type HighlightRange = { start: number; end: number };
  */
 export const CITATION_MARK_CLASS = "citation-mark";
 export const CITATION_MARK_STYLE =
-  "rounded bg-yellow-200/60 dark:bg-yellow-500/25";
+  "rounded bg-yellow-200/60 text-foreground dark:bg-yellow-500/25";
 export const CITATION_MARK_LABEL = "Cited passage";
 
 /**

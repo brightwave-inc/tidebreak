@@ -78,17 +78,21 @@ export function ApprovalCard({
   );
   const [highlight, setHighlight] = useState(0);
   const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
   const hasAutoFocused = useRef(false);
+  const mountedAt = useRef(0);
   const safeHighlight = Math.min(highlight, options.length - 1);
   const ask = approvalAsk(preview, summary);
+  const titleId = `approval-ask-${callId}`;
+  const previewId = preview ? `approval-preview-${callId}` : undefined;
 
   // Arm the shortcuts the moment the card appears, so ↑↓ / 1–9 / ↵ work
-  // without a click first. The latch arms before the bail-out so this fires
-  // exactly once: if focus is intentionally elsewhere we leave it there rather
-  // than yanking it back on some later state change.
+  // without a click first. Focus the question, not a choice: a pointer over a
+  // row must not steal the composer, and Space must never decide.
   useEffect(() => {
     if (hasAutoFocused.current || deciding) return;
     hasAutoFocused.current = true;
+    mountedAt.current = Date.now();
     const active = document.activeElement;
     const focusedElsewhere =
       active instanceof HTMLElement &&
@@ -97,10 +101,11 @@ export function ApprovalCard({
         active.tagName === "TEXTAREA" ||
         active.closest('[aria-label="Approval choices"]') !== null);
     if (focusedElsewhere) return;
-    // preventScroll: the point is to arm the keys, not to drag the transcript
-    // to a card that may have mounted off-screen.
-    rowRefs.current[0]?.focus({ preventScroll: true });
+    headingRef.current?.focus({ preventScroll: true });
   }, [deciding]);
+
+  const shortcutsReady = () =>
+    Date.now() - mountedAt.current >= APPROVAL_SHORTCUT_GRACE_MS;
 
   const activate = (index: number) => {
     const option = options[index];
@@ -130,20 +135,57 @@ export function ApprovalCard({
     rowRefs.current[wrapped]?.focus();
   };
 
-  const onKeyDown = (
-    event: KeyboardEvent<HTMLButtonElement>,
-    index: number,
-  ) => {
+  const onCardKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      target.closest("[data-approval-submit]")
+    ) {
+      return;
+    }
+    if (event.key === " ") {
+      event.preventDefault();
+      return;
+    }
+    if (!shortcutsReady()) {
+      if (
+        event.key === "Enter" ||
+        event.key === "ArrowDown" ||
+        event.key === "ArrowUp" ||
+        /^[1-9]$/.test(event.key)
+      ) {
+        event.preventDefault();
+      }
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const from =
+        target instanceof HTMLElement
+          ? rowRefs.current.findIndex((row) => row === target)
+          : -1;
+      if (from >= 0 && options[from]?.kind === "more") {
+        activate(from);
+        return;
+      }
+      submitSelected();
+      return;
+    }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
+      const from =
+        target instanceof HTMLElement
+          ? rowRefs.current.findIndex((row) => row === target)
+          : -1;
+      const index = from >= 0 ? from : safeHighlight;
       focusRow(index + (event.key === "ArrowDown" ? 1 : -1));
       return;
     }
     if (/^[1-9]$/.test(event.key)) {
-      const target = Number(event.key) - 1;
-      if (target < options.length) {
+      const next = Number(event.key) - 1;
+      if (next < options.length) {
         event.preventDefault();
-        focusRow(target);
+        focusRow(next);
       }
     }
   };
@@ -153,8 +195,16 @@ export function ApprovalCard({
       className="bg-background flex max-w-prose flex-col gap-3 rounded-lg border p-4"
       aria-label="Approval needed"
       aria-busy={deciding}
+      onKeyDown={onCardKeyDown}
     >
-      <h3 className="font-medium break-words">{ask.title}</h3>
+      <h3
+        id={titleId}
+        ref={headingRef}
+        tabIndex={-1}
+        className="font-medium break-words outline-hidden"
+      >
+        {ask.title}
+      </h3>
       {autoJudging && (
         <p className="text-muted-foreground text-sm" role="status">
           Deciding automatically… you can still answer to decide it yourself.
@@ -166,7 +216,10 @@ export function ApprovalCard({
         </p>
       )}
       {preview && (
-        <ScrollableContainer className="bg-muted text-muted-foreground max-h-48 rounded-md p-3 text-xs break-words whitespace-pre-wrap">
+        <ScrollableContainer
+          id={previewId}
+          className="bg-muted text-muted-foreground max-h-48 rounded-md p-3 text-xs break-words whitespace-pre-wrap"
+        >
           {toolPreviewPresentation(preview).detail}
         </ScrollableContainer>
       )}
@@ -182,18 +235,14 @@ export function ApprovalCard({
             ref={(node) => {
               rowRefs.current[index] = node;
             }}
-            aria-pressed={
-              option.kind === "decide" ? index === safeHighlight : undefined
-            }
+            aria-describedby={[titleId, previewId].filter(Boolean).join(" ")}
             disabled={deciding}
             onClick={() => activate(index)}
             onFocus={() => {
               if (option.kind === "decide") setHighlight(index);
             }}
-            onMouseEnter={(event) => event.currentTarget.focus()}
-            onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
-              "focus-visible:ring-ring flex cursor-pointer items-baseline gap-2.5 rounded-md px-3 py-2.5 text-sm outline-hidden focus-visible:ring-2",
+              "focus-visible:ring-ring flex cursor-pointer items-baseline gap-2.5 rounded-md px-3 py-2.5 text-left text-sm outline-hidden focus-visible:ring-2",
               index === safeHighlight ? "bg-muted" : "hover:bg-muted/60",
               deciding && "opacity-60",
             )}
@@ -203,7 +252,7 @@ export function ApprovalCard({
             </span>
             <span
               className={cn(
-                "flex-1",
+                "flex-1 text-left",
                 option.kind === "decide" &&
                   option.decision === "reject" &&
                   "text-muted-foreground",
@@ -226,7 +275,12 @@ export function ApprovalCard({
           ↑↓ choose · 1–{Math.min(options.length, 9)} jump · click or Submit
           confirms
         </span>
-        <Button size="sm" disabled={deciding} onClick={submitSelected}>
+        <Button
+          size="sm"
+          disabled={deciding}
+          data-approval-submit=""
+          onClick={submitSelected}
+        >
           Submit
         </Button>
       </div>
@@ -270,6 +324,9 @@ export function approvalAsk(
   }
   return { title: summary, summaryLine: null };
 }
+
+/** Ignore shortcut keys until the card has been on screen this long. */
+export const APPROVAL_SHORTCUT_GRACE_MS = 300;
 
 /** How many grants show before the rest move behind "More options". */
 const INLINE_GRANTS = 2;
