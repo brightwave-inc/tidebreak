@@ -38,6 +38,10 @@
 //! See [`setup`]; secrets are read from stdin or a named environment variable,
 //! never from a command-line argument.
 //!
+//! `tidebreak plugins install --git <url> --ref <tag-or-sha>` imports one
+//! pinned instruction-only plugin over `POST /plugins/install`. The URL must
+//! be public HTTPS, and the revision must be a tag or a full commit SHA.
+//!
 //! `tidebreak code …` drives the code-mode surface — repos, workspaces,
 //! sessions, turns, approvals, diffs, and the git/PR flow — over the same
 //! `/code/*` routes the desktop uses. `--json` (or `--output-format json`)
@@ -118,6 +122,7 @@ mod help;
 mod image_output;
 mod json_output;
 mod outputs;
+mod plugins;
 mod print;
 mod setup;
 
@@ -320,6 +325,15 @@ async fn run() -> Result<i32> {
             setup::run(command, format, server_flags.resolve()?)
                 .await
                 .map(|()| 0)
+        }
+        Some(command) if command == OsStr::new("plugins") => {
+            set_usage_family(Family::Plugins);
+            match plugins::parse(args) {
+                Ok(command) => plugins::run(command, server_flags.resolve()?)
+                    .await
+                    .map(|()| 0),
+                Err(message) => usage_error(&message),
+            }
         }
         // Folder consent is host-machine state: the broker's own state file and
         // this profile's data directory. There is nothing to point at another

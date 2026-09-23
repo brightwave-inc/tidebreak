@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { PluginCatalog } from "@/api";
+import { HttpError, type PluginCatalog } from "@/api";
 import { PluginDetailView } from "./PluginDetailView";
 import type { PluginsApis } from "./pluginsApis";
 import { PluginsView } from "./PluginsView";
@@ -76,6 +76,7 @@ function apisWith(overrides: Partial<PluginsApis> = {}): PluginsApis {
       instructions: SKILL_BODY,
     })),
     promptBody: vi.fn(),
+    installFromGit: vi.fn(),
     ...overrides,
   };
 }
@@ -95,6 +96,7 @@ function ListHarness({
       loadInstructions={apis.instructions}
       onOpen={() => {}}
       importSkills={importSkills}
+      installFromGit={apis.installFromGit}
     />
   );
 }
@@ -294,5 +296,69 @@ describe("Plugins library", () => {
     expect(apis.list).toHaveBeenCalledOnce();
     expect(screen.queryByText("Skill import complete")).not.toBeInTheDocument();
     expect(screen.queryByText("No skills imported")).not.toBeInTheDocument();
+  });
+
+  it("installs a pinned Git plugin and reloads the catalog", async () => {
+    const apis = apisWith({
+      installFromGit: vi.fn().mockResolvedValue({
+        plugin: "meeting-notes",
+        revision: "v1.0.0",
+        skipped: [
+          {
+            path: "skills/draft/SKILL.md",
+            reason: "The skill name is not a valid slug",
+          },
+        ],
+      }),
+    });
+    render(<ListHarness apis={apis} />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add from Git" }),
+    );
+    fireEvent.change(screen.getByLabelText("Repository URL"), {
+      target: { value: "https://github.com/acme/notes" },
+    });
+    fireEvent.change(screen.getByLabelText("Tag or commit SHA"), {
+      target: { value: "v1.0.0" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add plugin" }));
+
+    expect(
+      await screen.findByText(/Installed/, { exact: false }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("meeting-notes")).toBeInTheDocument();
+    expect(screen.getByText("skills/draft/SKILL.md")).toBeInTheDocument();
+    expect(apis.installFromGit).toHaveBeenCalledWith(
+      "https://github.com/acme/notes",
+      "v1.0.0",
+    );
+    await waitFor(() => expect(apis.list).toHaveBeenCalledTimes(2));
+  });
+
+  it("explains a failed Git install in plain words", async () => {
+    const apis = apisWith({
+      installFromGit: vi
+        .fn()
+        .mockRejectedValue(
+          new HttpError(409, "already there", "plugin_conflict"),
+        ),
+    });
+    render(<ListHarness apis={apis} />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add from Git" }),
+    );
+    fireEvent.change(screen.getByLabelText("Repository URL"), {
+      target: { value: "https://github.com/acme/notes" },
+    });
+    fireEvent.change(screen.getByLabelText("Tag or commit SHA"), {
+      target: { value: "v1.0.0" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add plugin" }));
+
+    expect(
+      await screen.findByText("A plugin with that name is already installed."),
+    ).toBeInTheDocument();
   });
 });

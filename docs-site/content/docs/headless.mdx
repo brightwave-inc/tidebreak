@@ -53,6 +53,7 @@ tidebreak settings exec remove-key <provider>
 tidebreak mcp-server list
 tidebreak mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
 tidebreak mcp-server remove <name>
+tidebreak plugins install --git <url> --ref <tag-or-sha> [--json]
 tidebreak chat list
 tidebreak chat create
 tidebreak chat delete <chat>
@@ -293,7 +294,7 @@ cargo run -p tidebreak-cli -- -p "plan the migration" \
 
 ### Setup commands
 
-`provider`, `model`, `settings`, `mcp-server`, and `chat` configure a profile
+`provider`, `model`, `settings`, `mcp-server`, `plugins`, and `chat` configure a profile
 without the desktop app. Each one boots the same in-process server the other
 commands do, calls the route the desktop's settings pages call, and prints the
 answer — they hold no configuration logic of their own, so both surfaces stay in
@@ -327,6 +328,12 @@ cargo run -p tidebreak-cli -- mcp-server list
 cargo run -p tidebreak-cli -- mcp-server add docs \
   --command npx --arg -y --arg @acme/docs-mcp --env-from ACME_TOKEN
 cargo run -p tidebreak-cli -- mcp-server remove docs
+
+# Plugins from a pinned Git source
+cargo run -p tidebreak-cli -- plugins install \
+  --git https://github.com/acme/notes --ref v1.0.0
+cargo run -p tidebreak-cli -- plugins install \
+  --git https://github.com/acme/notes --ref v1.0.0 --json
 
 # Chats
 cargo run -p tidebreak-cli -- chat list

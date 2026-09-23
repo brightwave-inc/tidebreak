@@ -439,6 +439,21 @@ impl Client {
         .await
     }
 
+    /// Fetch and install one pinned instruction-only plugin from Git.
+    pub async fn install_plugin(&self, url: &str, revision: &str) -> Result<serde_json::Value> {
+        self.post_json(
+            format!("{}/plugins/install", self.base),
+            &serde_json::json!({
+                "source": {
+                    "kind": "git",
+                    "url": url,
+                    "revision": revision,
+                }
+            }),
+        )
+        .await
+    }
+
     /// Every mounted MCP server, configured and plugin-sourced alike.
     pub async fn get_mcp_servers(&self) -> Result<serde_json::Value> {
         self.get_json(format!("{}/mcp/servers", self.base)).await

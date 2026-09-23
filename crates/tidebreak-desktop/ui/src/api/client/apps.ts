@@ -238,6 +238,22 @@ export function withAppsApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
       return this.json("/plugins", { headers: this.headers() });
     }
 
+    /**
+     * Fetch and install one pinned instruction-only plugin from Git.
+     *
+     * The body matches `POST /plugins/install`. The generated wire file does
+     * not yet root this request, so the payload is assembled here.
+     */
+    installPlugin(url: string, revision: string): Promise<unknown> {
+      return this.json("/plugins/install", {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify({
+          source: { kind: "git", url, revision },
+        }),
+      });
+    }
+
     /** One skill's full instruction body — what the model is taught by it. */
     getSkillInstructions(name: string): Promise<SkillInstructions> {
       return this.json(

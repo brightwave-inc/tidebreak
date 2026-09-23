@@ -38,6 +38,7 @@ export function PluginsPage({ pluginId }: { pluginId?: string }) {
           <PluginsView
             state={state}
             loadInstructions={apis.instructions}
+            installFromGit={apis.installFromGit}
             onOpen={(id) =>
               void navigate({
                 to: "/plugins/$pluginId",
