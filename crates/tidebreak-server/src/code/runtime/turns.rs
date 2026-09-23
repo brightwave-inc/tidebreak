@@ -349,6 +349,9 @@ impl CodeRuntime {
             .await
             .map_err(|_| ServerError::internal("session worker is gone"))?;
         drop(recovery_guard);
+        // The worker answers once the turn is accepted, not once it ends: the
+        // turn row exists and its start is journaled, and the caller follows
+        // the rest on the event bus.
         let turn = match rx
             .await
             .map_err(|_| ServerError::internal("session worker dropped the turn"))?

@@ -641,6 +641,12 @@ session, under a lease and the spawn epoch; for the internal engine the
 chat turn lane writes the journal under its own lease. Routes submit work
 and read state, they never write the journal directly.
 
+`POST /sessions/{id}/turns` answers `202` as soon as the message is accepted.
+A session that was idle answers with the started turn, still `running`: its
+row exists and the session reads running. A busy session answers with the
+queue row. Neither waits for the engine. Clients follow the turn on the
+session's event socket.
+
 ### Where worktrees live
 
 A workspace's worktree is created at

@@ -159,6 +159,7 @@ async fn an_engine_with_no_image_protocol_is_handed_the_file_and_its_path() {
         reqwest::StatusCode::ACCEPTED,
         "{accepted_body}"
     );
+    wait_for_turn_end(&client, addr, &token, &session, json_id(&accepted_body)).await;
     assert!(
         !path.exists(),
         "the worker removes the private attachment after the turn"

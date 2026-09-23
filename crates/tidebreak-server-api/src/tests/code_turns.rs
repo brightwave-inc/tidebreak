@@ -131,6 +131,8 @@ async fn interrupt_stops_a_running_turn_without_ending_its_browser_channel() {
     assert_eq!(interrupted.status(), reqwest::StatusCode::ACCEPTED);
     let turn = turn.unwrap();
     assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    let turn: serde_json::Value = turn.json().await.unwrap();
+    wait_for_turn_end(&client, addr, &token, json_id(&session), json_id(&turn)).await;
     assert_eq!(
         turn_statuses(&client, addr, &token, &session).await,
         ["interrupted"]
@@ -319,7 +321,10 @@ async fn an_engine_that_dies_without_saying_so_journals_an_interrupted_turn() {
     };
     let (turn, interrupted) = tokio::join!(turn_req.send(), interrupt);
     assert_eq!(interrupted.status(), reqwest::StatusCode::ACCEPTED);
-    assert_eq!(turn.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+    let turn = turn.unwrap();
+    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    let turn: serde_json::Value = turn.json().await.unwrap();
+    wait_for_turn_end(&client, addr, &token, json_id(&session), json_id(&turn)).await;
     assert_eq!(
         turn_statuses(&client, addr, &token, &session).await,
         ["interrupted"]
@@ -600,17 +605,16 @@ async fn a_session_whose_turns_keep_failing_is_fenced_rather_than_left_idle() {
     };
 
     for attempt in 1..=3 {
-        let response = client
-            .post(format!("http://{addr}/sessions/{session}/turns"))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "message": format!("attempt {attempt}") }))
-            .send()
-            .await
-            .unwrap();
-        assert!(
-            response.status().is_success(),
-            "the turn is accepted even though the engine fails it"
-        );
+        // The turn is accepted even though the engine fails it.
+        let ended = run_turn_to_end(
+            &client,
+            addr,
+            &token,
+            &session,
+            serde_json::json!({ "message": format!("attempt {attempt}") }),
+        )
+        .await;
+        assert_eq!(ended["status"], "failed");
 
         let row = lifecycle(session.clone()).await;
         if attempt < 3 {
@@ -843,6 +847,14 @@ async fn a_recovered_session_accepts_a_turn() {
         turn.text().await.unwrap()
     );
     let body: serde_json::Value = turn.json().await.unwrap();
+    let body = wait_for_turn_end(
+        &reqwest::Client::new(),
+        addr2,
+        &token2,
+        &session_id,
+        json_id(&body),
+    )
+    .await;
     assert_eq!(body["status"], "completed");
     assert_eq!(body["user_input"], "after restart");
 
@@ -896,6 +908,8 @@ async fn a_recovered_session_accepts_a_turn() {
         after_orphan_exit.text().await.unwrap()
     );
     let after_body: serde_json::Value = after_orphan_exit.json().await.unwrap();
+    let after_body =
+        wait_for_turn_end(&client3, addr3, &token3, &session_id, json_id(&after_body)).await;
     assert_eq!(after_body["status"], "completed");
     assert_eq!(after_body["user_input"], "after orphan exit");
 }
@@ -932,19 +946,14 @@ async fn a_failed_checkpoint_does_not_fail_the_turn() {
     std::fs::create_dir_all(&worktree).unwrap();
     std::fs::write(worktree.join("orphan.txt"), "still here\n").unwrap();
 
-    let turn = client
-        .post(format!(
-            "http://{addr}/sessions/{}/turns",
-            json_id(&session)
-        ))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "keep going" }))
-        .send()
-        .await
-        .unwrap()
-        .json::<serde_json::Value>()
-        .await
-        .unwrap();
+    let turn = run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        json_id(&session),
+        serde_json::json!({ "message": "keep going" }),
+    )
+    .await;
     assert_eq!(turn["status"], "completed");
     assert!(turn["checkpoint_ref"].is_null());
 

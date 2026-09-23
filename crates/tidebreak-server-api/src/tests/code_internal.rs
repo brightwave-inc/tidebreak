@@ -414,6 +414,30 @@ async fn pending_approval_of_kind(
     .unwrap_or_else(|_| panic!("a pending {kind} approval appears"))
 }
 
+/// Read the accepted turn out of a send's answer and wait for it to end.
+///
+/// The send answers once the turn is accepted, so the turn's outcome, and
+/// everything the worker writes after it, arrives later.
+async fn wait_for_answered_turn(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    session_id: SessionId,
+    response: reqwest::Response,
+) -> serde_json::Value {
+    let status = response.status();
+    let accepted: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::ACCEPTED, "{accepted}");
+    super::code::wait_for_turn_end(
+        client,
+        addr,
+        token,
+        &session_id.to_string(),
+        accepted["id"].as_str().expect("the send started a turn"),
+    )
+    .await
+}
+
 /// Poll until the session's turns read exactly `expected`, or fail.
 async fn wait_for_turn_statuses(
     client: &reqwest::Client,
@@ -856,11 +880,8 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     )
     .await;
 
-    let response = tokio::time::timeout(Duration::from_secs(20), turn)
-        .await
-        .expect("the turn completes")
-        .unwrap();
-    assert!(response.status().is_success(), "{}", response.status());
+    let response = turn.await.unwrap();
+    wait_for_answered_turn(&client, addr, &token, session_id, response).await;
     assert_eq!(ran.load(Ordering::SeqCst), 1, "the approved tool ran once");
     assert_eq!(
         turn_statuses(&client, addr, &token, session_id).await,
@@ -1198,11 +1219,8 @@ async fn canonical_and_compatibility_routes_share_conversation_rows() {
         serde_json::json!({ "decision": "approve" }),
     )
     .await;
-    let response = tokio::time::timeout(Duration::from_secs(20), running)
-        .await
-        .expect("the approved turn completes")
-        .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let response = running.await.unwrap();
+    wait_for_answered_turn(&client, addr, &token, session_id, response).await;
     assert_eq!(ran.load(Ordering::SeqCst), 1);
 }
 
@@ -1273,11 +1291,8 @@ async fn a_questions_park_answered_from_the_chat_route_resumes_the_session() {
         .unwrap();
     assert_eq!(answered.status(), reqwest::StatusCode::OK);
 
-    let response = tokio::time::timeout(Duration::from_secs(20), turn)
-        .await
-        .expect("the turn completes")
-        .unwrap();
-    assert!(response.status().is_success(), "{}", response.status());
+    let response = turn.await.unwrap();
+    wait_for_answered_turn(&client, addr, &token, hosted, response).await;
     assert_eq!(
         turn_statuses(&client, addr, &token, hosted).await,
         vec!["completed"]
@@ -1354,11 +1369,8 @@ async fn a_plan_accepted_from_the_chat_route_resumes_the_session() {
             .unwrap();
         assert_eq!(decided.status(), reqwest::StatusCode::OK, "{chosen_mode:?}");
 
-        let response = tokio::time::timeout(Duration::from_secs(20), turn)
-            .await
-            .expect("the turn completes")
-            .unwrap();
-        assert!(response.status().is_success(), "{}", response.status());
+        let response = turn.await.unwrap();
+        wait_for_answered_turn(&client, addr, &token, hosted, response).await;
         assert_eq!(
             turn_statuses(&client, addr, &token, hosted).await,
             vec!["completed"],
@@ -1458,8 +1470,17 @@ async fn an_internal_client_wait_resumes_through_one_adapter_park() {
     .await;
     assert_eq!(resolved.status(), StatusCode::OK);
 
-    let response = match tokio::time::timeout(Duration::from_secs(20), response).await {
-        Ok(response) => response.unwrap(),
+    // The send answered once the turn was accepted; the client's result is
+    // what resumes it.
+    let response = response.await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let completed = match tokio::time::timeout(
+        Duration::from_secs(15),
+        super::code::wait_for_turn_end_in(&runtime, &OwnerId::local(), session_id, parked.id),
+    )
+    .await
+    {
+        Ok(turn) => turn,
         Err(_) => {
             let code_turn =
                 tidebreak_core::db::code::get_turn(&runtime.db, &OwnerId::local(), parked.id)
@@ -1480,11 +1501,6 @@ async fn an_internal_client_wait_resumes_through_one_adapter_park() {
             );
         }
     };
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let completed = tidebreak_core::db::code::get_turn(&runtime.db, &OwnerId::local(), parked.id)
-        .await
-        .unwrap()
-        .unwrap();
     assert_eq!(completed.status, TurnStatus::Completed);
     assert_eq!(completed.park_ref, None);
     assert_eq!(completed.park_wait, None);
@@ -1584,15 +1600,14 @@ async fn an_internal_agent_wait_resumes_through_one_adapter_park() {
         )
     );
 
-    let response = tokio::time::timeout(Duration::from_secs(20), response)
-        .await
-        .expect("the child result resumes the turn")
-        .unwrap();
+    let response = response.await.unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let completed = tidebreak_core::db::code::get_turn(&runtime.db, &OwnerId::local(), parked.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let completed = tokio::time::timeout(
+        Duration::from_secs(15),
+        super::code::wait_for_turn_end_in(&runtime, &OwnerId::local(), session_id, parked.id),
+    )
+    .await
+    .expect("the child result resumes the turn");
     assert_eq!(completed.status, TurnStatus::Completed);
     assert_eq!(completed.park_ref, None);
     assert_eq!(completed.park_wait, None);
@@ -1698,15 +1713,14 @@ async fn interrupting_an_internal_client_park_closes_the_turn() {
         .await
         .unwrap();
     assert_eq!(interrupted.status(), StatusCode::ACCEPTED);
-    let response = tokio::time::timeout(Duration::from_secs(20), response)
-        .await
-        .expect("the interrupt closes the parked turn")
-        .unwrap();
+    let response = response.await.unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let closed = tidebreak_core::db::code::get_turn(&runtime.db, &OwnerId::local(), parked.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let closed = tokio::time::timeout(
+        Duration::from_secs(15),
+        super::code::wait_for_turn_end_in(&runtime, &OwnerId::local(), session_id, parked.id),
+    )
+    .await
+    .expect("the interrupt closes the parked turn");
     assert_eq!(closed.status, TurnStatus::Interrupted);
     let call_id: tidebreak_core::CallId = call_id.parse().unwrap();
     let call = runtime
@@ -1739,18 +1753,14 @@ async fn a_plain_internal_turn_is_journaled_once() {
     let session: serde_json::Value = created.json().await.unwrap();
     let hosted: SessionId = session["id"].as_str().unwrap().parse().unwrap();
 
-    let response = tokio::time::timeout(Duration::from_secs(20), async {
-        client
-            .post(format!("http://{addr}/sessions/{hosted}/turns"))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "message": "say it" }))
-            .send()
-            .await
-            .unwrap()
-    })
-    .await
-    .expect("the turn completes");
-    assert!(response.status().is_success(), "{}", response.status());
+    super::code::run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        &hosted.to_string(),
+        serde_json::json!({ "message": "say it" }),
+    )
+    .await;
     assert_eq!(
         turn_statuses(&client, addr, &token, hosted).await,
         vec!["completed"]
@@ -1979,7 +1989,7 @@ async fn the_internal_engine_is_only_reachable_without_a_workspace() {
 /// model, and the lane's existing resolution puts them on the request.
 #[tokio::test]
 async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
-    let (router, token, _runtime, _ran, _dir, provider, _state) =
+    let (router, token, runtime, _ran, _dir, provider, _state) =
         internal_engine_app_capturing(vec![Step::Text("i see it")]).await;
     let bearer = format!("Bearer {token}");
     let created = router
@@ -2048,12 +2058,20 @@ async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
             .unwrap()
     })
     .await
-    .expect("the turn completes");
+    .expect("the send answers");
     assert!(
         response.status().is_success(),
         "turn was not accepted: {}",
         response.status()
     );
+    let accepted: serde_json::Value = super::json_body(response).await;
+    super::code::wait_for_turn_end_in(
+        &runtime,
+        &OwnerId::local(),
+        session_id.parse().unwrap(),
+        accepted["id"].as_str().unwrap().parse().unwrap(),
+    )
+    .await;
 
     let request = provider
         .requests
@@ -2250,11 +2268,18 @@ async fn assert_internal_screenshot_hydrates_pixels(name: &'static str) {
             submit_internal_turn(&router, &bearer, session_id, message),
         )
         .await
-        .expect("the internal screenshot turn completes")
+        .expect("the send answers")
         .unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED, "{name}");
         let body: serde_json::Value = super::json_body(response).await;
-        assert_eq!(body["status"], "completed", "{name}: {body}");
+        let ended = super::code::wait_for_turn_end_in(
+            &runtime,
+            &OwnerId::local(),
+            session_id,
+            body["id"].as_str().unwrap().parse().unwrap(),
+        )
+        .await;
+        assert_eq!(ended.status, TurnStatus::Completed, "{name}: {body}");
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1, "{name} executes once");
     {
@@ -2308,11 +2333,18 @@ async fn assert_internal_screenshot_hydrates_pixels(name: &'static str) {
         ),
     )
     .await
-    .expect("the recovered screenshot turn completes")
+    .expect("the send answers")
     .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED, "{name}");
     let body: serde_json::Value = super::json_body(response).await;
-    assert_eq!(body["status"], "completed", "{name}: {body}");
+    let ended = super::code::wait_for_turn_end_in(
+        &recovered_runtime,
+        &OwnerId::local(),
+        session_id,
+        body["id"].as_str().unwrap().parse().unwrap(),
+    )
+    .await;
+    assert_eq!(ended.status, TurnStatus::Completed, "{name}: {body}");
     let requests = recovered_provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1, "{name}");
     assert!(!requests[0].tools.iter().any(|tool| tool.name == name));

@@ -1086,9 +1086,9 @@ async fn run_turn(
     timeout: Option<u64>,
     format: OutputFormat,
 ) -> Result<i32> {
-    // Subscribe first. `POST /turns` waits for the worker to finish the
-    // whole turn (or to queue), so a CLI that only reads after the POST
-    // returns never sees a live approval and cannot honor `--timeout`.
+    // Subscribe first. `POST /turns` answers once the turn is accepted (or
+    // queued); the turn's frames, its approvals, and its end all arrive on
+    // this socket, and `--timeout` is measured against them.
     let mut stream = CodeStream::open_session(client, session).await?;
     let attach_only = message.is_empty();
     let attach_turn = if attach_only {

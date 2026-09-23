@@ -921,17 +921,14 @@ async fn unread_engine_events_accumulate_on_the_session_row_and_reach_the_doctor
     assert_eq!(session["unrecognized_event_count"], 0);
 
     for message in ["hello", "again"] {
-        let turn = client
-            .post(format!(
-                "http://{addr}/sessions/{}/turns",
-                json_id(&session)
-            ))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "message": message }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+        run_turn_to_end(
+            &client,
+            addr,
+            &token,
+            json_id(&session),
+            serde_json::json!({ "message": message }),
+        )
+        .await;
     }
 
     // Both turns, not just the last: the row accumulates rather than being
@@ -1006,14 +1003,16 @@ async fn a_lost_resume_fences_the_session_instead_of_failing_every_turn() {
         .await
         .unwrap());
 
-    let failed = client
-        .post(format!("http://{addr}/sessions/{session_id}/turns"))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "carry on" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(failed.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    // The send is accepted; the engine then fails the turn it cannot resume.
+    let failed = run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        &session_id,
+        serde_json::json!({ "message": "carry on" }),
+    )
+    .await;
+    assert_eq!(failed["status"], "failed");
 
     let listed = client
         .get(format!(

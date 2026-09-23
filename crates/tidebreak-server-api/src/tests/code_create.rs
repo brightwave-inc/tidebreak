@@ -123,32 +123,22 @@ async fn listing_session_turns_returns_user_input_and_usage() {
     let empty_body: Vec<serde_json::Value> = empty.json().await.unwrap();
     assert!(empty_body.is_empty());
 
-    let first = client
-        .post(format!(
-            "http://{addr}/sessions/{}/turns",
-            json_id(&session)
-        ))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "hello" }))
-        .send()
-        .await
-        .unwrap()
-        .json::<serde_json::Value>()
-        .await
-        .unwrap();
-    let second = client
-        .post(format!(
-            "http://{addr}/sessions/{}/turns",
-            json_id(&session)
-        ))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "again" }))
-        .send()
-        .await
-        .unwrap()
-        .json::<serde_json::Value>()
-        .await
-        .unwrap();
+    let first = run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        json_id(&session),
+        serde_json::json!({ "message": "hello" }),
+    )
+    .await;
+    let second = run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        json_id(&session),
+        serde_json::json!({ "message": "again" }),
+    )
+    .await;
     let listed = client
         .get(format!(
             "http://{addr}/sessions/{}/turns",
@@ -939,18 +929,14 @@ async fn first_turn_starts_when_the_repository_has_no_main_ref() {
     assert_eq!(session.status(), reqwest::StatusCode::CREATED);
     let session: serde_json::Value = session.json().await.unwrap();
 
-    let turn = client
-        .post(format!(
-            "http://{addr}/sessions/{}/turns",
-            json_id(&session)
-        ))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "hello" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
-    let turn: serde_json::Value = turn.json().await.unwrap();
+    let turn = run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        json_id(&session),
+        serde_json::json!({ "message": "hello" }),
+    )
+    .await;
     assert_eq!(turn["status"], "completed");
 }
 

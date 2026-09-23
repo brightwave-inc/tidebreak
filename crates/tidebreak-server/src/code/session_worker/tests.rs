@@ -77,6 +77,37 @@ async fn an_aborted_permission_mode_settlement_rejects_a_turn_queued_behind_it()
     assert!(commands.is_closed());
 }
 
+/// Wait until the turn a worker accepted has ended and the worker has left
+/// the session, then read the turn back.
+///
+/// A worker answers `RunTurn` once the turn is accepted; the outcome, and the
+/// checkpoint and attention after it, arrive afterwards.
+async fn ended_turn(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    accepted: &Turn,
+) -> Turn {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let turn = tidebreak_core::db::code::get_turn(store, owner, accepted.id)
+                .await
+                .unwrap()
+                .expect("the accepted turn exists");
+            let session = get_session(store, owner, session_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if !turn.status.is_open() && session.lifecycle != SessionLifecycle::Running {
+                return turn;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the accepted turn ends")
+}
+
 async fn seeded_session(
     harness_kind: HarnessKind,
     harness_version: Option<&str>,
@@ -413,11 +444,12 @@ async fn an_engine_observed_decision_settles_its_own_approval_row() {
         })
         .await
         .unwrap();
-    let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
+    let accepted = tokio::time::timeout(Duration::from_secs(5), turn_response)
         .await
-        .expect("the turn completes")
+        .expect("the turn is accepted")
         .unwrap()
         .unwrap();
+    let turn = ended_turn(&store, &owner, session_id, &accepted).await;
     assert_eq!(turn.status, TurnStatus::Completed);
 
     let approvals = list_approvals(&store, &owner, None, Some(session_id))
@@ -706,11 +738,12 @@ async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
         .unwrap();
     decide_response.await.unwrap().unwrap();
 
-    let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
+    let accepted = tokio::time::timeout(Duration::from_secs(5), turn_response)
         .await
-        .expect("the turn completes after the resume")
+        .expect("the turn is accepted")
         .unwrap()
         .unwrap();
+    let turn = ended_turn(&store, &owner, session_id, &accepted).await;
     assert_eq!(turn.status, TurnStatus::Completed);
     assert_eq!(turn.park_ref, None, "the resume clears the park");
     assert_eq!(turn.park_wait, None);
@@ -1063,11 +1096,12 @@ async fn a_decision_on_the_running_leg_resumes_the_park() {
         .unwrap();
     decide_response.await.unwrap().unwrap();
 
-    let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
+    let accepted = tokio::time::timeout(Duration::from_secs(5), turn_response)
         .await
-        .expect("the turn completes from the already-delivered decision")
+        .expect("the turn is accepted")
         .unwrap()
         .unwrap();
+    let turn = ended_turn(&store, &owner, session_id, &accepted).await;
     assert_eq!(turn.status, TurnStatus::Completed);
     assert_eq!(turn.park_ref, None, "the resume clears the park");
     assert_eq!(turn.park_wait, None);
@@ -1167,11 +1201,12 @@ async fn an_interrupt_closes_a_parked_turn() {
         .await
         .unwrap();
     stop_response.await.unwrap().unwrap();
-    let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
+    let accepted = tokio::time::timeout(Duration::from_secs(5), turn_response)
         .await
-        .expect("the parked turn closes")
+        .expect("the turn is accepted")
         .unwrap()
         .unwrap();
+    let turn = ended_turn(&store, &OwnerId::local(), session_id, &accepted).await;
     assert_eq!(turn.status, TurnStatus::Interrupted);
     let _ = handle.commands.send(WorkerCommand::Shutdown).await;
 }
@@ -1281,11 +1316,12 @@ async fn a_confirmed_setting_reservation_wins_over_an_already_queued_idle_turn()
         .send(ExecutionSettingsSettlement::Confirmed)
         .is_ok());
 
-    let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
+    let accepted = tokio::time::timeout(Duration::from_secs(5), turn_response)
         .await
-        .expect("the turn completes")
+        .expect("the turn is accepted")
         .unwrap()
         .unwrap();
+    let turn = ended_turn(&store, &owner, session_id, &accepted).await;
     assert_eq!(turn.model, updated.model);
     assert_eq!(turn.fast_mode, updated.fast_mode);
     assert_eq!(adapter.turn_efforts(), vec![updated.reasoning_effort]);

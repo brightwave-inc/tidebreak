@@ -636,6 +636,13 @@ async fn a_native_steer_rejection_does_not_fail_or_redirect_the_turn() {
     let body: serde_json::Value = refused.json().await.unwrap();
     assert_eq!(body["kind"], "steering_rejected");
     assert_eq!(turn.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+    wait_for_turn_end_in(
+        &runtime,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+        active_turn_id,
+    )
+    .await;
 
     let turns = tidebreak_core::db::code::list_turns(
         &runtime.db,

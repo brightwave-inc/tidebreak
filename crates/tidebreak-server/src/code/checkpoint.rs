@@ -302,66 +302,68 @@ pub async fn record_session_baseline(
 ///
 /// Checkpoint failure does not fail the turn: a [`Event::HarnessNotice`]
 /// is journaled and the already-recorded work stands.
-pub async fn after_turn_ended(
-    db: &Arc<DbStore>,
-    bus: &Arc<CodeEventBus>,
-    session: &Session,
-    turn: &mut Turn,
-) {
-    let terminal = matches!(
-        turn.status,
-        TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
-    );
-    if !terminal || turn.checkpoint_ref.is_some() {
-        return;
-    }
-    // No workspace, no checkout to snapshot.
-    if session.workspace_id.is_none() {
-        return;
-    }
-    match record_for_turn(db, session, turn).await {
-        Ok(recorded) => {
-            turn.checkpoint_ref = Some(recorded.checkpoint_ref.clone());
-            turn.diffstat = Some(recorded.diffstat.clone());
-            if let Err(err) = save_turn(db, &session.owner, turn).await {
+pub fn after_turn_ended<'fut>(
+    db: &'fut Arc<DbStore>,
+    bus: &'fut Arc<CodeEventBus>,
+    session: &'fut Session,
+    turn: &'fut mut Turn,
+) -> futures::future::BoxFuture<'fut, ()> {
+    Box::pin(async move {
+        let terminal = matches!(
+            turn.status,
+            TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
+        );
+        if !terminal || turn.checkpoint_ref.is_some() {
+            return;
+        }
+        // No workspace, no checkout to snapshot.
+        if session.workspace_id.is_none() {
+            return;
+        }
+        match record_for_turn(db, session, turn).await {
+            Ok(recorded) => {
+                turn.checkpoint_ref = Some(recorded.checkpoint_ref.clone());
+                turn.diffstat = Some(recorded.diffstat.clone());
+                if let Err(err) = save_turn(db, &session.owner, turn).await {
+                    warn!(
+                        session = %session.id,
+                        turn = %turn.id,
+                        error = %err,
+                        "failed to persist checkpoint on the turn row"
+                    );
+                }
+                let _ = journal(
+                    db,
+                    bus,
+                    session,
+                    Event::CheckpointRecorded {
+                        turn_id: turn.id,
+                        diffstat: recorded.diffstat,
+                    },
+                )
+                .await;
+            }
+            Err(err) => {
+                let message = truncate_notice(format!("checkpoint failed: {err}"));
                 warn!(
                     session = %session.id,
                     turn = %turn.id,
                     error = %err,
-                    "failed to persist checkpoint on the turn row"
+                    "checkpoint failed; turn is kept"
                 );
+                let _ = journal(
+                    db,
+                    bus,
+                    session,
+                    Event::HarnessNotice {
+                        level: HarnessNoticeLevel::Warning,
+                        message,
+                    },
+                )
+                .await;
             }
-            let _ = journal(
-                db,
-                bus,
-                session,
-                Event::CheckpointRecorded {
-                    turn_id: turn.id,
-                    diffstat: recorded.diffstat,
-                },
-            )
-            .await;
         }
-        Err(err) => {
-            let message = truncate_notice(format!("checkpoint failed: {err}"));
-            warn!(
-                session = %session.id,
-                turn = %turn.id,
-                error = %err,
-                "checkpoint failed; turn is kept"
-            );
-            let _ = journal(
-                db,
-                bus,
-                session,
-                Event::HarnessNotice {
-                    level: HarnessNoticeLevel::Warning,
-                    message,
-                },
-            )
-            .await;
-        }
-    }
+    })
 }
 
 async fn record_for_turn(

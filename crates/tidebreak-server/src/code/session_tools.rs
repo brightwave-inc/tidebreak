@@ -58,62 +58,71 @@ impl Authority {
     }
 }
 
-async fn authority(runtime: &CodeRuntime, parent: SessionId) -> Result<Authority, ServerError> {
-    let parent = tidebreak_core::db::code::get_session_all_owners(&runtime.db, parent)
-        .await?
-        .ok_or_else(|| ServerError::not_found("parent session not found"))?;
-    if matches!(
-        parent.lifecycle,
-        SessionLifecycle::Ended | SessionLifecycle::Fenced
-    ) {
-        return Err(ServerError::conflict_kind(
-            "parent_unavailable",
-            "This conversation is ended or fenced.",
-        ));
-    }
-    let bindings =
-        tidebreak_core::db::code::list_bindings_for_session(&runtime.db, &parent.owner, parent.id)
-            .await?;
-    let grant = if let Some(binding) = bindings.first() {
-        if bindings
-            .iter()
-            .any(|other| other.grant_id != binding.grant_id)
-        {
+fn authority<'fut>(
+    runtime: &'fut CodeRuntime,
+    parent: SessionId,
+) -> futures::future::BoxFuture<'fut, Result<Authority, ServerError>> {
+    Box::pin(async move {
+        let parent = tidebreak_core::db::code::get_session_all_owners(&runtime.db, parent)
+            .await?
+            .ok_or_else(|| ServerError::not_found("parent session not found"))?;
+        if matches!(
+            parent.lifecycle,
+            SessionLifecycle::Ended | SessionLifecycle::Fenced
+        ) {
             return Err(ServerError::conflict_kind(
-                "grant_scope",
-                "This conversation has conflicting connection authorities.",
+                "parent_unavailable",
+                "This conversation is ended or fenced.",
             ));
         }
-        Some(
-            tidebreak_core::db::code::get_external_grant(
-                &runtime.db,
-                &parent.owner,
-                binding.grant_id,
-            )
-            .await?
-            .filter(|grant| grant.revoked_at.is_none())
-            .ok_or_else(|| ServerError::unauthorized("The external connection was revoked."))?,
+        let bindings = tidebreak_core::db::code::list_bindings_for_session(
+            &runtime.db,
+            &parent.owner,
+            parent.id,
         )
-    } else {
-        None
-    };
-    let context =
-        tidebreak_core::db::code::session_context(&runtime.db, &parent.owner, parent.id).await?;
-    let lender: Option<Arc<dyn GitCredentialLender>> = if let (Some(grant), Some(external)) = (
-        &grant,
-        runtime
-            .harness_llm()
-            .and_then(|relay| relay.external_delegations().cloned()),
-    ) {
-        Some(external.for_grant(&parent.owner, grant.id).await?)
-    } else {
-        runtime.git_credentials().cloned()
-    };
-    Ok(Authority {
-        parent,
-        grant,
-        channel: context.and_then(|c| c.channel_id),
-        lender,
+        .await?;
+        let grant = if let Some(binding) = bindings.first() {
+            if bindings
+                .iter()
+                .any(|other| other.grant_id != binding.grant_id)
+            {
+                return Err(ServerError::conflict_kind(
+                    "grant_scope",
+                    "This conversation has conflicting connection authorities.",
+                ));
+            }
+            Some(
+                tidebreak_core::db::code::get_external_grant(
+                    &runtime.db,
+                    &parent.owner,
+                    binding.grant_id,
+                )
+                .await?
+                .filter(|grant| grant.revoked_at.is_none())
+                .ok_or_else(|| ServerError::unauthorized("The external connection was revoked."))?,
+            )
+        } else {
+            None
+        };
+        let context =
+            tidebreak_core::db::code::session_context(&runtime.db, &parent.owner, parent.id)
+                .await?;
+        let lender: Option<Arc<dyn GitCredentialLender>> = if let (Some(grant), Some(external)) = (
+            &grant,
+            runtime
+                .harness_llm()
+                .and_then(|relay| relay.external_delegations().cloned()),
+        ) {
+            Some(external.for_grant(&parent.owner, grant.id).await?)
+        } else {
+            runtime.git_credentials().cloned()
+        };
+        Ok(Authority {
+            parent,
+            grant,
+            channel: context.and_then(|c| c.channel_id),
+            lender,
+        })
     })
 }
 
@@ -124,25 +133,27 @@ fn attribution(session: &Session) -> GitForgeAttributionRequest {
     }
 }
 
-async fn require_child_repository(
-    runtime: &CodeRuntime,
-    owner: &OwnerId,
-    child: &Session,
-    requested: &str,
-) -> Result<(), ServerError> {
-    let workspace_id = child.workspace_id.ok_or_else(|| {
-        ServerError::conflict_kind("workspace_missing", "The child has no workspace.")
-    })?;
-    let workspace = runtime.get_workspace(owner, workspace_id).await?;
-    let repo = runtime.get_repo(owner, workspace.repo_id).await?;
-    let origin = CodeRuntime::workspace_repository_origin(&repo)?;
-    if origin != requested {
-        return Err(ServerError::conflict_kind(
-            "request_key_reused",
-            "This request_key already names work in a different repository.",
-        ));
-    }
-    Ok(())
+fn require_child_repository<'fut>(
+    runtime: &'fut CodeRuntime,
+    owner: &'fut OwnerId,
+    child: &'fut Session,
+    requested: &'fut str,
+) -> futures::future::BoxFuture<'fut, Result<(), ServerError>> {
+    Box::pin(async move {
+        let workspace_id = child.workspace_id.ok_or_else(|| {
+            ServerError::conflict_kind("workspace_missing", "The child has no workspace.")
+        })?;
+        let workspace = runtime.get_workspace(owner, workspace_id).await?;
+        let repo = runtime.get_repo(owner, workspace.repo_id).await?;
+        let origin = CodeRuntime::workspace_repository_origin(&repo)?;
+        if origin != requested {
+            return Err(ServerError::conflict_kind(
+                "request_key_reused",
+                "This request_key already names work in a different repository.",
+            ));
+        }
+        Ok(())
+    })
 }
 
 fn text<'a>(args: &'a Value, key: &str, max: usize) -> Result<&'a str, ServerError> {
@@ -661,68 +672,75 @@ impl Drop for ActiveParentWait {
     }
 }
 
-async fn wait_for_children(
-    runtime: &Arc<CodeRuntime>,
-    parent: &Session,
-    children: &[Session],
+fn wait_for_children<'fut>(
+    runtime: &'fut Arc<CodeRuntime>,
+    parent: &'fut Session,
+    children: &'fut [Session],
     timeout: Duration,
-) -> Result<Value, ServerError> {
-    let mut snapshots = Vec::with_capacity(children.len());
-    for child in children {
-        snapshots.push(snapshot(runtime, &parent.owner, child.clone()).await?);
-    }
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut lease = ActiveParentWait::begin(runtime, parent, children, timeout).await?;
-    let outcome = tokio::time::timeout_at(deadline, async {
-        loop {
-            // Approval and output changes do not always change lifecycle.
-            // Refresh every child instead of waiting for a lifecycle change.
-            for (index, child) in children.iter().enumerate() {
-                snapshots[index] = snapshot(runtime, &parent.owner, child.clone()).await?;
+) -> futures::future::BoxFuture<'fut, Result<Value, ServerError>> {
+    Box::pin(async move {
+        let mut snapshots = Vec::with_capacity(children.len());
+        for child in children {
+            snapshots.push(snapshot(runtime, &parent.owner, child.clone()).await?);
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut lease = ActiveParentWait::begin(runtime, parent, children, timeout).await?;
+        let outcome = tokio::time::timeout_at(deadline, async {
+            loop {
+                // Approval and output changes do not always change lifecycle.
+                // Refresh every child instead of waiting for a lifecycle change.
+                for (index, child) in children.iter().enumerate() {
+                    snapshots[index] = snapshot(runtime, &parent.owner, child.clone()).await?;
+                }
+                if !snapshots
+                    .iter()
+                    .any(|value| value["running"].as_bool().unwrap_or(false))
+                {
+                    return Ok::<_, ServerError>(json!({"waiting":false,"sessions":snapshots}));
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            if !snapshots
-                .iter()
-                .any(|value| value["running"].as_bool().unwrap_or(false))
-            {
-                return Ok::<_, ServerError>(json!({"waiting":false,"sessions":snapshots}));
+        })
+        .await;
+        let result = match outcome {
+            Ok(result) => result,
+            // The tool has returned; the active wait ends even when children run.
+            // `waiting` tells the caller to check those children again.
+            Err(_) => Ok(json!({"waiting":true,"sessions":snapshots})),
+        };
+        let cleanup = lease.finish().await;
+        match result {
+            Ok(value) => {
+                cleanup?;
+                Ok(value)
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            Err(error) => {
+                if let Err(cleanup_error) = cleanup {
+                    tracing::warn!(session = %parent.id, error = cleanup_error.message(),
+                        "could not clear a failed parent wait");
+                }
+                Err(error)
+            }
         }
     })
-    .await;
-    let result = match outcome {
-        Ok(result) => result,
-        // The tool has returned; the active wait ends even when children run.
-        // `waiting` tells the caller to check those children again.
-        Err(_) => Ok(json!({"waiting":true,"sessions":snapshots})),
-    };
-    let cleanup = lease.finish().await;
-    match result {
-        Ok(value) => {
-            cleanup?;
-            Ok(value)
-        }
-        Err(error) => {
-            if let Err(cleanup_error) = cleanup {
-                tracing::warn!(session = %parent.id, error = cleanup_error.message(),
-                    "could not clear a failed parent wait");
-            }
-            Err(error)
-        }
-    }
 }
 
-async fn publish_parent_tree(runtime: &CodeRuntime, parent: &Session) {
-    crate::code::session_tree::publish_for_parent(
-        &runtime.db,
-        runtime.bus.as_ref(),
-        &parent.owner,
-        parent.id,
-    )
-    .await;
-    if let Ok(parent) = runtime.get_session(&parent.owner, parent.id).await {
-        super::attention::emit_digest(&runtime.db, runtime.bus.as_ref(), &parent).await;
-    }
+fn publish_parent_tree<'fut>(
+    runtime: &'fut CodeRuntime,
+    parent: &'fut Session,
+) -> futures::future::BoxFuture<'fut, ()> {
+    Box::pin(async move {
+        crate::code::session_tree::publish_for_parent(
+            &runtime.db,
+            runtime.bus.as_ref(),
+            &parent.owner,
+            parent.id,
+        )
+        .await;
+        if let Ok(parent) = runtime.get_session(&parent.owner, parent.id).await {
+            super::attention::emit_digest(&runtime.db, runtime.bus.as_ref(), &parent).await;
+        }
+    })
 }
 
 async fn require_child(
@@ -738,61 +756,63 @@ async fn require_child(
     runtime.get_session(&auth.parent.owner, id).await
 }
 
-async fn send(
-    runtime: &CodeRuntime,
-    auth: &Authority,
-    child: &Session,
-    message: &str,
-    key: &str,
-) -> Result<(), ServerError> {
-    tidebreak_core::db::code::inherit_session_inference(
-        &runtime.db,
-        &auth.parent.owner,
-        auth.parent.id,
-        child.id,
-    )
-    .await?;
-    let actor = tidebreak_core::TurnActor {
-        display: Some("Parent conversation".into()),
-        ..Default::default()
-    };
-    if let Some(grant) = &auth.grant {
-        runtime
-            .external_submit_message(
-                &auth.parent.owner,
-                grant.id,
-                child.id,
-                ExternalMessage {
-                    text: message.into(),
-                    event_id: tidebreak_core::db::code::delegated_child_external_key(
-                        auth.parent.id,
-                        key,
-                    ),
-                    channel_ts: chrono::Utc::now().timestamp_micros().to_string(),
-                    actor,
-                    context: None,
-                    steer: false,
-                    expected_turn_id: None,
-                    correlation_uuid: None,
-                },
-            )
-            .await?;
-    } else {
-        let record = tidebreak_core::db::code::record_external_message(
+fn send<'fut>(
+    runtime: &'fut CodeRuntime,
+    auth: &'fut Authority,
+    child: &'fut Session,
+    message: &'fut str,
+    key: &'fut str,
+) -> futures::future::BoxFuture<'fut, Result<(), ServerError>> {
+    Box::pin(async move {
+        tidebreak_core::db::code::inherit_session_inference(
             &runtime.db,
             &auth.parent.owner,
+            auth.parent.id,
             child.id,
-            &tidebreak_core::db::code::delegated_child_external_key(auth.parent.id, key),
-            &chrono::Utc::now().timestamp_micros().to_string(),
-            message,
-            &actor,
         )
         .await?;
-        if let tidebreak_core::ExternalMessageRecord::Recorded(row) = record {
-            runtime.promote_external_head(child.clone(), row.id).await?;
+        let actor = tidebreak_core::TurnActor {
+            display: Some("Parent conversation".into()),
+            ..Default::default()
+        };
+        if let Some(grant) = &auth.grant {
+            runtime
+                .external_submit_message(
+                    &auth.parent.owner,
+                    grant.id,
+                    child.id,
+                    ExternalMessage {
+                        text: message.into(),
+                        event_id: tidebreak_core::db::code::delegated_child_external_key(
+                            auth.parent.id,
+                            key,
+                        ),
+                        channel_ts: chrono::Utc::now().timestamp_micros().to_string(),
+                        actor,
+                        context: None,
+                        steer: false,
+                        expected_turn_id: None,
+                        correlation_uuid: None,
+                    },
+                )
+                .await?;
+        } else {
+            let record = tidebreak_core::db::code::record_external_message(
+                &runtime.db,
+                &auth.parent.owner,
+                child.id,
+                &tidebreak_core::db::code::delegated_child_external_key(auth.parent.id, key),
+                &chrono::Utc::now().timestamp_micros().to_string(),
+                message,
+                &actor,
+            )
+            .await?;
+            if let tidebreak_core::ExternalMessageRecord::Recorded(row) = record {
+                runtime.promote_external_head(child.clone(), row.id).await?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// The ordered `code_wait` payload for a settled set of children, or `None`
@@ -820,12 +840,12 @@ pub(crate) async fn settled_child_wait_result(
     ))
 }
 
-async fn snapshot(
-    runtime: &CodeRuntime,
-    owner: &OwnerId,
+fn snapshot<'fut>(
+    runtime: &'fut CodeRuntime,
+    owner: &'fut OwnerId,
     session: Session,
-) -> Result<Value, ServerError> {
-    snapshot_on(&runtime.db, owner, session.id).await
+) -> futures::future::BoxFuture<'fut, Result<Value, ServerError>> {
+    Box::pin(async move { snapshot_on(&runtime.db, owner, session.id).await })
 }
 
 async fn snapshot_on(

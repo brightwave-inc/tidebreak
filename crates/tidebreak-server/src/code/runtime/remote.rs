@@ -828,11 +828,11 @@ impl CodeRuntime {
 
     /// Submit one turn to a remote session's sandbox (`docs/slack-sessions.md`).
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn submit_remote_turn(
-        &self,
-        owner: &OwnerId,
+    pub(super) fn submit_remote_turn<'fut>(
+        &'fut self,
+        owner: &'fut OwnerId,
         mut session: Session,
-        workspace: Option<&CodeWorkspace>,
+        workspace: Option<&'fut CodeWorkspace>,
         message: String,
         model: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -840,93 +840,95 @@ impl CodeRuntime {
         actor: Option<tidebreak_core::TurnActor>,
         trigger_delivery: Option<TriggerDeliveryClaim>,
         queue_if_busy: bool,
-    ) -> Result<SubmitTurnOutcome, ServerError> {
-        let Some(remote) = self.remote_sessions() else {
-            return Err(ServerError::conflict_kind(
-                "remote_disabled",
-                "this deployment has no sandbox runtime configured",
-            ));
-        };
-        if trigger_delivery.is_some() {
-            // Trigger delivery is at-most-once. The runtime's spawn and inbox
-            // calls accept no idempotency key and expose no replay result, so
-            // retrying an ambiguous response could run one trigger twice.
-            return Err(ServerError::conflict_kind(
-                "remote_triggers_unsupported",
-                "remote trigger turns are disabled because sandbox spawn and inbox calls have no idempotency key; submit the turn manually",
-            ));
-        }
-        if !attachments.is_empty() {
-            // Remote messages carry text only. Until the runtime provides a
-            // bounded, owner-scoped file transfer, attachment bytes have no
-            // safe path into the sandbox.
-            return Err(ServerError::conflict_kind(
-                "remote_attachments_unsupported",
-                "remote sessions cannot stage attachment bytes because the sandbox message contract carries text only; send the turn without attachments",
-            ));
-        }
-        self.validate_remote_execution(&session)?;
-        // The declared supervised image reads settings only at spawn. Inbox
-        // messages cannot change them, so preserve the session contract.
-        let mut next = SessionExecutionSettings::from(&session);
-        if let Some(model) = normalize_model(model) {
-            next.model = Some(model);
-        }
-        if let Some(effort) = reasoning_effort {
-            next.reasoning_effort = effort;
-        }
-        self.validate_remote_settings_change(&session, &next)?;
-        if next != SessionExecutionSettings::from(&session) {
-            session = replace_session_execution_settings(&self.db, owner, &session, &next)
-                .await?
-                .ok_or_else(|| {
-                    ServerError::conflict_kind(
-                        "session_settings_changed",
-                        "the session settings changed before the turn could reserve them",
-                    )
-                })?;
-        }
-        // Queue-default, exactly as the local path: a busy session parks the
-        // send as a durable row the remote sweep promotes at the next idle.
-        let in_flight = session.lifecycle == SessionLifecycle::Running
-            || get_open_turn(&self.db, owner, session.id).await?.is_some();
-        let backlog = !tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
-            .await?
-            .is_empty();
-        if in_flight || backlog {
-            if !queue_if_busy {
+    ) -> futures::future::BoxFuture<'fut, Result<SubmitTurnOutcome, ServerError>> {
+        Box::pin(async move {
+            let Some(remote) = self.remote_sessions() else {
                 return Err(ServerError::conflict_kind(
-                    "trigger_turn_busy",
-                    "the turn was not accepted because the session is busy",
+                    "remote_disabled",
+                    "this deployment has no sandbox runtime configured",
+                ));
+            };
+            if trigger_delivery.is_some() {
+                // Trigger delivery is at-most-once. The runtime's spawn and inbox
+                // calls accept no idempotency key and expose no replay result, so
+                // retrying an ambiguous response could run one trigger twice.
+                return Err(ServerError::conflict_kind(
+                    "remote_triggers_unsupported",
+                    "remote trigger turns are disabled because sandbox spawn and inbox calls have no idempotency key; submit the turn manually",
                 ));
             }
-            return self
-                .park_remote_follow_up(owner, &session, message, actor)
-                .await;
-        }
-        let repo = match workspace {
-            Some(workspace) => Some(self.get_repo(owner, workspace.repo_id).await?),
-            None => None,
-        };
-        let scratch_branch = workspace
-            .is_none()
-            .then(|| format!("scratch-{}", session.id));
-        let driver = remote.driver(&self.db, self.bus.as_ref());
-        let outcome = driver
-            .submit_turn(
-                &mut session,
-                workspace,
-                repo.as_ref(),
-                scratch_branch.as_deref(),
-                &message,
-            )
-            .await?;
-        // A provisioned or delivered turn has events to drain and a parked
-        // one has a head to promote; either way the sweep should look now,
-        // not at its next floor.
-        remote.wake_sweep();
-        self.relay_remote_outcome(owner, &session, outcome, message, actor, queue_if_busy)
-            .await
+            if !attachments.is_empty() {
+                // Remote messages carry text only. Until the runtime provides a
+                // bounded, owner-scoped file transfer, attachment bytes have no
+                // safe path into the sandbox.
+                return Err(ServerError::conflict_kind(
+                    "remote_attachments_unsupported",
+                    "remote sessions cannot stage attachment bytes because the sandbox message contract carries text only; send the turn without attachments",
+                ));
+            }
+            self.validate_remote_execution(&session)?;
+            // The declared supervised image reads settings only at spawn. Inbox
+            // messages cannot change them, so preserve the session contract.
+            let mut next = SessionExecutionSettings::from(&session);
+            if let Some(model) = normalize_model(model) {
+                next.model = Some(model);
+            }
+            if let Some(effort) = reasoning_effort {
+                next.reasoning_effort = effort;
+            }
+            self.validate_remote_settings_change(&session, &next)?;
+            if next != SessionExecutionSettings::from(&session) {
+                session = replace_session_execution_settings(&self.db, owner, &session, &next)
+                    .await?
+                    .ok_or_else(|| {
+                        ServerError::conflict_kind(
+                            "session_settings_changed",
+                            "the session settings changed before the turn could reserve them",
+                        )
+                    })?;
+            }
+            // Queue-default, exactly as the local path: a busy session parks the
+            // send as a durable row the remote sweep promotes at the next idle.
+            let in_flight = session.lifecycle == SessionLifecycle::Running
+                || get_open_turn(&self.db, owner, session.id).await?.is_some();
+            let backlog = !tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
+                .await?
+                .is_empty();
+            if in_flight || backlog {
+                if !queue_if_busy {
+                    return Err(ServerError::conflict_kind(
+                        "trigger_turn_busy",
+                        "the turn was not accepted because the session is busy",
+                    ));
+                }
+                return self
+                    .park_remote_follow_up(owner, &session, message, actor)
+                    .await;
+            }
+            let repo = match workspace {
+                Some(workspace) => Some(self.get_repo(owner, workspace.repo_id).await?),
+                None => None,
+            };
+            let scratch_branch = workspace
+                .is_none()
+                .then(|| format!("scratch-{}", session.id));
+            let driver = remote.driver(&self.db, self.bus.as_ref());
+            let outcome = driver
+                .submit_turn(
+                    &mut session,
+                    workspace,
+                    repo.as_ref(),
+                    scratch_branch.as_deref(),
+                    &message,
+                )
+                .await?;
+            // A provisioned or delivered turn has events to drain and a parked
+            // one has a head to promote; either way the sweep should look now,
+            // not at its next floor.
+            remote.wake_sweep();
+            self.relay_remote_outcome(owner, &session, outcome, message, actor, queue_if_busy)
+                .await
+        })
     }
 
     /// Translate a driver outcome into the submit answer the routes speak.

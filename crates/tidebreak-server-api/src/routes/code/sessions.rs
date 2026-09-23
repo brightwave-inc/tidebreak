@@ -180,6 +180,13 @@ pub async fn get_session(
     Ok(Json(snapshot_with_origin(&code, session).await?))
 }
 
+/// `POST /sessions/{id}/turns` — send one message.
+///
+/// Answers `202` as soon as the message is accepted: with the turn snapshot
+/// when the session was idle and the turn has started, or with the queue row
+/// when the message parked behind a running turn. The turn's progress and its
+/// end arrive on the session's event socket; nothing waits for the engine
+/// here.
 pub async fn submit_turn(
     State(state): State<AppState>,
     code: ScopedCode,

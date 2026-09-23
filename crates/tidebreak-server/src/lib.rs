@@ -141,6 +141,7 @@ pub mod secret_rehome;
 /// The version handshake: what a server reports, and whether a client reads it.
 pub mod server_version;
 mod source_tools;
+pub(crate) mod stack;
 pub mod state;
 mod store_ownership;
 #[doc(hidden)]

@@ -72,119 +72,121 @@ impl CodeRuntime {
 
     /// Resolve a registered repository or start its bounded clone with the
     /// adapter grant's identity. A later retry observes the completed job.
-    pub async fn prepare_external_repository(
-        self: &Arc<Self>,
-        owner: &OwnerId,
+    pub fn prepare_external_repository<'fut>(
+        self: &'fut Arc<Self>,
+        owner: &'fut OwnerId,
         grant_id: tidebreak_core::CodeGrantId,
-        origin: &str,
+        origin: &'fut str,
         attribution: GitForgeAttributionRequest,
-    ) -> Result<tidebreak_core::CodeRepo, ServerError> {
-        if tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
-            .await?
-            .is_some_and(|grant| grant.kind.is_workspace())
-        {
-            self.require_workspace_repository_access(owner, grant_id, origin)
-                .await?;
-        }
-        let _creation = self.clone_jobs.external_start_lock.lock().await;
-        match self.repo_by_origin(owner, origin).await {
-            Ok(repo) => return Ok(repo),
-            Err(error) if error.kind() == "repo_unknown" => {}
-            Err(error) => return Err(error),
-        }
-        if !self.chooses_clone_destination().await? {
-            return self.repo_by_origin(owner, origin).await;
-        }
-        let origin = origin.to_ascii_lowercase();
-        let now = Instant::now();
-        let previous = {
-            let mut jobs = self.clone_jobs.jobs.lock().expect("clone jobs");
-            prune_completed_jobs(&mut jobs, now);
-            let matching = jobs
-                .values()
-                .filter(|job| {
-                    &job.owner == owner && job.external_origin.as_deref() == Some(&origin)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            matching
-                .iter()
-                .find(|job| !job.done)
-                .cloned()
-                .or_else(|| {
-                    matching
-                        .iter()
-                        .find(|job| job.done && job.error.is_none())
-                        .cloned()
-                })
-                .or_else(|| {
-                    matching
-                        .into_iter()
-                        .filter(|job| job.error.is_some())
-                        .max_by_key(|job| job.finished_at)
-                })
-        };
-        if let Some(job) = previous {
-            if !job.done {
-                return Err(preparing());
+    ) -> futures::future::BoxFuture<'fut, Result<tidebreak_core::CodeRepo, ServerError>> {
+        Box::pin(async move {
+            if tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
+                .await?
+                .is_some_and(|grant| grant.kind.is_workspace())
+            {
+                self.require_workspace_repository_access(owner, grant_id, origin)
+                    .await?;
             }
-            if job.error.is_none() {
-                return Err(ServerError::conflict_kind("repo_removed", "This repository registration was removed. Register it again before starting a session."));
+            let _creation = self.clone_jobs.external_start_lock.lock().await;
+            match self.repo_by_origin(owner, origin).await {
+                Ok(repo) => return Ok(repo),
+                Err(error) if error.kind() == "repo_unknown" => {}
+                Err(error) => return Err(error),
             }
-            let failed = {
+            if !self.chooses_clone_destination().await? {
+                return self.repo_by_origin(owner, origin).await;
+            }
+            let origin = origin.to_ascii_lowercase();
+            let now = Instant::now();
+            let previous = {
                 let mut jobs = self.clone_jobs.jobs.lock().expect("clone jobs");
-                if let Some(live) = jobs.get_mut(&job.id) {
-                    let reason = live.error.clone().unwrap_or_else(|| "clone failed".into());
-                    if !live.error_surfaced {
-                        live.error_surfaced = true;
-                        Some(reason)
-                    } else {
-                        let wait = live.finished_at.map_or(Duration::ZERO, |finished_at| {
-                            now.saturating_duration_since(finished_at)
-                        });
-                        if wait < EXTERNAL_CLONE_RETRY_BACKOFF {
+                prune_completed_jobs(&mut jobs, now);
+                let matching = jobs
+                    .values()
+                    .filter(|job| {
+                        &job.owner == owner && job.external_origin.as_deref() == Some(&origin)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                matching
+                    .iter()
+                    .find(|job| !job.done)
+                    .cloned()
+                    .or_else(|| {
+                        matching
+                            .iter()
+                            .find(|job| job.done && job.error.is_none())
+                            .cloned()
+                    })
+                    .or_else(|| {
+                        matching
+                            .into_iter()
+                            .filter(|job| job.error.is_some())
+                            .max_by_key(|job| job.finished_at)
+                    })
+            };
+            if let Some(job) = previous {
+                if !job.done {
+                    return Err(preparing());
+                }
+                if job.error.is_none() {
+                    return Err(ServerError::conflict_kind("repo_removed", "This repository registration was removed. Register it again before starting a session."));
+                }
+                let failed = {
+                    let mut jobs = self.clone_jobs.jobs.lock().expect("clone jobs");
+                    if let Some(live) = jobs.get_mut(&job.id) {
+                        let reason = live.error.clone().unwrap_or_else(|| "clone failed".into());
+                        if !live.error_surfaced {
+                            live.error_surfaced = true;
                             Some(reason)
                         } else {
-                            jobs.remove(&job.id);
-                            None
+                            let wait = live.finished_at.map_or(Duration::ZERO, |finished_at| {
+                                now.saturating_duration_since(finished_at)
+                            });
+                            if wait < EXTERNAL_CLONE_RETRY_BACKOFF {
+                                Some(reason)
+                            } else {
+                                jobs.remove(&job.id);
+                                None
+                            }
                         }
+                    } else {
+                        None
                     }
-                } else {
-                    None
+                };
+                if let Some(reason) = failed {
+                    return Err(repository_clone_failed(reason));
                 }
-            };
-            if let Some(reason) = failed {
-                return Err(repository_clone_failed(reason));
             }
-        }
-        let lender: Option<Arc<dyn GitCredentialLender>> = if let Some(external) = self
-            .harness_llm()
-            .as_ref()
-            .and_then(|relay| relay.external_delegations().cloned())
-        {
-            Some(
-                external
-                    .for_grant(owner, grant_id)
-                    .await
-                    .map_err(ServerError::from)?,
+            let lender: Option<Arc<dyn GitCredentialLender>> = if let Some(external) = self
+                .harness_llm()
+                .as_ref()
+                .and_then(|relay| relay.external_delegations().cloned())
+            {
+                Some(
+                    external
+                        .for_grant(owner, grant_id)
+                        .await
+                        .map_err(ServerError::from)?,
+                )
+            } else {
+                self.git_credentials().cloned()
+            };
+            self.start_clone_as(
+                owner,
+                CloneRequest {
+                    url: None,
+                    github: Some(origin.clone()),
+                    parent_dir: None,
+                    name: Some(origin.replace('/', "--")),
+                },
+                Some(origin),
+                attribution,
+                lender,
             )
-        } else {
-            self.git_credentials().cloned()
-        };
-        self.start_clone_as(
-            owner,
-            CloneRequest {
-                url: None,
-                github: Some(origin.clone()),
-                parent_dir: None,
-                name: Some(origin.replace('/', "--")),
-            },
-            Some(origin),
-            attribution,
-            lender,
-        )
-        .await?;
-        Err(preparing())
+            .await?;
+            Err(preparing())
+        })
     }
 }
 
