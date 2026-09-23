@@ -64,6 +64,24 @@ describe("remote connect refusals", () => {
     expect(connectFailureMessage(unnamed!)).toContain("Update Tidebreak");
   });
 
+  it("leaves out a release it could not show as it is", () => {
+    for (const machineVersion of [
+      "9.4.0 from https://evil.example",
+      "\u001b[1;31m9.4.0",
+      "1".repeat(33),
+    ]) {
+      const refused = remoteConnectError({
+        reason: "remote_machine_newer_than_app",
+        detail: null,
+        machineVersion,
+      });
+      expect(refused?.machineVersion, machineVersion).toBeNull();
+      expect(connectFailureMessage(refused!)).toBe(
+        "That machine runs a newer Tidebreak. Update Tidebreak to connect.",
+      );
+    }
+  });
+
   it("leaves anything that is not a worded refusal to the ordinary failure path", () => {
     expect(
       remoteConnectError({ reason: "remote_machine_invented_reason" }),

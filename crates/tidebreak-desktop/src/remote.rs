@@ -296,13 +296,32 @@ impl RemoteAttachment {
         base_url: &str,
         token: &str,
     ) -> Result<RemoteMachineState, RemoteConnectError> {
+        self.connect_within(base_url, token, PROBE_TIMEOUT).await
+    }
+
+    /// [`Self::connect`], with the whole attempt bounded by `budget`.
+    ///
+    /// The version check and the bearer probe share one deadline, so a
+    /// machine that never answers is refused within the time the bearer
+    /// probe alone used to take, not twice that.
+    async fn connect_within(
+        &self,
+        base_url: &str,
+        token: &str,
+        budget: std::time::Duration,
+    ) -> Result<RemoteMachineState, RemoteConnectError> {
         let base_url = validated_base_url(base_url)?;
         let token = token.trim();
         if token.is_empty() {
             return Err(RemoteConnectError::new(REASON_TOKEN_REFUSED));
         }
-        require_compatible(machine_version(&base_url).await.as_ref())?;
-        probe(&base_url, token).await?;
+        let deadline = tokio::time::Instant::now() + budget;
+        let version = tokio::time::timeout_at(deadline, machine_version(&base_url))
+            .await
+            .ok()
+            .flatten();
+        require_compatible(version.as_ref())?;
+        probe_until(&base_url, token, deadline).await?;
         self.store_static(&base_url, token).await?;
         Ok(RemoteMachineState {
             attachment: Attachment::Remote,
@@ -427,30 +446,34 @@ pub async fn discover_gateway(
     let body = read_discovery_body(response).await?;
     let discovery: AuthDiscovery = serde_json::from_slice(&body)
         .map_err(|error| RemoteConnectError::detailed(REASON_NOT_A_MACHINE, error))?;
-    // The discovery document carries the handshake's two keys, so a Gateway
-    // attach needs no second request to compare versions.
-    require_compatible(ServerVersion::from_answer(200, &body).as_ref())?;
-    match discovery {
+    let gateway_url = match discovery {
         AuthDiscovery::Gateway {
             gateway_url,
             resource: advertised,
-        } if advertised == resource => {
-            Ok((base_url, validated_gateway_url(&gateway_url)?, resource))
-        }
+        } if advertised == resource => validated_gateway_url(&gateway_url)?,
         AuthDiscovery::Gateway { .. }
         | AuthDiscovery::StaticToken
         | AuthDiscovery::Local
-        | AuthDiscovery::Other => Err(RemoteConnectError::new(REASON_GATEWAY_AUTH_UNAVAILABLE)),
-    }
+        | AuthDiscovery::Other => {
+            return Err(RemoteConnectError::new(REASON_GATEWAY_AUTH_UNAVAILABLE))
+        }
+    };
+    // The sign-in mode first, the way the mobile app orders it: a machine this
+    // app could never attach this way is refused for that reason, not told to
+    // update. The discovery document carries the handshake's two keys, so the
+    // version needs no second request.
+    require_compatible(ServerVersion::from_answer(200, &body).as_ref())?;
+    Ok((base_url, gateway_url, resource))
 }
 
 /// What the machine says about its version, or `None` when it says nothing
 /// this shell can read.
 ///
 /// `None` covers a machine that predates `GET /version` (a `404`), a page in
-/// front of it, and a request that failed outright. The caller connects in
-/// every one of those cases: the check exists to explain a version gap, and
-/// the bearer probe right after it reports an unreachable machine itself.
+/// front of it, a release this shell could not show, and a request that
+/// failed outright. The caller connects in every one of those cases: the
+/// check exists to explain a version gap, and the bearer probe right after it
+/// reports an unreachable machine itself.
 async fn machine_version(base_url: &str) -> Option<ServerVersion> {
     let client = reqwest::Client::builder()
         .timeout(PROBE_TIMEOUT)
@@ -569,8 +592,24 @@ pub fn url_host_is_loopback(url: &tauri::Url) -> bool {
 
 /// Ask the machine whether it is there and whether it accepts this token.
 async fn probe(base_url: &str, token: &str) -> Result<(), RemoteConnectError> {
+    probe_until(base_url, token, tokio::time::Instant::now() + PROBE_TIMEOUT).await
+}
+
+/// [`probe`], giving up at `deadline`.
+async fn probe_until(
+    base_url: &str,
+    token: &str,
+    deadline: tokio::time::Instant,
+) -> Result<(), RemoteConnectError> {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(RemoteConnectError::detailed(
+            REASON_UNREACHABLE,
+            "the machine did not answer in time",
+        ));
+    }
     let client = reqwest::Client::builder()
-        .timeout(PROBE_TIMEOUT)
+        .timeout(remaining)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("fixed HTTP client configuration is valid");
@@ -936,6 +975,61 @@ mod tests {
         assert_eq!(state.attachment, Attachment::Remote);
         let requests = served.await.unwrap();
         assert!(requests[1].starts_with("GET /policy "), "{}", requests[1]);
+    }
+
+    /// A machine that never answers is refused within one probe's time. The
+    /// version check and the bearer probe share the wait instead of each
+    /// taking its own.
+    #[tokio::test]
+    async fn an_unresponsive_machine_is_refused_within_one_wait() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let held = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                open.push(stream);
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let attachment =
+            RemoteAttachment::with_secrets(dir.path(), Arc::new(TestSecrets::default()));
+        let budget = std::time::Duration::from_secs(1);
+
+        let started = std::time::Instant::now();
+        let refused = attachment
+            .connect_within(&base_url, "machine-bearer", budget)
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(refused.reason, REASON_UNREACHABLE);
+        assert!(
+            elapsed < budget.mul_f32(1.6),
+            "two waits instead of one: {elapsed:?}"
+        );
+        held.abort();
+    }
+
+    /// The sign-in mode comes before the version, the order the mobile app
+    /// uses: a machine this app cannot attach through a Gateway says so, even
+    /// when it is also newer.
+    #[tokio::test]
+    async fn a_gateway_attach_checks_the_mode_before_the_version() {
+        let (base_url, served) = serve_once(|_| {
+            ok_json(
+                &serde_json::json!({
+                    "mode": "static_token",
+                    "version": "9.4.0",
+                    "api_level": newer_level(),
+                })
+                .to_string(),
+            )
+        })
+        .await;
+        assert_eq!(
+            discover_gateway(&base_url).await.unwrap_err().reason,
+            REASON_GATEWAY_AUTH_UNAVAILABLE
+        );
+        served.await.unwrap();
     }
 
     /// A Gateway attach reads the level from the discovery document it already

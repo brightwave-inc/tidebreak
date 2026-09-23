@@ -57,12 +57,32 @@ impl ServerVersion {
     /// Anything but a success with a JSON body naming both keys reads as
     /// `None`. A server that predates the route answers `404`, and a page in
     /// front of it may answer HTML; neither says anything about versions.
+    ///
+    /// A release a client could not print as it is reads as `None` too. The
+    /// release ends up in a terminal and in the desktop's copy, so it has to
+    /// be a plain release string (see [`is_printable_release`]). A server
+    /// that sends anything else says nothing a client can use.
     pub fn from_answer(status: u16, body: &[u8]) -> Option<Self> {
         if !(200..300).contains(&status) {
             return None;
         }
-        serde_json::from_slice(body).ok()
+        serde_json::from_slice::<Self>(body)
+            .ok()
+            .filter(|answer| is_printable_release(&answer.version))
     }
+}
+
+/// Whether a release string is short and plain enough to put in a sentence:
+/// 1 to 32 characters from `0-9`, `A-Z`, `a-z`, `.`, `+`, and `-`.
+///
+/// The mobile app applies the same rule before it names a release. A string
+/// outside it could carry terminal escapes, or words such as "from
+/// https://example.com" that would turn "update to" into a lure.
+pub fn is_printable_release(version: &str) -> bool {
+    (1..=32).contains(&version.len())
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
 }
 
 /// How a client built from this source should treat a server.
@@ -157,6 +177,34 @@ mod tests {
             ServerVersion::from_answer(200, br#"{"mode":"local"}"#),
             None
         );
+    }
+
+    /// A release is printed to a terminal and put into the desktop's copy, so
+    /// anything but a plain release string is no answer at all.
+    #[test]
+    fn a_release_a_client_could_not_print_is_no_answer() {
+        for version in [
+            "\u{1b}[1;31m9.4.0",
+            "9.4.0 from https://evil.example",
+            "9.4.0\nUpdate",
+            "",
+            "123456789012345678901234567890123",
+        ] {
+            let body = serde_json::json!({ "version": version, "api_level": 99 }).to_string();
+            assert_eq!(
+                ServerVersion::from_answer(200, body.as_bytes()),
+                None,
+                "{version:?}"
+            );
+        }
+        for version in [
+            "1.3.0",
+            "0.0.0",
+            "1.3.0-rc.1+build.5",
+            tidebreak_core::VERSION,
+        ] {
+            assert!(is_printable_release(version), "{version:?}");
+        }
     }
 
     /// Discovery and health documents carry the keys beside their own, and a

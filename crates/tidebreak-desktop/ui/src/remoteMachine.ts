@@ -82,11 +82,22 @@ export function remoteConnectError(error: unknown): RemoteConnectError | null {
   return {
     reason: candidate.reason as RemoteConnectReason,
     detail: typeof candidate.detail === "string" ? candidate.detail : null,
-    machineVersion:
-      typeof candidate.machineVersion === "string"
-        ? candidate.machineVersion
-        : null,
+    machineVersion: printableRelease(candidate.machineVersion),
   };
+}
+
+/**
+ * A release string short and plain enough to put in a sentence, or `null`.
+ *
+ * The same rule the shell and the mobile app apply: 1 to 32 characters from
+ * letters, digits, `.`, `+`, and `-`. Anything else could put a lure such as
+ * "from https://…" into the "update to" copy, so the copy leaves the release
+ * out instead.
+ */
+function printableRelease(value: unknown): string | null {
+  return typeof value === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(value)
+    ? value
+    : null;
 }
 
 /**

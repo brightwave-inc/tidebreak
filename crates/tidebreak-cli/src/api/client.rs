@@ -1023,31 +1023,47 @@ impl Client {
         &self.base
     }
 
-    /// What the server says about its own version, or `None` when it says
-    /// nothing this client can read.
+    /// What the server says about its own version.
     ///
-    /// `None` covers a server that predates `GET /version` (a `404`), a page
-    /// in front of it, and a request that failed outright. The caller treats
-    /// all of them as compatible: the check exists to explain a version gap,
-    /// and a server this client cannot reach fails the next request with its
-    /// own error.
-    pub async fn server_version(&self) -> Option<ServerVersion> {
-        let response = self
+    /// `Ok(None)` covers a server that predates `GET /version` (a `404`), a
+    /// page in front of it, an answer this client could not print, and a
+    /// request refused outright. The caller treats all of them as compatible:
+    /// the check exists to explain a version gap, and a server that refused
+    /// this request refuses the command's own next one with its own error.
+    ///
+    /// A server that does not answer within `timeout` is an error instead.
+    /// The command's own requests would wait on it without a limit, so the
+    /// check ends the wait rather than adding to it.
+    pub async fn server_version(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<ServerVersion>> {
+        let unanswered = || {
+            AgentError::msg(format!(
+                "the server at {} did not answer within {} seconds",
+                self.base,
+                timeout.as_secs_f32()
+            ))
+        };
+        let response = match self
             .http
             .get(format!("{}/version", self.base))
-            .timeout(VERSION_PROBE_TIMEOUT)
+            .timeout(timeout)
             .send()
             .await
-            .ok()?;
+        {
+            Ok(response) => response,
+            Err(error) if error.is_timeout() => return Err(unanswered()),
+            Err(_) => return Ok(None),
+        };
         let status = response.status().as_u16();
-        let body = response.bytes().await.ok()?;
-        ServerVersion::from_answer(status, &body)
+        match response.bytes().await {
+            Ok(body) => Ok(ServerVersion::from_answer(status, &body)),
+            Err(error) if error.is_timeout() => Err(unanswered()),
+            Err(_) => Ok(None),
+        }
     }
 }
-
-/// How long the attach-time version check waits before it gives up and lets
-/// the command's own first request report the problem.
-const VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The second per-launch credential, presented on the client-executor routes.
 ///
