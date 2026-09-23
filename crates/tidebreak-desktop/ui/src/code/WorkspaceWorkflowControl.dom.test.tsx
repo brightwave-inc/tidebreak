@@ -106,6 +106,8 @@ beforeEach(() => {
   useCodeUiStore.setState({
     pendingComposerPrompt: null,
     composerActionScope: null,
+    reviewSidebarOpen: false,
+    inspectorTab: null,
   });
   resetWorkflowPromptStore();
 });
@@ -338,6 +340,24 @@ function renderMergeControl(error?: HttpError) {
 }
 
 describe("Merge", () => {
+  it("paints the header merge as the default primary", () => {
+    renderMergeControl();
+    expect(screen.getByRole("button", { name: "Merge" }).className).toMatch(
+      /bg-primary/,
+    );
+  });
+
+  it("demotes the header merge while the inspector merge section is open", () => {
+    useCodeUiStore.setState({
+      reviewSidebarOpen: true,
+      inspectorTab: "pr",
+    });
+    renderMergeControl();
+    expect(screen.getByRole("button", { name: "Merge" }).className).not.toMatch(
+      /bg-primary/,
+    );
+  });
+
   it("submits the pull request and head shown in the confirmation", async () => {
     const { mergeCodePr, adopt } = renderMergeControl();
     await userEvent.click(screen.getByRole("button", { name: "Merge" }));

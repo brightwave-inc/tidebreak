@@ -372,6 +372,8 @@ export type CodeUiStore = {
   setNewWorkspaceDraft: (draft: NewWorkspaceDraft) => void;
   addRepoOpen: boolean;
   reviewSidebarOpen: boolean;
+  /** The inspector tab currently on screen, or null when the pane is unmounted. */
+  inspectorTab: "files" | "source" | "pr" | null;
   /** Files and diff scoped to one turn, or the whole worktree when null. */
   inspectorScope: InspectorScope | null;
   railPrefs: CodeRailPrefs;
@@ -406,6 +408,7 @@ export type CodeUiStore = {
   toggleReviewSidebar: () => void;
   setReviewSidebarOpen: (open: boolean) => void;
   setInspectorScope: (scope: InspectorScope | null) => void;
+  setInspectorTab: (tab: "files" | "source" | "pr" | null) => void;
   setRailPrefs: (patch: Partial<CodeRailPrefs>) => void;
   /** Record a successful create so the next dialog opens on the same choices. */
   rememberCreate: (selection: CodeCreateSelection) => void;
@@ -540,6 +543,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT,
   addRepoOpen: false,
   reviewSidebarOpen: readStoredReviewSidebarOpen(),
+  inspectorTab: null,
   inspectorScope: null,
   railPrefs: readStoredRailPrefs(),
   collapsedWorkspaceGroups: readStoredCollapsedWorkspaceGroups(),
@@ -718,6 +722,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     set({ reviewSidebarOpen: open });
   },
   setInspectorScope: (inspectorScope) => set({ inspectorScope }),
+  setInspectorTab: (inspectorTab) => set({ inspectorTab }),
   setRailPrefs: (patch) =>
     set((state) => {
       const railPrefs = { ...state.railPrefs, ...patch };
@@ -777,6 +782,7 @@ export function resetCodeUiHostState(): void {
     workspaceStartups: {},
     addRepoOpen: false,
     inspectorScope: null,
+    inspectorTab: null,
     terminalPending: false,
     pendingComposerPrompt: null,
     pendingComposerImages: null,

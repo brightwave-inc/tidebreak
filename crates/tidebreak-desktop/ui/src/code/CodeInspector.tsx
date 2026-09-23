@@ -43,13 +43,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+
 import {
   Empty,
   EmptyDescription,
@@ -67,7 +61,8 @@ import { useCodeUiStore } from "./CodeUiStore";
 import { DiffOverviewContent, useChangedFilesResource } from "./DiffOverview";
 import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
-import { MiddleTruncate } from "./MiddleTruncate";
+import { MergeMethodSelect, mergeMethodActionLabel } from "./MergeMethodSelect";
+import { PrBranchLine } from "./MiddleTruncate";
 import { PrCommentCard } from "./PrCommentCard";
 import {
   prDirectMergeAction,
@@ -137,6 +132,7 @@ export function CodeInspector({
     : (digest?.pr_state ?? workspace?.pr);
   const scope = useCodeUiStore((state) => state.inspectorScope);
   const setInspectorScope = useCodeUiStore((state) => state.setInspectorScope);
+  const setInspectorTab = useCodeUiStore((state) => state.setInspectorTab);
   const filesSearchPending = useCodeUiStore(
     (state) => state.filesSearchPending,
   );
@@ -176,6 +172,11 @@ export function CodeInspector({
   useEffect(() => {
     if (!pr && tab === "pr") setTab("source");
   }, [pr, tab]);
+
+  useEffect(() => {
+    setInspectorTab(tab);
+    return () => setInspectorTab(null);
+  }, [setInspectorTab, tab]);
 
   function openFile(next: string, line?: number) {
     if (onOpenFile) {
@@ -539,8 +540,8 @@ export function WorkspaceDeliveryPrTab({
   workspaceOnly?: boolean;
 }) {
   const target = pr ? workspacePullRequestTarget(pr) : null;
-  if (pr && target && !workspaceOnly) {
-    return (
+  const body =
+    pr && target && !workspaceOnly ? (
       <PullRequestDetailPane
         client={client}
         summary={deliverySummaryFromWorkspacePr(pr, target)}
@@ -549,17 +550,20 @@ export function WorkspaceDeliveryPrTab({
         }}
         onOpenWorkspace={() => undefined}
       />
+    ) : (
+      <PrTab
+        allowMerge={allowMerge}
+        client={client}
+        workspaceId={workspaceId}
+        pr={pr}
+        branch={branch}
+        prResource={prResource}
+      />
     );
-  }
   return (
-    <PrTab
-      allowMerge={allowMerge}
-      client={client}
-      workspaceId={workspaceId}
-      pr={pr}
-      branch={branch}
-      prResource={prResource}
-    />
+    <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col overflow-hidden">
+      {body}
+    </div>
   );
 }
 
@@ -733,11 +737,6 @@ export function PrTab({
   const blockers = mergeBlockedReasons(pr);
   const open = lifecycle === "open" || lifecycle === "draft";
   const chips = prStateChips(pr);
-  const branchLine =
-    pr.head_branch && pr.base_branch
-      ? `${pr.head_branch} → ${pr.base_branch}`
-      : (branch ?? null);
-
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 py-3">
       {dialog}
@@ -774,16 +773,19 @@ export function PrTab({
               </p>
             )}
           </div>
-          {/*
-            The base branch is the half a reader checks, and it is the half an
-            end-truncate eats first on a long feature-branch name.
-          */}
-          <MiddleTruncate
-            text={
-              branchLine ? `#${pr.number} · ${branchLine}` : `#${pr.number}`
-            }
-            className="text-muted-foreground mt-1 font-mono text-xs"
-          />
+          {pr.head_branch && pr.base_branch ? (
+            <PrBranchLine
+              number={pr.number}
+              base={pr.base_branch}
+              head={pr.head_branch}
+              className="text-muted-foreground mt-1 font-mono text-xs"
+            />
+          ) : (
+            <p className="text-muted-foreground mt-1 truncate font-mono text-xs">
+              #{pr.number}
+              {branch ? ` · ${branch}` : ""}
+            </p>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {chips.map((chip) => (
@@ -842,23 +844,11 @@ export function PrTab({
               )}
             </div>
             {showMergeMethod && (
-              <Select
+              <MergeMethodSelect
                 value={method}
-                onValueChange={(next) => setMethod(next as CodePrMergeMethod)}
+                onChange={setMethod}
                 disabled={mutationBusy}
-              >
-                <SelectTrigger
-                  className="h-7 w-[116px] shrink-0 text-xs"
-                  aria-label="Merge method"
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="squash">Squash and merge</SelectItem>
-                  <SelectItem value="merge">Merge commit</SelectItem>
-                  <SelectItem value="rebase">Rebase and merge</SelectItem>
-                </SelectContent>
-              </Select>
+              />
             )}
           </div>
           {directMerge?.kind === "merge" ? (
@@ -870,7 +860,7 @@ export function PrTab({
               onClick={() => void merge(false)}
             >
               {merging === "merge" ? <Spinner aria-hidden /> : null}
-              {mergeMethodLabel(method)}
+              {mergeMethodActionLabel(method)}
             </Button>
           ) : directMerge ? (
             <Button
@@ -927,17 +917,6 @@ export function PrTab({
       />
     </div>
   );
-}
-
-function mergeMethodLabel(method: CodePrMergeMethod): string {
-  switch (method) {
-    case "squash":
-      return "Squash and merge";
-    case "merge":
-      return "Create merge commit";
-    case "rebase":
-      return "Rebase and merge";
-  }
 }
 
 /** Review conversation, newest last, in the order the server sorted it. */
@@ -1208,26 +1187,32 @@ function CheckList({
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
       >
-        <CheckCount
-          icon={<Check className="size-3.5" />}
-          count={counts.passing}
-          label="passing"
-          // These counts carry words, so they take the readable ink rather
-          // than the mark colour the bare glyphs below use.
-          className="text-success-foreground"
-        />
-        <CheckCount
-          icon={<CircleDashed className="size-3.5" />}
-          count={counts.pending}
-          label="pending"
-          className="text-muted-foreground"
-        />
-        <CheckCount
-          icon={<X className="size-3.5" />}
-          count={counts.failing}
-          label="failing"
-          className="text-critical-foreground"
-        />
+        {counts.passing > 0 && (
+          <CheckCount
+            icon={<Check className="size-3.5" />}
+            count={counts.passing}
+            label="passing"
+            // These counts carry words, so they take the readable ink rather
+            // than the mark colour the bare glyphs below use.
+            className="text-success-foreground"
+          />
+        )}
+        {counts.pending > 0 && (
+          <CheckCount
+            icon={<CircleDashed className="size-3.5" />}
+            count={counts.pending}
+            label="pending"
+            className="text-muted-foreground"
+          />
+        )}
+        {counts.failing > 0 && (
+          <CheckCount
+            icon={<X className="size-3.5" />}
+            count={counts.failing}
+            label="failing"
+            className="text-critical-foreground"
+          />
+        )}
         {counts.skipped > 0 && (
           <CheckCount
             icon={<CircleMinus className="size-3.5" />}

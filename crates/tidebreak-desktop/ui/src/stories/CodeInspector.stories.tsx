@@ -19,6 +19,7 @@ type InspectorScenario =
   | "placement-failure"
   | "ready"
   | "merge-ready"
+  | "long-head"
   | "merge-queued"
   | "multi-pr"
   | "truncated"
@@ -384,9 +385,13 @@ function InspectorStory({
 }) {
   const client = inspectorClient(scenario);
   const storyPr =
-    scenario === "merge-ready"
+    scenario === "merge-ready" || scenario === "long-head"
       ? {
           ...pullRequest,
+          head_branch:
+            scenario === "long-head"
+              ? "thet/ui-pane-redesign-and-delivery-center"
+              : pullRequest.head_branch,
           checks_summary: "9 passing",
           checks: pullRequest.checks?.map((check) => ({
             ...check,
@@ -485,6 +490,11 @@ export const Review: Story = {
 /** The same compact merge card when GitHub says the PR can land now. */
 export const ReviewReadyToMerge: Story = {
   args: { tab: "pr", scenario: "merge-ready" },
+};
+
+/** A long head branch keeps the base visible in GitHub's base ← head order. */
+export const ReviewLongHeadBranch: Story = {
+  args: { tab: "pr", scenario: "long-head" },
 };
 
 /** The review tab and detail header use GitHub's orange queue mark. */
