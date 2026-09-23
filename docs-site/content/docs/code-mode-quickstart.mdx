@@ -1,0 +1,116 @@
+---
+title: Code mode quickstart
+description: Add a repository, start a workspace with a coding engine, review the diff, and open a pull request.
+---
+
+This walks through a first Code mode task: register a repository, pick an
+engine, start a workspace, watch the turn, review the diff, and open a pull
+request.
+
+Switch to **Code** at the top of the sidebar. For chats that produce files,
+use the [Work mode quickstart](/quickstart).
+
+<Steps>
+
+<Step>
+
+## Add a repository
+
+Press **Add repo**. The dialog title is **Add a repo**. Register a local
+checkout, or clone from a Git URL or GitHub.
+
+You can also add a repository from the **New workspace** dialog: choose
+**Add a repo**, then enter a path, Git URL, or `owner/repo`.
+
+</Step>
+
+<Step>
+
+## Pick an engine and sign in
+
+Open **Settings → Coding engines**. Tidebreak downloads the engine the first
+time you pick it. Press **Sign in** on that engine's row. The dialog title is
+**Sign in to** the engine name, such as **Sign in to Claude Code**. Finish
+the engine's own login in that window.
+
+You can also open **Coding engines** from the engine picker in **New
+workspace**.
+
+</Step>
+
+<Step>
+
+## Start a workspace with a task
+
+Press **New workspace**. The dialog title is **New workspace**. Choose the
+repository and engine, type the first task in the field that says
+**Describe the first task (optional)**, and press **Create**.
+
+Tidebreak creates a branch and a Git worktree, then starts the first
+session. Leave **Create more** off unless you want the dialog to stay open
+for another workspace.
+
+If the repository carries its own settings for coding engines, such as
+`.claude/settings.json`, `.mcp.json`, or `CLAUDE.md`, Tidebreak asks
+**Trust this repository?** before the first session and lists each file.
+Those settings can run commands on your computer as soon as a session
+starts. Choose **Trust this repository** to let the engine load them, or
+**Continue without its settings**. You can change the answer later in the
+repository's settings.
+
+</Step>
+
+<Step>
+
+## Watch the turn
+
+The workspace opens while the first turn runs. Tool activity appears in the
+transcript. Approval cards appear when the engine asks for something its
+permission mode does not cover.
+
+</Step>
+
+<Step>
+
+## Review the diff
+
+When the turn ends, a review card shows what changed and the diffstat. Open
+**Diff** in the editor area to read the whole workspace diff, or **Turn
+diff** for that turn only.
+
+Nothing reaches your base branch because a turn finished. The worktree holds
+the change until you commit it.
+
+</Step>
+
+<Step>
+
+## Open a pull request
+
+Use **Create PR** on the workspace. Tidebreak sends the Create PR prompt into
+the workspace chat so the engine commits, pushes, and opens the pull request.
+
+When a pull request exists, the workspace status control shows its number.
+Press that number to **Open pull request**. **Pull requests** in the sidebar
+lists pull requests across repositories.
+
+Pull-request operations use your `gh` CLI. If `gh` is missing or signed out,
+Tidebreak shows copyable instructions.
+
+</Step>
+
+</Steps>
+
+## Where to go next
+
+<Cards>
+  <Card title="Code mode" href="/code-mode">
+    Repos, workspaces, engines, review, and pull request delivery.
+  </Card>
+  <Card title="Work mode quickstart" href="/quickstart">
+    Attach a file and export a spreadsheet.
+  </Card>
+  <Card title="Permission modes" href="/permission-modes">
+    Control what the agent can do without asking.
+  </Card>
+</Cards>

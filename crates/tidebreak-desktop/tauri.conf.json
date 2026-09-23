@@ -53,7 +53,7 @@
     "targets": "all",
     "macOS": {
       "infoPlist": "Info.plist",
-      "minimumSystemVersion": "10.15",
+      "minimumSystemVersion": "13.0",
       "dmg": {
         "background": "dmg/background.tiff",
         "windowSize": {
