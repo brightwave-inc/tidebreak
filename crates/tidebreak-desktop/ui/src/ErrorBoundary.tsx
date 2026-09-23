@@ -1,6 +1,7 @@
 import { Component, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { BootBrand } from "./Logomark";
+import { reportRendererError } from "./rendererErrors";
 
 type ErrorBoundaryProps = {
   children: ReactNode;
@@ -37,6 +38,7 @@ type ErrorBoundaryState = {
  * Last-resort catch for render and lifecycle throws anywhere in the tree.
  * Without it a single throw unmounts everything into a blank window. Chat
  * data is durable in the embedded server, so a reload is a safe recovery.
+ * Every catch is also written to this machine's log; see `rendererErrors`.
  */
 export class ErrorBoundary extends Component<
   ErrorBoundaryProps,
@@ -50,6 +52,9 @@ export class ErrorBoundary extends Component<
 
   componentDidCatch(error: Error, info: { componentStack?: string | null }) {
     console.error("unhandled render error", error, info.componentStack);
+    reportRendererError("render", error, {
+      componentStack: info.componentStack,
+    });
   }
 
   componentDidUpdate(previous: ErrorBoundaryProps) {

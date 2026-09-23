@@ -167,7 +167,7 @@ export function UpdateReadyCard(props: UpdateReadyCardProps) {
 
   return (
     <aside
-      className="fixed right-4 bottom-4 z-40 w-[min(22rem,calc(100vw-2rem))] rounded-xl border border-border bg-popover p-4 text-popover-foreground shadow-lg"
+      className="relative rounded-xl border border-border bg-popover p-4 text-popover-foreground shadow-lg"
       aria-label={title}
       aria-live={status === "ready" ? undefined : "polite"}
     >
