@@ -14,6 +14,7 @@ import {
   Ellipsis,
   FolderGit2,
   GitBranch,
+  LogIn,
   Plus,
 } from "lucide-react";
 
@@ -72,6 +73,7 @@ import {
   ReasoningEffortMenu,
 } from "./CodeComposer";
 import { HarnessInstallNote } from "./HarnessInstallNote";
+import { HarnessSignInNote, openEngineSignIn } from "./EngineSignIn";
 import { useWarmHarnessInstall } from "./useHarnessInstall";
 import { startFirstSession } from "./startWorkspaceSession";
 import { HARNESS_ICONS } from "./HarnessPicker";
@@ -81,6 +83,8 @@ import {
   effortLadder,
   gatewayCodeModels,
   harnessCanStartNow,
+  harnessNeedsSignIn,
+  harnessPickerNote,
   harnessUnusableReason,
   PERMISSION_MODE_POLICY_BLOCKED,
   preferredCodeModels,
@@ -284,9 +288,16 @@ export function NewWorkspaceDialog({
   );
   // The doctor can land after the dialog opens, so the engine is derived
   // rather than seeded: a pick wins, and until there is one the recent
-  // engine follows whatever the report says can be chosen.
+  // engine follows whatever the report says can be chosen. A pick that
+  // downloaded and turned out signed out stays picked, so the note under the
+  // controls can say it needs a sign-in instead of the engine quietly
+  // changing.
   const harness: HarnessKind =
-    (pickedHarness && selectableHarnesses.some((e) => e.kind === pickedHarness)
+    (pickedHarness &&
+    (selectableHarnesses.some((e) => e.kind === pickedHarness) ||
+      allHarnesses.some(
+        (e) => e.kind === pickedHarness && harnessNeedsSignIn(e),
+      ))
       ? pickedHarness
       : undefined) ??
     recentHarness(selectableHarnesses, sessions, lastCreate?.harness) ??
@@ -866,6 +877,9 @@ export function NewWorkspaceDialog({
   const anyUnusable = allHarnesses.some((entry) =>
     harnessUnusableReason(entry),
   );
+  // Engines on disk that are signed out or unconfirmed, each one menu item
+  // away from its own sign-in.
+  const needsSignIn = allHarnesses.filter(harnessNeedsSignIn);
   // Typed as a plain string: the settings child route is not in the
   // registered route union, the same escape HarnessPicker uses.
   const harnessesPath: string = "/settings/coding-harnesses";
@@ -1157,6 +1171,11 @@ export function NewWorkspaceDialog({
               <HarnessInstallNote install={install} />
             </div>
           )}
+          {!installNote && doctorEntry && harnessNeedsSignIn(doctorEntry) && (
+            <div className="flex flex-col gap-1 px-4 pb-1.5">
+              <HarnessSignInNote entry={doctorEntry} />
+            </div>
+          )}
           <div
             className="flex min-w-0 flex-wrap items-end gap-x-2 gap-y-2 px-3 pb-3"
             data-testid="new-workspace-controls"
@@ -1187,6 +1206,7 @@ export function NewWorkspaceDialog({
                 >
                   {allHarnesses.map((entry) => {
                     const reason = harnessUnusableReason(entry);
+                    const note = harnessPickerNote(entry);
                     const Icon = HARNESS_ICONS[entry.kind];
                     return (
                       <DropdownMenuItem
@@ -1204,9 +1224,9 @@ export function NewWorkspaceDialog({
                           <span className="truncate font-medium">
                             {HARNESS_LABELS[entry.kind]}
                           </span>
-                          {reason && (
+                          {note && (
                             <span className="text-muted-foreground text-xs">
-                              {reason}
+                              {note}
                             </span>
                           )}
                         </span>
@@ -1216,6 +1236,24 @@ export function NewWorkspaceDialog({
                       </DropdownMenuItem>
                     );
                   })}
+                  {needsSignIn.length > 0 && (
+                    <>
+                      <DropdownMenuSeparator />
+                      {needsSignIn.map((entry) => (
+                        <DropdownMenuItem
+                          key={`sign-in-${entry.kind}`}
+                          onSelect={() => openEngineSignIn(entry.kind)}
+                          className="text-sm"
+                        >
+                          <LogIn
+                            className="text-muted-foreground size-4 shrink-0"
+                            aria-hidden="true"
+                          />
+                          Sign in to {HARNESS_LABELS[entry.kind]}…
+                        </DropdownMenuItem>
+                      ))}
+                    </>
+                  )}
                   {anyUnusable && (
                     <>
                       <DropdownMenuSeparator />

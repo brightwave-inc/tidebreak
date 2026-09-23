@@ -377,11 +377,31 @@ export const ModelPicker: Story = {};
 export const BaseRefPicker: Story = {};
 
 /**
- * Engines that cannot be fixed by waiting — no pin, or signed out — stay
- * listed and dimmed in the engine menu with the one reason why.
+ * Engines that cannot be fixed by waiting stay listed in the engine menu.
+ * A signed-out one is dimmed with the one reason why, and the menu ends with
+ * a Sign in item for it. One whose sign-in could not be confirmed stays
+ * pickable, and the line under the pills offers its sign-in.
  */
 export const EnginesNeedSetup: Story = {
   args: { doctor: harnessDoctorDegraded },
+};
+
+/**
+ * The picked engine finished downloading and is still signed out. It stays
+ * picked, Create waits, and the line under the pills runs its sign-in.
+ */
+export const EngineNeedsSignIn: Story = {
+  args: {
+    initialHarness: "claude_code",
+    doctor: {
+      harnesses: [
+        {
+          ...harnessDoctor.harnesses[0],
+          authenticated: false,
+        },
+      ],
+    },
+  },
 };
 
 /**

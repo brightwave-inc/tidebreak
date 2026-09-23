@@ -28,6 +28,7 @@ const meta = {
     report: harnessDoctor,
     onRefresh: fn(),
     onInstall: fn(),
+    onSignIn: fn(),
   },
   decorators: [
     (Story) => (
@@ -64,10 +65,19 @@ export const Downloading: Story = {
 
 /**
  * Nothing a download fixes: one unverified engine and one signed-out engine.
- * Each row names the engine's own sign-in command.
+ * Each row has Sign in, which runs the engine's own sign-in command, and the
+ * signed-out row names that command.
  */
 export const NeedsYou: Story = {
   args: { report: harnessDoctorDegraded },
+};
+
+/**
+ * The same rows where no client can run a sign-in: they fall back to the
+ * server's directions, which name the command and where to run it.
+ */
+export const NeedsYouWithoutSignIn: Story = {
+  args: { report: harnessDoctorDegraded, onSignIn: undefined },
 };
 
 /**

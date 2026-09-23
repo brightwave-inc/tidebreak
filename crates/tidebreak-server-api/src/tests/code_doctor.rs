@@ -167,6 +167,11 @@ async fn the_doctor_caches_probes_and_refresh_re_probes() {
         .unwrap();
     assert_eq!(report["harnesses"][0]["kind"], "claude_code");
     assert_eq!(report["harnesses"][0]["found"], true);
+    // The command the Sign in action runs, from the pin table.
+    assert_eq!(
+        report["harnesses"][0]["sign_in_command"],
+        "claude auth login"
+    );
 
     let again = client
         .get(format!("http://{addr}/code/harnesses"))
@@ -338,6 +343,20 @@ async fn the_doctor_reports_relay_engines_ready_on_a_hosted_machine() {
     assert_eq!(opencode["kind"], "opencode");
     assert_eq!(opencode["auth_mode"], "gateway_relay");
     assert_eq!(opencode["remediation"], "");
+
+    // The relay carries every turn here, so no row offers a sign-in and the
+    // route refuses one.
+    assert!(claude.get("sign_in_command").is_none(), "{claude}");
+    let refused = client
+        .post(format!("http://{addr}/code/harnesses/claude_code/sign-in"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body = refused.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["kind"], "sign_in_not_needed", "{body}");
 }
 
 /// A caller-scoped fake for the exact compat surfaces hosted engine pickers

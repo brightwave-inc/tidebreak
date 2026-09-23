@@ -117,16 +117,15 @@ describe("HarnessPicker", () => {
     expect(onChange).toHaveBeenCalledWith("grok");
   });
 
-  it("disables an engine whose sign-in status is unverified", async () => {
+  // Unconfirmed is not signed out: opencode runs local models with no
+  // sign-in, and create refuses only a confirmed sign-out.
+  it("offers an engine whose sign-in could not be confirmed, and says so", async () => {
     const onChange = vi.fn();
+    const user = userEvent.setup();
     await renderWithRouter(
       <HarnessPicker
         harnesses={[
-          entry({
-            kind: "claude_code",
-            authenticated: undefined,
-            remediation: "Sign in via your terminal, then re-check.",
-          }),
+          entry({ kind: "opencode", authenticated: undefined }),
           entry({ kind: "codex", authenticated: true }),
         ]}
         value="codex"
@@ -134,13 +133,32 @@ describe("HarnessPicker", () => {
       />,
     );
 
+    await user.click(screen.getByRole("combobox", { name: "Engine" }));
+    const row = screen.getByRole("option", { name: /opencode/ });
+    expect(row).toHaveTextContent("Sign-in not confirmed");
+    expect(row).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(row);
+    expect(onChange).toHaveBeenCalledWith("opencode");
+  });
+
+  it("says a downloaded, signed-out engine still needs a sign-in", async () => {
+    await renderWithRouter(
+      <HarnessPicker
+        harnesses={[
+          entry({ kind: "claude_code", authenticated: false }),
+          entry({ kind: "codex", authenticated: true }),
+        ]}
+        value="codex"
+        onChange={vi.fn()}
+      />,
+    );
+
     await userEvent
       .setup()
       .click(screen.getByRole("combobox", { name: "Engine" }));
     const row = screen.getByRole("option", { name: /Claude Code/ });
-    expect(row).toHaveTextContent("Unverified — sign in via your terminal");
+    expect(row).toHaveTextContent("Needs a sign-in");
     expect(row).toHaveAttribute("aria-disabled", "true");
-    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("does not add a settings button beside the composer control", async () => {

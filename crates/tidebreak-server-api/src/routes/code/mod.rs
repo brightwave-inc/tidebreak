@@ -106,7 +106,9 @@ pub(crate) use sessions::{
     set_session_reasoning_effort, steer_session, submit_turn,
 };
 pub(crate) use terminals::{
-    close_terminal, create_terminal, list_terminals, read_terminal, resize_terminal, write_terminal,
+    close_harness_sign_in, close_terminal, create_terminal, list_terminals, read_harness_sign_in,
+    read_terminal, resize_harness_sign_in, resize_terminal, start_harness_sign_in,
+    write_harness_sign_in, write_terminal,
 };
 pub(crate) use triggers::{
     create_repo_trigger, delete_repo_trigger, list_repo_triggers, update_repo_trigger,
@@ -124,10 +126,11 @@ pub(crate) use types::{
     CodeRepoSnapshot, CodeTerminalRead, CodeTerminalSnapshot, CodeTriggerSnapshot,
     CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot,
     CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSnapshot, CodeWorkspaceTree,
-    CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedTurn,
-    ResolveCodeDeliveryRepositoriesBody, SequencedEventFrame, SessionAccessSnapshot, SessionDigest,
-    SessionSnapshot, SetCodeWorktreeRootBody, SetSessionVisibilityBody, TurnSnapshot,
-    UpdateCodeTriggerBody, UpdateNotice, WorkspaceTitleProposal,
+    CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, HarnessSignInRead,
+    HarnessSignInTerminal, MergeCodePrBody, QueuedTurn, ResolveCodeDeliveryRepositoriesBody,
+    SequencedEventFrame, SessionAccessSnapshot, SessionDigest, SessionSnapshot,
+    SetCodeWorktreeRootBody, SetSessionVisibilityBody, TurnSnapshot, UpdateCodeTriggerBody,
+    UpdateNotice, WorkspaceTitleProposal,
 };
 #[cfg(test)]
 #[allow(unused_imports)]

@@ -6,6 +6,8 @@
 - Related: [`0031-harness-adapter-boundary.md`](0031-harness-adapter-boundary.md),
   [`0035-code-mode-wire-contract.md`](0035-code-mode-wire-contract.md),
   [`docs/code-mode.md`](../code-mode.md)
+- Amended below (2026-09-23): one terminal runs outside a workspace, an
+  engine's own sign-in, and workspace shells put the pinned engines on `PATH`.
 
 ## Context
 
@@ -120,3 +122,24 @@ opt-in, clearly-labeled record mode, not silent persistence.
 - A plausible wrong implementation persists ring contents to disk for crash
   recovery and passes every streaming test; the no-durable-bytes assertion
   must fail it.
+
+## Amendment (2026-09-23): a sign-in terminal, and the engines on `PATH`
+
+Two changes, both driven by the pinned engines of decision 41 living off the
+user's `PATH`.
+
+**One terminal outside a workspace.** An engine's own sign-in command runs in
+an auxiliary terminal that belongs to one owner and one engine rather than to
+a workspace (decision 34, amended the same day). It is the same PTY, ring, and
+cursor-pull contract. It never runs an engine session, and nothing parses its
+bytes, so "the harness never gets a PTY" still holds: adapters have no PTY API.
+
+**Workspace shells see the engines Tidebreak runs.** A workspace shell starts
+with the login environment the harness probe captures (decision 34), with each
+pinned engine's `bin` directory first on `PATH` and the managed Node runtime
+last. The shell starts interactive but not as a login shell when that capture
+exists: a login shell reruns `/etc/profile`, where macOS's `path_helper` moves
+prepended directories behind the system ones and Debian resets `PATH`. Without
+a capture, the shell loads the login profile itself. Managed Node goes last so
+a project's own `node` and `npm` keep winning, while Codex and Grok, which
+start through `#!/usr/bin/env node`, still find one.

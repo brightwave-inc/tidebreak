@@ -18,13 +18,10 @@ import {
 } from "@/components/ui/select";
 import {
   HARNESS_LABELS,
-  harnessNeedsDownload,
+  harnessPickerNote,
   harnessUnusableReason,
   workspaceHarnesses,
 } from "./labels";
-
-/** What picking a not-yet-downloaded engine does. */
-const DOWNLOAD_NOTE = "Downloads on first use";
 
 export const HARNESS_ICONS: Record<
   HarnessKind,
@@ -104,8 +101,7 @@ export function HarnessPicker({
         <SelectContent scrollButtons={false}>
           {choices.map((entry) => {
             const reason = harnessUnusableReason(entry);
-            const note =
-              reason ?? (harnessNeedsDownload(entry) ? DOWNLOAD_NOTE : null);
+            const note = harnessPickerNote(entry);
             const Icon = HARNESS_ICONS[entry.kind];
             return (
               <SelectItem

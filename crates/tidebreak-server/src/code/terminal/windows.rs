@@ -320,13 +320,15 @@ impl Process {
 }
 
 pub(super) fn spawn(
-    shell: &Path,
+    program: &Path,
+    args: &[OsString],
     cwd: &Path,
     cols: u16,
     rows: u16,
-    env: &[(&str, &str)],
+    env: &[(OsString, OsString)],
 ) -> io::Result<Spawned> {
-    spawn_with_args(shell, &[], cwd, cols, rows, env)
+    let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    spawn_with_args(program, &args, cwd, cols, rows, env)
 }
 
 fn spawn_with_args(
@@ -335,7 +337,7 @@ fn spawn_with_args(
     cwd: &Path,
     cols: u16,
     rows: u16,
-    env: &[(&str, &str)],
+    env: &[(OsString, OsString)],
 ) -> io::Result<Spawned> {
     let size = PtySize {
         rows,
@@ -605,15 +607,12 @@ fn quoted_command(executable: &[u16], args: &[&OsStr]) -> io::Result<Vec<u16>> {
     command.push(0);
     Ok(command)
 }
-fn environment(overrides: &[(&str, &str)]) -> io::Result<Vec<u16>> {
+fn environment(overrides: &[(OsString, OsString)]) -> io::Result<Vec<u16>> {
     let mut values: BTreeMap<OsString, (OsString, OsString)> = std::env::vars_os()
         .map(|(key, value)| (key.to_ascii_uppercase(), (key, value)))
         .collect();
-    for &(key, value) in overrides {
-        values.insert(
-            OsString::from(key).to_ascii_uppercase(),
-            (key.into(), value.into()),
-        );
+    for (key, value) in overrides {
+        values.insert(key.to_ascii_uppercase(), (key.clone(), value.clone()));
     }
     let mut block = Vec::new();
     for (key, value) in values.into_values() {

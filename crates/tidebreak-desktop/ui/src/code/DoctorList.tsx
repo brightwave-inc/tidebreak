@@ -1,5 +1,11 @@
 import { useState, type ReactNode } from "react";
-import { ArrowUpCircle, ChevronDown, Download, RotateCw } from "lucide-react";
+import {
+  ArrowUpCircle,
+  ChevronDown,
+  Download,
+  LogIn,
+  RotateCw,
+} from "lucide-react";
 
 import type {
   CodeHarnessInstallSnapshot,
@@ -16,6 +22,7 @@ import {
   HARNESS_LABELS,
   HARNESS_TIER_LABELS,
   harnessNeedsDownload,
+  harnessNeedsSignIn,
   isHarnessReady,
   workspaceHarnesses,
 } from "./labels";
@@ -35,6 +42,11 @@ import {
  * On the `latest` update channel the header gains Check for updates, and a
  * row whose driven install is behind the registry gains Update. On `pinned`
  * neither appears: the pin is the answer, and there is nothing to move to.
+ *
+ * A downloaded engine that is signed out, or whose sign-in Tidebreak could
+ * not confirm, gains Sign in. The engine Tidebreak runs is not on the
+ * reader's `PATH`, so the row runs its sign-in rather than naming a command
+ * the reader's own terminal does not have.
  */
 
 export function DoctorList({
@@ -46,6 +58,7 @@ export function DoctorList({
   installs,
   onCheckUpdates,
   checkingUpdates,
+  onSignIn,
 }: {
   report: HarnessDoctorReport;
   /** Section heading, where the surface has not written its own above this. */
@@ -62,6 +75,11 @@ export function DoctorList({
    */
   onCheckUpdates?: () => void;
   checkingUpdates?: boolean;
+  /**
+   * Run this engine's own sign-in. Omitted where no client can run one, and
+   * then the rows fall back to the server's written instructions.
+   */
+  onSignIn?: (kind: HarnessKind) => void;
 }) {
   const harnesses = workspaceHarnesses(report.harnesses);
   const ready = harnesses.filter(isHarnessReady).length;
@@ -77,9 +95,7 @@ export function DoctorList({
             // know "can I start work" does not walk every row to find out.
             <p className="text-muted-foreground text-sm">
               {ready === 0
-                ? harnesses.every((entry) => entry.found)
-                  ? "No engine is ready yet. Sign in to one below, then re-check."
-                  : "No engine is ready yet. Download one, or pick it when you start a workspace."
+                ? noEngineReady(harnesses)
                 : `${ready} of ${total} ${total === 1 ? "engine" : "engines"} ready.`}
             </p>
           )}
@@ -125,11 +141,32 @@ export function DoctorList({
             entry={entry}
             install={installs?.[entry.kind]}
             onInstall={onInstall}
+            onSignIn={onSignIn}
           />
         ))}
       </div>
     </section>
   );
+}
+
+/**
+ * What stands between the reader and a first turn when no engine is ready.
+ *
+ * A download is enough on a machine that carries the engines' credentials.
+ * Everywhere else the downloaded engine still needs its own sign-in, and the
+ * verdict says so up front rather than after the download.
+ */
+function noEngineReady(harnesses: HarnessDoctorEntry[]): string {
+  if (harnesses.every((entry) => entry.found)) {
+    return "No engine is ready yet. Sign in to one below.";
+  }
+  const signsInLocally = harnesses.some(
+    (entry) =>
+      !entry.found && (entry.auth_mode ?? "local_sign_in") === "local_sign_in",
+  );
+  return signsInLocally
+    ? "No engine is ready yet. Download one below, then sign in to it."
+    : "No engine is ready yet. Download one, or pick it when you start a workspace.";
 }
 
 /**
@@ -192,13 +229,26 @@ function statusBadge(
 function subtitle(
   entry: HarnessDoctorEntry,
   install: CodeHarnessInstallSnapshot | undefined,
-): string {
+  canSignIn: boolean,
+): ReactNode {
   if (install && !install.done && !install.error) {
     return install.version
       ? `Downloading version ${install.version}. This takes a few minutes.`
       : "Downloading the newest release. This takes a few minutes.";
   }
   if (install?.error) return install.error;
+  // The row carries the Sign in button, so the line says what it runs
+  // rather than the server's directions to a terminal.
+  if (canSignIn && entry.sign_in_command) {
+    return entry.authenticated === false ? (
+      <>
+        Sign in runs <code className="font-mono">{entry.sign_in_command}</code>{" "}
+        in a terminal here.
+      </>
+    ) : (
+      "Tidebreak could not confirm the sign-in. You can still pick it."
+    );
+  }
   if (entry.remediation) return entry.remediation;
   if (entry.update_available && entry.latest_version) {
     return `Version ${entry.latest_version} is available.`;
@@ -212,7 +262,7 @@ function subtitle(
     entry.auth_mode !== "gateway_managed" &&
     entry.authenticated !== true
   ) {
-    return "Sign in via your terminal, then re-check.";
+    return "Sign in, then re-check.";
   }
   if (harnessNeedsDownload(entry)) {
     return "Downloads the first time you pick it.";
@@ -238,10 +288,12 @@ function DoctorRow({
   entry,
   install,
   onInstall,
+  onSignIn,
 }: {
   entry: HarnessDoctorEntry;
   install: CodeHarnessInstallSnapshot | undefined;
   onInstall?: (kind: HarnessKind) => void;
+  onSignIn?: (kind: HarnessKind) => void;
 }) {
   const [open, setOpen] = useState(false);
   const Icon = HARNESS_ICONS[entry.kind];
@@ -254,6 +306,8 @@ function DoctorRow({
   // the server on the `latest` channel ever reports one.
   const canUpdate =
     Boolean(onInstall) && entry.found && entry.update_available && !downloading;
+  const canSignIn =
+    Boolean(onSignIn) && harnessNeedsSignIn(entry) && !downloading;
   const detailId = `harness-detail-${entry.kind}`;
 
   return (
@@ -287,9 +341,22 @@ function DoctorRow({
                 : "text-muted-foreground",
             )}
           >
-            {subtitle(entry, install)}
+            {subtitle(entry, install, canSignIn)}
           </p>
         </div>
+        {canSignIn && onSignIn && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={() => onSignIn(entry.kind)}
+            aria-label={`Sign in to ${HARNESS_LABELS[entry.kind]}`}
+          >
+            <LogIn className="size-3.5" aria-hidden="true" />
+            Sign in
+          </Button>
+        )}
         {canDownload && onInstall && (
           <Button
             type="button"

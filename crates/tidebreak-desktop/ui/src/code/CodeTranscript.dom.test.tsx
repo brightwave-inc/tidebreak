@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CodeTranscript } from "./CodeTranscript";
+import { useEngineSignInStore } from "./EngineSignIn";
 import type { CodeApprovalSnapshot } from "../api/types";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 
@@ -554,7 +555,7 @@ describe("CodeTranscript", () => {
     expect(alert).toHaveTextContent("4.0s");
   });
 
-  it("attributes a revoked refresh token to Codex CLI and gives recovery steps", () => {
+  it("attributes a revoked refresh token to Codex CLI and offers its sign-in", async () => {
     render(
       <CodeTranscript
         items={[
@@ -587,12 +588,16 @@ describe("CodeTranscript", () => {
     expect(alert).toHaveTextContent(
       "Tidebreak's account sign-in does not reset Codex CLI",
     );
-    expect(within(alert).getByText("codex logout").tagName).toBe("CODE");
-    expect(within(alert).getByText("codex login").tagName).toBe("CODE");
-    expect(alert).toHaveTextContent(
-      "Then open Settings → Coding engines and select Re-check",
-    );
+    // The Codex Tidebreak runs is not on the reader's PATH, so the card runs
+    // its sign-in instead of naming terminal commands.
+    expect(alert).not.toHaveTextContent("codex logout");
     expect(alert).not.toHaveTextContent("Your access token could not");
+    useEngineSignInStore.setState({ kind: null });
+    await userEvent.click(
+      within(alert).getByRole("button", { name: "Sign in to Codex CLI" }),
+    );
+    expect(useEngineSignInStore.getState().kind).toBe("codex");
+    useEngineSignInStore.setState({ kind: null });
   });
 
   it("folds an engine version floor into one card that points at Settings", () => {

@@ -13,6 +13,7 @@ import type {
 } from "../api/types";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeHome } from "./CodeHome";
+import { useEngineSignInStore } from "./EngineSignIn";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 
 function deferred<T>() {
@@ -226,6 +227,76 @@ describe("CodeHome", () => {
     expect(
       screen.queryByRole("heading", { name: "Start with a repository" }),
     ).not.toBeInTheDocument();
+  });
+
+  // A download alone does not sign an engine in. A fresh machine used to see
+  // the repo form here and met the sign-in when its first turn failed.
+  it("shows the doctor on a fresh machine instead of the repo form", async () => {
+    const notDownloaded = {
+      ...READY_DOCTOR.harnesses[0],
+      found: false,
+      authenticated: undefined,
+      sign_in_command: "claude auth login",
+    } as HarnessDoctorEntry;
+    await renderHome(
+      app({
+        getHarnessDoctor: vi.fn(async () => ({ harnesses: [notDownloaded] })),
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Set up a coding engine" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "No engine is ready yet. Download one below, then sign in to it.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Download/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Start with a repository" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens the engine's sign-in from its doctor row", async () => {
+    const signedOut = {
+      ...READY_DOCTOR.harnesses[0],
+      authenticated: false,
+      sign_in_command: "claude auth login",
+    } as HarnessDoctorEntry;
+    useEngineSignInStore.setState({ kind: null });
+    await renderHome(
+      app({
+        getHarnessDoctor: vi.fn(async () => ({ harnesses: [signedOut] })),
+      }),
+    );
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Sign in to Claude Code" }),
+    );
+    expect(useEngineSignInStore.getState().kind).toBe("claude_code");
+    useEngineSignInStore.setState({ kind: null });
+  });
+
+  // opencode with no stored key can still run a local model, so an engine
+  // whose sign-in Tidebreak could not confirm does not hold the page.
+  it("lets an unconfirmed engine through to the repo form", async () => {
+    const unconfirmed = {
+      ...READY_DOCTOR.harnesses[0],
+      kind: "opencode",
+      authenticated: undefined,
+    } as HarnessDoctorEntry;
+    await renderHome(
+      app({
+        getHarnessDoctor: vi.fn(async () => ({ harnesses: [unconfirmed] })),
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Start with a repository" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps Add repo available and retries when the engine check fails", async () => {

@@ -15,12 +15,26 @@ a capture.
 | --- | --- | --- |
 | Claude Code | 2.1.259 | 2.1.233 print/stream-json baseline and MCP prompt-tool approvals. The manifest also records process observations on 2.1.238 and steering observations on 2.1.239. 2.1.259 adds managed human MCP calls and a per-server timeout check. No complete 2.1.259 capture. |
 | Codex | 0.153.4 | 0.147.0 app-server baseline; 0.153.0 MCP tool-approval elicitation. 0.153.4 adds managed human MCP discovery and a 130-second human wait. No complete 0.153.4 capture. |
-| opencode | 1.18.27 | 1.18.18 HTTP/SSE baseline. No complete 1.18.27 capture. |
+| opencode | 1.18.27 | 1.18.18 HTTP/SSE baseline. 1.18.27 adds `auth list` output only. No complete 1.18.27 protocol capture. |
 | Grok | 1.0.13 | 1.0.4 print-stream baseline, 1.0.5 subagent projection, and 1.0.13 ACP approvals/cancel/resume plus tool-image transport. The 1.0.13 capture uses a scripted local provider, not a live model. |
 
 Keep this table and the pin comments accurate when changing an install version.
 Capture a changed protocol at its observed version. Do not copy an older stream
 into a new version directory or describe a partial capture as complete coverage.
+
+## Sign-in commands
+
+`src/pin.rs` names each pin's sign-in command. The doctor shows it, and the
+Sign in action runs it. Each pinned version directory holds
+`sign-in-help.txt`, the `--help` output of that command from the exact pinned
+release. `sign_in_commands_match_the_pinned_help` fails when a pin moves to a
+version with no capture, or when the captured usage line does not name the
+command. After a pin bump, capture `<bin> <sign-in args> --help` from the new
+release, register it in that version's manifest, and change the command in
+`src/pin.rs` if the help moved it.
+
+`opencode/1.18.27/auth-list-*.txt` are `opencode auth list` outputs the probe
+reads to observe sign-in. Their manifest records the home each one ran in.
 
 ## Fixture contents
 

@@ -1,0 +1,23 @@
+version = "1.18.27"
+protocol = "opencode CLI output; no HTTP/SSE protocol capture at this version"
+captured = "2026-09-23"
+scenarios = []
+
+[auth_list]
+command = "opencode auth list"
+binary = "opencode-ai@1.18.27 from npm, run outside the Tidebreak data directory"
+environment = "env -i with PATH=/usr/bin:/bin, a throwaway HOME, USER, LANG, and TMPDIR; stdin from /dev/null; stdout piped, as the probe runs it"
+files = [
+  "auth-list-none.txt: nothing stored, no provider variable",
+  "auth-list-env-key.txt: nothing stored, ANTHROPIC_API_KEY set",
+  "auth-list-stored-key.txt: one Anthropic API key in ~/.local/share/opencode/auth.json",
+  "auth-list-stored-and-env.txt: the stored key, and OPENAI_API_KEY set",
+  "auth-list-local-only.txt: nothing stored, and ~/.config/opencode/opencode.json defines an Ollama provider with no key",
+]
+result = "The credentials block always prints `N credentials`. The environment block prints only when a provider variable is set, and ends with `N environment variable(s)`. A provider the config defines without a key appears in neither block."
+redactions = "Seeded keys were placeholder strings; the listing prints provider and variable names, never values. Output is stdout verbatim, including the dim ANSI escape before each detail, except that the trailing blank line is trimmed."
+
+[sign_in_help]
+command = "opencode auth login --help"
+binary = "The pinned opencode-ai@1.18.27 install under the Tidebreak data directory"
+result = "`auth` is an alias of `providers`; `opencode auth login [url]` logs in to a provider."

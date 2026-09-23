@@ -1669,6 +1669,25 @@ impl ScopedCode {
         self.runtime.invalidate_probes();
     }
 
+    /// What a workspace terminal in `cwd` runs. See
+    /// [`CodeRuntime::shell_launch`].
+    pub async fn shell_launch(&self, cwd: &std::path::Path) -> super::terminal::TerminalLaunch {
+        self.runtime.shell_launch(cwd).await
+    }
+
+    /// What `kind`'s sign-in terminal runs. See
+    /// [`CodeRuntime::sign_in_launch`].
+    ///
+    /// Signing an engine in writes to the machine's own engine credentials,
+    /// the same files every principal's sessions read, which is why the
+    /// routes sit on the deployment plane beside Download and Re-check.
+    pub async fn sign_in_launch(
+        &self,
+        kind: HarnessKind,
+    ) -> Result<super::terminal::TerminalLaunch, ServerError> {
+        self.runtime.sign_in_launch(kind).await
+    }
+
     /// Whether the on-behalf-of inference relay is active (decision 71):
     /// true only on a gateway-authenticated hosted machine, whose engines
     /// carry no provider credentials of their own. The doctor reads this to

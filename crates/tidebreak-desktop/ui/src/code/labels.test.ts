@@ -12,6 +12,9 @@ import {
   matchingCodeModels,
   harnessCanStartNow,
   harnessNeedsDownload,
+  harnessNeedsNoSignIn,
+  harnessNeedsSignIn,
+  harnessPickerNote,
   harnessUnusableReason,
   isHarnessReady,
   preferredCodeModels,
@@ -192,14 +195,16 @@ describe("harnessUnusableReason", () => {
         authenticated: false,
         caps: caps("supported", "supported", "supported"),
       }),
-    ).toBe("Sign in via your terminal");
+    ).toBe("Needs a sign-in");
+    // Unconfirmed is not signed out: opencode runs a local model with no
+    // sign-in at all, and create refuses only a confirmed sign-out.
     expect(
       harnessUnusableReason({
         found: true,
         installable: true,
         caps: caps("supported", "supported", "supported"),
       }),
-    ).toBe("Unverified — sign in via your terminal");
+    ).toBeNull();
     expect(
       harnessUnusableReason({
         found: true,
@@ -225,6 +230,77 @@ describe("harnessUnusableReason", () => {
         caps: caps("unsupported", "unsupported", "supported"),
       }),
     ).toBeNull();
+  });
+
+  it("offers Sign in only where a local sign-in is missing", () => {
+    const signedOut = {
+      found: true,
+      authenticated: false,
+      sign_in_command: "claude auth login",
+    };
+    expect(harnessNeedsSignIn(signedOut)).toBe(true);
+    expect(harnessNeedsSignIn({ ...signedOut, authenticated: undefined })).toBe(
+      true,
+    );
+    expect(harnessNeedsSignIn({ ...signedOut, authenticated: true })).toBe(
+      false,
+    );
+    // Nothing on disk to run the sign-in with yet.
+    expect(harnessNeedsSignIn({ ...signedOut, found: false })).toBe(false);
+    // The gateway carries these; a hosted server names no command.
+    expect(
+      harnessNeedsSignIn({ ...signedOut, auth_mode: "gateway_managed" }),
+    ).toBe(false);
+    expect(
+      harnessNeedsSignIn({
+        found: true,
+        authenticated: false,
+        auth_mode: "gateway_relay",
+      }),
+    ).toBe(false);
+  });
+
+  it("says in the picker what a row still needs", () => {
+    const base = {
+      installable: true,
+      caps: caps("supported", "supported", "supported"),
+    };
+    expect(harnessPickerNote({ ...base, found: false })).toBe(
+      "Downloads on first use",
+    );
+    expect(
+      harnessPickerNote({ ...base, found: true, authenticated: false }),
+    ).toBe("Needs a sign-in");
+    expect(harnessPickerNote({ ...base, found: true })).toBe(
+      "Sign-in not confirmed",
+    );
+    expect(
+      harnessPickerNote({ ...base, found: true, authenticated: true }),
+    ).toBeNull();
+  });
+
+  // A fresh machine used to see the repo form while every engine was only
+  // downloadable, and met the sign-in when the first turn failed.
+  it("counts a download as enough only where no sign-in follows it", () => {
+    const base = {
+      installable: true,
+      caps: caps("supported", "supported", "supported"),
+    };
+    expect(harnessNeedsNoSignIn({ ...base, found: false })).toBe(false);
+    expect(
+      harnessNeedsNoSignIn({ ...base, found: true, authenticated: false }),
+    ).toBe(false);
+    expect(
+      harnessNeedsNoSignIn({ ...base, found: true, authenticated: true }),
+    ).toBe(true);
+    expect(harnessNeedsNoSignIn({ ...base, found: true })).toBe(true);
+    expect(
+      harnessNeedsNoSignIn({
+        ...base,
+        found: false,
+        auth_mode: "gateway_relay",
+      }),
+    ).toBe(true);
   });
 
   // The whole point of the lazy pin: an engine Tidebreak can fetch is a wait,

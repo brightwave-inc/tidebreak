@@ -147,7 +147,8 @@ impl HarnessAdapter for OpencodeAdapter {
     }
 }
 
-/// `opencode auth list` — "N credentials" vs "0 credentials". Never reads tokens.
+/// `opencode auth list`, read as a sign-in observation. Never reads tokens:
+/// the listing names providers and variable names, not values.
 async fn observe_auth(
     binary: &Path,
     env: &[(std::ffi::OsString, std::ffi::OsString)],
@@ -159,6 +160,9 @@ async fn observe_auth(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command.env_clear();
+    // The same variables the session child gets (`filter_engine_child_env`
+    // passes opencode no provider keys), so a key the listing counts below is
+    // one a session can also use.
     for (key, value) in crate::filter_child_env(env.iter().cloned()) {
         command.env(key, value);
     }
@@ -167,25 +171,71 @@ async fn observe_auth(
         .await
         .ok()?
         .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut last: Option<u64> = None;
-    for line in stdout.lines() {
-        if let Some(count) = credentials_count(line) {
-            last = Some(count);
-        }
-    }
-    last.map(|count| count > 0)
+    AuthListing::parse(&String::from_utf8_lossy(&output.stdout)).signed_in()
 }
 
-fn credentials_count(line: &str) -> Option<u64> {
-    let idx = line.find("credential")?;
-    let before = line[..idx].trim_end();
-    let number = before
-        .split_whitespace()
-        .next_back()?
-        .chars()
-        .filter(|ch| ch.is_ascii_digit())
-        .collect::<String>();
+/// What `opencode auth list` reports: the credentials opencode stored itself,
+/// then the provider keys it found in its environment.
+///
+/// 1.18.27 prints two blocks, each closed by a count line:
+///
+/// ```text
+/// └  0 credentials
+/// └  1 environment variable
+/// ```
+///
+/// The environment block appears only when a provider variable is set.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct AuthListing {
+    /// The credentials count, when the listing printed one.
+    credentials: Option<u64>,
+    /// The environment-variable count. Zero when the block is absent.
+    environment: u64,
+}
+
+impl AuthListing {
+    fn parse(stdout: &str) -> Self {
+        let mut listing = Self::default();
+        for line in stdout.lines() {
+            if let Some(count) = count_before(line, "credential") {
+                listing.credentials = Some(count);
+            } else if let Some(count) = count_before(line, "environment variable") {
+                listing.environment = count;
+            }
+        }
+        listing
+    }
+
+    /// The sign-in observation this listing supports.
+    ///
+    /// A stored credential or a provider key in the environment signs
+    /// opencode in. An empty listing does not sign it out: opencode also
+    /// runs providers its own config defines with no key at all, such as a
+    /// local model server, and a key set in Tidebreak's engine settings
+    /// reaches the session but not this listing. Neither shows up here, so
+    /// an empty listing is unverified, which still lets a person pick the
+    /// engine.
+    fn signed_in(self) -> Option<bool> {
+        match self.credentials {
+            None => None,
+            Some(credentials) if credentials > 0 || self.environment > 0 => Some(true),
+            Some(_) => None,
+        }
+    }
+}
+
+/// The number a count line puts before `noun`: `└  3 credentials` → 3.
+///
+/// Only a line that is the count and nothing else matches, so a provider
+/// named after the noun cannot read as a count.
+fn count_before(line: &str, noun: &str) -> Option<u64> {
+    let text = line.trim_start_matches(|ch: char| !ch.is_ascii_alphanumeric());
+    let (number, rest) = text.split_once(' ')?;
+    let rest = rest.trim_end();
+    let plural = format!("{noun}s");
+    if rest != noun && rest != plural {
+        return None;
+    }
     number.parse().ok()
 }
 
@@ -200,6 +250,86 @@ mod tests {
 
     fn fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/opencode/1.18.18")
+    }
+
+    /// `opencode auth list` from the pinned 1.18.27, captured in a
+    /// throwaway home. The version's manifest lists how each one was made.
+    fn auth_list_capture(name: &str) -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("fixtures/opencode/1.18.27/auth-list-{name}.txt"));
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("missing capture {}: {err}", path.display()))
+    }
+
+    #[test]
+    fn a_stored_credential_or_an_environment_key_signs_opencode_in() {
+        let stored = AuthListing::parse(&auth_list_capture("stored-key"));
+        assert_eq!(
+            stored,
+            AuthListing {
+                credentials: Some(1),
+                environment: 0
+            }
+        );
+        assert_eq!(stored.signed_in(), Some(true));
+        // Nothing stored and ANTHROPIC_API_KEY set: this read as signed out
+        // when only the credentials line counted.
+        let environment = AuthListing::parse(&auth_list_capture("env-key"));
+        assert_eq!(
+            environment,
+            AuthListing {
+                credentials: Some(0),
+                environment: 1
+            }
+        );
+        assert_eq!(environment.signed_in(), Some(true));
+        assert_eq!(
+            AuthListing::parse(&auth_list_capture("stored-and-env")).signed_in(),
+            Some(true)
+        );
+    }
+
+    /// A home with nothing stored, and one whose only provider is a local
+    /// model server in `opencode.json`, list the same thing. The second one
+    /// works, so neither may read as signed out.
+    #[test]
+    fn an_empty_auth_list_is_unverified_rather_than_signed_out() {
+        for name in ["none", "local-only"] {
+            let listing = AuthListing::parse(&auth_list_capture(name));
+            assert_eq!(
+                listing,
+                AuthListing {
+                    credentials: Some(0),
+                    environment: 0
+                },
+                "{name}"
+            );
+            assert_eq!(listing.signed_in(), None, "{name}");
+        }
+        // Output with no count line says nothing either way.
+        assert_eq!(
+            AuthListing::parse("error: could not open the database\n").signed_in(),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_count_line_is_a_count() {
+        assert_eq!(
+            count_before("└  2 environment variables", "environment variable"),
+            Some(2)
+        );
+        assert_eq!(
+            count_before(
+                "┌  Credentials \u{1b}[90m~/.local/share/opencode/auth.json",
+                "credential"
+            ),
+            None
+        );
+        assert_eq!(
+            count_before("●  Anthropic \u{1b}[90mapi", "credential"),
+            None
+        );
     }
 
     #[cfg(unix)]
@@ -479,21 +609,7 @@ mod tests {
 
     #[test]
     fn credentials_count_reads_auth_list_footer() {
-        assert_eq!(credentials_count("└  3 credentials"), Some(3));
-        assert_eq!(credentials_count("└  0 credentials"), Some(0));
-        assert!(observe_line_signed_in());
-        assert!(!observe_line_signed_out());
-    }
-
-    fn observe_line_signed_in() -> bool {
-        credentials_count("└  3 credentials")
-            .map(|n| n > 0)
-            .unwrap()
-    }
-
-    fn observe_line_signed_out() -> bool {
-        credentials_count("└  0 credentials")
-            .map(|n| n > 0)
-            .unwrap()
+        assert_eq!(count_before("└  3 credentials", "credential"), Some(3));
+        assert_eq!(count_before("└  0 credentials", "credential"), Some(0));
     }
 }

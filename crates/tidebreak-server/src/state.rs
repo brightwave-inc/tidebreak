@@ -273,6 +273,9 @@ pub struct AppState {
     pub code: Option<Arc<crate::code::CodeRuntime>>,
     /// In-memory auxiliary terminals. Ephemeral: empty after every restart.
     pub terminals: Arc<crate::code::terminal::TerminalHub>,
+    /// Terminals running an engine's own sign-in command, outside any
+    /// workspace. Ephemeral in the same way.
+    pub sign_in_terminals: Arc<crate::code::terminal::SignInTerminals>,
 }
 
 impl AppState {
@@ -467,6 +470,7 @@ impl AppState {
             host_folders: None,
             code: None,
             terminals: Arc::new(crate::code::terminal::TerminalHub::new()),
+            sign_in_terminals: Arc::new(crate::code::terminal::SignInTerminals::new()),
         })
     }
 

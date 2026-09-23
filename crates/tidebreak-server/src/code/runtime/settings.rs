@@ -875,7 +875,7 @@ impl CodeRuntime {
             "harness_not_authenticated",
             format!(
                 "{label} is not signed in on this machine. \
-                 Sign in to {label} in your own terminal, then start the session again."
+                 Sign in to {label} from Settings > Coding engines, then start the session again."
             ),
         ))
     }

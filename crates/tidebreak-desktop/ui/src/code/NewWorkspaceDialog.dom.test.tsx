@@ -28,6 +28,7 @@ import {
 } from "./CodeCatalogStore";
 import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import { useEngineSignInStore } from "./EngineSignIn";
 import { PERMISSION_MODE_POLICY_BLOCKED } from "./labels";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import type { ReasoningEffort } from "../api/types";
@@ -721,6 +722,55 @@ describe("NewWorkspaceDialog", () => {
     );
     // Create waits for the pin rather than stalling minutes on it.
     expect(screen.getByRole("button", { name: /Create/ })).toBeDisabled();
+  });
+
+  // A download does not sign the engine in. The picked engine stays picked
+  // and the dialog says what is left, instead of quietly switching engines
+  // or letting the first turn fail.
+  it("says a downloaded, signed-out engine still needs a sign-in", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      workspaces: [],
+      sessionsByWorkspace: {},
+      doctor: {
+        harnesses: [
+          {
+            ...harness("claude_code"),
+            authenticated: false,
+            sign_in_command: "claude auth login",
+          },
+        ],
+      } as never,
+    });
+    useEngineSignInStore.setState({ kind: null });
+    const user = userEvent.setup();
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          startHarnessInstall: vi.fn(),
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    expect(
+      screen.getByText("Claude Code is downloaded but still needs a sign-in."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Create/ })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(useEngineSignInStore.getState().kind).toBe("claude_code");
+    useEngineSignInStore.setState({ kind: null });
+
+    await user.click(
+      screen.getByRole("button", { name: "Engine: Claude Code" }),
+    );
+    expect(
+      await screen.findByRole("menuitem", { name: "Sign in to Claude Code…" }),
+    ).toBeInTheDocument();
   });
 
   it("opens on the last repo, harness, and model, and creates on Cmd+Enter", async () => {

@@ -2237,6 +2237,10 @@ body {
 
 .terminal-host .xterm .xterm-viewport {
   overflow-y: auto;
+  /* xterm.css paints the viewport black, and it shows as a band below the
+     last row whenever the pane is not a whole number of rows tall. The rows
+     paint the theme background, which reads this same token. */
+  background-color: var(--background);
 }
 
 /* Scrollbar styling. The thumb rests dim and brightens on hover; scoping the

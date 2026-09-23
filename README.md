@@ -180,7 +180,8 @@ commands, Linux runtime requirements, updates, and platform limits.
    and ask for the spreadsheet, deck, report, chart, or app you need.
 4. To change software, open **Code**, add or clone a repository, choose a coding
    engine, and describe the change. If the pinned engine is missing, Tidebreak
-   downloads it. Sign in through the engine's own terminal flow when prompted.
+   downloads it. To sign in to the engine, press **Sign in** on its row; that
+   runs the engine's own sign-in inside Tidebreak.
 5. Review the output. Export a file version from **Work**, or inspect the diff,
    checks, and review state before you merge from **Code**.
 

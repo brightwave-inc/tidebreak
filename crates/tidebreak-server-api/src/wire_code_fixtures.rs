@@ -518,6 +518,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                         managed_version: Some("2.1.259".to_owned()),
                         latest_version: Some("2.1.259".to_owned()),
                         update_available: false,
+                        sign_in_command: Some("claude auth login".to_owned()),
                     },
                     HarnessDoctorEntry {
                         kind: HarnessKind::Grok,
@@ -538,6 +539,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                         managed_version: None,
                         latest_version: None,
                         update_available: false,
+                        sign_in_command: None,
                     },
                 ],
                 update_channel: tidebreak_core::HarnessUpdateChannel::Latest,

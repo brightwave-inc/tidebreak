@@ -1976,8 +1976,8 @@ async fn a_relay_wired_session_keeps_the_relays_own_refusal() {
         None,
         crate::code::pr_refresh::HotPullRequests::default(),
     );
-    // The relay's refusals already name the gateway; "sign in in your
-    // own terminal" would be wrong on a hosted machine.
+    // The relay's refusals already name the gateway, and a hosted machine
+    // has no sign-in to send anyone to.
     let kept = sink.legible_turn_error("authentication_error: sign in required".into());
     assert_eq!(kept.message, "authentication_error: sign in required");
 }

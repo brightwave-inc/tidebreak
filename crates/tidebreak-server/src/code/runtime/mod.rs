@@ -197,6 +197,9 @@ pub enum ExternalMessageOutcome {
     Dropped,
 }
 
+/// A captured environment, shared between the callers that read it.
+type CapturedEnv = Arc<Vec<(std::ffi::OsString, std::ffi::OsString)>>;
+
 /// Shared code-mode services for the process.
 pub struct CodeRuntime {
     pub db: Arc<DbStore>,
@@ -270,6 +273,11 @@ pub struct CodeRuntime {
     pub(in crate::code) loopback_base: Mutex<Option<String>>,
     /// Memoized harness probes, one per kind. See [`CodeRuntime::probe`].
     probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
+    /// The login environment embedded shells start with, captured once the
+    /// way the probes capture theirs (decision 34) and dropped with them.
+    /// `Some(None)` records a capture that failed, so a broken profile costs
+    /// one timeout rather than one per terminal.
+    login_env: Mutex<Option<Option<CapturedEnv>>>,
     /// Last pin-install failure per kind. Cleared on a successful install.
     pin_install_errors: Mutex<HashMap<HarnessKind, String>>,
     workers: Mutex<HashMap<SessionId, WorkerHandle>>,
@@ -556,6 +564,7 @@ impl CodeRuntime {
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
+            login_env: Mutex::new(None),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             recovery_locks: Mutex::new(HashMap::new()),
@@ -736,6 +745,7 @@ impl CodeRuntime {
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
+            login_env: Mutex::new(None),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             recovery_locks: Mutex::new(HashMap::new()),

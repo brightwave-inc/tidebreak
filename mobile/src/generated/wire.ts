@@ -2922,7 +2922,13 @@ latest_version?: string,
  * driven install is older than it. Pressing Install on such a row moves
  * to it.
  */
-update_available: boolean, };
+update_available: boolean,
+/**
+ * The engine's own sign-in command, the way a person types it
+ * (`claude auth login`). Absent for an engine with nothing to sign in
+ * to. The Sign in action runs it with the pinned binary.
+ */
+sign_in_command?: string, };
 
 /**
  * Doctor report for every registered engine adapter.
@@ -2980,6 +2986,29 @@ export type HarnessModelSource = "harness" | "model_gateway";
  * Severity of a visible-degradation notice.
  */
 export type HarnessNoticeLevel = "info" | "warning" | "error";
+
+/**
+ * Cursor-pull response for
+ * `GET /code/harnesses/{kind}/sign-in/{tid}/read`. Fields mean what they
+ * mean on [`CodeTerminalRead`]; `ended` is true once every byte the command
+ * wrote has been read.
+ */
+export type HarnessSignInRead = { id: CodeTerminalId, kind: HarnessKind, bytes: string, cursor: number, overflow: boolean, truncated: boolean, ended: boolean, };
+
+/**
+ * A terminal running one engine's own sign-in command, outside any
+ * workspace. Bytes live only in the process ring, like a workspace
+ * terminal's.
+ */
+export type HarnessSignInTerminal = { id: CodeTerminalId, kind: HarnessKind,
+/**
+ * The command it runs, the way a person types it.
+ */
+command: string, cols: number, rows: number,
+/**
+ * The command has exited. Nothing more can be typed at it.
+ */
+ended: boolean, created_at: string, };
 
 /**
  * Adapter maturity, independent of any one capability flag.

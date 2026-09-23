@@ -362,8 +362,7 @@ impl LiveSink {
     /// provider is down", so the sentence the create-time refusal uses
     /// leads and the engine's own words follow. A turn riding the relay
     /// keeps its message untouched — the relay's refusals already name the
-    /// gateway, and "sign in in your own terminal" is wrong on a hosted
-    /// machine.
+    /// gateway, and a hosted machine has no sign-in to send anyone to.
     fn legible_turn_error(&self, message: String) -> BoundedError {
         if self.relay_wired || !provider_auth_failure(&message) {
             return BoundedError { message };
@@ -371,8 +370,8 @@ impl LiveSink {
         let label = crate::code::harness_label(self.harness);
         BoundedError {
             message: format!(
-                "{label} is not signed in on this machine. Sign in to {label} in your own \
-                 terminal, then try again. The engine reported: {message}"
+                "{label} is not signed in on this machine. Sign in to {label} from \
+                 Settings > Coding engines, then try again. The engine reported: {message}"
             ),
         }
     }

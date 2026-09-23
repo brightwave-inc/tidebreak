@@ -43,6 +43,11 @@ pub struct HarnessPin {
     pub package: &'static str,
     /// Binary name inside `node_modules/.bin`.
     pub bin: &'static str,
+    /// Arguments after [`Self::bin`] that start this version's own sign-in
+    /// flow. Each one is checked against the pinned binary's captured
+    /// `--help` (`fixtures/<engine>/<version>/sign-in-help.txt`), so a pin
+    /// bump that moves the command fails a test instead of a person.
+    pub sign_in: &'static [&'static str],
 }
 
 /// Current install pins. They do not identify complete fixture captures.
@@ -50,11 +55,14 @@ pub struct HarnessPin {
 /// `fixtures/README.md`; keep that coverage table accurate when changing a pin.
 pub const PINS: &[HarnessPin] = &[
     // Replay baseline: 2.1.233; 2.1.238/239 process observations are manifest notes.
+    // `claude login` is not a command: it starts a session with "login" as
+    // the prompt. Sign-in lives under `auth`.
     HarnessPin {
         kind: HarnessKind::ClaudeCode,
         version: "2.1.259",
         package: "@anthropic-ai/claude-code",
         bin: "claude",
+        sign_in: &["auth", "login"],
     },
     // Replay baseline: 0.147.0; MCP elicitation captures: 0.153.0.
     HarnessPin {
@@ -62,6 +70,7 @@ pub const PINS: &[HarnessPin] = &[
         version: "0.153.4",
         package: "@openai/codex",
         bin: "codex",
+        sign_in: &["login"],
     },
     // Replay baseline: 1.18.18; no complete 1.18.27 capture.
     HarnessPin {
@@ -69,6 +78,7 @@ pub const PINS: &[HarnessPin] = &[
         version: "1.18.27",
         package: "opencode-ai",
         bin: "opencode",
+        sign_in: &["auth", "login"],
     },
     // Replay baselines: 1.0.4/5; 1.0.13 covers ACP and tool images only.
     HarnessPin {
@@ -76,6 +86,7 @@ pub const PINS: &[HarnessPin] = &[
         version: "1.0.13",
         package: "@xai-official/grok",
         bin: "grok",
+        sign_in: &["login"],
     },
 ];
 
@@ -83,6 +94,50 @@ pub const PINS: &[HarnessPin] = &[
 #[must_use]
 pub fn pin_for(kind: HarnessKind) -> Option<&'static HarnessPin> {
     PINS.iter().find(|pin| pin.kind == kind)
+}
+
+/// The arguments that start `kind`'s own sign-in, for the pinned binary.
+///
+/// `None` for an engine Tidebreak ships no pin for, which has nothing to
+/// sign in to. A release installed on the `latest` update channel is
+/// assumed to keep the pin's command, the same way it keeps the pin's
+/// capability flags until someone captures otherwise.
+#[must_use]
+pub fn sign_in_args(kind: HarnessKind) -> Option<&'static [&'static str]> {
+    pin_for(kind)
+        .map(|pin| pin.sign_in)
+        .filter(|args| !args.is_empty())
+}
+
+/// The sign-in command the way a person types it: `claude auth login`.
+#[must_use]
+pub fn sign_in_command(kind: HarnessKind) -> Option<String> {
+    let pin = pin_for(kind)?;
+    let args = sign_in_args(kind)?;
+    Some(
+        std::iter::once(pin.bin)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// The directory holding the managed engine binary, so an embedded terminal
+/// can put it on `PATH`.
+///
+/// `version` names the install the update channel drives; `None` is the pin.
+/// An install whose marker does not match is not a directory to trust.
+#[must_use]
+pub fn managed_bin_dir(
+    data_dir: &Path,
+    kind: HarnessKind,
+    version: Option<&str>,
+) -> Option<PathBuf> {
+    let binary = match version {
+        Some(version) => managed_binary_version(data_dir, kind, version),
+        None => managed_binary(data_dir, kind),
+    }?;
+    binary.parent().map(Path::to_path_buf)
 }
 
 /// `{data_dir}/tools/harnesses/{kind}/{version}` for the pin itself.
@@ -446,6 +501,79 @@ mod tests {
         ] {
             assert!(pin_for(kind).is_some(), "{kind}");
         }
+    }
+
+    /// Every pin's sign-in command, checked against the `--help` of that
+    /// exact release.
+    ///
+    /// The doctor names this command and the Sign in action runs it, so a
+    /// wrong one sends a person to a prompt rather than a login: Claude Code
+    /// has no top-level `login`, and `claude login` starts a session with
+    /// "login" as its first message. The capture lives beside the version's
+    /// other fixtures. A pin bump fails here until someone captures
+    /// `<bin> <sign-in args> --help` from the new release and, if the
+    /// command moved, updates [`HarnessPin::sign_in`].
+    #[test]
+    fn sign_in_commands_match_the_pinned_help() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        for pin in PINS {
+            let engine = match pin.kind {
+                HarnessKind::ClaudeCode => "claude-code",
+                HarnessKind::Codex => "codex",
+                HarnessKind::Opencode => "opencode",
+                HarnessKind::Grok => "grok",
+                HarnessKind::Internal => continue,
+            };
+            let command = sign_in_command(pin.kind)
+                .unwrap_or_else(|| panic!("{} ships a pin with no sign-in command", pin.kind));
+            let capture = fixtures
+                .join(engine)
+                .join(pin.version)
+                .join("sign-in-help.txt");
+            let help = std::fs::read_to_string(&capture).unwrap_or_else(|_| {
+                panic!(
+                    "capture `{command} --help` from the {} {} pin into {}",
+                    pin.kind,
+                    pin.version,
+                    capture.display()
+                )
+            });
+            // clap and commander print `Usage: <command> …`; yargs prints the
+            // command on its own first line.
+            let usage = help.lines().map(str::trim).any(|line| {
+                let line = line.strip_prefix("Usage:").map_or(line, str::trim);
+                line == command || line.starts_with(&format!("{command} "))
+            });
+            assert!(
+                usage,
+                "{} {} does not document `{command}`; see {}",
+                pin.kind,
+                pin.version,
+                capture.display()
+            );
+        }
+    }
+
+    #[test]
+    fn sign_in_commands_read_the_way_a_person_types_them() {
+        assert_eq!(
+            sign_in_command(HarnessKind::ClaudeCode).as_deref(),
+            Some("claude auth login")
+        );
+        assert_eq!(
+            sign_in_command(HarnessKind::Codex).as_deref(),
+            Some("codex login")
+        );
+        assert_eq!(
+            sign_in_command(HarnessKind::Opencode).as_deref(),
+            Some("opencode auth login")
+        );
+        assert_eq!(
+            sign_in_command(HarnessKind::Grok).as_deref(),
+            Some("grok login")
+        );
+        assert_eq!(sign_in_command(HarnessKind::Internal), None);
+        assert_eq!(sign_in_args(HarnessKind::Internal), None);
     }
 
     /// Codex 0.153.0 lacks gpt-6-astra model metadata and falls back through

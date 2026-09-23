@@ -1,0 +1,11 @@
+┌  Credentials [90m~/.local/share/opencode/auth.json
+│
+●  Anthropic [90mapi
+│
+└  1 credentials
+
+┌  Environment
+│
+●  OpenAI [90mOPENAI_API_KEY
+│
+└  1 environment variable

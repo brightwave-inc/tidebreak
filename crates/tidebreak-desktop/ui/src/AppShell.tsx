@@ -119,6 +119,7 @@ import {
 } from "./ShellShortcuts";
 import { CommandPaletteDialog } from "./CommandPaletteDialog";
 import { RepositoryTrustSheetHost } from "./code/RepositoryTrustStore";
+import { EngineSignInHost } from "./code/EngineSignIn";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { useUiStore } from "./UiStore";
 import { UPDATE_CHECK_REQUESTED_EVENT, useDesktopUpdates } from "./updates";
@@ -1257,6 +1258,7 @@ export function AppShell() {
           />
           <CommandPaletteDialog />
           <RepositoryTrustSheetHost />
+          <EngineSignInHost />
           {computerUseSetupPrompt && (
             <ComputerUseSetupDialog
               open={!computerUseSetupDismissed}

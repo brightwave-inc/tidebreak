@@ -22,7 +22,8 @@ import {
   codeRepositories,
   codeSidebarWorkspaces,
   harnessDoctor,
-  harnessDoctorDegraded,
+  harnessDoctorCold,
+  harnessDoctorSignedOut,
 } from "./fixtures";
 
 type HomeScenario =
@@ -31,6 +32,7 @@ type HomeScenario =
   | "loading"
   | "failure"
   | "needs-harness"
+  | "fresh-machine"
   | "dense-sidebar";
 
 function pending<T>(): Promise<T> {
@@ -51,12 +53,18 @@ function storyClient(scenario: HomeScenario): ApiClient {
   const loading = scenario === "loading";
   const failure = scenario === "failure";
   const repos =
-    scenario === "empty" || scenario === "needs-harness"
+    scenario === "empty" ||
+    scenario === "needs-harness" ||
+    scenario === "fresh-machine"
       ? []
       : codeRepositories;
   const workspaces = scenario === "dense-sidebar" ? codeSidebarWorkspaces : [];
   const doctor =
-    scenario === "needs-harness" ? harnessDoctorDegraded : harnessDoctor;
+    scenario === "needs-harness"
+      ? harnessDoctorSignedOut
+      : scenario === "fresh-machine"
+        ? harnessDoctorCold
+        : harnessDoctor;
 
   return {
     listCodeRepos: async () => {
@@ -242,8 +250,17 @@ export const Failure: Story = {
   args: { scenario: "failure" },
 };
 
+/** Engines downloaded but none signed in: each row offers Sign in. */
 export const NeedsHarness: Story = {
   args: { scenario: "needs-harness" },
+};
+
+/**
+ * Nothing downloaded yet. The doctor holds the page, because a download
+ * alone does not sign an engine in.
+ */
+export const FreshMachine: Story = {
+  args: { scenario: "fresh-machine" },
 };
 
 export const DenseSidebar: Story = {
