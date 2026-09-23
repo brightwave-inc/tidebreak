@@ -130,7 +130,9 @@ workspaces stay where they are.
 
 Provider API keys are **not** in the application data directory. They go to
 your OS credential store — Login Keychain on macOS, Credential Manager on
-Windows, or Secret Service on Linux — under the service name `tidebreak`.
+Windows, or Secret Service on Linux — under the service name `tidebreak`. A
+separate CLI profile, named with `TIDEBREAK_DATA_DIR`, keeps its keys under a
+service of its own, `tidebreak.profile.<id>`.
 
 <Callout>
 Desktop upgrades from v0.61.0 onward keep this data. Tidebreak upgrades the
@@ -152,8 +154,9 @@ On macOS:
 2. Delete `~/Library/Application Support/io.brightwave.tidebreak`.
 3. Delete `~/Tidebreak/workspaces` if you used code mode and do not need those
    worktrees.
-4. Remove keychain items for the service `tidebreak`. In Keychain Access,
-   search for `tidebreak`, or list them with
+4. Remove keychain items for the service `tidebreak`, and for any
+   `tidebreak.profile.<id>` services a separate CLI profile created. In
+   Keychain Access, search for `tidebreak`, or list them with
    `security find-generic-password -s tidebreak`.
 
 On Windows, remove the app from **Settings → Apps**, then delete
@@ -176,5 +179,8 @@ The same server the desktop app embeds can run on its own:
 ANTHROPIC_API_KEY=sk-... cargo run -p tidebreak-cli -- serve
 ```
 
-It prints a loopback URL and a per-launch bearer token. See
-[Running headless](/headless) for the other commands.
+It prints a loopback URL and a per-launch bearer token. With
+`TIDEBREAK_DATA_DIR` unset, it serves the app's own data (a debug build like
+this one serves the dev app's), so it runs only while that app is closed. See
+[Running headless](/headless) for which data each command uses and for the
+other commands.

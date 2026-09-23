@@ -217,7 +217,7 @@ plugins install fetches one public HTTPS Git repository at a pinned tag or
 full commit SHA and imports it as an instruction-only plugin. A moving
 branch is refused. The plugin's files run with the agent's permissions.
 --json prints one object stamped with schema_version. These commands take
---server <url> [--server-token-env <var>] or --attach.";
+--server <url> [--server-token-env <var>], --attach, or --embed.";
 
 const FOLDER_USAGE: &str = "\
 usage: tidebreak folder connect <path> --chat <id> [--output-format text|json]
@@ -336,10 +336,10 @@ A key is read from stdin, or from the environment variable named by
 can read.
 
 Which data the CLI uses: with TIDEBREAK_DATA_DIR unset, every command works on
-the Tidebreak app's own data. -p, output, attach, diagnostics, agent-mcp, the
-setup commands, and the code family connect to the app while it runs, and
-stop with what to do next when it does not. --embed runs a server in this
-process over the app's data instead. Set TIDEBREAK_DATA_DIR to work on a
+the Tidebreak app's own data. -p, output, attach, diagnostics, agent-mcp,
+plugins, the setup commands, and the code family connect to the app while it
+runs, and stop with what to do next when it does not. --embed runs a server in
+this process over the app's data instead. Set TIDEBREAK_DATA_DIR to work on a
 separate profile in that folder: commands then run their own server over it,
 except agent-mcp, which needs --attach, --server, or --embed. A separate
 profile keeps its credentials apart from the app's. Nothing uses the current

@@ -84,8 +84,10 @@ cargo tauri build --target universal-apple-darwin
 Useful when iterating on the React UI without rebuilding the native shell.
 
 ```sh
-# terminal 1 — from the repo root
-cargo run -p tidebreak-cli -- serve
+# terminal 1 — from the repo root. TIDEBREAK_DATA_DIR keeps this profile in
+# the repo's ignored .tidebreak folder; leave it out to serve the dev app's own
+# data while the dev app is closed.
+TIDEBREAK_DATA_DIR=.tidebreak cargo run -p tidebreak-cli -- serve
 # note the printed URL and token
 
 # terminal 2

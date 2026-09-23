@@ -21,6 +21,32 @@ cargo build -p tidebreak-cli --release
 The examples below use `tidebreak` for the command. Substitute the app-bundle
 path, or `cargo run -p tidebreak-cli --`, if that is what you have.
 
+## Which data does the CLI use?
+
+A command works on one profile: a data directory with its chats, settings,
+and logs, plus the credentials stored for it.
+
+- **`TIDEBREAK_DATA_DIR` unset.** The CLI uses the Tidebreak app's own
+  profile. A command connects to the app while the app is running. When the
+  app is not running, the command stops and tells you so. Add `--embed` to
+  work on the app's data without opening the app: the command then runs the
+  server in its own process.
+- **`TIDEBREAK_DATA_DIR` set.** The CLI uses the profile in that folder, and a
+  command runs its own server over it. Add `--attach` to connect to a server
+  that already owns the folder. This profile keeps its credentials apart from
+  the app's, so a key you set or remove here never changes the app.
+- **`--server <url>`.** The command connects to that server and uses no local
+  data.
+
+Nothing uses the folder you run a command from. `serve`, `folder`, and
+`rehome-secrets` follow the same rule: the app's data unless
+`TIDEBREAK_DATA_DIR` names another folder. Because one data directory has one
+server at a time, `serve` over the app's data cannot run while the app does.
+
+A debug build of the CLI, such as `cargo run -p tidebreak-cli --`, uses the
+dev app's profile (`io.brightwave.tidebreak.dev`) in place of the installed
+app's.
+
 ## Commands
 
 ```text
@@ -106,10 +132,13 @@ tidebreak code action <name> --ws <id>
 tidebreak code watch [--once] [--timeout <secs>]
 ```
 
-A bare `tidebreak` with no arguments runs `serve`.
+Run `tidebreak` with no arguments, or `tidebreak --help`, to print this list.
+To start the server, run `tidebreak serve`.
 
-`-p`, `output`, `attach`, `agent-mcp`, the setup commands, and the code family additionally take
-`--server <url>` / `--server-token-env <var>`, or `--attach` — see
+`-p`, `output`, `attach`, `agent-mcp`, `plugins`, the setup commands, and the
+code family additionally take `--server <url>` / `--server-token-env <var>`,
+`--attach`, or `--embed` — see
+[Which data does the CLI use?](#which-data-does-the-cli-use) and
 [Attaching to a running server](#attaching-to-a-running-server).
 Every `tidebreak code` command also accepts `--json` (one object, or NDJSON
 for `run` and `watch`). `code session start` takes `--reasoning <level>` and
@@ -158,6 +187,10 @@ tidebreak: token 7f2c…
 
 The token is a secret. Capture the process's stdout directly rather than
 running it under a logging supervisor.
+
+With `TIDEBREAK_DATA_DIR` unset, `serve` serves the Tidebreak app's own data,
+so quit the app first. To serve a separate profile, set `TIDEBREAK_DATA_DIR` to
+its folder.
 
 The API is not exposed on a public interface. There is no generated OpenAPI
 document — the route table and handler documentation in `tidebreak-server` are
@@ -268,8 +301,8 @@ under text output, so an undriven run is always machine-diagnosable.
 #### A dev harness
 
 To drive Tidebreak from a script or a coding agent, give it its own data
-directory so it cannot touch the desktop's chats, and let it act without
-parking:
+directory so it cannot touch the desktop's chats or credentials, and let it
+act without parking:
 
 ```sh
 export TIDEBREAK_DATA_DIR="$(mktemp -d)/tidebreak"
@@ -297,12 +330,12 @@ cargo run -p tidebreak-cli -- -p "plan the migration" \
 ### Setup commands
 
 `provider`, `model`, `settings`, `mcp-server`, `plugins`, and `chat` configure a profile
-without the desktop app. Each one boots the same in-process server the other
-commands do, calls the route the desktop's settings pages call, and prints the
-answer — they hold no configuration logic of their own, so both surfaces stay in
-step. All of them accept `--output-format text|json`, and `json` prints one
-object on one line, stamped with `schema_version` (see
-[Compatibility](#compatibility)).
+without the desktop window. Each one reaches the same server the other commands
+do — the running app, or one it starts in its own process — calls the route
+the desktop's settings pages call, and prints the answer. They hold no
+configuration logic of their own, so both surfaces stay in step. All of them
+accept `--output-format text|json`, and `json` prints one object on one line,
+stamped with `schema_version` (see [Compatibility](#compatibility)).
 
 ```sh
 # Providers and credentials
@@ -346,9 +379,12 @@ cargo run -p tidebreak-cli -- -p "…" --chat "$CHAT"
 **A key is never a command-line argument.** `set-key` reads it from stdin, or
 from the environment variable named by `--from-env`. Arguments are visible to
 every process on the machine through the process list and land in shell
-history; a pipe and an exported variable do not. Stored keys go to the same
-place the desktop puts them — the OS keychain on a desktop profile — and no
-command here ever prints one back.
+history; a pipe and an exported variable do not. Stored keys go to the OS
+keychain entry of the profile the command works on. The app's profile keeps
+the entry the app uses. A profile named by `TIDEBREAK_DATA_DIR` has an entry of
+its own, under the keychain service `tidebreak.profile.<id>`
+(`tidebreak.dev.profile.<id>` for a debug build), where `<id>` comes from the
+folder's path. No command here ever prints a key back.
 
 Storing a provider key also enables that provider for routing, matching what
 saving a key in the app does. `model select` writes the same role selections
@@ -419,12 +455,21 @@ it is unrelated to [connecting MCP servers to Tidebreak](/mcp-servers).
 
 `tidebreak agent-mcp` is the other direction: an MCP *server* that lets an
 external agent drive **chat** on a Tidebreak that is already running. It is an
-attach client, the same way `-p` is — pass `--server` / `--attach` (and
-`TIDEBREAK_SERVER_TOKEN` or `TIDEBREAK_DATA_DIR` for `--attach`). `mcp` and
-`browser-mcp` refuse those flags; this command requires them in practice,
-because the tools talk to the attach contract, not to a workspace directory.
+attach client, the same way `-p` is. `mcp` and `browser-mcp` refuse the
+connection flags; this command takes them, because its tools talk to the
+attach contract, not to a workspace directory.
+
+With no flags, it connects to the Tidebreak app, so an MCP client can launch
+it as a bare command and drive the chats you see in the app. It never starts a
+server of its own unless you pass `--embed`, even when `TIDEBREAK_DATA_DIR` is
+set: pass `--attach` to connect to the server that owns that folder, or
+`--server <url>` with `TIDEBREAK_SERVER_TOKEN` for another server.
 
 ```sh
+# The app on this computer
+tidebreak agent-mcp
+
+# Another server
 export TIDEBREAK_SERVER_TOKEN=<the token that server printed>
 cargo run -p tidebreak-cli -- agent-mcp --server http://127.0.0.1:53421
 ```
@@ -563,7 +608,7 @@ would catch:
 
 ```text
 tidebreak: configuration error: another Tidebreak process is already running on
-the data directory /Users/me/.tidebreak. Connect to it instead …
+the data directory /Users/me/tidebreak-profile. Attach with the CLI's --attach …
 ```
 
 The claim is an OS advisory lock on `tidebreak.lock` inside the directory, so it
@@ -571,9 +616,11 @@ is honest across a crash: a killed process releases it the moment it dies, and
 the leftover file never has to be cleaned up by hand.
 
 The way in is to *attach* — to be a client of the server that is already there
-rather than a second one. Prefer `--attach`, which reads the
-`listen.json` the running server wrote into the data directory (mode `0600`,
-bearer only — never the native executor credential):
+rather than a second one. With `TIDEBREAK_DATA_DIR` unset, a command does this
+on its own: it connects to the running app. For another data directory, prefer
+`--attach`, which reads the `listen.json` the running server wrote into the
+data directory (mode `0600`, bearer only — never the native executor
+credential):
 
 ```sh
 # Same data directory the desktop or `serve` owns
@@ -583,7 +630,9 @@ cargo run -p tidebreak-cli -- -p "what changed today?" --attach
 ```
 
 On a release desktop build, the directory is `io.brightwave.tidebreak` (no
-`.dev`). `--attach` and `--server` conflict; pick one.
+`.dev`). With `TIDEBREAK_DATA_DIR` unset, `--attach` reads the app's own
+`listen.json`, so it fails when the app is not running. `--attach`, `--server`,
+and `--embed` conflict; pick one.
 
 You can still pass an explicit URL when you already have the pair (for example
 from `serve`'s stdout):
@@ -593,16 +642,17 @@ export TIDEBREAK_SERVER_TOKEN=<the token that server printed>
 cargo run -p tidebreak-cli -- --server http://127.0.0.1:53421 provider list
 ```
 
-`--server` / `--attach` work on `-p`, `agent-mcp`, and every setup command.
+`--server`, `--attach`, and `--embed` work on `-p`, `agent-mcp`, and every setup command.
 `TIDEBREAK_SERVER_URL` sets the same thing as `--server` for a whole shell, and
 the flag wins over it. After the endpoint is resolved, an attached command
 writes no log file and touches no keychain — it is only an HTTP+WebSocket
 client. With `--attach`, `TIDEBREAK_DATA_DIR` is used solely to find
 `listen.json`; with `--server`, the local data directory is ignored.
 
-`serve`, `mcp`, and `rehome-secrets` reject `--server` / `--attach`: the first
-two *are* servers, and the third rewrites local keychain items. (They ignore
-`TIDEBREAK_SERVER_URL`, so a shell that exports it can still start a daemon.)
+`serve`, `mcp`, and `rehome-secrets` reject `--server`, `--attach`, and
+`--embed`: the first two *are* servers, and the third rewrites local keychain
+items. (They ignore `TIDEBREAK_SERVER_URL`, so a shell that exports it can
+still start a daemon.)
 
 An attached command checks the server's version before it does anything else.
 See [The version check](#the-version-check).
@@ -617,11 +667,11 @@ they land in shell history. `--attach` loads it from `listen.json`. With
 
 **From `tidebreak serve` or the desktop app:** both write
 `{data_dir}/listen.json` on bind. Point `TIDEBREAK_DATA_DIR` at that directory
-and use `--attach`. `serve` still prints the URL and token on stdout if you
-prefer to capture them:
+and use `--attach`, or leave it unset to reach the app. `serve` still prints
+the URL and token on stdout if you prefer to capture them:
 
 ```sh
-cargo run -p tidebreak-cli -- serve > server.log &
+TIDEBREAK_DATA_DIR="$(mktemp -d)" cargo run -p tidebreak-cli -- serve > server.log &
 export TIDEBREAK_SERVER_URL=http://$(grep -m1 'listening on http://' server.log | sed 's|.*http://||')
 export TIDEBREAK_SERVER_TOKEN=$(grep -m1 'token ' server.log | sed 's|.*token ||')
 ```
@@ -635,6 +685,10 @@ a major release.
 
 - **Commands and flags.** Every command and flag in the
   [Commands](#commands) block. A release can add a command or a flag.
+- **Which data a command uses.** The rules in
+  [Which data does the CLI use?](#which-data-does-the-cli-use): the app's
+  profile when `TIDEBREAK_DATA_DIR` is unset, the named folder when it is set,
+  and never the folder a command runs from.
 - **Exit codes.** Every command exits `0` on success, `1` on failure, and `2`
   on a usage error. `-p` and the `code` family add the codes in the tables
   above.
@@ -705,8 +759,8 @@ on stderr.
 
 | Variable | Effect |
 | --- | --- |
-| `TIDEBREAK_DATA_DIR` | Where the database, blobs, logs, and `listen.json` live. Defaults to `./.tidebreak` under the current directory. With `--attach`, used only to locate `listen.json`; with `--server`, ignored. |
-| `TIDEBREAK_SERVER_URL` | Attach to the server at this base URL instead of embedding one. `--server <url>` overrides it; conflicts with `--attach`. `serve`/`mcp`/`rehome-secrets` ignore it. |
+| `TIDEBREAK_DATA_DIR` | Where the database, blobs, logs, and `listen.json` live. Unset: the Tidebreak app's own data directory, and a client command connects to the app instead of starting a server; a debug build uses the dev app's. Nothing defaults to the current directory. With `--attach`, used only to locate `listen.json`; with `--server`, ignored. Required for `self_host`. |
+| `TIDEBREAK_SERVER_URL` | Attach to the server at this base URL instead of embedding one. `--server <url>` overrides it; conflicts with `--attach` and `--embed`. `serve`/`mcp`/`rehome-secrets` ignore it. |
 | `TIDEBREAK_SERVER_TOKEN` | Bearer token for `--server`, unless `--server-token-env <var>` names a different variable. Not used with `--attach`. |
 | `TIDEBREAK_PROFILE` | `desktop` (default, SQLite) or `self_host` (PostgreSQL). |
 | `TIDEBREAK_DATABASE_URL` | Required for `self_host`. |
@@ -724,13 +778,12 @@ on stderr.
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `FIREWORKS_API_KEY`, `TOGETHER_API_KEY` | Used as a credential for that provider when nothing is stored in the credential store. |
 
 <Callout>
-`tidebreak serve` defaults to `./.tidebreak` in your current directory, which is
-**not** the desktop app's data directory. Point `TIDEBREAK_DATA_DIR` at the
-desktop's application data directory (debug:
-`~/Library/Application Support/io.brightwave.tidebreak.dev`) and use `--attach`
-to drive the same chats while the app is running. Embedding a second server
-over that directory is still refused. See
-[Attaching to a running server](#attaching-to-a-running-server).
+With `TIDEBREAK_DATA_DIR` unset, the CLI works on the Tidebreak app's data:
+commands connect to the app while it runs, and `serve` and `--embed` open the
+same data only while it does not, because a data directory has one server at a
+time. To keep a script's chats and credentials apart from the app's, set
+`TIDEBREAK_DATA_DIR` to a folder of its own. See
+[Which data does the CLI use?](#which-data-does-the-cli-use).
 </Callout>
 
 Logs are written to `logs/tidebreak.log` under the data directory.

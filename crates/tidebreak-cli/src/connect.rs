@@ -25,11 +25,11 @@
 //! embedding CLI at a directory the desktop or a running daemon already owns is
 //! refused rather than allowed to race the database.
 //!
-//! The token never rides argv. It comes from `listen.json` under `--attach`
-//! and for the app, from `TIDEBREAK_SERVER_TOKEN`, or from the variable
-//! `--server-token-env` names — a command line is readable by every process on
-//! the machine and lands in shell history, and a per-launch bearer token is
-//! full authority over the profile.
+//! The token never rides argv. It comes from `listen.json` (under `--attach`,
+//! and when a command reaches the app), from `TIDEBREAK_SERVER_TOKEN`, or from
+//! the variable `--server-token-env` names — a command line is readable by
+//! every process on the machine and lands in shell history, and a per-launch
+//! bearer token is full authority over the profile.
 //!
 //! Before an attached command does anything else, it reads the server's
 //! `GET /version` and compares the API level with the range this build reads.

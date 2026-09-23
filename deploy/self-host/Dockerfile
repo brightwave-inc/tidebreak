@@ -370,5 +370,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 \
 # The entrypoint publishes the image's managed Node runtime into the data
 # directory before starting the server; see entrypoint.sh for why that cannot
 # happen at build time. Arguments still append to `serve`, and overriding
-# `--entrypoint` reaches the binary directly.
+# `--entrypoint` reaches the binary directly. The binary alone prints help, so
+# an override that means to start the server passes `serve` itself.
 ENTRYPOINT ["/usr/local/bin/tidebreak-entrypoint"]

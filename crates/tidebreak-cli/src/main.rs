@@ -479,9 +479,10 @@ impl ServerFlags {
     }
 
     /// [`Self::resolve`] for a command that drives a server that is already
-    /// running. It starts one of its own only when `--embed` says so; a set
-    /// `TIDEBREAK_DATA_DIR` alone is not enough, because a client that
-    /// launches it quietly gets an empty profile instead of the one it meant.
+    /// running. It starts one of its own only when `--embed` says so. A set
+    /// `TIDEBREAK_DATA_DIR` alone is not enough: an MCP client launches this
+    /// command to drive a Tidebreak someone is using, not a new server over a
+    /// folder nobody is watching.
     fn resolve_without_implicit_embed(self, command: &str) -> Result<connect::Server> {
         let embed = self.embed;
         let server = self.resolve()?;

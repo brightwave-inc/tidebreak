@@ -98,3 +98,19 @@ DB.
 - A second embed on a locked directory still fails, and the error mentions
   `--attach` (or the listen file) rather than only stdout capture.
 - The file never contains the client-executor token.
+
+## Amended 2026-09-23
+
+This record rejected attaching without a flag whenever a data directory's lock
+is held, because a person who named another directory meant a fresh embed
+there. The CLI now attaches without a flag in one case only: `TIDEBREAK_DATA_DIR`
+is unset, and the desktop app's `listen.json` names a server on this computer
+that answers. A named directory never attaches on its own, so the rejected case
+cannot arise. With the variable unset, `--attach` reads the app's
+`listen.json`, the same default an embed uses. See the amendment to
+[decision 7](0007-cli-headless-feature-parity.md).
+
+Validation: `a_client_command_connects_to_the_running_app` and
+`without_the_app_a_client_command_says_what_to_do_instead` in
+`crates/tidebreak-cli/tests/serve.rs` run the binary against a fake app and a
+`listen.json` the app left behind.

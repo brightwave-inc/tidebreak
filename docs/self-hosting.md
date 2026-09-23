@@ -284,7 +284,7 @@ aspirational.
 | `TIDEBREAK_VAULT_MOUNT` | no | `secret` | KV v2 mount path. |
 | `TIDEBREAK_VAULT_PATH` | no | `tidebreak` | Deployment-specific path below the mount. Tidebreak appends one encoded credential key. |
 | `TIDEBREAK_VAULT_NAMESPACE` | no | unset | Vault Enterprise or HCP namespace sent as `X-Vault-Namespace`. |
-| `TIDEBREAK_DATA_DIR` | no | `./.tidebreak` | Instance lock, logs, per-turn scratch. Durable state lives in PostgreSQL, not here. |
+| `TIDEBREAK_DATA_DIR` | yes (the image sets it) | `/var/lib/tidebreak` in the image | Instance lock, logs, per-turn scratch. Durable state lives in PostgreSQL, not here. Nothing defaults to the current directory: a self-host server started without it refuses to start and names the variable. |
 | `HOME` | no | `/var/lib/tidebreak/home` in the image | Writable home for npm and the coding harnesses. The image keeps it on the data volume because a hosting plane may run the container as a uid with no passwd entry, which is otherwise handed `HOME=/`. The server creates it at boot. |
 | `TIDEBREAK_LOG` | no | built-in policy | `tracing` filter directives, e.g. `debug` or `warn,tidebreak_server=trace`. An invalid spec falls back to the default. |
 | `TIDEBREAK_DIAGNOSTICS_LOG` | no | `off,tidebreak_diagnostics=info` | `tracing` filter directives for the bounded structured JSONL log. See [Diagnostics](diagnostics.md). |
@@ -630,6 +630,9 @@ the server still finds every path it checks. The Dockerfile comments in
   directory at that copy on every start. Unpack Node into the data
   directory at build time and the link is gone the moment you mount a
   volume.
+- **The `serve` command.** The entrypoint runs `tidebreak serve`. If you
+  replace the entrypoint, or override it to reach the binary directly, pass
+  `serve` yourself: a bare `tidebreak` prints help and exits.
 - **The healthcheck.** The image probes `http://127.0.0.1:8080/healthz`
   with `curl`. Keep `curl` and that listen address, or replace the
   healthcheck with an equivalent probe of `/healthz`.

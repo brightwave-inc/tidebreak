@@ -57,8 +57,9 @@ cargo run -p tidebreak-cli -- rehome-secrets
 ## The app will not start, or reports the data directory is in use
 
 One process owns the application data directory at a time, enforced with a
-lock file. Close the other instance — including a headless `tidebreak serve`
-pointed at the same directory.
+lock file. Close the other instance — including a headless `tidebreak serve`,
+or a CLI command run with `--embed`, started without `TIDEBREAK_DATA_DIR`:
+both use the app's data directory.
 
 ## Chats disappeared after an update
 
