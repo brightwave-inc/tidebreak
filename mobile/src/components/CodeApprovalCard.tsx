@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import type { ApprovalSnapshot as CodeApprovalSnapshot } from "../generated/wire";
+import type { ListedCodeApproval } from "../lib/api";
 import {
   approvalSummary,
-  approvalTitle,
+  canApproveCodeApproval,
+  codeApprovalHeadline,
   formatApprovalPayload,
   validDenialFeedback,
 } from "../lib/approvals";
@@ -15,7 +16,7 @@ export function CodeApprovalCard({
   onApprove,
   onDeny,
 }: {
-  approval: CodeApprovalSnapshot;
+  approval: ListedCodeApproval;
   onApprove: () => Promise<void>;
   onDeny: (feedback: string) => Promise<void>;
 }) {
@@ -29,6 +30,10 @@ export function CodeApprovalCard({
     const denial = validDenialFeedback(feedback);
     if (kind === "deny" && !denial) {
       setError("Tell the agent what to change before denying.");
+      return;
+    }
+    if (kind === "approve" && !canApproveCodeApproval(approval)) {
+      setError("This app cannot approve a request it does not recognize.");
       return;
     }
     setBusy(kind);
@@ -48,7 +53,7 @@ export function CodeApprovalCard({
       <View className="gap-1">
         <SectionLabel>Approval needed</SectionLabel>
         <Text className="text-base font-semibold text-foreground">
-          {approvalTitle(approval.kind)}?
+          {codeApprovalHeadline(approval)}
         </Text>
       </View>
       <View className="rounded-lg border border-border bg-muted p-3">
@@ -113,14 +118,16 @@ export function CodeApprovalCard({
           </>
         ) : (
           <>
-            <View className="flex-1">
-              <Button
-                label="Approve"
-                busy={busy === "approve"}
-                disabled={busy !== null}
-                onPress={() => void decide("approve")}
-              />
-            </View>
+            {canApproveCodeApproval(approval) ? (
+              <View className="flex-1">
+                <Button
+                  label="Approve"
+                  busy={busy === "approve"}
+                  disabled={busy !== null}
+                  onPress={() => void decide("approve")}
+                />
+              </View>
+            ) : null}
             <View className="flex-1">
               <Button
                 label="Deny…"

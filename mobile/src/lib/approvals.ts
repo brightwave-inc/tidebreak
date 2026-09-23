@@ -4,6 +4,7 @@ import type {
   NetworkPolicy,
   ToolActionPreview,
 } from "../generated/wire";
+import type { ListedCodeApproval } from "./api";
 
 export function approvalTitle(kind: CodeApprovalKind): string {
   switch (kind.type) {
@@ -143,9 +144,25 @@ function quoteArgument(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-export function pendingApprovals(
-  approvals: readonly CodeApprovalSnapshot[],
-): CodeApprovalSnapshot[] {
+/**
+ * Whether the card may offer Approve. Only a kind this app can show: an
+ * unrecognized request can be denied, and approved from a client that reads
+ * it.
+ */
+export function canApproveCodeApproval(approval: ListedCodeApproval): boolean {
+  return !approval.unrecognized;
+}
+
+/** The question at the top of the card. */
+export function codeApprovalHeadline(approval: ListedCodeApproval): string {
+  return approval.unrecognized
+    ? "Deny this request?"
+    : `${approvalTitle(approval.kind)}?`;
+}
+
+export function pendingApprovals<T extends CodeApprovalSnapshot>(
+  approvals: readonly T[],
+): T[] {
   return approvals
     .filter((approval) => approval.state === "pending")
     .sort((left, right) => left.requested_at.localeCompare(right.requested_at));
