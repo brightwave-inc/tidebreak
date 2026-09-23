@@ -158,7 +158,7 @@ describe("message actions", () => {
     await user.click(screen.getByRole("button", { name: "Edit" }));
     expect(
       screen.getByText(
-        "This answer wrote files and used connected apps, so your edit starts a new chat. This chat stays as it is.",
+        "Your edit replaces an answer that wrote files and used connected apps, so it starts a new chat. This chat stays as it is.",
       ),
     ).toBeInTheDocument();
     expect(

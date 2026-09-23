@@ -96,7 +96,8 @@ export function withTurnsApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
     /**
      * Replace the latest message and answer the new one. The answer says
      * whether the edit started a new chat instead, because the turn it
-     * replaces changed things outside the conversation.
+     * replaces, or an earlier answer to the same message, changed things
+     * outside the conversation.
      */
     editTurn(
       chatId: string,

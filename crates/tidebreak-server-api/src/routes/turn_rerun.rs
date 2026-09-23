@@ -6,15 +6,16 @@
 //! - Regenerate answers the latest message again. The earlier answer stays as
 //!   a version the reader can page back to.
 //! - Edit replaces the latest message and answers it. When the turn it
-//!   replaces changed things outside the conversation, the edit starts a new
-//!   conversation instead, so the original keeps its record of what ran.
+//!   replaces, or an earlier answer to the same message, changed things
+//!   outside the conversation, the edit starts a new conversation instead, so
+//!   the original keeps its record of what ran.
 //! - Branch starts a new conversation with a copy of the history through one
 //!   turn, named after the original and linked back to it.
 //!
 //! A replaced turn leaves the model's view of the conversation (see
 //! `tidebreak_core::replaced_turns`). Its rows stay.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -109,8 +110,9 @@ pub struct ChatTurnStarted {
     /// Whether the edit started a new conversation instead of replacing the
     /// turn in place.
     pub branched: bool,
-    /// What the replaced turn did outside the conversation, which is why an
-    /// edit started a new conversation. Empty otherwise.
+    /// What the replaced turn and its earlier answers did outside the
+    /// conversation, which is why an edit started a new conversation. Empty
+    /// otherwise.
     pub side_effects: Vec<TurnSideEffect>,
 }
 
@@ -164,11 +166,12 @@ pub async fn post_regenerate_turn(
 /// answer the new one.
 ///
 /// When the replaced turn only talked, the edit replaces it in place and the
-/// old turn leaves the conversation. When it changed things outside the
-/// conversation, the edit starts a new conversation with the history before
-/// the turn, sends the new message there, and says so with `branched` and
-/// `side_effects`. `409` unless `turn_id` is the chat's latest settled turn
-/// and was not rerun already, and while another turn runs.
+/// old turn leaves the conversation. When it, or an earlier answer to the same
+/// message, changed things outside the conversation, the edit starts a new
+/// conversation with the history before the turn, sends the new message
+/// there, and says so with `branched` and `side_effects`. `409` unless
+/// `turn_id` is the chat's latest settled turn and was not rerun already, and
+/// while another turn runs.
 pub async fn post_edit_turn(
     State(state): State<AppState>,
     store: ScopedStore,
@@ -332,6 +335,10 @@ pub async fn post_branch_turn(
 
 /// What a turn did outside the conversation, from its durable rows.
 ///
+/// The turn's earlier answers count too. An edit takes every one of them out
+/// of the conversation, so one that acted is enough to start a new
+/// conversation instead.
+///
 /// A call the reader declined never ran, so it changed nothing. Every other
 /// call counts, including one that failed or was stopped partway: it may have
 /// acted before it ended.
@@ -340,10 +347,23 @@ pub(crate) async fn turn_side_effects(
     chat_id: SessionId,
     turn_id: TurnId,
 ) -> Result<Vec<TurnSideEffect>, ServerError> {
+    let replacements = store.list_turn_replacements(chat_id).await?;
+    let mut turns = HashSet::from([turn_id]);
+    let mut current = turn_id;
+    while let Some(replacement) = replacements
+        .iter()
+        .find(|replacement| replacement.turn_id == current)
+    {
+        if !turns.insert(replacement.replaces) {
+            break;
+        }
+        current = replacement.replaces;
+    }
+
     let mut effects = BTreeSet::new();
     let declined = tidebreak_core::ToolErrorCategory::UserDeclined.as_str();
     for call in store.list_tool_calls(chat_id).await? {
-        if call.turn_id != turn_id
+        if !turns.contains(&call.turn_id)
             || call.status == ToolCallStatus::Pending
             || call.error_code.as_deref() == Some(declined)
         {
@@ -363,7 +383,7 @@ pub(crate) async fn turn_side_effects(
         .list_exec_file_snapshots(chat_id)
         .await?
         .iter()
-        .any(|snapshot| snapshot.turn_id == turn_id)
+        .any(|snapshot| turns.contains(&snapshot.turn_id))
     {
         effects.insert(TurnSideEffect::FilesWritten);
     }

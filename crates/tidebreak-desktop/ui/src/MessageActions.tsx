@@ -246,7 +246,7 @@ export function editStartsNewChatCopy(
     done.length === 1
       ? done[0]
       : `${done.slice(0, -1).join(", ")} and ${done[done.length - 1]}`;
-  return `This answer ${listed}, so your edit starts a new chat. This chat stays as it is.`;
+  return `Your edit replaces an answer that ${listed}, so it starts a new chat. This chat stays as it is.`;
 }
 
 /**

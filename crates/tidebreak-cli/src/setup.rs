@@ -160,8 +160,9 @@ pub enum Command {
         model: Option<String>,
         wait: bool,
     },
-    /// Replace a chat's latest message and answer it. An edit of a turn that
-    /// changed things outside the chat starts a new chat instead.
+    /// Replace a chat's latest message and answer it. An edit that replaces
+    /// an answer that changed things outside the chat starts a new chat
+    /// instead.
     ChatEdit {
         chat: SessionId,
         turn: Option<TurnId>,
@@ -218,7 +219,8 @@ async fn finish_rerun(
     } else {
         if started.branched {
             eprintln!(
-                "tidebreak: turn {replaced} changed things outside the chat ({}), so the edit started chat {}",
+                "tidebreak: the edit replaces an answer that changed things outside the chat \
+                 ({}), so it started chat {}",
                 side_effect_words(&started.side_effects),
                 started.chat_id
             );

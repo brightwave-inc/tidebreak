@@ -642,9 +642,10 @@ pub struct ChatTerminalTurnSnapshot {
     pub usage: crate::event_projection::RendererTurnUsage,
     pub voice_input_used: bool,
     pub finished_at: chrono::DateTime<Utc>,
-    /// What this turn did outside the conversation. Read only for the
-    /// conversation's latest turn, the one an edit can replace: an edit of a
-    /// turn with any of these starts a new conversation instead.
+    /// What this turn, or an earlier answer it replaced, did outside the
+    /// conversation. Read only for the conversation's latest turn, the one an
+    /// edit can replace: an edit of a turn with any of these starts a new
+    /// conversation instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub side_effects: Option<Vec<super::turn_rerun::TurnSideEffect>>,

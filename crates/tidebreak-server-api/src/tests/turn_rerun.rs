@@ -2,17 +2,20 @@
 
 use super::*;
 
+/// The `(role, text)` of every message one request carried.
+type SeenRequest = Vec<(Role, String)>;
+
 /// Answers `answer 1`, `answer 2`, … and records the text of every message
 /// each request carried, so a test can see what the model was shown.
 #[derive(Clone, Default)]
 struct NumberedProvider {
-    requests: Arc<Mutex<Vec<Vec<(Role, String)>>>>,
+    requests: Arc<Mutex<Vec<SeenRequest>>>,
     /// Fail the first request with an error the worker does not retry.
     fail_first: bool,
 }
 
 impl NumberedProvider {
-    fn request(&self, index: usize) -> Vec<(Role, String)> {
+    fn request(&self, index: usize) -> SeenRequest {
         self.requests.lock().unwrap()[index].clone()
     }
 }
@@ -504,6 +507,63 @@ async fn an_edit_of_a_turn_that_wrote_files_starts_a_new_chat_and_says_why() {
         link.turn_id,
         Some(store.list_turns(chat.id).await.unwrap()[0].id)
     );
+}
+
+#[tokio::test]
+async fn an_edit_starts_a_new_chat_when_an_earlier_answer_acted() {
+    let provider = NumberedProvider::default();
+    let (router, token, store, _dir) = test_app_with(Arc::new(provider.clone())).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "write the report").await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turns(&store, chat.id, 1).await;
+    let wrote = latest_turn(&store, chat.id).await;
+    record_call(&store, chat.id, wrote, "write_file").await;
+
+    // The answer that replaces it only talks.
+    let regenerated = TurnId::new();
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/turns/{wrote}/regenerate", chat.id),
+        serde_json::json!({ "new_turn_id": regenerated }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    wait_for_turns(&store, chat.id, 2).await;
+
+    // An edit takes the earlier answer out of the conversation too, so the
+    // transcript warns before sending and the edit starts a new chat.
+    let before = transcript(&router, &bearer, chat.id).await;
+    assert_eq!(
+        before["terminal_turns"][0]["side_effects"],
+        serde_json::json!(["files_written"])
+    );
+    let edited = TurnId::new();
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/turns/{regenerated}/edit", chat.id),
+        serde_json::json!({ "new_turn_id": edited, "content": "write a shorter report" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let started: serde_json::Value = json_body(response).await;
+    assert_eq!(started["branched"], true);
+    assert_eq!(
+        started["side_effects"],
+        serde_json::json!(["files_written"])
+    );
+    let branch: SessionId = serde_json::from_value(started["chat_id"].clone()).unwrap();
+    assert_ne!(branch, chat.id);
+    wait_for_turns(&store, branch, 1).await;
+
+    // The original still pages back to the answer that wrote the file.
+    let original = transcript(&router, &bearer, chat.id).await;
+    assert_eq!(original["answer_versions"][0]["turn_id"], wrote.to_string());
 }
 
 #[tokio::test]

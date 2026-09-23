@@ -69,13 +69,15 @@ how they were replaced (`tidebreak_core::replaced_turns`):
   version of it: they answered a message that no longer exists.
 
 **An edit that would erase a record of action starts a new conversation
-instead.** When the turn being edited wrote files, created outputs, called a
-connected app or MCP server, or started other work (background agents, code
-sessions, app or browser control, a new app), the edit branches before that
-turn and sends the edited message in the branch. The original keeps its
-record of what ran, which nothing undoes either way. The answer says so with
-`branched` and `side_effects`, and the transcript carries the latest turn's
-`side_effects` so the desktop says so before you send.
+instead.** When the turn being edited, or any earlier answer to the same
+message, wrote files, created outputs, called a connected app or MCP server,
+or started other work (background agents, code sessions, app or browser
+control, a new app), the edit branches before that turn and sends the edited
+message in the branch. Earlier answers count because an edit takes them out
+of the conversation too. The original keeps its record of what ran, which
+nothing undoes either way. The answer says so with `branched` and
+`side_effects`, and the transcript carries the latest turn's `side_effects`
+so the desktop says so before you send.
 
 **A branch copies; it does not point back.** Branching copies, in one
 transaction, the settled turns of the conversation as it stands through the

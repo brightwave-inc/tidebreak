@@ -990,9 +990,10 @@ invoked_skills?: Array<string>,
  */
 usage: RendererTurnUsage, voice_input_used: boolean, finished_at: string,
 /**
- * What this turn did outside the conversation. Read only for the
- * conversation's latest turn, the one an edit can replace: an edit of a
- * turn with any of these starts a new conversation instead.
+ * What this turn, or an earlier answer it replaced, did outside the
+ * conversation. Read only for the conversation's latest turn, the one an
+ * edit can replace: an edit of a turn with any of these starts a new
+ * conversation instead.
  */
 side_effects?: Array<TurnSideEffect>, };
 
@@ -1120,8 +1121,9 @@ turn_id: TurnId,
  */
 branched: boolean,
 /**
- * What the replaced turn did outside the conversation, which is why an
- * edit started a new conversation. Empty otherwise.
+ * What the replaced turn and its earlier answers did outside the
+ * conversation, which is why an edit started a new conversation. Empty
+ * otherwise.
  */
 side_effects: Array<TurnSideEffect>, };
 
