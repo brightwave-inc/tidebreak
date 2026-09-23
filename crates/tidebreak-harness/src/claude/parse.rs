@@ -46,9 +46,10 @@ pub struct ClaudeStreamParser {
     /// current turn. A cut `assistant` line loses its attribution the same
     /// way a cut result does.
     message_parents: HashMap<String, Option<String>>,
-    /// Tasks running in the background. Their tool call settles at once with
-    /// a placeholder, so their real end arrives only as a notification.
-    background_tasks: HashSet<String>,
+    /// Tasks the engine is running, by task id. A task in the background
+    /// settles its tool call at once with a placeholder, so its real end
+    /// arrives only as a notification.
+    tasks: HashMap<String, EngineTask>,
     emitted_session: bool,
     reported_model: Option<String>,
 }
@@ -59,6 +60,17 @@ pub struct ClaudeStreamParser {
 /// from zero, so the index alone does not identify one. The `Task` call the
 /// lines run inside separates them.
 type BlockKey = (Option<String>, u64);
+
+/// A task the engine is running for a tool call.
+#[derive(Debug, Clone, Default)]
+struct EngineTask {
+    /// A subagent, rather than a command or a tool.
+    subagent: bool,
+    /// The engine's one-line description of the task.
+    description: String,
+    /// Running in the background, where its tool result is a placeholder.
+    background: bool,
+}
 
 /// A tool call the engine has opened but not yet described.
 #[derive(Debug)]
@@ -338,8 +350,12 @@ impl ClaudeStreamParser {
                     .and_then(Value::as_bool)
                     == Some(true)
                 {
-                    if let Some(task_id) = value.get("task_id").and_then(Value::as_str) {
-                        self.background_tasks.insert(task_id.to_owned());
+                    if let Some(task) = value
+                        .get("task_id")
+                        .and_then(Value::as_str)
+                        .and_then(|task_id| self.tasks.get_mut(task_id))
+                    {
+                        task.background = true;
                     }
                 }
                 Vec::new()
@@ -364,52 +380,81 @@ impl ClaudeStreamParser {
         }
     }
 
-    /// Remember a task whose end its tool result will not report.
+    /// Remember a task, to know at its end whether its tool result already
+    /// reported it.
     ///
-    /// A task started in the background settles its tool call at once with
-    /// a placeholder ("Command running in background with ID: …"). A
+    /// A task in the background settles its tool call at once with a
+    /// placeholder: "Command running in background with ID: …" for a
+    /// command, "Async agent launched successfully" for a subagent. A
     /// housekeeping task the engine marks `skip_transcript` or `ambient` is
     /// not the person's work, so it is not followed.
     fn note_task_started(&mut self, value: &Value) {
         let flag = |key: &str| value.get(key).and_then(Value::as_bool) == Some(true);
-        if !flag("is_backgrounded") || flag("skip_transcript") || flag("ambient") {
+        if flag("skip_transcript") || flag("ambient") {
             return;
         }
-        if let Some(task_id) = value.get("task_id").and_then(Value::as_str) {
-            self.background_tasks.insert(task_id.to_owned());
-        }
+        let Some(task_id) = value.get("task_id").and_then(Value::as_str) else {
+            return;
+        };
+        self.tasks.insert(
+            task_id.to_owned(),
+            EngineTask {
+                subagent: value.get("task_type").and_then(Value::as_str) == Some("local_agent"),
+                description: value
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned(),
+                background: flag("is_backgrounded"),
+            },
+        );
     }
 
     /// A task finished. A foreground task's own tool result follows and
     /// reports it. A background task's call settled long ago with a
-    /// placeholder, so its end reaches the transcript as a notice carrying
-    /// the engine's own summary: `Background command "…" completed (exit
-    /// code 0)`.
+    /// placeholder, so its end reaches the transcript as a notice. A
+    /// command's notice is the engine's own summary: `Background command "…"
+    /// completed (exit code 0)`. A subagent's summary is its whole final
+    /// answer, which its span already shows, so its notice just names it.
     fn parse_task_notification(&mut self, value: &Value) -> Vec<HarnessEvent> {
         let Some(task_id) = value.get("task_id").and_then(Value::as_str) else {
             self.count_unrecognized("system/task_notification/missing-task", value);
             return Vec::new();
         };
-        if !self.background_tasks.remove(task_id) {
+        let Some(task) = self.tasks.remove(task_id).filter(|task| task.background) else {
             return Vec::new();
-        }
+        };
         let status = value.get("status").and_then(Value::as_str).unwrap_or("");
         let summary = value
             .get("summary")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|summary| !summary.is_empty())
-            .map_or_else(
-                || format!("A background task ended ({status})."),
-                str::to_owned,
-            );
+            .filter(|summary| !summary.is_empty());
+        let message = match (task.subagent, summary) {
+            (false, Some(summary)) => summary.to_owned(),
+            (subagent, _) => {
+                let what = match (subagent, task.description.is_empty()) {
+                    (true, true) => "A background subagent".to_owned(),
+                    (true, false) => format!("Subagent \"{}\"", task.description),
+                    (false, true) => "A background task".to_owned(),
+                    (false, false) => format!("Background task \"{}\"", task.description),
+                };
+                match status {
+                    "completed" => format!("{what} finished."),
+                    "failed" => format!("{what} failed."),
+                    "stopped" => format!("{what} was stopped."),
+                    _ => format!("{what} ended."),
+                }
+            }
+        };
         vec![HarnessEvent::HarnessNotice {
             level: if status == "completed" {
                 HarnessNoticeLevel::Info
             } else {
                 HarnessNoticeLevel::Warning
             },
-            message: bound(&summary, MAX_NOTICE_CHARS),
+            message: bound(&message, MAX_NOTICE_CHARS),
         }]
     }
 
@@ -613,8 +658,10 @@ impl ClaudeStreamParser {
     }
 
     fn parse_result(&mut self, value: &Value) -> Vec<HarnessEvent> {
-        // Messages never span turns.
+        // Messages and tool calls never span turns: a call the turn left
+        // without a result will not get one now.
         self.message_parents.clear();
+        self.running_calls.clear();
         if let Some(session_id) = value.get("session_id").and_then(Value::as_str) {
             if self.resume_ref.is_none() {
                 self.resume_ref = Some(session_id.to_owned());
@@ -818,12 +865,19 @@ fn tool_call_id(block: &Value) -> String {
 }
 
 /// Tool name of a `tool_use` block.
+///
+/// 2.1.259 names its subagent tool `Agent` (captured); 2.1.233 called it
+/// `Task`. The span every adapter emits for a subagent is `Task` (decision
+/// 52), and the rail and the transcript look for that name.
 fn tool_name(block: &Value) -> String {
-    block
+    match block
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
-        .to_owned()
+    {
+        "Agent" => "Task".to_owned(),
+        name => name.to_owned(),
+    }
 }
 
 /// Whether a view of a call still says nothing about its arguments.

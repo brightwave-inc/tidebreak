@@ -588,6 +588,67 @@ pub(crate) mod tests {
         assert!(first_result < notice);
     }
 
+    /// Captured on 2.1.259: the engine names its subagent tool `Agent`, and
+    /// the span every adapter emits for a subagent is `Task`, which the rail
+    /// and the transcript look for. The subagent's own calls attach to it.
+    ///
+    /// Run in the background, the call settles at once with a placeholder
+    /// while the subagent works on; its end arrives as a notification after
+    /// the turn's result, and reaches the transcript as a notice naming it.
+    /// Run in the foreground, its own tool result reports its end.
+    #[test]
+    fn fixture_replay_subagent_tasks() {
+        for (name, background) in [("subagent-task", true), ("subagent-task-foreground", false)] {
+            let (events, unrecognized) = replay_at("2.1.259", name);
+            assert_eq!(unrecognized, 0, "{name}");
+            let span = events
+                .iter()
+                .find_map(|event| match event {
+                    HarnessEvent::ToolStarted {
+                        call_id,
+                        name,
+                        detail,
+                        parent_call_id: None,
+                    } if name == "Task" => Some((call_id.clone(), detail.clone())),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name}: the Agent call opens a Task span"));
+            assert_eq!(
+                span.1,
+                tidebreak_core::ToolDetail::Other {
+                    summary: "Inspect the fixture (general-purpose)".into()
+                },
+                "{name}"
+            );
+            let children = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        HarnessEvent::ToolStarted { parent_call_id: Some(parent), .. }
+                            if *parent == span.0
+                    )
+                })
+                .count();
+            assert_eq!(
+                children, 2,
+                "{name}: both subagent commands attach to the span"
+            );
+            let notices: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    HarnessEvent::HarnessNotice { message, .. } => Some(message.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if background {
+                assert_eq!(notices, ["Subagent \"Inspect the fixture\" finished."]);
+            } else {
+                assert!(notices.is_empty(), "{name}: {notices:?}");
+            }
+        }
+    }
+
     #[test]
     fn auth_status_reads_authenticated_unauthenticated_and_unknown_states() {
         assert_eq!(

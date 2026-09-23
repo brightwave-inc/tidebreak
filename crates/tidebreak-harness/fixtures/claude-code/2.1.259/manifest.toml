@@ -1,7 +1,12 @@
 version = "2.1.259"
 protocol = "stdio MCP over the pinned Claude Code CLI; print-mode stream-json for the task scenarios"
 captured = "2026-09-14"
-scenarios = ["managed-human-mcp", "background-tasks"]
+scenarios = [
+  "managed-human-mcp",
+  "background-tasks",
+  "subagent-task",
+  "subagent-task-foreground",
+]
 
 [managed_human_mcp]
 provider = "Scripted localhost Messages provider; no paid inference"
@@ -51,6 +56,37 @@ redactions = """
 The repository path became /workspace, and the engine's task-output root
 /tmp/redacted. Two thinking signatures became REDACTED_SIGNATURE. Session,
 message, request, tool, and task ids and timestamps are kept as emitted.
+"""
+
+[subagent_tasks]
+files = ["subagent-task.ndjson", "subagent-task-foreground.ndjson"]
+captured = "2026-09-23"
+binary = "The pinned install; `claude --version` printed `2.1.259 (Claude Code)`"
+command = "The background-tasks argv without --bare, so the subagent tool is offered."
+provider = "Scripted localhost Messages provider; no paid inference. ANTHROPIC_API_KEY was a placeholder and CLAUDE_CONFIG_DIR a fresh directory. With CLAUDE_CONFIG_DIR set, 2.1.259 names its keychain items with a hash of that directory, so they did not exist. A stand-in `security` on PATH answered every lookup as not found, and every request carried only the placeholder key."
+notes = """
+The scripted parent calls the subagent tool, which requests and tool_use
+blocks name Agent while system/init lists it as Task. The subagent runs two
+Bash commands and answers. Its forwarded lines carry parent_tool_use_id set
+to the Agent call's id. The local_agent task lines (task_started,
+task_progress, task_notification) carry the same id as tool_use_id;
+task_updated carries only task_id. The subagent's own long Bash registers a
+local_bash task marked owned_by_subagent.
+
+subagent-task leaves run_in_background unset, and 2.1.259 runs the subagent
+in the background: the call's tool result is a placeholder ("Async agent
+launched successfully"), the parent's result lands first, the subagent's
+task_notification follows with its final answer as the summary, and the
+engine then runs a turn nobody asked for. subagent-task-foreground sets
+run_in_background false and runs 31 seconds: the call blocks, a
+tool_progress heartbeat names the Agent call, and the call's own tool result
+carries the answer.
+"""
+redactions = """
+The repository path became /workspace, the config directory and the
+engine's task-output root /tmp/redacted, the messaging socket
+/tmp/redacted.sock, and thinking signatures REDACTED_SIGNATURE. Ids and
+timestamps are kept as emitted.
 """
 
 [help]

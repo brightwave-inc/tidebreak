@@ -590,6 +590,7 @@ impl CodexStreamParser {
         // A late child frame must not reopen a span that this boundary settles.
         self.settled_subagents
             .extend(self.started_subagents.iter().cloned());
+        self.item_threads.clear();
         self.parent_turn_active = false;
         match status {
             "completed" => vec![HarnessEvent::TurnCompleted {

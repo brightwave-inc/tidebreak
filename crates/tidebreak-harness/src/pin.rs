@@ -54,7 +54,8 @@ pub struct HarnessPin {
 /// Replay baselines and later protocol-specific captures live in
 /// `fixtures/README.md`; keep that coverage table accurate when changing a pin.
 pub const PINS: &[HarnessPin] = &[
-    // Replay baseline: 2.1.233; 2.1.238/239 process observations are manifest notes.
+    // Replay baseline: 2.1.233; task-line captures: 2.1.259; 2.1.238/239 process
+    // observations are manifest notes.
     // `claude login` is not a command: it starts a session with "login" as
     // the prompt. Sign-in lives under `auth`.
     HarnessPin {
@@ -64,7 +65,8 @@ pub const PINS: &[HarnessPin] = &[
         bin: "claude",
         sign_in: &["auth", "login"],
     },
-    // Replay baseline: 0.147.0; MCP elicitation captures: 0.153.0.
+    // Replay baseline: 0.147.0; MCP elicitation captures: 0.153.0; item and
+    // resume captures: 0.153.4.
     HarnessPin {
         kind: HarnessKind::Codex,
         version: "0.153.4",
@@ -80,7 +82,7 @@ pub const PINS: &[HarnessPin] = &[
         bin: "opencode",
         sign_in: &["auth", "login"],
     },
-    // Replay baselines: 1.0.4/5; 1.0.13 covers ACP and tool images only.
+    // Replay baselines: 1.0.4/5; 1.0.13 covers ACP, tool images, and plan updates.
     HarnessPin {
         kind: HarnessKind::Grok,
         version: "1.0.13",
