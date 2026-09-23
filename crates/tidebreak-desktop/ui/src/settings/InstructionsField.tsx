@@ -143,7 +143,7 @@ export function InstructionsField({
         }
       >
         <Textarea
-          className="min-h-40 resize-y"
+          className="min-h-40 resize-y aria-invalid:border-critical-border"
           value={draft}
           placeholder={placeholder}
           disabled={disabled}
