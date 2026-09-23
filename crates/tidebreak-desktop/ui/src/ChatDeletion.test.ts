@@ -10,6 +10,7 @@ import {
   prependReplacementChat,
   purgeDeletedChatHostAuthority,
   stopLiveChatWork,
+  tryDeleteChat,
   waitForChatQuiescent,
 } from "./ChatDeletion";
 import {
@@ -223,6 +224,28 @@ describe("active work on delete", () => {
       waitForChatQuiescent({ inspect, wait, attempts: 5, intervalMs: 1 }),
     ).resolves.toBe(true);
     expect(inspect).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks the server to delete before detaching folders", async () => {
+    const deleteChat = vi.fn(async () => undefined);
+    await expect(tryDeleteChat(deleteChat)).resolves.toBe("deleted");
+    expect(deleteChat).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a running conversation without detaching folders", async () => {
+    const deleteChat = vi.fn(async () => {
+      throw new HttpError(409, "still working", "chat_active");
+    });
+    await expect(tryDeleteChat(deleteChat)).resolves.toBe("chat_active");
+  });
+
+  it("reports attached folders only after the server says they are the blocker", async () => {
+    const deleteChat = vi.fn(async () => {
+      throw new HttpError(409, "folders attached", "chat_roots_attached");
+    });
+    await expect(tryDeleteChat(deleteChat)).resolves.toBe(
+      "chat_roots_attached",
+    );
   });
 
   it("explains an active-work refusal without the raw error", () => {

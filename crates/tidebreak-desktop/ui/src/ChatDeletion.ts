@@ -119,6 +119,33 @@ export async function stopLiveChatWork(args: {
   }
 }
 
+/** Why the first delete refused, or that it succeeded. */
+export type ChatDeleteAttempt =
+  | "deleted"
+  | "chat_active"
+  | "chat_roots_attached";
+
+/**
+ * Ask the server to delete first. Detach folders only after it answers
+ * `chat_roots_attached`; a running turn answers `chat_active` instead.
+ */
+export async function tryDeleteChat(
+  deleteChat: () => Promise<void>,
+): Promise<ChatDeleteAttempt> {
+  try {
+    await deleteChat();
+    return "deleted";
+  } catch (error) {
+    if (error instanceof HttpError && error.kind === "chat_active") {
+      return "chat_active";
+    }
+    if (error instanceof HttpError && error.kind === "chat_roots_attached") {
+      return "chat_roots_attached";
+    }
+    throw error;
+  }
+}
+
 /** Wait until cancel has made the conversation deletable, or give up. */
 export async function waitForChatQuiescent(args: {
   inspect: () => Promise<LiveChatWork>;
