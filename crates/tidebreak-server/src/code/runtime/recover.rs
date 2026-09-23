@@ -515,6 +515,10 @@ mod tests {
         runtime.recover().await.unwrap();
 
         assert!(expected_pin.is_file());
+        assert!(
+            !old_binary.exists(),
+            "the install the new pin replaced is removed"
+        );
         assert_eq!(
             broker.ensure_calls.load(Ordering::Relaxed),
             1,

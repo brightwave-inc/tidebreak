@@ -515,6 +515,17 @@ impl CodeRuntime {
         self.workers.lock().expect("code workers").contains_key(&id)
     }
 
+    /// The engine executable each attached worker launches. An older engine
+    /// install stays on disk while one of these runs from it.
+    pub(in crate::code) fn worker_binaries(&self) -> Vec<PathBuf> {
+        self.workers
+            .lock()
+            .expect("code workers")
+            .values()
+            .filter_map(|handle| handle.binary.clone())
+            .collect()
+    }
+
     /// Move every idle live worker of `kinds` onto the binary the update
     /// channel now selects.
     ///
@@ -838,6 +849,63 @@ mod tests {
             .resync_workers_to_selected_binaries(&[HarnessKind::Codex])
             .await
             .is_empty());
+    }
+
+    fn set_worker_binary(runtime: &CodeRuntime, id: SessionId, binary: &Path) {
+        runtime
+            .workers
+            .lock()
+            .expect("code workers")
+            .get_mut(&id)
+            .expect("attached worker")
+            .binary = Some(binary.to_path_buf());
+    }
+
+    /// A session in the middle of a turn on an older install keeps that
+    /// install through a prune, while an unused one beside it goes. Once the
+    /// session moves to the pin, the next prune removes the older install.
+    #[tokio::test]
+    async fn a_prune_keeps_the_install_a_running_session_uses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kind = HarnessKind::ClaudeCode;
+        let pin = tidebreak_harness::pin_for(kind).unwrap();
+        let pinned = write_install(tmp.path(), kind, pin.version);
+        let held = write_install(tmp.path(), kind, "0.0.2");
+        write_install(tmp.path(), kind, "0.0.1");
+        let runtime = scripted_runtime(tmp.path()).await;
+        let owner = OwnerId::new("alice").unwrap();
+        let session = workspaceless_session(&owner, kind);
+        insert_session(&runtime.db, &session).await.unwrap();
+        let attached = runtime.attach_and_spawn_worker(session).await.unwrap();
+        // The session attached before the pin moved, and its turn is still
+        // running on the older install.
+        set_worker_binary(&runtime, attached.id, &held);
+        let mut running = runtime.get_session(&owner, attached.id).await.unwrap();
+        running.lifecycle = SessionLifecycle::Running;
+        crate::code::attention::persist_session(&runtime.db, &runtime.bus, &running)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            runtime.remove_superseded_installs(kind),
+            vec!["0.0.1".to_owned()]
+        );
+        assert!(held.exists(), "the running session's install stays");
+        assert_eq!(
+            tidebreak_harness::installed_versions(tmp.path(), kind),
+            vec![pin.version.to_owned(), "0.0.2".to_owned()]
+        );
+
+        // The resync moves the session to the pin once its turn ends.
+        set_worker_binary(&runtime, attached.id, &pinned);
+        assert_eq!(
+            runtime.remove_superseded_installs(kind),
+            vec!["0.0.2".to_owned()]
+        );
+        assert_eq!(
+            tidebreak_harness::installed_versions(tmp.path(), kind),
+            vec![pin.version.to_owned()]
+        );
     }
 
     #[tokio::test]

@@ -11,6 +11,11 @@
 //! updates, and a deliberate install on the `latest` channel. Listing and
 //! session create read the disk and the memoized probe, so neither waits on a
 //! network round trip.
+//!
+//! Every pin bump and every update leaves the previous version on disk, and
+//! nothing reads it again. After each install, the versions no channel drives
+//! go, unless a session still runs one; see
+//! [`CodeRuntime::remove_superseded_installs`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,6 +28,12 @@ use super::runtime::CodeRuntime;
 /// question it answers is "may this machine run past the pins", not
 /// "which pins".
 pub const HARNESS_UPDATE_CHANNEL_SETTING: &str = "code.harness_update_channel";
+
+/// Name prefix for an engine install on its way out. A removal renames the
+/// version directory first, so the listing drops it in one step and nothing
+/// reads a half-deleted tree. The deletion runs in the background; one that a
+/// quit cuts short keeps the prefix, and the next removal pass finishes it.
+const REMOVING_PREFIX: &str = ".removing-";
 
 /// The stored update channel, or `pinned` when unset or unreadable.
 pub async fn read_update_channel(
@@ -81,6 +92,71 @@ impl KnownReleases {
     }
 }
 
+/// The version the `latest` channel drives: the newest install at or past the
+/// pin. `installed` is newest first, as [`tidebreak_harness::installed_versions`]
+/// lists it.
+fn newest_at_or_past_pin<'a>(installed: &'a [String], pin: &str) -> Option<&'a String> {
+    installed
+        .iter()
+        .find(|version| tidebreak_harness::compare_versions(version, pin).is_ge())
+}
+
+/// The installed versions of one engine that no update channel drives.
+///
+/// Two installs stay. The pin stays, because the pinned channel drives it.
+/// The newest install at or past the pin stays, because the `latest` channel
+/// drives it; on the pinned channel it keeps a switch back to `latest` a probe
+/// away rather than a download away. Everything else goes: no channel selects
+/// a version below the pin, and the newest install replaces every other
+/// version past it.
+///
+/// `installed` is newest first, as [`tidebreak_harness::installed_versions`]
+/// lists it.
+fn superseded_installs(installed: &[String], pin: &str) -> Vec<String> {
+    let driven_by_latest = newest_at_or_past_pin(installed, pin);
+    installed
+        .iter()
+        .filter(|version| version.as_str() != pin && Some(*version) != driven_by_latest)
+        .cloned()
+        .collect()
+}
+
+/// Directories under `versions_dir` that a quit left mid-removal.
+fn unfinished_removals(versions_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(versions_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(REMOVING_PREFIX)
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// Delete install directories already renamed out of the listing. This runs
+/// on a blocking thread: one install is thousands of files.
+fn delete_removed_installs(kind: HarnessKind, paths: Vec<PathBuf>) {
+    for path in paths {
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            // Another pass deleted it first.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                %kind,
+                path = %path.display(),
+                %error,
+                "could not delete a removed engine install; the next removal pass retries"
+            ),
+        }
+    }
+}
+
 impl CodeRuntime {
     /// The update channel this machine is on.
     pub async fn harness_update_channel(&self) -> HarnessUpdateChannel {
@@ -104,11 +180,9 @@ impl CodeRuntime {
         let version = match channel {
             HarnessUpdateChannel::Pinned => pin.version.to_owned(),
             HarnessUpdateChannel::Latest => {
-                tidebreak_harness::installed_versions(&self.data_dir, kind)
-                    .into_iter()
-                    .find(|version| {
-                        tidebreak_harness::compare_versions(version, pin.version).is_ge()
-                    })
+                let installed = tidebreak_harness::installed_versions(&self.data_dir, kind);
+                newest_at_or_past_pin(&installed, pin.version)
+                    .cloned()
                     .unwrap_or_else(|| pin.version.to_owned())
             }
         };
@@ -190,6 +264,9 @@ impl CodeRuntime {
     /// installed yet takes the newest release on its own. A registry that
     /// cannot be reached is not a fault on this path: the newest install
     /// stands in, and the pin stands in for that.
+    ///
+    /// With the install on disk, the versions it leaves behind are removed;
+    /// see [`Self::remove_superseded_installs`].
     pub(in crate::code) async fn ensure_harness(
         &self,
         kind: HarnessKind,
@@ -230,10 +307,91 @@ impl CodeRuntime {
             Some(&node_root),
         )
         .await?;
+        self.remove_superseded_installs(kind);
         Ok(InstalledHarness {
             version: target,
             binary,
         })
+    }
+
+    /// Remove the installs of `kind` that no channel drives and no session
+    /// runs, and return their versions.
+    ///
+    /// [`superseded_installs`] decides which versions no channel drives. Of
+    /// those, a version stays while an attached session worker launches its
+    /// binary, so a session in the middle of a turn keeps the files it runs
+    /// from. A later pass removes that version once the session moves to the
+    /// selected install. Nothing else runs an unselected install: the probe
+    /// and the sign-in terminal start the selected one, one process owns a
+    /// data directory, and startup recovery stops an engine that a crash left
+    /// running.
+    ///
+    /// Only a host that drives managed installs prunes them. A declared
+    /// binary, the in-process engine, and a host with no data directory leave
+    /// the directory alone.
+    pub(in crate::code) fn remove_superseded_installs(&self, kind: HarnessKind) -> Vec<String> {
+        if kind.is_in_process()
+            || self.host.data_dir.is_none()
+            || self.host.declared(kind).is_some()
+        {
+            return Vec::new();
+        }
+        let Some(pin) = tidebreak_harness::pin_for(kind) else {
+            return Vec::new();
+        };
+        let install_dir =
+            |version: &str| tidebreak_harness::pin::install_dir_for(&self.data_dir, pin, version);
+        let pinned_dir = install_dir(pin.version);
+        let Some(versions_dir) = pinned_dir.parent() else {
+            return Vec::new();
+        };
+        let mut deletions = unfinished_removals(versions_dir);
+        let installed = tidebreak_harness::installed_versions(&self.data_dir, kind);
+        let binaries = self.worker_binaries();
+        let (running, unused): (Vec<String>, Vec<String>) =
+            superseded_installs(&installed, pin.version)
+                .into_iter()
+                .partition(|version| {
+                    let dir = install_dir(version);
+                    binaries.iter().any(|binary| binary.starts_with(&dir))
+                });
+        for version in &running {
+            tracing::info!(
+                %kind,
+                %version,
+                "kept an older engine install that a session still runs"
+            );
+        }
+        let mut removed = Vec::new();
+        for version in unused {
+            let dir = install_dir(&version);
+            let removing = versions_dir.join(format!(
+                "{REMOVING_PREFIX}{version}-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            match std::fs::rename(&dir, &removing) {
+                Ok(()) => {
+                    tracing::info!(
+                        %kind,
+                        %version,
+                        path = %dir.display(),
+                        "removed an engine install that nothing uses"
+                    );
+                    deletions.push(removing);
+                    removed.push(version);
+                }
+                Err(error) => tracing::warn!(
+                    %kind,
+                    %version,
+                    %error,
+                    "could not remove an engine install that nothing uses"
+                ),
+            }
+        }
+        if !deletions.is_empty() {
+            tokio::task::spawn_blocking(move || delete_removed_installs(kind, deletions));
+        }
+        removed
     }
 
     /// Ask the registry for every engine's newest version and remember the
@@ -493,5 +651,93 @@ mod tests {
                 .as_deref(),
             Some(pin.version)
         );
+    }
+
+    fn versions(list: &[&str]) -> Vec<String> {
+        list.iter().map(|version| (*version).to_owned()).collect()
+    }
+
+    /// The pin and the newest install at or past it are what the two
+    /// channels drive. Every other version goes, whether it sits below the
+    /// pin or is an older release past it.
+    #[test]
+    fn only_the_pin_and_the_newest_release_are_kept() {
+        assert_eq!(
+            superseded_installs(&versions(&["2.1.259", "2.1.234"]), "2.1.259"),
+            versions(&["2.1.234"])
+        );
+        assert_eq!(
+            superseded_installs(
+                &versions(&["0.155.0", "0.154.0", "0.153.4", "0.153.0", "0.147.0"]),
+                "0.153.4"
+            ),
+            versions(&["0.154.0", "0.153.0", "0.147.0"])
+        );
+        // A machine that updated past a pin it never downloaded keeps the
+        // release `latest` drives.
+        assert_eq!(
+            superseded_installs(&versions(&["0.154.0", "0.153.0", "0.147.0"]), "0.153.4"),
+            versions(&["0.153.0", "0.147.0"])
+        );
+        assert!(superseded_installs(&versions(&["2.1.259"]), "2.1.259").is_empty());
+        assert!(superseded_installs(&[], "2.1.259").is_empty());
+    }
+
+    fn removals_in_progress(versions_dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(versions_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(REMOVING_PREFIX))
+            })
+            .collect()
+    }
+
+    /// A prune takes every version no channel drives off the listing at
+    /// once, deletes it in the background, and finishes a deletion that a
+    /// quit cut short. A directory with no marker may be an install npm is
+    /// still writing, so it stays.
+    #[tokio::test]
+    async fn a_prune_removes_every_version_no_channel_drives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kind = HarnessKind::Codex;
+        let pin = tidebreak_harness::pin_for(kind).unwrap();
+        let pinned = write_install(tmp.path(), kind, pin.version);
+        let newest = write_install(tmp.path(), kind, "99.0.0");
+        write_install(tmp.path(), kind, "98.0.0");
+        write_install(tmp.path(), kind, "0.0.1");
+        let versions_dir = tidebreak_harness::pin::install_dir_for(tmp.path(), pin, pin.version)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let in_progress = versions_dir.join("100.0.0");
+        std::fs::create_dir_all(in_progress.join("node_modules")).unwrap();
+        let unfinished = versions_dir.join(format!("{REMOVING_PREFIX}0.0.0-cut-short"));
+        std::fs::create_dir_all(unfinished.join("node_modules")).unwrap();
+        let runtime = runtime(tmp.path()).await;
+
+        assert_eq!(
+            runtime.remove_superseded_installs(kind),
+            versions(&["98.0.0", "0.0.1"])
+        );
+        assert_eq!(
+            tidebreak_harness::installed_versions(tmp.path(), kind),
+            versions(&["99.0.0", pin.version])
+        );
+        assert!(in_progress.exists());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !removals_in_progress(&versions_dir).is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the background deletion finishes");
+
+        // Each channel still finds the install it drives.
+        assert_eq!(runtime.selected_harness(kind).await.unwrap().binary, pinned);
+        set_channel(&runtime, HarnessUpdateChannel::Latest).await;
+        assert_eq!(runtime.selected_harness(kind).await.unwrap().binary, newest);
+        assert!(runtime.remove_superseded_installs(kind).is_empty());
     }
 }
