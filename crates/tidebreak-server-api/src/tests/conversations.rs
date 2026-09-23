@@ -1789,3 +1789,194 @@ async fn a_managed_ceiling_locks_over_ceiling_permission_modes() {
     .await;
     assert_eq!(settings["chat_defaults"]["permission_mode"], "ask");
 }
+
+/// Wait until `turns` turns of `chat` have reached a terminal event.
+async fn wait_for_terminal_turns(store: &Arc<dyn Store>, chat: SessionId, turns: usize) {
+    for _ in 0..500 {
+        let finished = store
+            .list_events(chat, 0)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.event,
+                    AgentEvent::TurnCompleted { .. }
+                        | AgentEvent::TurnRefused { .. }
+                        | AgentEvent::TurnFailed { .. }
+                        | AgentEvent::TurnCancelled { .. }
+                )
+            })
+            .count();
+        if finished >= turns {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("turns did not finish within the timeout");
+}
+
+async fn transcript_page(
+    router: &Router,
+    bearer: &str,
+    chat: SessionId,
+    query: &str,
+) -> (StatusCode, serde_json::Value) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{chat}/messages{query}"))
+                .header(header::AUTHORIZATION, bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+fn questions(page: &serde_json::Value) -> Vec<String> {
+    page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn stitched(pages: &[&serde_json::Value], field: &str) -> Vec<serde_json::Value> {
+    pages
+        .iter()
+        .flat_map(|page| page[field].as_array().unwrap().clone())
+        .collect()
+}
+
+/// A long conversation opens at its end: `limit` reads the newest turns, each
+/// page's cursor reads the turns before it, and the pages put back together
+/// are the whole transcript — tool activity included, on the page covering
+/// when it ran.
+#[tokio::test]
+async fn transcript_pages_read_the_newest_turns_first() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    for (index, question) in ["first", "second", "third"].into_iter().enumerate() {
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, question).await,
+            StatusCode::ACCEPTED
+        );
+        wait_for_terminal_turns(&store, chat.id, index + 1).await;
+    }
+
+    // A call from the middle turn, stamped just after that turn's question.
+    let middle_question = store
+        .list_messages(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.content == "second")
+        .expect("the middle question exists");
+    let call_id = CallId::new();
+    let started_at = middle_question.created_at + chrono::Duration::milliseconds(1);
+    store
+        .accept_tool_call(&ToolCallRecord {
+            id: call_id,
+            chat_id: chat.id,
+            turn_id: middle_question.turn_id,
+            provider_id: "provider-middle-call".into(),
+            name: "search".into(),
+            arguments: serde_json::json!({"query": "middle"}),
+            raw_arguments: None,
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            result_preview: None,
+            provider_replay: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: started_at,
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_server_tool_call(
+                call_id,
+                &ToolCallResolution::Completed {
+                    result: "found".into(),
+                },
+                started_at + chrono::Duration::milliseconds(1),
+            )
+            .await
+            .unwrap(),
+        tidebreak_core::ResolveToolCallOutcome::Resolved
+    );
+
+    let (status, whole) = transcript_page(&router, &bearer, chat.id, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(questions(&whole), ["first", "second", "third"]);
+    assert_eq!(whole["has_more"], false);
+    assert!(whole["earlier_cursor"].is_null());
+
+    let (_, newest) = transcript_page(&router, &bearer, chat.id, "?limit=1").await;
+    assert_eq!(questions(&newest), ["third"]);
+    assert_eq!(newest["has_more"], true);
+    assert!(newest["tool_activity"].as_array().unwrap().is_empty());
+    let cursor = newest["earlier_cursor"].as_i64().unwrap();
+
+    let (_, middle) = transcript_page(
+        &router,
+        &bearer,
+        chat.id,
+        &format!("?before={cursor}&limit=1"),
+    )
+    .await;
+    assert_eq!(questions(&middle), ["second"]);
+    assert_eq!(
+        middle["tool_activity"][0]["call_id"],
+        serde_json::json!(call_id)
+    );
+    let cursor = middle["earlier_cursor"].as_i64().unwrap();
+
+    let (_, oldest) = transcript_page(
+        &router,
+        &bearer,
+        chat.id,
+        &format!("?before={cursor}&limit=5"),
+    )
+    .await;
+    assert_eq!(questions(&oldest), ["first"]);
+    assert_eq!(oldest["has_more"], false);
+    assert!(oldest["earlier_cursor"].is_null());
+
+    let pages = [&oldest, &middle, &newest];
+    for field in ["messages", "tool_activity", "terminal_turns"] {
+        assert_eq!(
+            stitched(&pages, field),
+            whole[field].as_array().unwrap().clone(),
+            "the pages hold exactly the {field} of the whole transcript"
+        );
+    }
+    assert_eq!(newest["last_event_seq"], whole["last_event_seq"]);
+}
+
+#[tokio::test]
+async fn transcript_paging_refuses_an_unusable_page() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    for query in ["?limit=0", "?limit=501", "?before=0"] {
+        let (status, _) = transcript_page(&router, &bearer, chat.id, query).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+    }
+}

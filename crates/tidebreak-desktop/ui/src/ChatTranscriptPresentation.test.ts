@@ -3,6 +3,7 @@ import type { ChatTranscript } from "./api";
 import {
   loadCurrentTerminalTranscript,
   presentChatTranscript,
+  TERMINAL_REFRESH_TURNS,
 } from "./ChatTranscriptPresentation";
 import { refusalCopy, TURN_CANCELLED_NOTICE } from "./MessageList";
 
@@ -34,6 +35,8 @@ const transcript: ChatTranscript = {
   tool_activity: [],
   terminal_turns: [],
   last_event_seq: 12,
+  has_more: false,
+  earlier_cursor: null,
 };
 
 describe("terminal transcript presentation", () => {
@@ -54,6 +57,8 @@ describe("terminal transcript presentation", () => {
       tool_activity: [],
       terminal_turns: [],
       last_event_seq: 2,
+      has_more: false,
+      earlier_cursor: null,
     });
 
     expect(presented.messages).toEqual([
@@ -93,6 +98,8 @@ describe("terminal transcript presentation", () => {
       tool_activity: [],
       terminal_turns: [],
       last_event_seq: 3,
+      has_more: false,
+      earlier_cursor: null,
     });
 
     expect(presented.messages.map((message) => message.role)).toEqual([
@@ -122,6 +129,8 @@ describe("terminal transcript presentation", () => {
       ],
       terminal_turns: [],
       last_event_seq: 4,
+      has_more: false,
+      earlier_cursor: null,
     });
 
     expect(presented.messages).toEqual([
@@ -152,6 +161,8 @@ describe("terminal transcript presentation", () => {
       ],
       terminal_turns: [],
       last_event_seq: 4,
+      has_more: false,
+      earlier_cursor: null,
     });
 
     expect(presented.messages).toEqual([
@@ -179,6 +190,8 @@ describe("terminal transcript presentation", () => {
       ],
       terminal_turns: [],
       last_event_seq: 4,
+      has_more: false,
+      earlier_cursor: null,
     });
 
     expect(presented.messages).toEqual([
@@ -194,7 +207,10 @@ describe("terminal transcript presentation", () => {
       () => true,
     );
 
-    expect(listChatMessages).toHaveBeenCalledWith("chat-current");
+    // Only the newest turns: a finished turn changes nothing older.
+    expect(listChatMessages).toHaveBeenCalledWith("chat-current", {
+      limit: TERMINAL_REFRESH_TURNS,
+    });
     expect(presented?.messages).toEqual([
       {
         id: "assistant-durable",
@@ -355,6 +371,8 @@ describe("terminal transcript presentation", () => {
       tool_activity: [],
       terminal_turns: [],
       last_event_seq: 15,
+      has_more: false,
+      earlier_cursor: null,
     });
 
     expect(presented.messages).toEqual([
@@ -428,6 +446,8 @@ describe("terminal transcript presentation", () => {
         },
       ],
       last_event_seq: 14,
+      has_more: false,
+      earlier_cursor: null,
     });
 
     expect(presented.messages).toEqual([
@@ -509,6 +529,8 @@ describe("terminal transcript presentation", () => {
         },
       ],
       last_event_seq: 20,
+      has_more: false,
+      earlier_cursor: null,
     });
 
     expect(
@@ -576,6 +598,8 @@ describe("terminal transcript presentation", () => {
         },
       ],
       last_event_seq: 20,
+      has_more: false,
+      earlier_cursor: null,
     });
 
     expect(
@@ -665,6 +689,8 @@ describe("terminal transcript presentation", () => {
         },
       ],
       last_event_seq: 21,
+      has_more: false,
+      earlier_cursor: null,
     });
 
     expect(

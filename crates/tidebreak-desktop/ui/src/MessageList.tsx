@@ -1,4 +1,13 @@
-import { memo, useMemo, useRef } from "react";
+import {
+  memo,
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MutableRefObject,
+} from "react";
 import { Wand2 } from "lucide-react";
 import type { ReactNode, Ref, RefCallback, UIEvent } from "react";
 import type {
@@ -40,6 +49,7 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import {
   ToolActivityGroup,
   ToolActivityUnavailable,
+  toolActivitySignature,
 } from "./ToolActivityGroup";
 import { WelcomeState, type StarterPromptOptions } from "./WelcomeState";
 import { isolatedCard } from "./PendingCard";
@@ -67,6 +77,10 @@ import {
   MemoryRememberedCard,
   type MemoryRememberedClient,
 } from "./MemoryRememberedCard";
+import { useStreamStalled } from "./useStreamStalled";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { cn } from "@/lib/utils";
 
 export type ChatMessage =
   | {
@@ -253,6 +267,12 @@ type MessageListProps = {
   compacting?: boolean;
   /** The live turn's stream has gone quiet — see [useStreamStalled]. */
   streamStalled?: boolean;
+  /**
+   * The session's stream cursor, read by the one leaf that needs it. Every
+   * stream event advances it; handing it down as a prop re-rendered the whole
+   * transcript on each one. Without it, `streamStalled` decides.
+   */
+  streamActivity?: StreamActivitySource;
   scrollRef: Ref<HTMLDivElement>;
   /** Attached to the transcript content column so growth can drive auto-follow. */
   contentRef?: RefCallback<HTMLDivElement>;
@@ -278,6 +298,13 @@ type MessageListProps = {
   onSelectPrompt?: (prompt: string, options?: StarterPromptOptions) => void;
   /** Resend the failed turn. Offered only on the transcript's newest failure. */
   onRetryTurn?: (turn: RetryableTurn) => void;
+  /** The conversation has turns older than the ones in `messages`. */
+  hasEarlierMessages?: boolean;
+  /**
+   * Put the page of turns before the held ones at the top of `messages`.
+   * "Show earlier messages" reveals held turns first, then calls this.
+   */
+  onLoadEarlierMessages?: () => Promise<void>;
   hydrated?: boolean;
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
   executionConfigClient?: Pick<ApiClient, "getExecConfig">;
@@ -335,6 +362,7 @@ export function MessageList({
   animateStreaming = true,
   compacting = false,
   streamStalled = false,
+  streamActivity,
   scrollRef,
   contentRef,
   pinLastTurn = false,
@@ -346,6 +374,8 @@ export function MessageList({
   onOutputWritebackCancel = () => undefined,
   onSelectPrompt,
   onRetryTurn,
+  hasEarlierMessages = false,
+  onLoadEarlierMessages,
   hydrated = true,
   imageClient,
   executionConfigClient,
@@ -393,26 +423,42 @@ export function MessageList({
       backgroundAgentClient,
     ],
   );
-  // Grouping walks the whole transcript and builds every row's element; memoized
+  // A long conversation opens on its newest turns. The window starts at the
+  // user message that opens its oldest turn; it is set once the transcript
+  // arrives, only ever reaches further back, and new turns join below it.
+  const [windowStart, setWindowStart] = useState<{ id: string | null } | null>(
+    null,
+  );
+  let start = windowStart;
+  if (start === null && hydrated && messages.length > 0) {
+    start = {
+      id: turnWindowStart(messages, messages.length, TRANSCRIPT_TURNS_SHOWN),
+    };
+    setWindowStart(start);
+  }
+  const startIndex = start?.id
+    ? Math.max(
+        0,
+        messages.findIndex((message) => message.id === start.id),
+      )
+    : 0;
+  const visibleMessages = useMemo(
+    () => (startIndex > 0 ? messages.slice(startIndex) : messages),
+    [messages, startIndex],
+  );
+  // Grouping walks the transcript and builds every row's element; memoized
   // so a render whose inputs are unchanged (a scroll, a pending-card flag)
-  // reuses the rows instead of rebuilding a long conversation's worth.
-  const { items: messageItems, lastTurnStart } = useMemo(
-    () =>
-      groupMessageItems(
-        messages,
-        busy,
-        animateStreaming,
-        onApproval,
-        approvalState,
-        imageClient,
-        chatId,
-        changeClient,
-        memoryClient,
-        backgroundAgents,
-        retry,
-      ),
-    [
-      messages,
+  // reuses the rows instead of rebuilding a long conversation's worth. Each
+  // grouping also hands its phases to the next, which reuses the ones a new
+  // token did not touch.
+  const phaseCache = useRef<ActivityPhaseCache | null>(null);
+  const {
+    items: messageItems,
+    lastTurnStart,
+    turnStarts,
+  } = useMemo(() => {
+    const grouped = groupMessageItems(
+      visibleMessages,
       busy,
       animateStreaming,
       onApproval,
@@ -423,8 +469,83 @@ export function MessageList({
       memoryClient,
       backgroundAgents,
       retry,
-    ],
+      phaseCache.current,
+    );
+    phaseCache.current = grouped.phases;
+    return grouped;
+  }, [
+    visibleMessages,
+    busy,
+    animateStreaming,
+    onApproval,
+    approvalState,
+    imageClient,
+    chatId,
+    changeClient,
+    memoryClient,
+    backgroundAgents,
+    retry,
+  ]);
+
+  // The scroll viewport, for keeping the reader's place when earlier turns
+  // appear above it. The caller's ref still gets the element.
+  const scrollElement = useRef<HTMLDivElement | null>(null);
+  const attachScroll = useCallback(
+    (element: HTMLDivElement | null) => {
+      scrollElement.current = element;
+      if (typeof scrollRef === "function") scrollRef(element);
+      else if (scrollRef) {
+        (scrollRef as MutableRefObject<HTMLDivElement | null>).current =
+          element;
+      }
+    },
+    [scrollRef],
   );
+  // Revealed turns land above what the reader is looking at. Holding their
+  // distance from the bottom keeps that content where it was, whether or not
+  // the webview anchors scrolling itself.
+  const pendingRestore = useRef<{
+    fromBottom: number;
+    firstId: string | undefined;
+  } | null>(null);
+  const firstVisibleId = visibleMessages[0]?.id;
+  useLayoutEffect(() => {
+    const pending = pendingRestore.current;
+    const scroller = scrollElement.current;
+    if (!pending || !scroller || pending.firstId === firstVisibleId) return;
+    pendingRestore.current = null;
+    scroller.scrollTop = scroller.scrollHeight - pending.fromBottom;
+  }, [firstVisibleId]);
+  const [earlier, setEarlier] = useState<"idle" | "loading" | "failed">("idle");
+  const showEarlier = () => {
+    if (earlier === "loading") return;
+    const scroller = scrollElement.current;
+    pendingRestore.current = scroller
+      ? {
+          fromBottom: scroller.scrollHeight - scroller.scrollTop,
+          firstId: firstVisibleId,
+        }
+      : null;
+    if (startIndex > 0) {
+      setWindowStart({
+        id: turnWindowStart(messages, startIndex, TRANSCRIPT_TURNS_SHOWN),
+      });
+      return;
+    }
+    if (!onLoadEarlierMessages) return;
+    // Everything held is on screen now, so the page that arrives is too.
+    setWindowStart({ id: null });
+    setEarlier("loading");
+    onLoadEarlierMessages().then(
+      () => setEarlier("idle"),
+      () => {
+        pendingRestore.current = null;
+        setEarlier("failed");
+      },
+    );
+  };
+  const hasEarlier = startIndex > 0 || hasEarlierMessages;
+
   // Only greet a genuinely empty, fully-hydrated conversation. While an
   // existing chat's transcript is still loading it is transiently empty; showing
   // the welcome there would flash "How can I help?" before its history renders.
@@ -438,7 +559,7 @@ export function MessageList({
 
   if (isEmpty) {
     return (
-      <div className="messages is-empty" ref={scrollRef} onScroll={onScroll}>
+      <div className="messages is-empty" ref={attachScroll} onScroll={onScroll}>
         <WelcomeState
           onSelectPrompt={onSelectPrompt}
           executionConfigClient={executionConfigClient}
@@ -452,7 +573,7 @@ export function MessageList({
   // history lands.
   if (!hydrated && messages.length === 0) {
     return (
-      <div className="messages" ref={scrollRef} onScroll={onScroll}>
+      <div className="messages" ref={attachScroll} onScroll={onScroll}>
         <div className="messages-column">
           <TranscriptSkeleton />
         </div>
@@ -462,6 +583,10 @@ export function MessageList({
 
   // The continuation cards and the working indicator belong to the turn in
   // flight, so when the trailing turn is pinned they ride inside its wrapper.
+  const pendingWorkCount =
+    folderAccessRequests.length +
+    outputWritebackRequests.length +
+    pendingPromptCount;
   const trailing = (
     <>
       {folderAccessRequests.map((request) =>
@@ -505,39 +630,116 @@ export function MessageList({
       )}
       {compacting ? (
         <AssistantWorkingIndicator compacting />
-      ) : (
-        shouldShowAssistantWorking(
-          messages,
-          busy,
-          folderAccessRequests.length +
-            outputWritebackRequests.length +
-            pendingPromptCount,
-          streamStalled,
-        ) && <AssistantWorkingIndicator />
-      )}
+      ) : shouldShowAssistantWorking(messages, busy, pendingWorkCount) ? (
+        <AssistantWorkingIndicator />
+      ) : shouldShowAssistantWorking(messages, busy, pendingWorkCount, true) ? (
+        <StalledStreamIndicator
+          busy={busy}
+          source={streamActivity}
+          stalled={streamStalled}
+        />
+      ) : null}
     </>
   );
 
   const pin = pinLastTurn && lastTurnStart >= 0;
 
-  return (
-    <div className="messages" ref={scrollRef} onScroll={onScroll}>
-      <div className="messages-column" ref={contentRef}>
-        {pin ? (
-          <>
-            {messageItems.slice(0, lastTurnStart)}
-            <div className="message-turn is-pinned">
-              {messageItems.slice(lastTurnStart)}
-              {trailing}
-            </div>
-          </>
-        ) : (
-          <>
-            {messageItems}
-            {trailing}
-          </>
-        )}
+  // One box per turn. A settled turn — every one but the last — can skip
+  // layout and paint while it is off screen (see `.message-turn.is-settled`).
+  const bounds: { item: number; messageId: string | null }[] =
+    turnStarts[0]?.item === 0
+      ? turnStarts
+      : [{ item: 0, messageId: null }, ...turnStarts];
+  const turns = bounds.map((bound, index) => {
+    const last = index === bounds.length - 1;
+    const end = bounds[index + 1]?.item ?? messageItems.length;
+    return (
+      <div
+        key={bound.messageId ? `turn-${bound.messageId}` : "turn-leading"}
+        className={cn("message-turn", last ? pin && "is-pinned" : "is-settled")}
+      >
+        {messageItems.slice(bound.item, end)}
+        {last && pin && trailing}
       </div>
+    );
+  });
+
+  return (
+    <div className="messages" ref={attachScroll} onScroll={onScroll}>
+      <div className="messages-column" ref={contentRef}>
+        {hasEarlier && (
+          <EarlierMessagesControl
+            loading={earlier === "loading"}
+            failed={earlier === "failed"}
+            onShow={showEarlier}
+          />
+        )}
+        {turns}
+        {!pin && trailing}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * How many turns the transcript shows when it opens, and how many more each
+ * "Show earlier messages" reveals. Opening a conversation renders this many
+ * answers at once, so it is sized to keep that under a quarter second: forty
+ * 5 KB answers measured about twice that. A transcript page holds twice as
+ * many turns, so the first reveal needs no fetch.
+ */
+export const TRANSCRIPT_TURNS_SHOWN = 20;
+
+/**
+ * The message that opens the last `turns` turns before `end`, or null when
+ * those turns reach the start of the transcript.
+ */
+export function turnWindowStart(
+  messages: readonly ChatMessage[],
+  end: number,
+  turns: number,
+): string | null {
+  let seen = 0;
+  for (let index = end - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    seen += 1;
+    if (seen === turns) return index > 0 ? message.id : null;
+  }
+  return null;
+}
+
+/**
+ * The way to earlier turns, at the top of the transcript: first the ones held
+ * but not shown, then the conversation's earlier pages.
+ */
+function EarlierMessagesControl({
+  loading,
+  failed,
+  onShow,
+}: {
+  loading: boolean;
+  failed: boolean;
+  onShow: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-1.5 pb-2">
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        disabled={loading}
+        aria-busy={loading}
+        onClick={onShow}
+      >
+        {loading && <Spinner />}
+        Show earlier messages
+      </Button>
+      {failed && (
+        <p className="text-muted-foreground text-xs" role="alert">
+          Could not load earlier messages. Try again.
+        </p>
+      )}
     </div>
   );
 }
@@ -604,23 +806,7 @@ export function groupMessageItems(
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >,
   memoryClient?: MemoryRememberedClient,
-  backgroundAgents: {
-    runs: AgentRun[];
-    loading: boolean;
-    error: string | null;
-    retry: () => void;
-    cancel: (runId: string) => Promise<void>;
-    loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
-    loadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
-    loadProgress: (
-      runId: string,
-      afterSequence: number,
-    ) => Promise<AgentRunProgress>;
-    open?: (runId: string) => void;
-    openOutput?: (outputId: string) => void;
-    /** The connected client, so a row's "Copy debug info" can fetch its run. */
-    client?: ApiClient;
-  } = {
+  backgroundAgents: BackgroundAgentsContext = {
     runs: [],
     loading: false,
     error: null,
@@ -634,12 +820,22 @@ export function groupMessageItems(
     }),
   },
   retry?: { failureId: string; onRetry: () => void },
+  /**
+   * The phases the last grouping built. A phase whose rows and inputs are all
+   * unchanged is reused as the same element, so a streamed token re-renders
+   * the phase it touched instead of every phase in the conversation.
+   */
+  previousPhases: ActivityPhaseCache | null = null,
 ) {
   const items: ReactNode[] = [];
+  const nextPhases = new Map<string, BuiltPhase>();
   // The item index at which the trailing turn opens (its user message). Lets the
   // caller lift the last exchange into a pinned wrapper without re-deriving the
   // turn boundary. Stays -1 for a transcript that opens on activity alone.
   let lastTurnStart = -1;
+  // Where every turn opens, with the message that opens it, so the caller can
+  // give each turn its own box.
+  const turnStarts: { item: number; messageId: string }[] = [];
   // Cards whose whole content is the situation, not the call — a standing
   // call-to-action the reader answers once. Parallel calls that all fail the
   // same way would otherwise stack identical copies of it. The claim is per
@@ -676,6 +872,7 @@ export function groupMessageItems(
     if (!isActivityMessage(message)) {
       if (message.role === "user") {
         lastTurnStart = items.length;
+        turnStarts.push({ item: items.length, messageId: message.id });
         standingCardKeys = new Set<string>();
         turnWebSources = [];
       }
@@ -713,151 +910,323 @@ export function groupMessageItems(
 
     // One phase per contiguous run of activity, however long. A phase that
     // splits at every assistant sentence is not a phase.
-    const phase: ChatMessage[] = [];
-    // Activity can resume through several assistant snapshots while remaining
-    // one expandable phase. The collapsed live label should describe only the
-    // latest snapshot; the expanded rail still preserves the whole phase.
-    let latestSnapshotStart = 0;
-    while (index < messages.length) {
-      if (isActivityMessage(messages[index])) {
-        phase.push(messages[index]!);
-        index += 1;
-        continue;
-      }
-      // An assistant bubble that renders nothing must not end the phase: the
-      // live reducer opens empty bubbles at turn-start and resume boundaries,
-      // and the hydrated snapshot has no such entries — so a phase split here
-      // would merge back when the turn settles, visibly reshuffling the
-      // transcript. Approval resume cycles can stack several in a row, so the
-      // whole run is swallowed when activity continues past it. A trailing
-      // run is the response now streaming in, and stays outside the phase so
-      // gaining its first characters does not move the group boundary.
-      if (isInvisibleAssistant(messages[index])) {
-        let ahead = index + 1;
-        while (isInvisibleAssistant(messages[ahead])) ahead += 1;
-        if (isActivityMessage(messages[ahead])) {
-          latestSnapshotStart = phase.length;
-          index = ahead;
-          continue;
-        }
-      }
-      break;
+    const phaseStart = index;
+    index = activityPhaseEnd(messages, index);
+    const firstCallId = phaseCallId(messages, phaseStart, index);
+    // Keyed by the call that opened it rather than by position, so loading
+    // earlier messages above does not remount every phase below.
+    let key = `tool-activity-group-${firstCallId ?? `position-${groupIndex}`}`;
+    if (nextPhases.has(key)) key = `${key}-${groupIndex}`;
+    const standingBefore = [...standingCardKeys].sort().join(" ");
+    const cached = previousPhases?.get(key);
+    let built: BuiltPhase;
+    if (
+      cached !== undefined &&
+      cached.groupIndex === groupIndex &&
+      cached.animate === animateStreaming &&
+      cached.chatId === chatId &&
+      cached.standingBefore === standingBefore &&
+      (cached.approvals === null ||
+        (cached.approvals.onApproval === onApproval &&
+          cached.approvals.approvalState === approvalState)) &&
+      (cached.backgroundAgents === null ||
+        cached.backgroundAgents === backgroundAgents) &&
+      sameSpan(cached.span, messages, phaseStart, index)
+    ) {
+      // Nothing this phase draws on moved: hand React the element it already
+      // has, which it skips without rendering anything inside it.
+      built = cached;
+      for (const claimed of cached.claimed) standingCardKeys.add(claimed);
+    } else {
+      built = buildActivityPhase({
+        key,
+        span: messages.slice(phaseStart, index),
+        groupIndex,
+        animate: animateStreaming,
+        standingCardKeys,
+        standingBefore,
+        onApproval,
+        approvalState,
+        chatId,
+        backgroundAgents,
+      });
     }
-
-    // A call parked on approval is represented by its approval card, so the
-    // rail would otherwise announce the same pending action twice.
-    const parked = new Set(
-      phase.flatMap((entry) =>
-        entry.role === "approval" && !entry.resolved ? [entry.callId] : [],
-      ),
-    );
-    const activities = phase.filter(
-      (entry): entry is ToolMessage =>
-        entry.role === "tool" && !parked.has(entry.callId),
-    );
-    const latestActivities = phase
-      .slice(latestSnapshotStart)
-      .filter(
-        (entry): entry is ToolMessage =>
-          entry.role === "tool" && !parked.has(entry.callId),
-      );
+    nextPhases.set(key, built);
     // Phases accumulate: a turn that searched, answered a little, and searched
     // again names every page it found under the answer that closes it.
-    for (const source of collectWebSources(activities)) {
+    for (const source of built.webSources) {
       if (!turnWebSources.some((seen) => seen.url === source.url)) {
         turnWebSources.push(source);
       }
     }
-    const cards = surfacedCards(
-      phase,
-      parked,
-      standingCardKeys,
-      onApproval,
-      approvalState,
-      chatId,
-    );
-    const spawns = activities.flatMap((entry) =>
-      entry.name === "spawn_sandbox_agent"
-        ? [
-            {
-              callId: entry.callId,
-              runId: entry.backgroundAgentRunId,
-              status: entry.status,
-            },
-          ]
-        : [],
-    );
-    const children: ReactNode[] = [...cards];
-    if (spawns.length > 0) {
-      children.push(
-        isolatedCard(
-          "background-agents",
-          spawns.map((spawn) => spawn.status).join(" "),
-          <BackgroundAgentList
-            spawns={spawns}
-            runs={backgroundAgents.runs}
-            loading={backgroundAgents.loading}
-            error={backgroundAgents.error}
-            onRetry={backgroundAgents.retry}
-            onCancel={backgroundAgents.cancel}
-            onLoadActivity={backgroundAgents.loadActivity}
-            onLoadTaskPlan={backgroundAgents.loadTaskPlan}
-            onLoadProgress={backgroundAgents.loadProgress}
-            onOpen={backgroundAgents.open}
-            onOpenOutput={backgroundAgents.openOutput}
-            {...(backgroundAgents.client && chatId
-              ? { client: backgroundAgents.client, chatId }
-              : {})}
-          />,
-        ),
-      );
-    }
-
-    // The agent list below already names the delegation and every agent in it.
-    // Leaving the spawn and wait calls on the rail as well stacks a second
-    // summary of the same thing above it ("Waited for background agents and
-    // delegated N tasks"), so the phase line covers everything except them.
-    const railActivities =
-      spawns.length > 0
-        ? activities.filter(
-            (entry) =>
-              entry.name !== "spawn_sandbox_agent" &&
-              entry.name !== "wait_for_agents",
-          )
-        : activities;
-    const latestRailActivities =
-      spawns.length > 0
-        ? latestActivities.filter(
-            (entry) =>
-              entry.name !== "spawn_sandbox_agent" &&
-              entry.name !== "wait_for_agents",
-          )
-        : latestActivities;
-
-    // The rail and every card inside carry their own boundary, so this one is
-    // only a backstop for the phase's own frame.
-    items.push(
-      <ErrorBoundary
-        key={`tool-activity-group-${groupIndex}`}
-        fallback={<ToolActivityUnavailable />}
-      >
-        <ToolActivityGroup
-          activities={railActivities}
-          labelActivities={latestRailActivities}
-          anchorIds={phase.flatMap((entry) =>
-            entry.role === "tool" ? [entry.id] : [],
-          )}
-          groupIndex={groupIndex}
-          animate={animateStreaming}
-        >
-          {children.length > 0 ? children : undefined}
-        </ToolActivityGroup>
-      </ErrorBoundary>,
-    );
+    items.push(built.element);
     groupIndex += 1;
   }
 
-  return { items, lastTurnStart };
+  return { items, lastTurnStart, turnStarts, phases: nextPhases };
+}
+
+/** Where the activity phase that starts at `start` ends. */
+function activityPhaseEnd(
+  messages: readonly ChatMessage[],
+  start: number,
+): number {
+  let index = start;
+  while (index < messages.length) {
+    if (isActivityMessage(messages[index])) {
+      index += 1;
+      continue;
+    }
+    // An assistant bubble that renders nothing must not end the phase: the
+    // live reducer opens empty bubbles at turn-start and resume boundaries,
+    // and the hydrated snapshot has no such entries — so a phase split here
+    // would merge back when the turn settles, visibly reshuffling the
+    // transcript. Approval resume cycles can stack several in a row, so the
+    // whole run is swallowed when activity continues past it. A trailing
+    // run is the response now streaming in, and stays outside the phase so
+    // gaining its first characters does not move the group boundary.
+    if (isInvisibleAssistant(messages[index])) {
+      let ahead = index + 1;
+      while (isInvisibleAssistant(messages[ahead])) ahead += 1;
+      if (isActivityMessage(messages[ahead])) {
+        index = ahead;
+        continue;
+      }
+    }
+    break;
+  }
+  return index;
+}
+
+/** The call id of the first activity in a phase, which names the phase. */
+function phaseCallId(
+  messages: readonly ChatMessage[],
+  start: number,
+  end: number,
+): string | null {
+  for (let index = start; index < end; index += 1) {
+    const message = messages[index];
+    if (message?.role === "tool" || message?.role === "approval") {
+      return typeof message.callId === "string" ? message.callId : null;
+    }
+  }
+  return null;
+}
+
+/** Whether `messages[start, end)` is exactly the rows `span` holds. */
+function sameSpan(
+  span: readonly ChatMessage[],
+  messages: readonly ChatMessage[],
+  start: number,
+  end: number,
+): boolean {
+  if (span.length !== end - start) return false;
+  for (let offset = 0; offset < span.length; offset += 1) {
+    if (span[offset] !== messages[start + offset]) return false;
+  }
+  return true;
+}
+
+/** What a phase's background-agent list reads and calls. */
+type BackgroundAgentsContext = {
+  runs: AgentRun[];
+  loading: boolean;
+  error: string | null;
+  retry: () => void;
+  cancel: (runId: string) => Promise<void>;
+  loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
+  loadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
+  loadProgress: (
+    runId: string,
+    afterSequence: number,
+  ) => Promise<AgentRunProgress>;
+  open?: (runId: string) => void;
+  openOutput?: (outputId: string) => void;
+  /** The connected client, so a row's "Copy debug info" can fetch its run. */
+  client?: ApiClient;
+};
+
+type ApprovalState = {
+  decidingApprovalCalls: Set<string>;
+  approvalErrors: Record<string, string>;
+  grantScope?: GrantScopeName;
+};
+
+/**
+ * One activity phase as last built, with what it was built from. The next
+ * grouping reuses the element while every input still matches.
+ */
+type BuiltPhase = {
+  /** The transcript rows the phase covers, swallowed empty bubbles included. */
+  span: readonly ChatMessage[];
+  groupIndex: number;
+  animate: boolean;
+  chatId: string | undefined;
+  /** The turn's claimed standing cards when the phase began. */
+  standingBefore: string;
+  /** Standing cards this phase claimed, replayed when it is reused. */
+  claimed: readonly string[];
+  /** Set only when an approval card in the phase reads them. */
+  approvals: {
+    onApproval: CardContext["onApproval"];
+    approvalState: ApprovalState | undefined;
+  } | null;
+  /** Set only when the phase lists background agents. */
+  backgroundAgents: BackgroundAgentsContext | null;
+  webSources: readonly MessageWebSource[];
+  element: ReactNode;
+};
+
+/** Phases from the last grouping, by key. */
+export type ActivityPhaseCache = ReadonlyMap<string, BuiltPhase>;
+
+function buildActivityPhase({
+  key,
+  span,
+  groupIndex,
+  animate,
+  standingCardKeys,
+  standingBefore,
+  onApproval,
+  approvalState,
+  chatId,
+  backgroundAgents,
+}: {
+  key: string;
+  span: ChatMessage[];
+  groupIndex: number;
+  animate: boolean;
+  standingCardKeys: Set<string>;
+  standingBefore: string;
+  onApproval: CardContext["onApproval"];
+  approvalState: ApprovalState | undefined;
+  chatId: string | undefined;
+  backgroundAgents: BackgroundAgentsContext;
+}): BuiltPhase {
+  // Activity can resume through several assistant snapshots while remaining
+  // one expandable phase. The collapsed live label should describe only the
+  // latest snapshot; the expanded rail still preserves the whole phase.
+  const phase: ChatMessage[] = [];
+  let latestSnapshotStart = 0;
+  for (const message of span) {
+    if (isActivityMessage(message)) phase.push(message);
+    else latestSnapshotStart = phase.length;
+  }
+
+  // A call parked on approval is represented by its approval card, so the
+  // rail would otherwise announce the same pending action twice.
+  const parked = new Set(
+    phase.flatMap((entry) =>
+      entry.role === "approval" && !entry.resolved ? [entry.callId] : [],
+    ),
+  );
+  const activities = phase.filter(
+    (entry): entry is ToolMessage =>
+      entry.role === "tool" && !parked.has(entry.callId),
+  );
+  const latestActivities = phase
+    .slice(latestSnapshotStart)
+    .filter(
+      (entry): entry is ToolMessage =>
+        entry.role === "tool" && !parked.has(entry.callId),
+    );
+  const claimedBefore = new Set(standingCardKeys);
+  const cards = surfacedCards(
+    phase,
+    parked,
+    standingCardKeys,
+    onApproval,
+    approvalState,
+    chatId,
+  );
+  const spawns = activities.flatMap((entry) =>
+    entry.name === "spawn_sandbox_agent"
+      ? [
+          {
+            callId: entry.callId,
+            runId: entry.backgroundAgentRunId,
+            status: entry.status,
+          },
+        ]
+      : [],
+  );
+  const children: ReactNode[] = [...cards];
+  if (spawns.length > 0) {
+    children.push(
+      isolatedCard(
+        "background-agents",
+        spawns.map((spawn) => spawn.status).join(" "),
+        <BackgroundAgentList
+          spawns={spawns}
+          runs={backgroundAgents.runs}
+          loading={backgroundAgents.loading}
+          error={backgroundAgents.error}
+          onRetry={backgroundAgents.retry}
+          onCancel={backgroundAgents.cancel}
+          onLoadActivity={backgroundAgents.loadActivity}
+          onLoadTaskPlan={backgroundAgents.loadTaskPlan}
+          onLoadProgress={backgroundAgents.loadProgress}
+          onOpen={backgroundAgents.open}
+          onOpenOutput={backgroundAgents.openOutput}
+          {...(backgroundAgents.client && chatId
+            ? { client: backgroundAgents.client, chatId }
+            : {})}
+        />,
+      ),
+    );
+  }
+
+  // The agent list below already names the delegation and every agent in it.
+  // Leaving the spawn and wait calls on the rail as well stacks a second
+  // summary of the same thing above it ("Waited for background agents and
+  // delegated N tasks"), so the phase line covers everything except them.
+  const railActivities =
+    spawns.length > 0
+      ? activities.filter(
+          (entry) =>
+            entry.name !== "spawn_sandbox_agent" &&
+            entry.name !== "wait_for_agents",
+        )
+      : activities;
+  const latestRailActivities =
+    spawns.length > 0
+      ? latestActivities.filter(
+          (entry) =>
+            entry.name !== "spawn_sandbox_agent" &&
+            entry.name !== "wait_for_agents",
+        )
+      : latestActivities;
+  const anchorIds = phase.flatMap((entry) =>
+    entry.role === "tool" ? [entry.id] : [],
+  );
+
+  return {
+    span,
+    groupIndex,
+    animate,
+    chatId,
+    standingBefore,
+    claimed: [...standingCardKeys].filter((claim) => !claimedBefore.has(claim)),
+    approvals: parked.size > 0 ? { onApproval, approvalState } : null,
+    backgroundAgents: spawns.length > 0 ? backgroundAgents : null,
+    webSources: collectWebSources(activities),
+    // The rail and every card inside carry their own boundary, so this one is
+    // only a backstop for the phase's own frame.
+    element: (
+      <ErrorBoundary key={key} fallback={<ToolActivityUnavailable />}>
+        <ToolActivityGroup
+          activities={railActivities}
+          labelActivities={latestRailActivities}
+          anchorIds={anchorIds}
+          groupIndex={groupIndex}
+          animate={animate}
+          signature={`${toolActivitySignature(railActivities)}#${toolActivitySignature(latestRailActivities)}#${anchorIds.join(" ")}`}
+        >
+          {children.length > 0 ? children : undefined}
+        </ToolActivityGroup>
+      </ErrorBoundary>
+    ),
+  };
 }
 
 /** What deciding a card needs beyond the entry it is deciding about. */
@@ -1188,7 +1557,7 @@ function MessageBubbleImpl({
           className="message message-assistant message-superseded"
           aria-label="Superseded response, replaced below"
         >
-          <MessageMarkdown>{message.text}</MessageMarkdown>
+          <MessageMarkdown whole>{message.text}</MessageMarkdown>
         </article>
       );
     }
@@ -1206,6 +1575,8 @@ function MessageBubbleImpl({
             <AssistantMessageBody
               text={message.text}
               streaming={busy && animateStreaming}
+              // Only the live bubble can still grow; the rest parse whole.
+              whole={!busy}
               containerRef={richContentRef}
             />
           )}
@@ -1366,6 +1737,45 @@ export function refusalCopy(
   return partialOutput
     ? `The response above is incomplete. ${explanation}`
     : explanation;
+}
+
+/**
+ * Where the live turn's stream activity can be read without re-rendering the
+ * transcript: a cursor that advances with every applied stream event.
+ */
+export type StreamActivitySource = {
+  subscribe: (onChange: () => void) => () => void;
+  getSnapshot: () => number;
+};
+
+const subscribeToNothing = () => () => undefined;
+const noActivity = () => 0;
+
+/**
+ * The Working indicator for a response that has started streaming, shown only
+ * once the stream goes quiet.
+ *
+ * Its own leaf because the cursor it watches advances with every stream event:
+ * subscribed here, an event re-renders this and nothing above it.
+ */
+function StalledStreamIndicator({
+  busy,
+  source,
+  stalled,
+}: {
+  busy: boolean;
+  source: StreamActivitySource | undefined;
+  /** Decides when there is no source to watch. */
+  stalled: boolean;
+}) {
+  const getActivity = source?.getSnapshot ?? noActivity;
+  const activity = useSyncExternalStore(
+    source?.subscribe ?? subscribeToNothing,
+    getActivity,
+    getActivity,
+  );
+  const quiet = useStreamStalled(busy, activity);
+  return (source ? quiet : stalled) ? <AssistantWorkingIndicator /> : null;
 }
 
 /**

@@ -29,6 +29,66 @@ describe("code block copy", () => {
   });
 });
 
+// Highlighting re-ran over the whole fence on every typewriter tick, and a
+// long fence cost more than a frame. While it streams, an open fence is plain.
+describe("a code fence that is still streaming", () => {
+  const OPEN = "Intro.\n\n```ts\nconst x: number = 1;\n";
+
+  it("renders as plain text until it closes, then highlights", async () => {
+    const user = userEvent.setup();
+    const { container, rerender } = render(
+      <MessageMarkdown streaming>{OPEN}</MessageMarkdown>,
+    );
+    expect(container.querySelector("pre code")?.textContent).toBe(
+      "const x: number = 1;\n",
+    );
+    expect(container.querySelector(".hljs-keyword")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Copy code" }));
+    expect(await window.navigator.clipboard.readText()).toBe(
+      "const x: number = 1;\n",
+    );
+
+    rerender(<MessageMarkdown streaming>{`${OPEN}\`\`\``}</MessageMarkdown>);
+    expect(container.querySelector(".hljs-keyword")).not.toBeNull();
+  });
+
+  it("highlights an open fence once the message stops streaming", () => {
+    const { container } = render(<MessageMarkdown>{OPEN}</MessageMarkdown>);
+    expect(container.querySelector(".hljs-keyword")).not.toBeNull();
+  });
+});
+
+// Settled text parses in one pass because blocks cost a parse to find and a
+// processor each. It must read exactly as the block-by-block rendering does.
+describe("settled text in one pass", () => {
+  it("renders the same markup as block by block", () => {
+    const source = [
+      "## Heading",
+      "",
+      "A paragraph with **bold**, a [link](https://example.com), and `code`.",
+      "Its second line.",
+      "",
+      "- one",
+      "- two",
+      "",
+      "```ts",
+      "const x: number = 1;",
+      "```",
+      "",
+      "| a | b |",
+      "| - | - |",
+      "| 1 | 2 |",
+      "",
+      "> quoted",
+    ].join("\n");
+    const blocks = render(<MessageMarkdown>{source}</MessageMarkdown>);
+    const whole = render(<MessageMarkdown whole>{source}</MessageMarkdown>);
+    const markup = (container: HTMLElement) =>
+      container.innerHTML.replace(/>\s+</g, "><");
+    expect(markup(whole.container)).toBe(markup(blocks.container));
+  });
+});
+
 describe("table copy", () => {
   it("copies the rendered cells as tab-separated rows", async () => {
     const user = userEvent.setup();

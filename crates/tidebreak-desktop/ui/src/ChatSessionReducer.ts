@@ -73,6 +73,11 @@ export type ChatSessionState = {
    * Cleared on finished or any turn-terminal event so it never sticks.
    */
   compacting: boolean;
+  /**
+   * The cursor that reads the transcript page before the oldest one held, or
+   * null when the held transcript reaches the start of the conversation.
+   */
+  earlierCursor: number | null;
 };
 
 export type ChatSessionEffect =
@@ -128,6 +133,7 @@ export function initialChatSessionState(): ChatSessionState {
     lastTurnUsage: null,
     sandboxPreparing: false,
     compacting: false,
+    earlierCursor: null,
   };
 }
 
@@ -280,13 +286,24 @@ export function reduceChatSessionEvent(
     case "tool_call_args_delta": {
       // Arguments are intentionally not retained in renderer state. They can
       // contain paths, file content, credentials, or provider-specific data.
+      // The server sends one of these per argument fragment, so a call that is
+      // already running or parked on approval has nothing new to show. Keep
+      // the transcript as it is: a new array would re-render every row once
+      // per fragment. The cursor above still advances.
+      const tool = findToolCall(state.messages, event.call_id);
+      if (
+        tool === undefined ||
+        tool.status === "running" ||
+        tool.status === "waiting_approval"
+      ) {
+        return { state, effects };
+      }
       return {
         state: {
           ...state,
-          messages: updateToolCall(state.messages, event.call_id, (tool) => ({
-            ...tool,
-            status:
-              tool.status === "waiting_approval" ? tool.status : "running",
+          messages: updateToolCall(state.messages, event.call_id, (entry) => ({
+            ...entry,
+            status: "running",
           })),
         },
         effects,
@@ -609,6 +626,12 @@ export function reduceChatSessionEvent(
  * Fold an authoritative terminal transcript into the session, replacing the
  * optimistic stream. The seq cursor only moves forward: a snapshot can trail
  * events that arrived while it loaded.
+ *
+ * A page of the newest turns is spliced over the same turns already held,
+ * from its first message on, and the earlier conversation stays as it was.
+ * A page that does not meet the held transcript replaces it. Either way, a
+ * message that has not changed keeps the object it had, so its row does not
+ * re-render.
  */
 export function applyTerminalHydration(
   state: ChatSessionState,
@@ -617,19 +640,119 @@ export function applyTerminalHydration(
     messageIds: ReadonlySet<string>;
     lastEventSeq: number;
     lastTurnUsage: RendererTurnUsage | null;
+    /** The page's cursor; absent or null when it holds the whole history. */
+    earlierCursor?: number | null;
+    /** Where the page starts, when it is a page. */
+    firstMessageId?: string | null;
   },
 ): ChatSessionState {
+  const earlierCursor = hydration.earlierCursor ?? null;
+  const joinAt =
+    earlierCursor !== null && hydration.firstMessageId
+      ? state.messages.findIndex(
+          (message) => message.id === hydration.firstMessageId,
+        )
+      : -1;
+  const spliced = joinAt >= 0;
+  const replaced = spliced ? state.messages.slice(joinAt) : state.messages;
+  const messages = reuseUnchangedMessages(replaced, hydration.messages);
   return {
     ...state,
     lastSeq: Math.max(state.lastSeq, hydration.lastEventSeq),
-    hydratedMessageIds: hydration.messageIds,
-    messages: hydration.messages,
+    hydratedMessageIds: spliced
+      ? new Set([...state.hydratedMessageIds, ...hydration.messageIds])
+      : hydration.messageIds,
+    messages: spliced
+      ? [...state.messages.slice(0, joinAt), ...messages]
+      : messages,
+    earlierCursor: spliced ? state.earlierCursor : earlierCursor,
     reasoningBuffer: "",
     // The snapshot is authoritative when it has counts — it is rebuilt from
     // the durable turn rows. A chat with no finished turn yet leaves whatever
     // the live stream established rather than blanking the meter.
     lastTurnUsage: hydration.lastTurnUsage ?? state.lastTurnUsage,
   };
+}
+
+/**
+ * Put an earlier page of the transcript above the one held.
+ *
+ * `requestedCursor` is the cursor the page was read with. A page for a cursor
+ * the session has since moved past — another load landed first, or the chat
+ * was reopened — adds nothing.
+ */
+export function prependEarlierPage(
+  state: ChatSessionState,
+  page: {
+    messages: ChatMessage[];
+    messageIds: ReadonlySet<string>;
+    earlierCursor?: number | null;
+  },
+  requestedCursor: number,
+): ChatSessionState {
+  if (state.earlierCursor !== requestedCursor) return state;
+  const held = new Set(state.messages.map((message) => message.id));
+  return {
+    ...state,
+    messages: [
+      ...page.messages.filter((message) => !held.has(message.id)),
+      ...state.messages,
+    ],
+    hydratedMessageIds: new Set([
+      ...page.messageIds,
+      ...state.hydratedMessageIds,
+    ]),
+    earlierCursor: page.earlierCursor ?? null,
+  };
+}
+
+/**
+ * `next`, with each message that equals the one it replaces swapped back for
+ * that one. A refresh rebuilds every message from the server; the ones that
+ * did not change keep their identity, and with it their rows' memo.
+ */
+function reuseUnchangedMessages(
+  previous: readonly ChatMessage[],
+  next: ChatMessage[],
+): ChatMessage[] {
+  if (previous.length === 0) return next;
+  const byId = new Map(previous.map((message) => [message.id, message]));
+  return next.map((message) => {
+    const held = byId.get(message.id);
+    return held !== undefined && equalValues(held, message) ? held : message;
+  });
+}
+
+/** Structural equality for the plain data a transcript message is made of. */
+function equalValues(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (
+    typeof left !== "object" ||
+    typeof right !== "object" ||
+    left === null ||
+    right === null
+  ) {
+    return false;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((item, index) => equalValues(item, right[index]))
+    );
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const keys = Object.keys(leftRecord);
+  return (
+    keys.length === Object.keys(rightRecord).length &&
+    keys.every(
+      (key) =>
+        Object.hasOwn(rightRecord, key) &&
+        equalValues(leftRecord[key], rightRecord[key]),
+    )
+  );
 }
 
 /** Append any withheld marker-like tail to the trailing assistant bubble. */
@@ -737,6 +860,18 @@ export function upsertToolCall(
     ...messages,
     { id: deps.nextId(), role: "tool", callId, name, status },
   ];
+}
+
+/** The transcript row for one call, searched from the end where live calls sit. */
+function findToolCall(
+  messages: readonly ChatMessage[],
+  callId: string,
+): Extract<ChatMessage, { role: "tool" }> | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "tool" && message.callId === callId) return message;
+  }
+  return undefined;
 }
 
 export function updateToolCall(

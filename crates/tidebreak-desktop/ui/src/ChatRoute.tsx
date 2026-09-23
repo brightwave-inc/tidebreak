@@ -24,6 +24,7 @@ import {
   type ChatSessionState,
 } from "./ChatSessionReducer";
 import { useChatSessionStore } from "./ChatSessionStore";
+import { isToolMessage, stableSubset } from "./chatSessionSelectors";
 import { loadCurrentTerminalTranscript } from "./ChatTranscriptPresentation";
 import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
@@ -149,7 +150,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   const images = useImageAttachments(client, chatId);
-  const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
+  const handleEventsRef = useRef<(events: readonly SequencedEvent[]) => void>(
+    () => {},
+  );
   const terminalHydrationGenerationRef = useRef(0);
   // Steering reads the draft synchronously, from outside a render. The route
   // deliberately does not subscribe to the draft — a keystroke re-renders the
@@ -168,10 +171,22 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   // status chip, the agents table, and the tab strip alike. Subscribed as a
   // joined key rather than the message list: the route must not re-render on
   // every streamed token, and the set of spawn steps changes only when one
-  // appears or resolves.
-  const spawnKey = useChatSessionStore((session) =>
-    backgroundAgentSpawnKeys(session.messages).join(","),
-  );
+  // appears or resolves. The selector runs on every store publish, so it reads
+  // the tool calls through a cache and joins the key only when they change.
+  const selectSpawnKey = useMemo(() => {
+    const selectToolCalls = stableSubset(isToolMessage);
+    let lastCalls: readonly unknown[] | null = null;
+    let lastKey = "";
+    return (session: ChatSessionState) => {
+      const calls = selectToolCalls(session.messages);
+      if (calls !== lastCalls) {
+        lastCalls = calls;
+        lastKey = backgroundAgentSpawnKeys(calls).join(",");
+      }
+      return lastKey;
+    };
+  }, []);
+  const spawnKey = useChatSessionStore(selectSpawnKey);
   const spawnKeys = useMemo(
     () => (spawnKey ? spawnKey.split(",") : []),
     [spawnKey],
@@ -235,7 +250,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     const controller = new ChatSessionController({
       openSocket: (after, onFrame) => client.openEvents(chatId, after, onFrame),
       getAfter: () => useChatSessionStore.getState().lastSeq,
-      onEvent: (event) => handleEventRef.current(event),
+      onEvents: (events) => handleEventsRef.current(events),
       onMetadata: (metadata) => {
         if (metadata.metadata === "titled") {
           chatListActions.applyDerivedTitle(chatId, metadata.title);
@@ -272,13 +287,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     useChatSessionStore.getState().update(update);
   }
 
-  function handleEvent(framed: SequencedEvent) {
+  function handleEvents(frames: readonly SequencedEvent[]) {
     const effects = useChatSessionStore
       .getState()
-      .applyEvent(framed, sessionDeps);
+      .applyEvents(frames, sessionDeps);
     for (const effect of effects) applySessionEffect(effect);
   }
-  handleEventRef.current = handleEvent;
+  handleEventsRef.current = handleEvents;
 
   function applySessionEffect(effect: ChatSessionEffect) {
     switch (effect.type) {

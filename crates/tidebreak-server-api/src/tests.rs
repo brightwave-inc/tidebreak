@@ -1007,6 +1007,13 @@ impl Store for PauseTerminalStore {
     ) -> Result<Option<tidebreak_core::ChatTranscriptSnapshot>> {
         self.inner.get_chat_transcript(id).await
     }
+    async fn get_chat_transcript_page(
+        &self,
+        id: SessionId,
+        page: tidebreak_core::TranscriptPage,
+    ) -> Result<Option<tidebreak_core::ChatTranscriptPage>> {
+        self.inner.get_chat_transcript_page(id, page).await
+    }
     async fn set_chat_model(&self, id: SessionId, model: Option<String>) -> Result<()> {
         self.inner.set_chat_model(id, model).await
     }

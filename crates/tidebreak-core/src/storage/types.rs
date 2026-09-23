@@ -57,6 +57,32 @@ pub struct ChatTranscriptSnapshot {
     pub last_event_seq: i64,
 }
 
+/// Which part of a chat's transcript to read.
+///
+/// The default reads all of it. A page counts turns by the user messages that
+/// open them and reads newest first: the first page is the end of the
+/// conversation, and each page's cursor reads the one before it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TranscriptPage {
+    /// Read only messages whose sequence number is below this cursor.
+    pub before: Option<i64>,
+    /// Read at most this many turns before the cursor.
+    pub turns: Option<u32>,
+}
+
+/// One page of a chat's transcript.
+///
+/// Messages are cut at a user message, so a page never opens mid-exchange.
+/// Tool activity and finished turns fall on whichever page covers the moment
+/// they happened, which is where a renderer ordering by time would put them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatTranscriptPage {
+    pub transcript: ChatTranscriptSnapshot,
+    /// The cursor that reads the page just before this one, or `None` when
+    /// this page reaches the start of the conversation.
+    pub earlier: Option<i64>,
+}
+
 /// The skills one user message explicitly invoked, in submitted order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageInvokedSkills {

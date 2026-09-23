@@ -54,6 +54,41 @@ describe("ChatSessionStore", () => {
     expect(store.getState().activeTurnId).toBeNull();
   });
 
+  it("publishes a run of frames once, with every frame's effects", () => {
+    const store = createChatSessionStore();
+    let publishes = 0;
+    store.subscribe(() => {
+      publishes += 1;
+    });
+    const effects = store.getState().applyEvents(
+      [
+        { seq: 1, event: { type: "turn_started", turn_id: "turn-1" } },
+        { seq: 2, event: { type: "text_delta", text: "Hel" } },
+        { seq: 3, event: { type: "text_delta", text: "lo" } },
+      ],
+      deps,
+    );
+    expect(publishes).toBe(1);
+    expect(store.getState().lastSeq).toBe(3);
+    expect(store.getState().messages.at(-1)).toMatchObject({
+      role: "assistant",
+      text: "Hello",
+    });
+    expect(effects.map((effect) => effect.type)).toEqual([
+      "invalidate_terminal_hydration",
+      "turn_began",
+    ]);
+
+    // A run the cursor has already passed publishes nothing at all.
+    store
+      .getState()
+      .applyEvents(
+        [{ seq: 2, event: { type: "text_delta", text: "x" } }],
+        deps,
+      );
+    expect(publishes).toBe(1);
+  });
+
   it("keeps the reducer's dedup: stale seqs change nothing and yield no effects", () => {
     const store = createChatSessionStore();
     store

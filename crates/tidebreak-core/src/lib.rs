@@ -399,7 +399,7 @@ pub use storage::{
     AppendClaimedMessageOutcome, ApplyTurnSteerOutcome, BeginRootAttachmentChangeOutcome,
     BeginSandboxProvisionOutcome, BeginTurnAdmissionOutcome, BlobInventoryItem, BlobMetadata,
     BlobStore, BlobStream, ChatCitationSnapshot, ChatTerminalTurnSnapshot, ChatTerminalTurnStatus,
-    ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot,
+    ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptPage, ChatTranscriptSnapshot,
     CheckpointSandboxSpawnOutcome, ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome,
     ClaimSandboxToolCallOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim,
     CompleteTurnRunOutcome, DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome,
@@ -415,8 +415,8 @@ pub use storage::{
     ReservedQueuedTurnOutcome, ReservedTurnAcceptanceOutcome, ResolveSandboxToolCallOutcome,
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome,
     SandboxAdmissionMode, SandboxProvision, SandboxProvisionState, SecretProvider,
-    SettleChildSessionWaitOutcome, Store, SubmitAgentRunResultOutcome, TurnEventAppend,
-    TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    SettleChildSessionWaitOutcome, Store, SubmitAgentRunResultOutcome, TranscriptPage,
+    TurnEventAppend, TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use task_plan::{
     open_task_plan_steps, parse_update_task_plan_arguments, sandbox_update_task_plan_tool_spec,

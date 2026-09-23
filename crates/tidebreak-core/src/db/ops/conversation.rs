@@ -21,8 +21,8 @@ use crate::model::{
 use crate::provider::MessageReasoning;
 use crate::storage::{
     ChatTerminalTurnSnapshot, ChatTerminalTurnStatus, ChatToolActivitySnapshot,
-    ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome, MessageInvokedSkills,
-    MoveChatOutcome, TurnEventAppend,
+    ChatToolActivityStatus, ChatTranscriptPage, ChatTranscriptSnapshot, DeleteChatOutcome,
+    MessageInvokedSkills, MoveChatOutcome, TranscriptPage, TurnEventAppend,
 };
 use crate::PermissionMode;
 
@@ -992,11 +992,14 @@ pub(in crate::db) async fn delete_chat(
 /// can commit between the two reads. Only a terminal event is represented by
 /// the durable assistant transcript; a later active turn's streamed deltas
 /// must remain after the cursor for the renderer to reconstruct it on replay.
+///
+/// `page` cuts the read to part of the history; the default reads all of it.
 pub(in crate::db) async fn get_chat_transcript(
     store: &DbStore,
     chat_id: SessionId,
     owner: Option<&OwnerId>,
-) -> Result<Option<ChatTranscriptSnapshot>> {
+    page: TranscriptPage,
+) -> Result<Option<ChatTranscriptPage>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
         transaction.rollback().await.map_err(store_err)?;
@@ -1016,27 +1019,142 @@ pub(in crate::db) async fn get_chat_transcript(
             return Ok(None);
         }
     }
-    let messages = list_messages_on(&transaction, chat_id).await?;
-    let message_attachments =
-        super::message_attachment::list_for_chat_on(&transaction, chat_id).await?;
+    let window = transcript_window_on(&transaction, chat_id, page).await?;
+    let messages = list_messages_in_on(&transaction, chat_id, &window).await?;
+    // Rows keyed to a message follow their message onto its page.
+    let page_message_ids: Option<HashSet<MessageId>> =
+        (!window.is_whole()).then(|| messages.iter().map(|message| message.id).collect());
+    let on_page = |id: &MessageId| {
+        page_message_ids
+            .as_ref()
+            .is_none_or(|page_ids| page_ids.contains(id))
+    };
+    let message_attachments = super::message_attachment::list_for_chat_on(&transaction, chat_id)
+        .await?
+        .into_iter()
+        .filter(|attachment| on_page(&attachment.message_id))
+        .collect();
     let message_document_attachments =
-        super::message_document_attachment::list_for_chat_on(&transaction, chat_id).await?;
-    let citations = super::citation::list_snapshots_on(&transaction, chat_id).await?;
-    let message_invoked_skills = list_message_invoked_skills_on(&transaction, chat_id).await?;
-    let terminal_turns = list_terminal_turns_on(&transaction, chat_id, &messages).await?;
-    let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id).await?;
+        super::message_document_attachment::list_for_chat_on(&transaction, chat_id)
+            .await?
+            .into_iter()
+            .filter(|attachment| on_page(&attachment.message_id))
+            .collect();
+    let citations = super::citation::list_snapshots_on(&transaction, chat_id)
+        .await?
+        .into_iter()
+        .filter(|citation| on_page(&citation.message_id))
+        .collect();
+    let message_invoked_skills = list_message_invoked_skills_on(&transaction, chat_id)
+        .await?
+        .into_iter()
+        .filter(|invoked| on_page(&invoked.message_id))
+        .collect();
+    let terminal_turns = list_terminal_turns_on(&transaction, chat_id, &messages, &window).await?;
+    let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id, &window).await?;
     let last_event_seq = terminal_event_cursor_on(&transaction, chat_id).await?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(Some(ChatTranscriptSnapshot {
-        messages,
-        message_attachments,
-        message_document_attachments,
-        citations,
-        message_invoked_skills,
-        terminal_turns,
-        tool_activity,
-        last_event_seq,
+    Ok(Some(ChatTranscriptPage {
+        transcript: ChatTranscriptSnapshot {
+            messages,
+            message_attachments,
+            message_document_attachments,
+            citations,
+            message_invoked_skills,
+            terminal_turns,
+            tool_activity,
+            last_event_seq,
+        },
+        earlier: window.earlier,
     }))
+}
+
+/// The part of a chat's history one transcript page covers.
+///
+/// Messages are cut by sequence number, at a user message. Tool calls and
+/// finished turns carry no message sequence, so they are cut by time at the
+/// same boundary messages: each falls on the page that covers the moment it
+/// happened, which is where a renderer ordering the page by time puts it.
+#[derive(Debug, Default)]
+struct TranscriptWindow {
+    /// Messages from this sequence number on; `None` reads from the start.
+    from_seq: Option<i64>,
+    /// Messages below this sequence number; `None` reads to the end.
+    before_seq: Option<i64>,
+    /// Timed rows from this instant on.
+    from_time: Option<chrono::DateTime<Utc>>,
+    /// Timed rows before this instant.
+    before_time: Option<chrono::DateTime<Utc>>,
+    /// The cursor for the page before this one, when there is one.
+    earlier: Option<i64>,
+}
+
+impl TranscriptWindow {
+    fn is_whole(&self) -> bool {
+        self.from_seq.is_none() && self.before_seq.is_none()
+    }
+
+    fn covers_time(&self, at: chrono::DateTime<Utc>) -> bool {
+        self.from_time.is_none_or(|from| at >= from)
+            && self.before_time.is_none_or(|before| at < before)
+    }
+}
+
+/// Where `page` starts and ends in `chat_id`'s history.
+async fn transcript_window_on<C>(
+    conn: &C,
+    chat_id: SessionId,
+    page: TranscriptPage,
+) -> Result<TranscriptWindow>
+where
+    C: ConnectionTrait,
+{
+    let mut window = TranscriptWindow {
+        before_seq: page.before,
+        ..TranscriptWindow::default()
+    };
+    if let Some(before) = page.before {
+        // The cursor is the newer page's first message; when it was written
+        // is where this page's timed rows stop.
+        window.before_time = entities::message::Entity::find()
+            .filter(entities::message::Column::ChatId.eq(chat_id.0))
+            .filter(entities::message::Column::Seq.gte(before))
+            .order_by_asc(entities::message::Column::Seq)
+            .one(conn)
+            .await
+            .map_err(store_err)?
+            .map(|message| message.created_at);
+    }
+    let Some(turns) = page.turns else {
+        return Ok(window);
+    };
+    // The user message that opens the oldest turn on this page. With fewer
+    // turns left than asked for, the page runs to the start.
+    let Some(boundary) = entities::message::Entity::find()
+        .filter(entities::message::Column::ChatId.eq(chat_id.0))
+        .filter(entities::message::Column::Role.eq(role_to_db(Role::User)))
+        .apply_if(page.before, |query, before| {
+            query.filter(entities::message::Column::Seq.lt(before))
+        })
+        .order_by_desc(entities::message::Column::Seq)
+        .offset(u64::from(turns.max(1) - 1))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(window);
+    };
+    window.from_seq = Some(boundary.seq);
+    window.from_time = Some(boundary.created_at);
+    let earlier_exists = entities::message::Entity::find()
+        .filter(entities::message::Column::ChatId.eq(chat_id.0))
+        .filter(entities::message::Column::Seq.lt(boundary.seq))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    window.earlier = earlier_exists.then_some(boundary.seq);
+    Ok(window)
 }
 
 /// Pair every user message that invoked skills with the list it invoked.
@@ -1102,10 +1220,15 @@ where
 /// still comes from its committed message. A cancellation after an intermediate
 /// step committed points at the last assistant message from that turn; only a
 /// genuinely message-less terminal turn retains its streamed text here.
+///
+/// On a page, a turn that points at a message comes with that message, and a
+/// turn that left none falls where it finished. Only those turns' deltas are
+/// read back from the journal.
 async fn list_terminal_turns_on<C>(
     conn: &C,
     chat_id: SessionId,
     messages: &[Message],
+    window: &TranscriptWindow,
 ) -> Result<Vec<ChatTerminalTurnSnapshot>>
 where
     C: ConnectionTrait,
@@ -1127,15 +1250,20 @@ where
         return Ok(Vec::new());
     }
 
-    let last_assistant_message_by_turn = messages
-        .iter()
-        .filter(|message| message.role == Role::Assistant)
-        .fold(HashMap::new(), |mut by_turn, message| {
-            by_turn.insert(message.turn_id, message.id);
-            by_turn
-        });
+    let last_assistant_message_by_turn = if window.is_whole() {
+        messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .fold(HashMap::new(), |mut by_turn, message| {
+                by_turn.insert(message.turn_id, message.id);
+                by_turn
+            })
+    } else {
+        // A page can hold where a turn ended without holding every message
+        // it wrote, so a cancelled turn's last message is read from the table.
+        last_assistant_message_on(conn, chat_id, &turns).await?
+    };
     let mut snapshots = Vec::with_capacity(turns.len());
-    let mut index_of = HashMap::with_capacity(turns.len());
     for turn in turns {
         let Some(finished_at) = turn.ended_at else {
             // Terminal rows are constrained to have a finish time. If legacy
@@ -1163,7 +1291,6 @@ where
                 })
                 .flatten()
         });
-        index_of.insert(turn.id, snapshots.len());
         snapshots.push(ChatTerminalTurnSnapshot {
             turn_id: TurnId(turn.id),
             message_id,
@@ -1180,9 +1307,22 @@ where
             finished_at,
         });
     }
+    if !window.is_whole() {
+        let page_message_ids: HashSet<MessageId> =
+            messages.iter().map(|message| message.id).collect();
+        snapshots.retain(|snapshot| match snapshot.message_id {
+            Some(message_id) => page_message_ids.contains(&message_id),
+            None => window.covers_time(snapshot.finished_at),
+        });
+    }
     if snapshots.is_empty() {
         return Ok(snapshots);
     }
+    let index_of: HashMap<uuid::Uuid, usize> = snapshots
+        .iter()
+        .enumerate()
+        .map(|(index, snapshot)| (snapshot.turn_id.0, index))
+        .collect();
 
     // These tags are SQL literals rather than bound values on purpose.
     // sea-query does not rewrite `?` inside a custom expression for PostgreSQL
@@ -1197,9 +1337,14 @@ where
             "json_extract(event, '$.type') IN ('{TEXT_DELTA_TAG}', '{REASONING_DELTA_TAG}', '{TURN_REFUSED_TAG}')"
         ),
     };
+    // A page reads back its own turns' deltas, not the whole chat's.
+    let page_turn_ids = (!window.is_whole()).then(|| index_of.keys().copied().collect::<Vec<_>>());
     let events = entities::event::Entity::find()
         .filter(entities::event::Column::SessionId.eq(chat_id.0))
         .filter(sea_orm::sea_query::Expr::cust(tag_matches))
+        .apply_if(page_turn_ids, |query, turn_ids| {
+            query.filter(entities::event::Column::TurnId.is_in(turn_ids))
+        })
         .order_by_asc(entities::event::Column::Seq)
         .all(conn)
         .await
@@ -1238,9 +1383,13 @@ const TOOL_CALL_COMPLETED_TAG: &str = "tool_completed";
 /// state. A live call is reconstructed from the event journal instead: showing
 /// it in the snapshot before its event is committed would make reconnecting
 /// renderers duplicate or skip activity.
+///
+/// On a page, a call falls where it started. The window is applied here rather
+/// than in SQL so the comparison never depends on how a backend stores time.
 async fn list_terminal_tool_activity_on<C>(
     conn: &C,
     chat_id: SessionId,
+    window: &TranscriptWindow,
 ) -> Result<Vec<ChatToolActivitySnapshot>>
 where
     C: ConnectionTrait,
@@ -1272,7 +1421,9 @@ where
         .await
         .map_err(store_err)?
         .into_iter()
-        .filter(|call| terminal_turn_ids.contains(&call.turn_id))
+        .filter(|call| {
+            terminal_turn_ids.contains(&call.turn_id) && window.covers_time(call.created_at)
+        })
         .map(|model| {
             // Read off the model before it is narrowed to a record: the
             // projection is renderer state and has no place on the canonical
@@ -1433,8 +1584,26 @@ async fn list_messages_on<C>(conn: &C, chat_id: SessionId) -> Result<Vec<Message
 where
     C: ConnectionTrait,
 {
+    list_messages_in_on(conn, chat_id, &TranscriptWindow::default()).await
+}
+
+/// The chat's messages inside `window`, in commit order.
+async fn list_messages_in_on<C>(
+    conn: &C,
+    chat_id: SessionId,
+    window: &TranscriptWindow,
+) -> Result<Vec<Message>>
+where
+    C: ConnectionTrait,
+{
     entities::message::Entity::find()
         .filter(entities::message::Column::ChatId.eq(chat_id.0))
+        .apply_if(window.from_seq, |query, from| {
+            query.filter(entities::message::Column::Seq.gte(from))
+        })
+        .apply_if(window.before_seq, |query, before| {
+            query.filter(entities::message::Column::Seq.lt(before))
+        })
         .order_by_asc(entities::message::Column::Seq)
         .all(conn)
         .await
@@ -1442,6 +1611,43 @@ where
         .into_iter()
         .map(message_from_model)
         .collect()
+}
+
+/// The last assistant message each cancelled turn without an output wrote.
+///
+/// Only those turns point at a message this way, so only their rows are read.
+async fn last_assistant_message_on<C>(
+    conn: &C,
+    chat_id: SessionId,
+    turns: &[entities::turn::Model],
+) -> Result<HashMap<TurnId, MessageId>>
+where
+    C: ConnectionTrait,
+{
+    let cancelled: Vec<uuid::Uuid> = turns
+        .iter()
+        .filter(|turn| {
+            turn.output_message_id.is_none()
+                && TurnRunStatus::CANCELLED.contains(&turn.status.as_str())
+        })
+        .map(|turn| turn.id)
+        .collect();
+    if cancelled.is_empty() {
+        return Ok(HashMap::new());
+    }
+    Ok(entities::message::Entity::find()
+        .filter(entities::message::Column::ChatId.eq(chat_id.0))
+        .filter(entities::message::Column::Role.eq(role_to_db(Role::Assistant)))
+        .filter(entities::message::Column::TurnId.is_in(cancelled))
+        .order_by_asc(entities::message::Column::Seq)
+        .all(conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .fold(HashMap::new(), |mut by_turn, message| {
+            by_turn.insert(TurnId(message.turn_id), MessageId(message.id));
+            by_turn
+        }))
 }
 
 pub(in crate::db) async fn list_tool_calls(

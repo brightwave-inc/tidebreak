@@ -4,14 +4,22 @@ import {
   applyTerminalHydration,
   type ChatSessionState,
 } from "./ChatSessionReducer";
-import { presentChatTranscript } from "./ChatTranscriptPresentation";
+import {
+  presentChatTranscript,
+  TRANSCRIPT_PAGE_TURNS,
+} from "./ChatTranscriptPresentation";
 
 type ApprovalHydrationClient = Pick<
   ApiClient,
   "listChatMessages" | "listPendingApprovals"
 >;
 
-/** Load a transcript boundary, then its authoritative pending approvals. */
+/**
+ * Load a transcript boundary, then its authoritative pending approvals.
+ *
+ * Reads the newest page of the conversation, not all of it: the transcript
+ * shows the end, and earlier turns load when the reader asks for them.
+ */
 export async function loadChatApprovalHydration(
   client: ApprovalHydrationClient,
   chatId: string,
@@ -20,7 +28,9 @@ export async function loadChatApprovalHydration(
   transcript: ChatTranscript;
   pendingApprovals: PendingToolApproval[];
 } | null> {
-  const transcript = await client.listChatMessages(chatId);
+  const transcript = await client.listChatMessages(chatId, {
+    limit: TRANSCRIPT_PAGE_TURNS,
+  });
   if (!isCurrent()) return null;
   const pendingApprovals = await client.listPendingApprovals(chatId);
   if (!isCurrent()) return null;

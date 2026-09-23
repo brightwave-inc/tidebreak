@@ -366,6 +366,25 @@ pub trait Store: Send + Sync {
     /// watermark. Returns `None` when the chat does not exist.
     async fn get_chat_transcript(&self, id: SessionId) -> Result<Option<ChatTranscriptSnapshot>>;
 
+    /// [`Store::get_chat_transcript`], cut to one page.
+    ///
+    /// The default reads the whole transcript as a single page with nothing
+    /// before it, which is what a store without paging can honestly return.
+    async fn get_chat_transcript_page(
+        &self,
+        id: SessionId,
+        page: TranscriptPage,
+    ) -> Result<Option<ChatTranscriptPage>> {
+        let _ = page;
+        Ok(self
+            .get_chat_transcript(id)
+            .await?
+            .map(|transcript| ChatTranscriptPage {
+                transcript,
+                earlier: None,
+            }))
+    }
+
     /// Set (or clear, with `None`) a chat's model override. A no-op if the chat
     /// doesn't exist.
     async fn set_chat_model(&self, id: SessionId, model: Option<String>) -> Result<()>;
@@ -519,6 +538,17 @@ pub trait Store: Send + Sync {
     ) -> Result<Option<ChatTranscriptSnapshot>> {
         let _ = owner;
         self.get_chat_transcript(id).await
+    }
+
+    /// [`Store::get_chat_transcript_page`] restricted to `owner`'s chats.
+    async fn get_chat_transcript_page_scoped(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+        page: TranscriptPage,
+    ) -> Result<Option<ChatTranscriptPage>> {
+        let _ = owner;
+        self.get_chat_transcript_page(id, page).await
     }
 
     /// [`Store::update_chat_metadata`] restricted to `owner`'s chats;
