@@ -77,6 +77,13 @@ describe("UpdatesPanel", () => {
     expect(markup).toContain("downloads it only when you ask");
   });
 
+  it("holds the switch until the desktop reports the setting", () => {
+    const markup = panel(idle, null);
+
+    expect(markup).toContain("Loading this setting…");
+    expect(markup).toMatch(/role="switch"[^>]*disabled/);
+  });
+
   it("shows generic host errors without exposing updater diagnostics", () => {
     const markup = panel({
       ...idle,

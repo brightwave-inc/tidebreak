@@ -106,6 +106,23 @@ describe("UpdateReadyCard", () => {
     expect(screen.queryByRole("button", { name: "Download" })).toBeNull();
   });
 
+  it("says why a download failed and offers it again", () => {
+    render(
+      <UpdateReadyCard
+        status="available"
+        version="0.115.0"
+        error="Not enough disk space to download the update. Free up space, then try again."
+        onDownload={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Not enough disk space to download the update. Free up space, then try again.",
+    );
+    expect(screen.getByRole("button", { name: "Download" })).toBeEnabled();
+  });
+
   it("reports why a check failed", () => {
     render(
       <UpdateReadyCard

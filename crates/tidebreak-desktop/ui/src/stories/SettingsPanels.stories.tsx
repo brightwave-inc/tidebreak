@@ -50,6 +50,8 @@ type SettingsShowcaseProps = {
   /** Notifications: tell you when an agent finishes or fails. */
   finished?: boolean;
   updatePreferences?: DesktopUpdatePreferences | null;
+  /** Updates: why the automatic-download setting could not be saved. */
+  updatePreferencesError?: string | null;
 };
 
 /**
@@ -82,6 +84,7 @@ function SettingsShowcase({
   needsYou = true,
   finished = true,
   updatePreferences = DEFAULT_UPDATE_PREFERENCES,
+  updatePreferencesError = null,
 }: SettingsShowcaseProps) {
   if (panel === "appearance") {
     return <AppearancePanel mode={theme} onChange={fn()} />;
@@ -137,6 +140,7 @@ function SettingsShowcase({
       upToDate={upToDate}
       appVersion="0.114.0"
       preferences={updatePreferences}
+      preferencesError={updatePreferencesError}
       onCheck={fn(async () => updateState)}
       onDownload={fn(async () => updateState)}
       onRestart={fn(async () => {})}
@@ -298,5 +302,39 @@ export const UpdatesManagedByOrganization: Story = {
   args: {
     panel: "updates",
     updatePreferences: { automaticDownloads: false, managed: true },
+  },
+};
+
+/** The organization keeps automatic downloads on. */
+export const UpdatesManagedOn: Story = {
+  args: {
+    panel: "updates",
+    updatePreferences: { automaticDownloads: true, managed: true },
+  },
+};
+
+/** The download could not be saved, so the release stays on offer. */
+export const UpdateAvailableDownloadFailed: Story = {
+  args: {
+    panel: "updates",
+    updateState: {
+      status: "available",
+      version: "0.115.0",
+      error:
+        "Not enough disk space to download the update. Free up space, then try again.",
+      enabled: true,
+    },
+  },
+};
+
+/** The desktop has not reported the setting yet. */
+export const UpdatesPreferencesLoading: Story = {
+  args: { panel: "updates", updatePreferences: null },
+};
+
+export const UpdatesPreferenceSaveFailed: Story = {
+  args: {
+    panel: "updates",
+    updatePreferencesError: "Could not save the setting. Try again.",
   },
 };

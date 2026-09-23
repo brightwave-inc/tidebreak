@@ -132,8 +132,8 @@ import {
   downloadDesktopUpdate,
   UPDATE_CHECK_REQUESTED_EVENT,
   useDesktopUpdates,
-  type DesktopUpdateState,
 } from "./updates";
+import { stillFollowing, updateCardFor, updateNoticeKey } from "./updateCard";
 import { UpdateReadyCard } from "./UpdateReadyCard";
 
 /**
@@ -145,17 +145,6 @@ import { UpdateReadyCard } from "./UpdateReadyCard";
  */
 const CLOSE_TAB_REQUESTED_EVENT = "desktop-close-tab-requested";
 const DISMISSED_UPDATE_VERSION_KEY = "tidebreak.dismissed-update-version";
-const UNKNOWN_UPDATE_VERSION = "unknown";
-
-/**
- * What dismissing the update card remembers. A ready update keeps the bare
- * version, as it always has; an offered one is its own notice, so dismissing
- * "available" never hides the "ready" card for the same version later.
- */
-function updateNoticeKey(state: DesktopUpdateState): string {
-  const version = state.version ?? UNKNOWN_UPDATE_VERSION;
-  return state.status === "available" ? `available:${version}` : version;
-}
 
 /** Move focus to whichever composer the current route has on screen. */
 function focusComposer(): void {
@@ -349,6 +338,21 @@ export function AppShell() {
       );
     }
   }, [updateStatus]);
+
+  // A download you start from the update card keeps a card on screen: its
+  // progress while it runs, then the ready card, or the available card again
+  // with the reason it failed.
+  const [followingDownload, setFollowingDownload] = useState(false);
+  useEffect(() => {
+    if (!stillFollowing(updateStatus)) setFollowingDownload(false);
+  }, [updateStatus]);
+  const updateCard = updateCardFor({
+    state: desktopUpdates.state,
+    explicitCheck: explicitUpdateCheck,
+    followingDownload,
+    dismissedKey: dismissedUpdateVersion,
+    appVersion,
+  });
 
   // Help > Documentation. Listened for here rather than beside the shortcuts
   // the other menu items run: those wait behind the sign-in gate, and the
@@ -1322,48 +1326,50 @@ export function AppShell() {
           )}
           <SidebarExpandStrip macOverlay={macOverlayTitlebar} />
           <ComputerUseIndicator />
-          {explicitUpdateCheck === "running" &&
-            (updateStatus === "checking" || updateStatus === "downloading") && (
-              <UpdateReadyCard
-                status={updateStatus}
-                version={desktopUpdates.state.version}
-                onDismiss={() => setExplicitUpdateCheck(null)}
-              />
-            )}
-          {explicitUpdateCheck === "settled" &&
-            updateStatus === "idle" &&
-            (desktopUpdates.state.error ? (
-              <UpdateReadyCard
-                status="failed"
-                message={desktopUpdates.state.error}
-                onDismiss={() => setExplicitUpdateCheck(null)}
-              />
-            ) : (
-              <UpdateReadyCard
-                status="up-to-date"
-                version={appVersion}
-                onDismiss={() => setExplicitUpdateCheck(null)}
-              />
-            ))}
-          {updateStatus === "available" &&
-            dismissedUpdateVersion !==
-              updateNoticeKey(desktopUpdates.state) && (
-              <UpdateReadyCard
-                status="available"
-                version={desktopUpdates.state.version}
-                onDownload={() => void downloadDesktopUpdate()}
-                onDismiss={dismissUpdateNotice}
-              />
-            )}
-          {updateStatus === "ready" &&
-            dismissedUpdateVersion !==
-              updateNoticeKey(desktopUpdates.state) && (
-              <UpdateReadyCard
-                version={desktopUpdates.state.version}
-                onRestart={() => void onRestartForUpdate()}
-                onDismiss={dismissUpdateNotice}
-              />
-            )}
+          {updateCard?.kind === "progress" && (
+            <UpdateReadyCard
+              status={updateCard.status}
+              version={updateCard.version}
+              onDismiss={() => {
+                setExplicitUpdateCheck(null);
+                setFollowingDownload(false);
+              }}
+            />
+          )}
+          {updateCard?.kind === "failed" && (
+            <UpdateReadyCard
+              status="failed"
+              message={updateCard.message}
+              onDismiss={() => setExplicitUpdateCheck(null)}
+            />
+          )}
+          {updateCard?.kind === "up-to-date" && (
+            <UpdateReadyCard
+              status="up-to-date"
+              version={updateCard.version}
+              onDismiss={() => setExplicitUpdateCheck(null)}
+            />
+          )}
+          {updateCard?.kind === "available" && (
+            <UpdateReadyCard
+              status="available"
+              version={updateCard.version}
+              error={updateCard.error}
+              onDownload={() => {
+                setFollowingDownload(true);
+                void downloadDesktopUpdate();
+              }}
+              onDismiss={dismissUpdateNotice}
+            />
+          )}
+          {updateCard?.kind === "ready" && (
+            <UpdateReadyCard
+              version={updateCard.version}
+              error={updateCard.error}
+              onRestart={() => void onRestartForUpdate()}
+              onDismiss={dismissUpdateNotice}
+            />
+          )}
           {/* Each route renders its own rail beside its content — see RouteFrame. */}
           <div className="app-body">
             <DocumentTitle />

@@ -152,6 +152,28 @@ describe("Updates section", () => {
     await waitFor(() => expect(toggle).not.toBeChecked());
   });
 
+  it("puts the switch back and says so when the setting cannot be saved", async () => {
+    const user = userEvent.setup();
+    const saveFailed = "Could not save the setting. Try again.";
+    const invokeDefault = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation(
+      async (command: string, args?: { enabled: boolean }) => {
+        if (command === "set_automatic_update_downloads") throw saveFailed;
+        return invokeDefault?.(command, args);
+      },
+    );
+    render(<UpdatesSection />);
+    const toggle = await screen.findByRole("switch", {
+      name: "Download updates automatically",
+    });
+    await waitFor(() => expect(toggle).toBeEnabled());
+
+    await user.click(toggle);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(saveFailed);
+    expect(toggle).toBeChecked();
+  });
+
   it("shows a setting your organization manages as locked", async () => {
     mocks.preferences = { automaticDownloads: false, managed: true };
     render(<UpdatesSection />);

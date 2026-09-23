@@ -23,6 +23,8 @@ type UpdateReadyCardProps =
       /** A newer release is published and not downloaded yet. */
       status: "available";
       version: string | null;
+      /** Why the last download failed, so you can fix it and try again. */
+      error?: string | null;
       onDownload: () => void;
       onDismiss: () => void;
     }
@@ -42,6 +44,8 @@ type UpdateReadyCardProps =
   | {
       status?: "ready";
       version: string | null;
+      /** Why the last restart, or the download of a newer release, failed. */
+      error?: string | null;
       onRestart: () => void;
       onDismiss: () => void;
     };
@@ -154,12 +158,12 @@ export function UpdateReadyCard(props: UpdateReadyCardProps) {
   const { onDismiss } = props;
   const status = props.status ?? "ready";
   const { title, description } = cardCopy(props);
-  const releaseVersion =
+  const offersRelease =
     props.status === "available" ||
     props.status === "ready" ||
-    props.status === undefined
-      ? props.version
-      : null;
+    props.status === undefined;
+  const releaseVersion = offersRelease ? props.version : null;
+  const error = offersRelease ? props.error : null;
 
   return (
     <aside
@@ -183,12 +187,18 @@ export function UpdateReadyCard(props: UpdateReadyCardProps) {
           {description && (
             <p className="mt-1 text-sm text-muted-foreground">{description}</p>
           )}
+          {error && (
+            <p
+              className="mt-2 text-sm break-words text-critical-foreground"
+              role="alert"
+            >
+              {error}
+            </p>
+          )}
         </div>
       </div>
 
-      {(props.status === "available" ||
-        props.status === "ready" ||
-        props.status === undefined) && (
+      {offersRelease && (
         <div className="mt-4 flex flex-wrap items-center gap-2">
           {props.status === "available" ? (
             <Button type="button" size="sm" onClick={props.onDownload}>

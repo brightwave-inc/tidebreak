@@ -52,7 +52,10 @@ export function upToDateMessage(version: string | null): string {
 export function automaticDownloadsHint(
   preferences: DesktopUpdatePreferences | null,
 ): string {
-  if (!preferences?.managed) {
+  if (preferences === null) {
+    return "Loading this setting…";
+  }
+  if (!preferences.managed) {
     return "Tidebreak downloads new versions in the background. When this is off, Tidebreak tells you when an update is available and downloads it only when you ask.";
   }
   return preferences.automaticDownloads

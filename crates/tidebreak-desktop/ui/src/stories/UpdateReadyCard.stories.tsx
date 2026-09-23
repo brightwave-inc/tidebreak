@@ -10,6 +10,7 @@ const CHECK_FAILED =
 function UpdateReadyCardStory({
   status,
   version,
+  error = null,
 }: {
   status:
     | "checking"
@@ -19,6 +20,8 @@ function UpdateReadyCardStory({
     | "failed"
     | "ready";
   version: string | null;
+  /** Why the last download of an offered release failed. */
+  error?: string | null;
 }) {
   const [visible, setVisible] = useState(true);
   const dismiss = () => setVisible(false);
@@ -46,6 +49,7 @@ function UpdateReadyCardStory({
         <UpdateReadyCard
           status="available"
           version={version}
+          error={error}
           onDownload={fn()}
           onDismiss={dismiss}
         />
@@ -112,4 +116,14 @@ export const UpToDate: Story = {
 /** The check you asked for failed, and the card says why. */
 export const CheckFailed: Story = {
   args: { status: "failed", version: null },
+};
+
+/** The download could not be saved, so the card offers it again with why. */
+export const AvailableDownloadFailed: Story = {
+  args: {
+    status: "available",
+    version: "0.115.0",
+    error:
+      "Not enough disk space to download the update. Free up space, then try again.",
+  },
 };
