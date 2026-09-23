@@ -4,6 +4,7 @@ import {
   FileText,
   GitPullRequest,
   ExternalLink,
+  Inbox,
   MessageSquare,
   Play,
   Plus,
@@ -243,6 +244,16 @@ export function codeNavigationPaletteRows(input: {
       icon: Plus,
       shortcut: "code-new-workspace",
       onSelect: input.onNewWorkspace,
+    },
+    // The inbox under the code rail: what waits on you spans both modes, and
+    // going to it should not move you out of this one.
+    {
+      id: "navigate:inbox",
+      section: "navigate",
+      label: "Inbox",
+      keywords: "waiting approvals questions plans needs you",
+      icon: Inbox,
+      onSelect: () => input.navigate("/code/inbox"),
     },
     {
       id: "navigate:analytics",

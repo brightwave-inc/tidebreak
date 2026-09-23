@@ -2,16 +2,16 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as agentNotify from "./agentNotify";
 import type { ApiClient } from "./api";
 import { useChatAttention } from "./ChatAttention";
 import { useInbox } from "./Inbox";
 import { usePendingPrompts } from "./PendingPrompts";
 import { useRefreshSignals } from "./RefreshSignals";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
-import * as host from "./host";
 
-vi.mock("./host", () => ({
-  requestUserAttention: vi.fn().mockResolvedValue(undefined),
+vi.mock("./agentNotify", () => ({
+  presentNeedsYou: vi.fn().mockResolvedValue("native"),
 }));
 
 function question(callId: string, turnId = "turn-1") {
@@ -29,10 +29,14 @@ function inboxEntry(
     callId: string;
     kind?: "question" | "folder_access" | "tool_approval";
   }>,
+  options: { title?: string; workspaceId?: string } = {},
 ) {
   return {
-    conversation: { sessionId: chatId, workspaceId: null },
-    title: null,
+    conversation: {
+      sessionId: chatId,
+      workspaceId: options.workspaceId ?? null,
+    },
+    title: options.title ?? null,
     attention: {
       state: {
         type: "needs_you" as const,
@@ -62,8 +66,10 @@ function stubClient(overrides: Record<string, unknown> = {}) {
   } as unknown as ApiClient;
 }
 
+const presentNeedsYou = vi.mocked(agentNotify.presentNeedsYou);
+
 beforeEach(() => {
-  vi.mocked(host.requestUserAttention).mockClear();
+  presentNeedsYou.mockClear();
   usePendingPrompts.setState({
     chatId: null,
     userQuestions: [],
@@ -109,21 +115,109 @@ describe("useChatPromptWatcher", () => {
     await waitFor(() => expect(client.listInbox).toHaveBeenCalledTimes(2));
   });
 
-  it("asks for attention once per question, not once per read", async () => {
+  it("leaves what was already waiting at launch to the inbox badge", async () => {
     const client = stubClient({
       listInbox: vi
         .fn()
         .mockResolvedValue([inboxEntry("chat-2", [{ callId: "call-1" }])]),
     });
     renderHook(() => useChatPromptWatcher(client, "chat-1"));
-    await waitFor(() =>
-      expect(host.requestUserAttention).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(useInbox.getState().entries).toHaveLength(1));
 
     act(() => useRefreshSignals.getState().signal("userQuestions"));
     await waitFor(() => expect(client.listInbox).toHaveBeenCalledTimes(2));
 
-    expect(host.requestUserAttention).toHaveBeenCalledTimes(1);
+    expect(presentNeedsYou).not.toHaveBeenCalled();
+  });
+
+  it("notifies once per question that parks after the first read", async () => {
+    const listInbox = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        inboxEntry("chat-2", [{ callId: "call-1" }], {
+          title: "Plan the trip",
+        }),
+      ]);
+    const client = stubClient({
+      listInbox,
+      listPendingUserQuestions: vi.fn().mockResolvedValue([
+        {
+          callId: "call-1",
+          turnId: "turn-1",
+          askedAt: "2026-08-04T00:00:00Z",
+          questions: [
+            {
+              id: "q1",
+              header: "Dates",
+              question: "Which week works for you?",
+              options: [],
+              questionType: "single_select",
+              allowFreeForm: true,
+            },
+          ],
+        },
+      ]),
+    });
+    renderHook(() => useChatPromptWatcher(client, "chat-1"));
+    await waitFor(() => expect(listInbox).toHaveBeenCalledTimes(1));
+
+    act(() => useRefreshSignals.getState().signal("userQuestions"));
+    await waitFor(() => expect(presentNeedsYou).toHaveBeenCalledTimes(1));
+    const notice = presentNeedsYou.mock.calls[0]![0];
+    expect(notice).toMatchObject({
+      name: "Plan the trip",
+      href: "/c/chat-2",
+      viewing: false,
+    });
+    // The question comes from the conversation's own route, and only when
+    // the notice asks for it.
+    await expect(notice.question()).resolves.toEqual({
+      kind: "question",
+      text: "Which week works for you?",
+    });
+    expect(notice.stillWaiting()).toBe(true);
+
+    act(() => useRefreshSignals.getState().signal("userQuestions"));
+    await waitFor(() => expect(listInbox).toHaveBeenCalledTimes(3));
+    expect(presentNeedsYou).toHaveBeenCalledTimes(1);
+  });
+
+  it("tells the notice when the parked chat is the one on screen", async () => {
+    const listInbox = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([inboxEntry("chat-1", [{ callId: "call-1" }])]);
+    const client = stubClient({ listInbox });
+    renderHook(() => useChatPromptWatcher(client, "chat-1"));
+    await waitFor(() => expect(listInbox).toHaveBeenCalledTimes(1));
+
+    act(() => useRefreshSignals.getState().signal("userQuestions"));
+
+    await waitFor(() => expect(presentNeedsYou).toHaveBeenCalledTimes(1));
+    expect(presentNeedsYou.mock.calls[0]![0]).toMatchObject({
+      name: "New work",
+      viewing: true,
+    });
+  });
+
+  it("leaves a code conversation to its digest", async () => {
+    const listInbox = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        inboxEntry("session-1", [{ callId: "call-1" }], {
+          workspaceId: "ws-1",
+        }),
+      ]);
+    const client = stubClient({ listInbox });
+    renderHook(() => useChatPromptWatcher(client, null));
+    await waitFor(() => expect(listInbox).toHaveBeenCalledTimes(1));
+
+    act(() => useRefreshSignals.getState().signal("userQuestions"));
+    await waitFor(() => expect(listInbox).toHaveBeenCalledTimes(2));
+
+    expect(presentNeedsYou).not.toHaveBeenCalled();
   });
 
   it("forgets a question once it stops being pending", async () => {
@@ -131,25 +225,23 @@ describe("useChatPromptWatcher", () => {
     // long session accumulates the id of every question ever asked.
     const listInbox = vi
       .fn()
-      .mockResolvedValueOnce([inboxEntry("chat-1", [{ callId: "call-1" }])])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([inboxEntry("chat-2", [{ callId: "call-1" }])])
       .mockResolvedValue([]);
     const client = stubClient({ listInbox });
     renderHook(() => useChatPromptWatcher(client, "chat-1"));
-    await waitFor(() =>
-      expect(host.requestUserAttention).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(listInbox).toHaveBeenCalledTimes(1));
 
     act(() => useRefreshSignals.getState().signal("userQuestions"));
-    await waitFor(() =>
-      expect(usePendingPrompts.getState().userQuestions).toHaveLength(0),
-    );
+    await waitFor(() => expect(presentNeedsYou).toHaveBeenCalledTimes(1));
 
-    listInbox.mockResolvedValue([inboxEntry("chat-1", [{ callId: "call-2" }])]);
+    act(() => useRefreshSignals.getState().signal("userQuestions"));
+    await waitFor(() => expect(listInbox).toHaveBeenCalledTimes(3));
+
+    listInbox.mockResolvedValue([inboxEntry("chat-2", [{ callId: "call-2" }])]);
     act(() => useRefreshSignals.getState().signal("userQuestions"));
 
-    await waitFor(() =>
-      expect(host.requestUserAttention).toHaveBeenCalledTimes(2),
-    );
+    await waitFor(() => expect(presentNeedsYou).toHaveBeenCalledTimes(2));
   });
 
   it("drops the previous conversation's requests when the open chat changes", async () => {
@@ -228,7 +320,8 @@ describe("useChatPromptWatcher", () => {
     expect(
       useInbox.getState().entries.flatMap((entry) => entry.items),
     ).toHaveLength(3);
-    expect(host.requestUserAttention).toHaveBeenCalledTimes(1);
+    // Already waiting when the watcher started: the badge says so.
+    expect(presentNeedsYou).not.toHaveBeenCalled();
     expect(client.listPendingUserQuestions).not.toHaveBeenCalled();
     expect(usePendingPrompts.getState().userQuestions).toEqual([]);
   });

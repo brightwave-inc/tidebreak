@@ -1,6 +1,7 @@
 import type { ComponentType, FunctionComponent } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
+  Bell,
   Blocks,
   Bot,
   Cpu,
@@ -45,6 +46,7 @@ import { ChannelPreferencesPanel } from "./ChannelPreferencesPanel";
 import { GitSourceControlPanel } from "./GitSourceControlPanel";
 import { MemoryPanel } from "./MemoryPanel";
 import { InstructionsPanel } from "./InstructionsPanel";
+import { NotificationsPanel } from "./NotificationsPanel";
 
 /**
  * Each section reads what it needs from the shell context rather than being
@@ -444,11 +446,21 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "appearance",
     label: "Appearance",
-    keywords: "theme dark mode light system notifications",
+    keywords: "theme dark mode light system",
     group: "application",
     icon: Palette,
     iconClass: "text-icon-rose",
     Component: AppearanceSection,
+  },
+  {
+    path: "notifications",
+    label: "Notifications",
+    keywords:
+      "alerts desktop banners dock bounce approvals questions plans finished failed",
+    group: "application",
+    icon: Bell,
+    iconClass: "text-icon-amber",
+    Component: NotificationsPanel,
   },
   {
     path: "updates",

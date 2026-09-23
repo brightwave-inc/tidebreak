@@ -359,6 +359,96 @@ describe("CodeTranscript", () => {
     );
   });
 
+  it("says what a parked turn waits on, and clears it once you decide", () => {
+    const parked: CodeTranscriptItem[] = [
+      items[0],
+      {
+        kind: "approval",
+        id: "approval:a9",
+        approvalId: "a9",
+        state: "pending",
+      },
+    ];
+    const pending: CodeApprovalSnapshot = {
+      id: "a9",
+      session_id: "s1",
+      turn_id: "t1",
+      kind: { type: "command", cmd: "cargo test -p core", cwd: "/tmp" },
+      harness_raw_json: "{}",
+      state: "pending",
+      requested_at: "2026-08-15T12:00:00.000Z",
+    };
+    // The region is mounted empty, so the park is a change it announces.
+    const { rerender } = render(<CodeTranscript items={[items[0]]} busy />);
+
+    rerender(
+      <CodeTranscript items={parked} busy approvals={{ a9: pending }} />,
+    );
+    expect(screen.getByTestId("code-turn-announcer")).toHaveTextContent(
+      "Waiting for your approval: Run this command? cargo test -p core",
+    );
+
+    rerender(
+      <CodeTranscript
+        items={[
+          items[0],
+          {
+            kind: "approval",
+            id: "approval:a9",
+            approvalId: "a9",
+            state: "approved",
+          },
+        ]}
+        busy
+        approvals={{ a9: { ...pending, state: "approved" } }}
+      />,
+    );
+    expect(screen.getByTestId("code-turn-announcer")).toHaveTextContent(
+      "Turn running",
+    );
+  });
+
+  it("names the question a parked turn asks", () => {
+    const question: CodeApprovalSnapshot = {
+      id: "a10",
+      session_id: "s1",
+      turn_id: "t1",
+      kind: {
+        type: "questions",
+        questions: [
+          {
+            id: "q1",
+            header: "Scope",
+            question: "Should I update the migration too?",
+            options: [],
+            question_type: "single_select",
+            allow_free_form: true,
+          },
+        ],
+      },
+      harness_raw_json: "{}",
+      state: "pending",
+      requested_at: "2026-08-15T12:00:00.000Z",
+    };
+    const parked: CodeTranscriptItem[] = [
+      items[0],
+      {
+        kind: "approval",
+        id: "approval:a10",
+        approvalId: "a10",
+        state: "pending",
+      },
+    ];
+    const { rerender } = render(<CodeTranscript items={[items[0]]} busy />);
+    rerender(
+      <CodeTranscript items={parked} busy approvals={{ a10: question }} />,
+    );
+
+    expect(screen.getByTestId("code-turn-announcer")).toHaveTextContent(
+      "Waiting for your answer: Should I update the migration too?",
+    );
+  });
+
   it("leaves a failed turn to its alert rather than saying it twice", () => {
     const failed: CodeTranscriptItem[] = [
       items[0],

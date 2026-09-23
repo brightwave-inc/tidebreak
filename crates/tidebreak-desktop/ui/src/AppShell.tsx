@@ -114,6 +114,7 @@ import { Titlebar } from "./Titlebar";
 import { WindowDragStrip } from "./WindowDragStrip";
 import { useActiveChatId } from "./useActiveChatId";
 import { useAgentNotifications } from "./useAgentNotifications";
+import { useBannerTargetNavigation } from "./bannerTarget";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
 import {
   hasOpenModalDialog,
@@ -212,6 +213,8 @@ function GatedShellHooks({
   // turn on a question is noticed whatever screen the reader is on.
   useChatPromptWatcher(client, chatId);
   useAgentNotifications(client);
+  // Opening the app from a desktop banner opens the conversation it named.
+  useBannerTargetNavigation();
   useShellShortcuts(shortcuts, shortcutMode);
   useShellMenuCommands(shortcuts, shortcutMode);
   return <CodeDeliveryMonitor client={client} />;

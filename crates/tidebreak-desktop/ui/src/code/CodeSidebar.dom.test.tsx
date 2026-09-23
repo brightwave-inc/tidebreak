@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { HttpError } from "../api/client";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
+import { useInbox } from "@/Inbox";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { resetCodeDeliveryHostState } from "./CodeDeliveryStore";
@@ -155,6 +156,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  useInbox.getState().clear();
   useCodeCatalogStore.getState().reset();
   resetCodeDeliveryHostState();
   disconnectCodeUpdates();
@@ -357,7 +359,13 @@ describe("CodeSidebar", () => {
       destinations.map(
         (button) => button.getAttribute("aria-label") ?? button.textContent,
       ),
-    ).toEqual(["Pull requests", "Notifications", "Analytics", "Archive"]);
+    ).toEqual([
+      "Inbox",
+      "Pull requests",
+      "Notifications",
+      "Analytics",
+      "Archive",
+    ]);
     expect(
       screen.getByRole("button", { name: "Settings" }),
     ).toBeInTheDocument();
@@ -367,6 +375,44 @@ describe("CodeSidebar", () => {
     expect(
       screen.queryByRole("button", { name: /Subscription usage/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("opens the inbox under the code rail and counts what waits", async () => {
+    useInbox.getState().setEntries([
+      {
+        conversation: { sessionId: "session-1", workspaceId: "ws-1" },
+        title: "Fix login",
+        attention: {
+          state: {
+            type: "needs_you",
+            prompt: "an approval is waiting",
+            source: "structured",
+          },
+          source: "structured",
+        },
+        items: [],
+        waitingSince: "2026-08-15T00:00:00.000Z",
+      },
+    ]);
+    const { router } = await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const inbox = within(
+      screen.getByRole("navigation", { name: "Code destinations" }),
+    ).getByRole("button", { name: /Inbox/ });
+    expect(within(inbox).getByLabelText("1 waiting on you")).toBeVisible();
+
+    fireEvent.click(inbox);
+
+    // The code rail stays: the inbox opens under it, not in work mode.
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/inbox"),
+    );
+    expect(inbox).toHaveAttribute("aria-current", "page");
   });
 
   it.each([

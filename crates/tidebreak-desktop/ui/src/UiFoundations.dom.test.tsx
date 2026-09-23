@@ -48,21 +48,6 @@ describe("UI foundations", () => {
     expect(onChange).toHaveBeenCalledWith("dark");
   });
 
-  it("persists the completion notification preference", async () => {
-    const user = userEvent.setup();
-    render(<AppearancePanel mode="system" onChange={vi.fn()} />);
-
-    const notifications = screen.getByRole("switch", {
-      name: "Completion notifications",
-    });
-    expect(notifications).toHaveAttribute("data-state", "checked");
-
-    await user.click(notifications);
-    expect(window.localStorage.getItem("tidebreak.desktop-notifications")).toBe(
-      "off",
-    );
-  });
-
   it("toggles thinking and source disclosures through Collapsible", async () => {
     const user = userEvent.setup();
     render(

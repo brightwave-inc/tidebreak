@@ -16,6 +16,13 @@ import { useTranscriptFollow } from "./useTranscriptFollow";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { prependEarlierPage } from "./ChatSessionReducer";
 import {
+  approvalAnnouncement,
+  composerTurnStatus,
+  hostRequestAnnouncement,
+  promptQuestion,
+} from "./chatTurnStatus";
+import { ChatPromptAnnouncer } from "./ChatPromptAnnouncer";
+import {
   presentChatTranscript,
   TRANSCRIPT_PAGE_TURNS,
 } from "./ChatTranscriptPresentation";
@@ -217,6 +224,28 @@ export function ChatView({
   // the transcript and nothing here.
   const busy = useChatSessionStore((session) => session.busy);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
+  // What the composer's status region says about the turn. Both selectors
+  // return strings, so a streamed token does not re-render the pane. Only a
+  // running turn can be parked on an approval, so an idle chat skips the scan.
+  const approvalWaiting = useChatSessionStore((session) =>
+    session.busy ? approvalAnnouncement(session.messages) : "",
+  );
+  const lastTurnEnding = useChatSessionStore(
+    (session) => session.lastTurnEnding,
+  );
+  const composerStatus = composerTurnStatus({
+    waiting:
+      approvalWaiting ||
+      hostRequestAnnouncement(folderAccess.requests, outputWritebacks.requests),
+    busy,
+    ending: lastTurnEnding,
+  });
+  // A question or a plan replaces the composer and its status region, so a
+  // region beside both announces it.
+  const waitingPrompt = promptQuestion(
+    userQuestions.requests,
+    planApprovals.requests,
+  );
   const chatQueue = useChatQueueApi(client, chat.id);
   // The questions asked and the tool calls made, as arrays that stay the same
   // object while a token streams into an answer.
@@ -717,6 +746,7 @@ export function ChatView({
       </div>
 
       <div className="px-[clamp(0.5rem,4%,5rem)] pb-2" ref={promptSlotRef}>
+        <ChatPromptAnnouncer question={waitingPrompt} />
         {taskPlan !== null && (
           <div className="pb-2">
             <TaskPlanCard plan={taskPlan} live={taskPlanLive} />
@@ -780,6 +810,7 @@ export function ChatView({
                 turnControls.steerPendingTurnId === activeTurnId
               }
               steerStatus={turnControls.steerStatus}
+              turnStatus={composerStatus}
             />
           </>
         )}

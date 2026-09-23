@@ -413,6 +413,12 @@ export type ComposerProps = {
   steerError: string | null;
   steerPending: boolean;
   steerStatus: string | null;
+  /**
+   * What the status region says about the turn when the surface knows more
+   * than `busy`: that the turn waits on you, or how it just ended. A string,
+   * so the memo holds while it stays the same.
+   */
+  turnStatus?: string;
   /** Quiet status or guidance that belongs to this composer setup. */
   footerNote?: ReactNode;
 };
@@ -461,6 +467,7 @@ function ComposerView({
   steerError,
   steerPending,
   steerStatus,
+  turnStatus,
   footerNote,
 }: ComposerProps) {
   const contextTriggerId = useId();
@@ -1506,9 +1513,11 @@ function ComposerView({
           ? voice?.state === "transcribing"
             ? "Transcribing voice recording"
             : "Listening for voice input"
-          : busy
-            ? "Agent is responding"
-            : "Ready to send"}
+          : turnStatus
+            ? turnStatus
+            : busy
+              ? "Agent is responding"
+              : "Ready to send"}
       </span>
       {voice?.error && (
         <span className="text-xs text-destructive" role="alert">

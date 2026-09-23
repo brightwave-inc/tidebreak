@@ -700,15 +700,29 @@ export function parseAgentNotification(
       id: unknown;
       kind: unknown;
       title: unknown;
+      body?: unknown;
       context: unknown;
       created_at: unknown;
       read_at?: unknown;
-    }>(value, ["id", "kind", "title", "context", "created_at", "read_at"]) ||
+    }>(value, [
+      "id",
+      "kind",
+      "title",
+      "body",
+      "context",
+      "created_at",
+      "read_at",
+    ]) ||
     !nonEmptyBounded(value.id, MAX_WIRE_ID_CHARS) ||
     !isNotificationKind(value.kind) ||
     !nonEmptyBounded(value.title, 512) ||
     !nonEmptyBounded(value.created_at, MAX_WIRE_TIMESTAMP_CHARS)
   ) {
+    return null;
+  }
+  // The server caps a body well under this; the bound only keeps a bad
+  // response from reaching a banner.
+  if (value.body !== undefined && !nonEmptyBounded(value.body, 512)) {
     return null;
   }
   const context = parseNotificationContext(value.context);
@@ -723,6 +737,7 @@ export function parseAgentNotification(
     id: value.id,
     kind: value.kind,
     title: value.title,
+    body: typeof value.body === "string" ? value.body : null,
     context,
     createdAt: value.created_at,
     readAt: typeof value.read_at === "string" ? value.read_at : null,

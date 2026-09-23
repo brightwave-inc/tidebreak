@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { toast } from "sonner";
 import { create } from "zustand";
 
+import { presentNeedsYou } from "../agentNotify";
 import type { ApiClient } from "../api/client";
 import type {
   Attention,
@@ -19,7 +20,7 @@ import {
   INITIAL_RECONNECT_DELAY_MS,
   nextReconnectDelay,
 } from "../ChatSessionController";
-import { requestUserAttention } from "../host";
+import { codeParkedQuestion } from "../needsYouQuestions";
 import { useRefreshSignals } from "../RefreshSignals";
 import { friendlyErrorMessage } from "../lib/utils";
 import { applyLiveTurnRewrite } from "./CodeSessionRegistry";
@@ -437,14 +438,15 @@ export function watchChildren(
   );
 }
 
-/** True when a digest transition should poke the OS attention affordance. */
-export function shouldRequestOsAttention(
+/**
+ * True when a digest moves into structured NeedsYou: the engine stopped on
+ * an approval, a question, or a plan. Whether to notify also depends on where
+ * you are looking, which the notice decides with window focus.
+ */
+export function parkedOnYou(
   previous: Attention | undefined,
   next: Attention,
-  workspaceId: string,
-  viewedWorkspaceId: string | null,
 ): boolean {
-  if (viewedWorkspaceId === workspaceId) return false;
   if (!isStructuredNeed(next)) return false;
   return !previous || !isStructuredNeed(previous);
 }
@@ -804,10 +806,15 @@ export function forgetCodeClone(client: object, jobId: string): void {
   });
 }
 
+/**
+ * The client the live socket runs on. It can also read a parked approval,
+ * so a notification can say what the engine asked.
+ */
 type CloneUpdatesClient = Pick<
   ApiClient,
   "getCodeCloneJob" | "openCodeUpdates"
->;
+> &
+  Partial<Pick<ApiClient, "listCodeApprovals">>;
 
 const cloneReconciliations = new Map<
   string,
@@ -928,22 +935,34 @@ function maybeNotify(
   previous: CodeUpdatesState,
   digest: CodeSessionDigest,
 ): void {
-  if (digest.workspace === null) return;
+  const workspaceId = digest.workspace;
+  if (workspaceId === null) return;
   const prior =
-    previous.conversationsByWorkspace[digest.workspace]?.[digest.session]
-      ?.attention;
-  if (
-    shouldRequestOsAttention(
-      prior,
-      digest.attention,
-      digest.workspace,
-      previous.viewedWorkspaceId,
-    )
-  ) {
-    void requestUserAttention().catch(() => {
-      // Best-effort dock bounce. The digest itself is the durable signal.
-    });
-  }
+    previous.conversationsByWorkspace[workspaceId]?.[digest.session]?.attention;
+  if (!parkedOnYou(prior, digest.attention)) return;
+  const client = activeClient;
+  const sessionId = digest.session;
+  void presentNeedsYou({
+    name: digest.title.trim() || "Code session",
+    href: `/code/w/${workspaceId}`,
+    viewing: previous.viewedWorkspaceId === workspaceId,
+    question: () =>
+      client?.listCodeApprovals
+        ? codeParkedQuestion(
+            { listCodeApprovals: client.listCodeApprovals.bind(client) },
+            sessionId,
+          )
+        : Promise.resolve({ kind: "approval" as const, text: "" }),
+    stillWaiting: () => {
+      const attention =
+        useCodeUpdatesStore.getState().conversationsByWorkspace[workspaceId]?.[
+          sessionId
+        ]?.attention;
+      return attention !== undefined && isStructuredNeed(attention);
+    },
+  }).catch(() => {
+    // Best-effort. The digest itself is the durable signal.
+  });
 }
 
 let activeClient: CloneUpdatesClient | null = null;

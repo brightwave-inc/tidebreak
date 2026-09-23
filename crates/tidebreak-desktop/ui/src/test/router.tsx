@@ -66,6 +66,16 @@ export async function renderWithRouter(
     path: "/code",
     component: () => <>{ui}</>,
   });
+  const inboxRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/inbox",
+    component: () => <>{ui}</>,
+  });
+  const codeInboxRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/code/inbox",
+    component: () => <>{ui}</>,
+  });
   const codeSessionRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/code/s/$sessionId",
@@ -84,7 +94,9 @@ export async function renderWithRouter(
       homeRoute,
       chatRoute,
       appDetailRoute,
+      inboxRoute,
       codeRoute,
+      codeInboxRoute,
       codeSessionRoute,
       codeWorkspaceRoute,
       settingsRoute.addChildren([webSearchSettingsRoute, voiceSettingsRoute]),

@@ -17,6 +17,7 @@ const unread: AgentNotification = {
   id: "n-unread",
   kind: "agent_completed",
   title: "Review the updater migration finished",
+  body: "The migration now runs once per profile and keeps existing rows.",
   context: { surface: "chat", chatId: "chat-1" },
   createdAt: "2026-08-26T18:00:00.000Z",
   readAt: null,
@@ -27,6 +28,7 @@ const read: AgentNotification = {
   kind: "agent_failed",
   title:
     "A very long workspace title that should truncate in the dense row failed",
+  body: "claude exited with status 1",
   context: { surface: "code", sessionId: "s-1", workspaceId: "ws-1" },
   createdAt: "2026-08-26T17:00:00.000Z",
   readAt: "2026-08-26T17:05:00.000Z",

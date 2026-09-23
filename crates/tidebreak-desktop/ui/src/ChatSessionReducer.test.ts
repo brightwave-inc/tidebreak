@@ -785,6 +785,38 @@ describe("terminal events", () => {
   });
 });
 
+describe("how the last turn ended", () => {
+  it("records a live ending for the composer to announce", () => {
+    const finished = play([TURN, { type: "turn_completed", usage: NO_USAGE }]);
+    expect(finished.state.lastTurnEnding).toBe("finished");
+
+    const stopped = play([TURN, { type: "turn_cancelled", usage: NO_USAGE }]);
+    expect(stopped.state.lastTurnEnding).toBe("stopped");
+
+    const failed = play([TURN, { type: "turn_failed", category: "unknown" }]);
+    expect(failed.state.lastTurnEnding).toBe("failed");
+
+    // The next turn's start clears it.
+    const next = play([TURN], finished.state);
+    expect(next.state.lastTurnEnding).toBeNull();
+  });
+
+  it("does not announce an ending replayed when the chat reopens", () => {
+    const deps = makeDeps();
+    const started = reduceChatSessionEvent(
+      initialChatSessionState(),
+      framed(1, TURN, true),
+      deps,
+    );
+    const replayed = reduceChatSessionEvent(
+      started.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      deps,
+    );
+    expect(replayed.state.lastTurnEnding).toBeNull();
+  });
+});
+
 describe("applyTerminalHydration", () => {
   it("replaces the transcript and only moves the seq cursor forward", () => {
     const authoritative: ChatMessage[] = [

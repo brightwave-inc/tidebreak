@@ -13,6 +13,7 @@ const notification: AgentNotification = {
   id: "notification-1",
   kind: "agent_completed",
   title: "Workspace finished",
+  body: null,
   context: {
     surface: "code",
     sessionId: "session-1",

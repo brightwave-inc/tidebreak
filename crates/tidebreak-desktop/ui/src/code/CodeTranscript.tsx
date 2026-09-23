@@ -24,10 +24,11 @@ import type {
   FileChangeKind,
   ToolDetail,
 } from "../api/types";
-import { CodeApprovalCard } from "./CodeApprovalCard";
+import { CodeApprovalCard, codeApprovalQuestion } from "./CodeApprovalCard";
 import { AssistantMessageBody } from "@/AssistantMessageBody";
 import { AssistantWorkingIndicator } from "@/AssistantWorkingIndicator";
 import { MessageFooter } from "@/MessageFooter";
+import { waitingAnnouncement } from "@/needsYou";
 import { isolatedCard } from "@/PendingCard";
 import { ThinkingAccordion } from "@/ThinkingAccordion";
 import { ToolCardShell } from "@/ToolCardShell";
@@ -265,7 +266,7 @@ export function CodeTranscript({
           <AssistantWorkingIndicator />
         )}
         <TurnLifecycleAnnouncer
-          text={codeTurnAnnouncement(presentationItems, busy)}
+          text={codeTurnAnnouncement(presentationItems, busy, approvals)}
         />
       </div>
     </div>
@@ -334,14 +335,27 @@ function hasTurnRecovery(message: string | null): boolean {
  * Streaming text, tool output, and file activity all change many times a
  * second; announcing any of them turns the transcript into a firehose that
  * drowns the one thing a supervisor has to hear — whether the engine is still
- * working, and how the turn ended. A failed turn is not announced here because
- * `TurnReviewCard` already raises it as an alert, and a fact said twice is
- * worse than a fact said once.
+ * working, whether it is waiting on you, and how the turn ended. A failed turn
+ * is not announced here because `TurnReviewCard` already raises it as an
+ * alert, and a fact said twice is worse than a fact said once.
+ *
+ * A pending approval outranks "Turn running": the engine is stopped until you
+ * decide, and the announcement names what it asked. Deciding clears it.
  */
 export function codeTurnAnnouncement(
   items: readonly CodeTranscriptItem[],
   busy: boolean,
+  approvals: Readonly<Record<string, CodeApprovalSnapshot>> = {},
 ): string {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.kind !== "approval" || item.state !== "pending") continue;
+    const approval = approvals[item.approvalId];
+    if (approval && approval.state !== "pending") continue;
+    return approval
+      ? waitingAnnouncement(codeApprovalQuestion(approval))
+      : waitingAnnouncement({ kind: "approval", text: "" });
+  }
   if (busy) return "Turn running";
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];

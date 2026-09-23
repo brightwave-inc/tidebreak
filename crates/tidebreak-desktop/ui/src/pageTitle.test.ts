@@ -7,6 +7,9 @@ describe("document title", () => {
     expect(formatDocumentTitle(pageNameForPath("/inbox"))).toBe(
       "Inbox – Tidebreak",
     );
+    expect(formatDocumentTitle(pageNameForPath("/code/inbox"))).toBe(
+      "Inbox – Tidebreak",
+    );
     expect(formatDocumentTitle(pageNameForPath("/code/analytics"))).toBe(
       "Analytics – Tidebreak",
     );

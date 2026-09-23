@@ -33,6 +33,7 @@ export function pageNameForPath(
   }
   if (/^\/p\/[^/]+$/.test(pathname)) return names.project ?? "Project";
   if (pathname === "/code") return "Code";
+  if (pathname === "/code/inbox") return "Inbox";
   if (pathname === "/code/analytics") return "Analytics";
   if (pathname === "/code/archive") return "Archive";
   if (pathname === "/code/delivery/pull-requests") return "Pull requests";

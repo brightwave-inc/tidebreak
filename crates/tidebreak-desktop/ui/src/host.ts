@@ -101,10 +101,19 @@ export async function pickCodeDirectory(): Promise<string | null> {
   return path ?? null;
 }
 
-/** Best-effort only; durable pending-question polling remains authoritative. */
-export async function requestUserAttention(): Promise<void> {
+/**
+ * Ask for attention while the window is in the background. Critical bounces
+ * the Dock icon until you come back; otherwise it bounces once.
+ *
+ * Best-effort only; durable polling of what waits remains authoritative.
+ */
+export async function requestUserAttention(
+  options: { critical?: boolean } = {},
+): Promise<void> {
   if (!isTauri()) return;
-  await invoke("request_user_attention");
+  await invoke("request_user_attention", {
+    critical: options.critical === true,
+  });
 }
 
 /** Main-window focus. `document.hidden` is the tab, not this window. */

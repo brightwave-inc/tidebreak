@@ -328,6 +328,20 @@ const codeArchiveRoute = createRoute({
   ),
 });
 
+/**
+ * The same inbox as `/inbox`, under the code rail, so opening it from code
+ * mode does not drop you into work mode.
+ */
+const codeInboxRoute = createRoute({
+  getParentRoute: () => codeLayoutRoute,
+  path: "/code/inbox",
+  component: () => (
+    <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      <InboxView />
+    </div>
+  ),
+});
+
 function CodeWorkspaceRouteComponent() {
   const { workspaceId } = codeWorkspaceRoute.useParams();
   return (
@@ -454,6 +468,7 @@ export const routeTree = rootRoute.addChildren([
     codeDeliveryPullRequestsRoute,
     codeDeliveryRunsRoute,
     codeArchiveRoute,
+    codeInboxRoute,
   ]),
   settingsRoute.addChildren([
     settingsIndexRoute,

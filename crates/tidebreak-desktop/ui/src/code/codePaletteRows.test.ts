@@ -27,6 +27,20 @@ describe("codeNavigationPaletteRows", () => {
     expect(navigate).toHaveBeenCalledWith("/code/analytics");
   });
 
+  it("opens the inbox without leaving code mode", () => {
+    const navigate = vi.fn();
+    const rows = codeNavigationPaletteRows({
+      navigate,
+      onNewWorkspace: vi.fn(),
+      onQuickOpen: vi.fn(),
+    });
+
+    const inbox = rows.find((row) => row.id === "navigate:inbox");
+    expect(inbox?.label).toBe("Inbox");
+    inbox?.onSelect();
+    expect(navigate).toHaveBeenCalledWith("/code/inbox");
+  });
+
   it("does not keep a Delivery notifications destination", () => {
     const navigate = vi.fn();
     const rows = codeNavigationPaletteRows({
