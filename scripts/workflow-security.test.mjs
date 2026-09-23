@@ -2993,9 +2993,11 @@ test("the packaged desktop activates the signed updater feed", () => {
     desktopUpdater,
     /const UPDATE_CHECK_STARTUP_DELAY: Duration = Duration::from_secs\(15\)/,
   );
+  // The check interval is moving from five minutes to hourly. Accept both
+  // until the updater change lands, then pin hourly.
   assert.match(
     desktopUpdater,
-    /const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs\(5 \* 60\)/,
+    /const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs\((?:5|60) \* 60\)/,
   );
 });
 
