@@ -65,7 +65,8 @@ import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 import { codeDeliveryRepositoryTarget } from "./CodeDeliveryStore";
 import { fetchFixErrorsLogs } from "./checkLogs";
-import { MiddleTruncate } from "./MiddleTruncate";
+import { MergeMethodSelect } from "./MergeMethodSelect";
+import { MiddleTruncate, PrBranchLine } from "./MiddleTruncate";
 import {
   deliveryPullRequestDigest,
   prAgentQuickActions,
@@ -1061,9 +1062,11 @@ function PrDetailHeader({
         <MetaDot />
         <span className="flex min-w-0 items-center gap-1.5 font-mono">
           <GitBranch className="size-3 shrink-0" />
-          <MiddleTruncate className="min-w-0" text={summary.base_branch} />
-          <span aria-hidden>←</span>
-          <MiddleTruncate className="min-w-0" text={summary.head_branch} />
+          <PrBranchLine
+            className="min-w-0"
+            base={summary.base_branch}
+            head={summary.head_branch}
+          />
         </span>
         {detail && (
           <>
@@ -1691,31 +1694,6 @@ function PrMergeBox({
         onOpenWorkspace={onOpenWorkspace}
       />
     </section>
-  );
-}
-
-/** The merge method, offered the same way wherever a merge button appears. */
-function MergeMethodSelect({
-  value,
-  onChange,
-}: {
-  value: MergeMethod;
-  onChange: (method: MergeMethod) => void;
-}) {
-  return (
-    <Select
-      value={value}
-      onValueChange={(next) => onChange(next as MergeMethod)}
-    >
-      <SelectTrigger size="sm" className="w-28" aria-label="Merge method">
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem value="squash">Squash</SelectItem>
-        <SelectItem value="merge">Merge</SelectItem>
-        <SelectItem value="rebase">Rebase</SelectItem>
-      </SelectContent>
-    </Select>
   );
 }
 

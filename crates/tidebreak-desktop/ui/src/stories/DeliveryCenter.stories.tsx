@@ -563,6 +563,17 @@ type Story = StoryObj<typeof meta>;
 
 export const PullRequests: Story = {};
 
+/** A 1,000 px frame so Status, Checks, Action, and Updated all fit. */
+export const PullRequestsWide: Story = {
+  decorators: [
+    (Story) => (
+      <div className="h-full w-[1000px]">
+        <Story />
+      </div>
+    ),
+  ],
+};
+
 /**
  * Stack lanes (decision 77): children indent under their parent in fact
  * order, and a child whose parent is not loaded stays flat with a

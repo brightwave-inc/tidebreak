@@ -54,3 +54,35 @@ export function MiddleTruncate({
 const SHORT_ENOUGH = 40;
 const TAIL_MIN = 12;
 const TAIL_MAX = 28;
+
+/**
+ * GitHub's `base ← head` order, with the base kept intact so a long feature
+ * branch never eats the branch the pull request lands on.
+ */
+export function PrBranchLine({
+  number,
+  base,
+  head,
+  className,
+}: {
+  number?: number;
+  base: string;
+  head: string;
+  className?: string;
+}) {
+  const full =
+    number != null ? `#${number} · ${base} ← ${head}` : `${base} ← ${head}`;
+  return (
+    <span
+      className={cn("flex min-w-0 items-center gap-1", className)}
+      title={full}
+    >
+      {number != null ? <span className="shrink-0">#{number} ·</span> : null}
+      <span className="shrink-0">{base}</span>
+      <span aria-hidden className="shrink-0">
+        ←
+      </span>
+      <MiddleTruncate className="min-w-0" text={head} />
+    </span>
+  );
+}

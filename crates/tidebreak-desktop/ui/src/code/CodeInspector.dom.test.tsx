@@ -30,6 +30,7 @@ afterEach(() => {
   useCodeUpdatesStore.getState().reset();
   useCodeUiStore.setState({
     inspectorScope: null,
+    inspectorTab: null,
     pendingComposerPrompt: null,
     composerActionScope: null,
   });
@@ -186,6 +187,10 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
   // Checks render individually with their buckets counted.
   expect(screen.getByText("1 passing")).toBeInTheDocument();
   expect(screen.getByText("1 pending")).toBeInTheDocument();
+  expect(screen.queryByText("0 failing")).not.toBeInTheDocument();
+  expect(
+    screen.getByTitle("#41 · main ← tidebreak/fix-login"),
+  ).toBeInTheDocument();
   expect(screen.getByText("ci / rust")).toBeInTheDocument();
 
   // Comments load on open, with the inline anchor visible.
@@ -367,6 +372,9 @@ it("only enables direct merge for an affirmatively ready PR", async () => {
   expect(
     screen.getByRole("button", { name: "Squash and merge" }),
   ).toBeEnabled();
+  expect(
+    screen.getByRole("combobox", { name: "Merge method" }),
+  ).toHaveTextContent("Squash");
   expect(
     screen.queryByRole("button", { name: "Enable auto-merge" }),
   ).not.toBeInTheDocument();
