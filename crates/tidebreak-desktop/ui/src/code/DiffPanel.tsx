@@ -131,7 +131,11 @@ export function DiffPanel({
           This diff was truncated. Open a single file for the rest.
         </p>
       )}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div
+        className="min-h-0 flex-1 overflow-y-auto"
+        tabIndex={0}
+        aria-label="Diff"
+      >
         {!payload && !error && (
           <div className="flex flex-col gap-2 px-3 py-3" aria-hidden="true">
             <Skeleton className="h-3 w-1/3" />

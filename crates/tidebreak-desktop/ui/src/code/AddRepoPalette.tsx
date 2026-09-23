@@ -1657,7 +1657,11 @@ function ProgressStage({
           </span>
         )}
       </div>
-      <Progress value={percent} style={{ forcedColorAdjust: "none" }} />
+      <Progress
+        value={percent}
+        aria-label="Clone progress"
+        style={{ forcedColorAdjust: "none" }}
+      />
       {readError && !job?.done && (
         <ProbeFailure
           message={readError}

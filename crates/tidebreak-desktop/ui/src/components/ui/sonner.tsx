@@ -1,6 +1,9 @@
 import { Toaster as Sonner } from "sonner";
 
+import { persistErrorToasts } from "@/errorToasts";
 import { useTheme } from "@/theme";
+
+persistErrorToasts();
 
 type ToasterProps = React.ComponentProps<typeof Sonner>;
 

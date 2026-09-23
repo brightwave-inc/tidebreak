@@ -127,7 +127,7 @@ export function CodeAnalyticsBody() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Select value={repoId} onValueChange={setRepoId}>
-              <SelectTrigger size="sm" className="w-44">
+              <SelectTrigger size="sm" className="w-44" aria-label="Repository">
                 <SelectValue placeholder="All repositories" />
               </SelectTrigger>
               <SelectContent>
@@ -154,7 +154,11 @@ export function CodeAnalyticsBody() {
         </div>
       </header>
 
-      <main className="min-h-0 flex-1 overflow-y-auto bg-page-background px-5 py-5">
+      <main
+        className="min-h-0 flex-1 overflow-y-auto bg-page-background px-5 py-5"
+        tabIndex={0}
+        aria-label="Analytics"
+      >
         {loading && !report ? (
           <AnalyticsSkeleton />
         ) : error && !report ? (

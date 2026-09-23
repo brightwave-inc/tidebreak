@@ -66,4 +66,20 @@ describe("useStreamingTypewriter", () => {
     });
     expect(result.current).toBe(replayed);
   });
+
+  it("shows the full text immediately when reduced motion is on", () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("prefers-reduced-motion"),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    const { result, rerender } = renderHook(
+      ({ text, live }) => useStreamingTypewriter(text, live),
+      { initialProps: { text: "Searching", live: true } },
+    );
+    rerender({ text: "Searching the web", live: true });
+    expect(result.current).toBe("Searching the web");
+    vi.unstubAllGlobals();
+  });
 });

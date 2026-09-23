@@ -1,4 +1,8 @@
-import type { ReactNode } from "react";
+import { useLayoutEffect, useRef, type ReactNode } from "react";
+import { useRouter } from "@tanstack/react-router";
+
+/** Last path that owned the page heading, so a remounted frame still skips the first load. */
+let lastFocusedPath: string | null = null;
 
 /**
  * A route and the rail that belongs to it, side by side.
@@ -18,10 +22,30 @@ export function RouteFrame({
   className?: string;
   mainClassName?: string;
 }) {
+  const mainRef = useRef<HTMLElement>(null);
+  const router = useRouter();
+  useLayoutEffect(() => {
+    const apply = () => {
+      const pathname = router.state.location.pathname;
+      const heading = mainRef.current?.querySelector("h1");
+      if (!(heading instanceof HTMLElement)) return;
+      heading.tabIndex = -1;
+      const previous = lastFocusedPath;
+      lastFocusedPath = pathname;
+      if (previous === null || previous === pathname) return;
+      heading.focus({ preventScroll: true });
+    };
+    apply();
+    return router.subscribe("onResolved", apply);
+  }, [router]);
+
   const frame = (
     <>
       {sidebar}
-      <main className={`main${mainClassName ? ` ${mainClassName}` : ""}`}>
+      <main
+        ref={mainRef}
+        className={`main${mainClassName ? ` ${mainClassName}` : ""}`}
+      >
         {children}
       </main>
     </>

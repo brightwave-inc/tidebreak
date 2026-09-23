@@ -1980,6 +1980,13 @@ body {
     gap: 0.375rem;
   }
 
+  .settings-field > label {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+
   .settings-field-label {
     font-size: 0.8125rem;
     font-weight: 600;
@@ -2517,4 +2524,21 @@ body {
    but recedes; the replacement streams in beneath it. */
 .message-superseded {
   opacity: 0.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse,
+  .animate-in,
+  .animate-out,
+  .fade-in-0,
+  .fade-out-0,
+  .zoom-in-95,
+  .zoom-out-95,
+  .slide-in-from-top-2,
+  .slide-in-from-bottom-2,
+  .slide-in-from-left-2,
+  .slide-in-from-right-2 {
+    animation: none !important;
+    transition: none !important;
+  }
 }

@@ -106,13 +106,10 @@ export function RecentChatRow({
         onClick={onOpen}
       >
         {displayTitle}
+        {needsAttention && <span className="sr-only">, needs attention</span>}
       </button>
       {needsAttention && (
-        <span
-          className="text-warning shrink-0"
-          aria-label={`${title} needs attention`}
-          title="Needs attention"
-        >
+        <span className="text-warning shrink-0" title="Needs attention">
           <CircleAlert aria-hidden="true" size={15} />
         </span>
       )}
