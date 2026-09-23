@@ -18,7 +18,7 @@ use tidebreak_core::{
 
 use crate::error::ServerError;
 use crate::exec_write_snapshot::{list_file_change_summaries, ExecFileChangeSummary};
-use crate::extract::{double_option, Json, Path};
+use crate::extract::{double_option, Json, Path, Query};
 use crate::principal::AuthContext;
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
@@ -666,7 +666,31 @@ pub struct ChatTranscript {
     /// terminal metadata even when no assistant message was committed.
     pub terminal_turns: Vec<ChatTerminalTurnSnapshot>,
     pub last_event_seq: i64,
+    /// Whether the conversation has messages older than this page. Always
+    /// false when the whole transcript was read.
+    pub has_more: bool,
+    /// Pass as `before` to read the page just older than this one. Set exactly
+    /// when `has_more` is.
+    pub earlier_cursor: Option<i64>,
 }
+
+/// Query of `GET /chats/{id}/messages`. With neither field, the whole
+/// transcript is read.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatTranscriptQuery {
+    /// Read only messages older than this cursor: an `earlier_cursor` from a
+    /// previous page.
+    #[serde(default)]
+    pub before: Option<i64>,
+    /// Read at most this many turns, newest first. A turn opens at a user
+    /// message, so a page never starts mid-exchange.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// The most turns one transcript page may ask for.
+pub const MAX_TRANSCRIPT_PAGE_TURNS: u32 = 500;
 
 /// The roles a visible transcript entry can have.
 ///
@@ -734,12 +758,29 @@ impl ChatMessageSnapshot {
 /// `GET /chats/{id}/messages` — replay the visible durable transcript in
 /// commit order. The existence check prevents a missing chat from looking like
 /// an empty conversation.
+///
+/// `limit` and `before` read one page, newest first: opening a long
+/// conversation reads its end, and each `earlier_cursor` reads the page before.
 pub async fn list_chat_messages(
     State(state): State<AppState>,
     auth: AuthContext,
     store: ScopedStore,
     Path(id): Path<SessionId>,
+    Query(query): Query<ChatTranscriptQuery>,
 ) -> Result<Json<ChatTranscript>, ServerError> {
+    if query
+        .limit
+        .is_some_and(|limit| !(1..=MAX_TRANSCRIPT_PAGE_TURNS).contains(&limit))
+    {
+        return Err(ServerError::bad_request(format!(
+            "transcript limit must be between 1 and {MAX_TRANSCRIPT_PAGE_TURNS}"
+        )));
+    }
+    if query.before.is_some_and(|before| before < 1) {
+        return Err(ServerError::bad_request(
+            "transcript cursor must be a positive message sequence",
+        ));
+    }
     if let Some(runtime) = state.code.as_ref() {
         if let Some(session) = tidebreak_core::db::code::get_session_all_owners(
             &runtime.db,
@@ -755,10 +796,18 @@ pub async fn list_chat_messages(
             }
         }
     }
-    let transcript = store
-        .get_chat_transcript(id)
+    let page = store
+        .get_chat_transcript_page(
+            id,
+            tidebreak_core::TranscriptPage {
+                before: query.before,
+                turns: query.limit,
+            },
+        )
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
+    let earlier_cursor = page.earlier;
+    let transcript = page.transcript;
     let mut citations_by_message = std::collections::HashMap::new();
     for citation in transcript.citations {
         citations_by_message
@@ -919,6 +968,8 @@ pub async fn list_chat_messages(
             })
             .collect(),
         last_event_seq: transcript.last_event_seq,
+        has_more: earlier_cursor.is_some(),
+        earlier_cursor,
     }))
 }
 

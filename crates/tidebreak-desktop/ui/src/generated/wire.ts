@@ -923,7 +923,17 @@ tool_activity: Array<ChatToolActivitySnapshot>,
  * Status and streamed presentation for every terminal turn. This owns
  * terminal metadata even when no assistant message was committed.
  */
-terminal_turns: Array<ChatTerminalTurnSnapshot>, last_event_seq: number, };
+terminal_turns: Array<ChatTerminalTurnSnapshot>, last_event_seq: number,
+/**
+ * Whether the conversation has messages older than this page. Always
+ * false when the whole transcript was read.
+ */
+has_more: boolean,
+/**
+ * Pass as `before` to read the page just older than this one. Set exactly
+ * when `has_more` is.
+ */
+earlier_cursor: number | null, };
 
 /**
  * Hint that a turn recorded a checkpoint. The diff body is loaded separately.

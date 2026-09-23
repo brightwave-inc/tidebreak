@@ -33,14 +33,14 @@ use tidebreak_core::local_app::{AppGrant, AppRecord, AppRevision};
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
     AcceptTurnSteerOutcome, AgentRun, AgentRunId, AgentRunResult, AnswerUserQuestionsOutcome,
-    AnswerUserQuestionsRequest, CallId, Chat, ChatTranscriptSnapshot, DecidePlanRequest,
-    DeleteChatOutcome, DeleteProjectOutcome, DocumentId, DocumentListCursor, DocumentRecord,
-    DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, ImageRef, JournaledTurnOutcome,
-    MessageAttachment, MoveChatOutcome, NetworkPolicy, OwnerId, PendingPlanApproval,
-    PendingUserQuestions, PermissionMode, Project, ProjectId, ReasoningEffort,
+    AnswerUserQuestionsRequest, CallId, Chat, ChatTranscriptPage, ChatTranscriptSnapshot,
+    DecidePlanRequest, DeleteChatOutcome, DeleteProjectOutcome, DocumentId, DocumentListCursor,
+    DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, ImageRef,
+    JournaledTurnOutcome, MessageAttachment, MoveChatOutcome, NetworkPolicy, OwnerId,
+    PendingPlanApproval, PendingUserQuestions, PermissionMode, Project, ProjectId, ReasoningEffort,
     RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
     SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedAgentEvent, SessionId,
-    Store, TaskPlan, ToolApproval, ToolCallRecord, TurnId, TurnRun, TurnSteerId,
+    Store, TaskPlan, ToolApproval, ToolCallRecord, TranscriptPage, TurnId, TurnRun, TurnSteerId,
 };
 
 use crate::error::ServerError;
@@ -119,6 +119,17 @@ impl ScopedStore {
         id: SessionId,
     ) -> Result<Option<ChatTranscriptSnapshot>> {
         self.store.get_chat_transcript_scoped(&self.owner, id).await
+    }
+
+    /// One page of the principal's chat transcript.
+    pub async fn get_chat_transcript_page(
+        &self,
+        id: SessionId,
+        page: TranscriptPage,
+    ) -> Result<Option<ChatTranscriptPage>> {
+        self.store
+            .get_chat_transcript_page_scoped(&self.owner, id, page)
+            .await
     }
 
     /// Update user-editable metadata on the principal's chat.

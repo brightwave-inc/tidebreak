@@ -1160,7 +1160,14 @@ impl Store for DbStore {
         &self,
         id: SessionId,
     ) -> Result<Option<crate::storage::ChatTranscriptSnapshot>> {
-        ops::conversation::get_chat_transcript(self, id, None).await
+        Ok(ops::conversation::get_chat_transcript(
+            self,
+            id,
+            None,
+            crate::storage::TranscriptPage::default(),
+        )
+        .await?
+        .map(|page| page.transcript))
     }
 
     async fn get_chat_transcript_scoped(
@@ -1168,7 +1175,31 @@ impl Store for DbStore {
         owner: &OwnerId,
         id: SessionId,
     ) -> Result<Option<crate::storage::ChatTranscriptSnapshot>> {
-        ops::conversation::get_chat_transcript(self, id, Some(owner)).await
+        Ok(ops::conversation::get_chat_transcript(
+            self,
+            id,
+            Some(owner),
+            crate::storage::TranscriptPage::default(),
+        )
+        .await?
+        .map(|page| page.transcript))
+    }
+
+    async fn get_chat_transcript_page(
+        &self,
+        id: SessionId,
+        page: crate::storage::TranscriptPage,
+    ) -> Result<Option<crate::storage::ChatTranscriptPage>> {
+        ops::conversation::get_chat_transcript(self, id, None, page).await
+    }
+
+    async fn get_chat_transcript_page_scoped(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+        page: crate::storage::TranscriptPage,
+    ) -> Result<Option<crate::storage::ChatTranscriptPage>> {
+        ops::conversation::get_chat_transcript(self, id, Some(owner), page).await
     }
 
     async fn create_output(&self, request: &CreateOutput) -> Result<OutputRecord> {
