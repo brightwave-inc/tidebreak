@@ -1095,6 +1095,7 @@ pub(crate) enum Notification {
     Owner,
     Kind,
     Title,
+    Body,
     Context,
     DedupeKey,
     CreatedAt,

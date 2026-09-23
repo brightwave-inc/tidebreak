@@ -1142,6 +1142,11 @@ export type AgentNotification = {
   id: string;
   kind: NotificationKind;
   title: string;
+  /**
+   * One line under the title: why the turn failed, or how the agent's reply
+   * began. Null when there is nothing worth showing.
+   */
+  body: string | null;
   context: NotificationContext;
   createdAt: string;
   readAt: string | null;

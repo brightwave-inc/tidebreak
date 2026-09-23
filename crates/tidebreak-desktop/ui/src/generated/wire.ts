@@ -4021,7 +4021,12 @@ export type NotificationKindSnapshot = "agent_completed" | "agent_failed";
 
 export type NotificationPage = { notifications: Array<NotificationSnapshot>, next_cursor?: string, };
 
-export type NotificationSnapshot = { id: NotificationId, kind: NotificationKindSnapshot, title: string, context: NotificationContextSnapshot, created_at: string, read_at?: string, };
+export type NotificationSnapshot = { id: NotificationId, kind: NotificationKindSnapshot, title: string,
+/**
+ * One line under the title: why the turn failed, or how the agent's
+ * closing message began. Absent when there is nothing worth showing.
+ */
+body?: string, context: NotificationContextSnapshot, created_at: string, read_at?: string, };
 
 export type NotificationUnreadCount = { unread: number, };
 

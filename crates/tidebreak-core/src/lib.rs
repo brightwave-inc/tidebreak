@@ -303,7 +303,9 @@ pub use deliverable_acceptance::{
     WorkspaceArtifactProposal,
 };
 pub use digest::sha256_hex;
-pub use error::{AgentError, AgentErrorInfo, ProviderErrorInfo, ProviderFailure, Result};
+pub use error::{
+    provider_failure_detail, AgentError, AgentErrorInfo, ProviderErrorInfo, ProviderFailure, Result,
+};
 pub use event::{AgentEvent, SequencedAgentEvent};
 pub use fs_atomic::{replace_file, sync_directory};
 pub use id::{

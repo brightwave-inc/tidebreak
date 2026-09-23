@@ -44,6 +44,7 @@ type RouteScenario =
   | "settings-instructions"
   | "settings-managed"
   | "settings-connected-apps"
+  | "settings-notifications"
   | "apps-list"
   | "apps-detail"
   | "plugins-list"
@@ -187,6 +188,7 @@ function initialPathFor(scenario: RouteScenario): string {
   if (scenario === "settings-instructions") return "/settings/instructions";
   if (scenario === "settings-managed") return "/settings/gateway";
   if (scenario === "settings-connected-apps") return "/settings/connected-apps";
+  if (scenario === "settings-notifications") return "/settings/notifications";
   if (scenario === "settings-unmanaged") return "/settings/providers";
   if (scenario === "apps-list") return "/apps";
   if (scenario === "apps-detail") return "/apps/release-brief";
@@ -301,6 +303,11 @@ export const ProjectInstructionsMinimumWindow: Story = {
 
 export const SettingsInstructions: Story = {
   args: { scenario: "settings-instructions" },
+};
+
+/** Notifications in the settings rail, after Appearance. */
+export const SettingsNotifications: Story = {
+  args: { scenario: "settings-notifications" },
 };
 
 export const SettingsProvidersUnmanaged: Story = {

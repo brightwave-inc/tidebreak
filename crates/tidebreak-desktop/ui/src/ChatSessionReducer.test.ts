@@ -514,6 +514,17 @@ describe("approvals", () => {
     expect(state.provisionalToolCallIds.has("call-1")).toBe(false);
   });
 
+  it("asks the shell to re-read the inbox, so the park is noticed now", () => {
+    // Without it, a turn parked on an approval while you are in another app
+    // waits for the inbox poll before anything tells you.
+    const { effects } = play([
+      TURN,
+      { type: "tool_call_started", call_id: "call-1", name: "search" },
+      APPROVAL,
+    ]);
+    expect(effects).toContainEqual({ type: "refresh_inbox" });
+  });
+
   it("resolves the card and resumes or cancels the tool on decision", () => {
     const approved = play([
       TURN,
@@ -782,6 +793,38 @@ describe("terminal events", () => {
     expect(state.messages.find((m) => m.role === "tool")).toMatchObject({
       status: "completed",
     });
+  });
+});
+
+describe("how the last turn ended", () => {
+  it("records a live ending for the composer to announce", () => {
+    const finished = play([TURN, { type: "turn_completed", usage: NO_USAGE }]);
+    expect(finished.state.lastTurnEnding).toBe("finished");
+
+    const stopped = play([TURN, { type: "turn_cancelled", usage: NO_USAGE }]);
+    expect(stopped.state.lastTurnEnding).toBe("stopped");
+
+    const failed = play([TURN, { type: "turn_failed", category: "unknown" }]);
+    expect(failed.state.lastTurnEnding).toBe("failed");
+
+    // The next turn's start clears it.
+    const next = play([TURN], finished.state);
+    expect(next.state.lastTurnEnding).toBeNull();
+  });
+
+  it("does not announce an ending replayed when the chat reopens", () => {
+    const deps = makeDeps();
+    const started = reduceChatSessionEvent(
+      initialChatSessionState(),
+      framed(1, TURN, true),
+      deps,
+    );
+    const replayed = reduceChatSessionEvent(
+      started.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      deps,
+    );
+    expect(replayed.state.lastTurnEnding).toBeNull();
   });
 });
 

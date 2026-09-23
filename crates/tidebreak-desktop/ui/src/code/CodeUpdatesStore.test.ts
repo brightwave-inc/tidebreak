@@ -14,10 +14,10 @@ import {
   connectCodeUpdates,
   disconnectCodeUpdates,
   noticeToAction,
+  parkedOnYou,
   reconcileCodeClone,
   reduceCodeUpdates,
   selectCodeClone,
-  shouldRequestOsAttention,
   takeSelectedCodeClone,
   trackCodeClone,
   useCodeUpdatesStore,
@@ -681,22 +681,16 @@ describe("clone onboarding reconciliation", () => {
   });
 });
 
-describe("shouldRequestOsAttention", () => {
-  it("fires only on a transition into structured NeedsYou for a workspace that is not being viewed", () => {
-    expect(shouldRequestOsAttention(working, need, "ws-1", null)).toBe(true);
-    expect(shouldRequestOsAttention(undefined, need, "ws-1", null)).toBe(true);
-    expect(shouldRequestOsAttention(need, need, "ws-1", null)).toBe(false);
-    expect(shouldRequestOsAttention(working, need, "ws-1", "ws-1")).toBe(false);
-    expect(shouldRequestOsAttention(working, need, "ws-1", "ws-other")).toBe(
-      true,
-    );
+describe("parkedOnYou", () => {
+  it("fires only on a transition into structured NeedsYou", () => {
+    expect(parkedOnYou(working, need)).toBe(true);
+    expect(parkedOnYou(undefined, need)).toBe(true);
+    expect(parkedOnYou(need, need)).toBe(false);
     expect(
-      shouldRequestOsAttention(
-        working,
-        { state: { type: "done_unreviewed" }, source: "lifecycle" },
-        "ws-1",
-        null,
-      ),
+      parkedOnYou(working, {
+        state: { type: "done_unreviewed" },
+        source: "lifecycle",
+      }),
     ).toBe(false);
   });
 });

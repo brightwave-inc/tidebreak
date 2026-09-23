@@ -432,6 +432,9 @@ async fn record_notification(
     append: &Append,
     mint: Mint,
 ) -> Result<()> {
+    // The admitted event is the terminal one. It decodes here only to say why
+    // a failed turn failed; a completed turn's body comes from the journal.
+    let event = serde_json::from_value::<crate::code::Event>(append.event.clone()).ok();
     match mint.workspace_id {
         Some(workspace_id) => {
             let workspace_title = entities::code_workspace::Entity::find_by_id(workspace_id.0)
@@ -448,6 +451,7 @@ async fn record_notification(
                 mint.turn_id,
                 workspace_title.as_deref(),
                 mint.kind,
+                event.as_ref().and_then(super::journal::failure_message),
             )
             .await?;
         }
@@ -459,6 +463,7 @@ async fn record_notification(
                 append.session_id,
                 mint.turn_id,
                 mint.kind,
+                event.as_ref().and_then(super::journal::failure_detail),
             )
             .await?;
         }

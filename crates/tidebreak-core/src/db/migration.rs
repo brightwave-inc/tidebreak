@@ -37,6 +37,7 @@ mod managed_decision;
 mod memory_evidence_kind;
 mod native_tool_receipt;
 mod native_turn_identity;
+mod notification_body;
 mod one_approval_surface;
 mod one_journal;
 mod one_turn_lane;
@@ -131,6 +132,7 @@ impl MigratorTrait for Migrator {
             Box::new(incarnation_wip_time::IncarnationWipTime),
             Box::new(project_instructions::ProjectInstructions),
             Box::new(memory_evidence_kind::MemoryEvidenceEventKind),
+            Box::new(notification_body::NotificationBody),
         ]
     }
 }

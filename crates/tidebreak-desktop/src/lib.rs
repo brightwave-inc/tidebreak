@@ -553,16 +553,23 @@ pub(crate) fn native_security_label(value: &str) -> String {
         .collect()
 }
 
-/// Best-effort attention hint for a newly parked user question.
+/// Best-effort attention hint while the window is in the background.
 ///
-/// Durable server state and renderer recovery remain authoritative; failure to
-/// notify never changes or acknowledges a question.
+/// `critical` is for an agent that is blocked on you: the Dock icon bounces
+/// until you bring the app back. Otherwise it bounces once. Durable server
+/// state and renderer recovery remain authoritative; failure to notify never
+/// changes or acknowledges anything.
 #[tauri::command]
-fn request_user_attention(window: tauri::WebviewWindow) {
+fn request_user_attention(window: tauri::WebviewWindow, critical: Option<bool>) {
     if window.is_focused().unwrap_or(true) {
         return;
     }
-    let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
+    let kind = if critical.unwrap_or(false) {
+        tauri::UserAttentionType::Critical
+    } else {
+        tauri::UserAttentionType::Informational
+    };
+    let _ = window.request_user_attention(Some(kind));
 }
 
 /// Main-window focus. `document.hidden` is the tab, not this window.

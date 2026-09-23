@@ -17,7 +17,7 @@ import {
   PopoverTrigger,
 } from "./components/ui/popover";
 import { cn } from "./lib/utils";
-import { notificationHref } from "./useAgentNotifications";
+import { notificationHref } from "./notificationPresent";
 import { useNotifications } from "./NotificationStore";
 import { Button } from "@/components/ui/button";
 import { SidebarButton } from "./sidebar/primitives";

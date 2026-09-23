@@ -392,20 +392,11 @@ impl TurnFailureCategory {
 /// Only provider-originated diagnostics cross to the renderer. These strings
 /// have already passed the router's bounded message extraction and credential
 /// redaction; internal failures can carry host paths and stay server-side.
+///
+/// The rule lives in core, so a notification body can never show more than
+/// the transcript does.
 pub fn renderer_provider_failure_detail(kind: &str, detail: &str) -> Option<String> {
-    matches!(
-        kind,
-        "authentication"
-            | "access_denied"
-            | "rate_limited"
-            | "overloaded"
-            | "invalid_request"
-            | "refusal"
-            | "prompt_too_long"
-            | "provider"
-    )
-    .then(|| detail.trim().to_owned())
-    .filter(|detail| !detail.is_empty())
+    tidebreak_core::provider_failure_detail(kind, detail)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

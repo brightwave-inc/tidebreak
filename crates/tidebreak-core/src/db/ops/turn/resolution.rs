@@ -1078,8 +1078,14 @@ where
     .await?;
     let notification_kind = terminal_notification_kind(event);
     if let Some(kind) = notification_kind {
-        super::super::notification::record_work_turn_notification_on(conn, chat_id, id, kind)
-            .await?;
+        super::super::notification::record_work_turn_notification_on(
+            conn,
+            chat_id,
+            id,
+            kind,
+            terminal_failure(event),
+        )
+        .await?;
     }
     Ok(Some(SequencedAgentEvent {
         seq,
@@ -1122,6 +1128,7 @@ where
             SessionId(stored.session_id),
             id,
             kind,
+            terminal_failure(&event),
         )
         .await?;
     }
@@ -1129,6 +1136,14 @@ where
         seq: stored.seq,
         event,
     }))
+}
+
+/// The error a failed turn ended with, for its notification's body.
+fn terminal_failure(event: &AgentEvent) -> Option<&crate::AgentErrorInfo> {
+    match event {
+        AgentEvent::TurnFailed { error } => Some(error),
+        _ => None,
+    }
 }
 
 fn terminal_notification_kind(event: &AgentEvent) -> Option<crate::NotificationKind> {

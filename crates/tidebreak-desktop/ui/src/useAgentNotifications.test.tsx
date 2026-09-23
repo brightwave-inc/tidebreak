@@ -22,6 +22,7 @@ const existing: AgentNotification = {
   id: "notification-existing",
   kind: "agent_completed",
   title: "Existing work finished",
+  body: "Three files changed.",
   context: { surface: "chat", chatId: "chat-old" },
   createdAt: "2026-08-26T18:00:00Z",
   readAt: null,
@@ -31,6 +32,7 @@ const fresh: AgentNotification = {
   id: "notification-fresh",
   kind: "agent_failed",
   title: "Fresh work failed",
+  body: "claude exited with status 1",
   context: { surface: "code", sessionId: "session-1", workspaceId: "ws-1" },
   createdAt: "2026-08-26T18:05:00Z",
   readAt: null,
@@ -107,7 +109,10 @@ describe("useAgentNotifications", () => {
     await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
     expect(toast).toHaveBeenCalledWith(
       "Fresh work failed",
-      expect.objectContaining({ action: expect.any(Object) }),
+      expect.objectContaining({
+        description: "claude exited with status 1",
+        action: expect.any(Object),
+      }),
     );
   });
 

@@ -131,6 +131,7 @@ async fn append_event_inner(
                     turn_id,
                     workspace_title.as_deref(),
                     kind,
+                    failure_message(event),
                 )
                 .await?;
             } else {
@@ -141,6 +142,7 @@ async fn append_event_inner(
                     session_id,
                     turn_id,
                     kind,
+                    failure_detail(event),
                 )
                 .await?;
             }
@@ -155,6 +157,24 @@ fn notification_kind(event: &Event) -> Option<NotificationKind> {
     match event {
         Event::TurnCompleted { .. } => Some(NotificationKind::AgentCompleted),
         Event::TurnFailed { .. } => Some(NotificationKind::AgentFailed),
+        _ => None,
+    }
+}
+
+/// The bounded message a failed turn ended with: what its review card shows.
+pub(in crate::db) fn failure_message(event: &Event) -> Option<&str> {
+    match event {
+        Event::TurnFailed { error, .. } => Some(error.message.as_str()),
+        _ => None,
+    }
+}
+
+/// The categorized failure an internal session's turn ended with. An internal
+/// session opens as a chat, so its notification follows the chat's rule for
+/// what a failure may say.
+pub(in crate::db) fn failure_detail(event: &Event) -> Option<&crate::AgentErrorInfo> {
+    match event {
+        Event::TurnFailed { detail, .. } => detail.as_ref(),
         _ => None,
     }
 }

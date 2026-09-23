@@ -11,6 +11,7 @@ import { useLayoutState } from "@/panel/usePanelNav";
 import { searchFromLayout } from "@/panel/panelUrl";
 import { SidebarFrame } from "@/sidebar/SidebarFrame";
 import { NotificationBellButton } from "@/NotificationBellButton";
+import { InboxButton } from "@/sidebar/InboxButton";
 import { SidebarButton } from "@/sidebar/primitives";
 import { AddRepoPalette } from "./AddRepoPalette";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
@@ -620,6 +621,7 @@ function CodeDestinations({
   ) => void;
 }) {
   const destinations = [
+    { type: "inbox" as const },
     {
       type: "route" as const,
       label: "Pull requests",
@@ -646,6 +648,9 @@ function CodeDestinations({
   return (
     <>
       {destinations.map((destination) => {
+        if (destination.type === "inbox") {
+          return <InboxButton key="inbox" />;
+        }
         if (destination.type === "notifications") {
           return <NotificationBellButton key="notifications" />;
         }

@@ -1,9 +1,10 @@
 import { useEffect, useRef } from "react";
 
-import type { ApiClient } from "./api";
+import { presentNeedsYou } from "./agentNotify";
+import type { ApiClient, InboxEntry, InboxItem } from "./api";
 import { useChatAttention } from "./ChatAttention";
-import { requestUserAttention } from "./host";
 import { useInbox } from "./Inbox";
+import { workParkedQuestion } from "./needsYouQuestions";
 import { usePendingPrompts } from "./PendingPrompts";
 import { useRefreshSignals } from "./RefreshSignals";
 import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
@@ -12,7 +13,7 @@ import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
  * Safety-net cadence. The event stream signals the open chat's prompts as
  * they park; the timer covers chats that are not open, whose parked work has
  * no stream to announce it. Hidden, it slows rather than stops: a question
- * parking in a background chat still wants the dock bounce.
+ * parking in a background chat still wants its notification.
  */
 const POLL_INTERVAL_MS = 30_000;
 const HIDDEN_POLL_INTERVAL_MS = 60_000;
@@ -20,6 +21,26 @@ const HIDDEN_POLL_INTERVAL_MS = 60_000;
 const promptActions = usePendingPrompts.getState();
 const attentionActions = useChatAttention.getState();
 const inboxActions = useInbox.getState();
+
+/**
+ * The Work conversations with something newly parked, each with the oldest
+ * of its new items. Code conversations are left out: their digest announces
+ * them as they park, without waiting for this poll.
+ */
+function newlyParkedWork(
+  pending: readonly InboxEntry[],
+  announced: ReadonlySet<string>,
+): { entry: InboxEntry; item: InboxItem }[] {
+  const parked: { entry: InboxEntry; item: InboxItem }[] = [];
+  for (const entry of pending) {
+    if (entry.conversation.workspaceId !== null) continue;
+    const item = entry.items.find(
+      (candidate) => !announced.has(candidate.callId),
+    );
+    if (item) parked.push({ entry, item });
+  }
+  return parked;
+}
 
 /**
  * Watches every conversation for parked work and keeps detailed prompt cards
@@ -31,6 +52,11 @@ const inboxActions = useInbox.getState();
  * cannot disagree about what is waiting. Detail still comes from the selected
  * chat's established recovery routes, which keeps prompt content scoped to the
  * conversation that can render it.
+ *
+ * A Work conversation that parks after the first read gets one notification,
+ * unless you are looking at it. What was already waiting when the watcher
+ * started is on the inbox badge, and repeating it on every launch would be
+ * noise.
  */
 export function useChatPromptWatcher(
   client: ApiClient | null,
@@ -39,12 +65,15 @@ export function useChatPromptWatcher(
   // Which questions the shell has already announced. It spans chat switches
   // and screens, then is pruned to the current server summary after each read.
   const announcedCallIdsRef = useRef<Set<string>>(new Set());
+  const chatIdRef = useRef(chatId);
+  chatIdRef.current = chatId;
   const refreshRef = useRef<(() => void) | null>(null);
   const detailsRefreshRef = useRef<(() => void) | null>(null);
   const questionsSignal = useRefreshSignals((state) => state.userQuestions);
   const plansSignal = useRefreshSignals((state) => state.planApprovals);
   const folderSignal = useRefreshSignals((state) => state.folderAccess);
   const writebackSignal = useRefreshSignals((state) => state.outputWritebacks);
+  const inboxSignal = useRefreshSignals((state) => state.inbox);
 
   useEffect(() => {
     if (!client) {
@@ -63,6 +92,7 @@ export function useChatPromptWatcher(
     announcedCallIdsRef.current = new Set();
     let cancelled = false;
     let summarySeq = 0;
+    let seeded = false;
 
     const readSummary = async () => {
       const seq = ++summarySeq;
@@ -79,16 +109,28 @@ export function useChatPromptWatcher(
             .filter((conversation) => conversation.workspaceId === null)
             .map((conversation) => conversation.sessionId),
         );
-        const pendingPromptIds = new Set(
+        const parked = seeded
+          ? newlyParkedWork(pending, announcedCallIdsRef.current)
+          : [];
+        seeded = true;
+        announcedCallIdsRef.current = new Set(
           pending.flatMap((entry) => entry.items.map((item) => item.callId)),
         );
-        const unannounced = [...pendingPromptIds].filter(
-          (callId) => !announcedCallIdsRef.current.has(callId),
-        );
-        announcedCallIdsRef.current = pendingPromptIds;
-        if (unannounced.length > 0) {
-          void requestUserAttention().catch(() => {
-            // Attention is a best-effort hint. Durable polling is truth.
+        for (const { entry, item } of parked) {
+          const sessionId = entry.conversation.sessionId;
+          void presentNeedsYou({
+            name: entry.title?.trim() || "New work",
+            href: `/c/${sessionId}`,
+            viewing: chatIdRef.current === sessionId,
+            question: () => workParkedQuestion(client, sessionId, item),
+            stillWaiting: () =>
+              useInbox
+                .getState()
+                .entries.some(
+                  (current) => current.conversation.sessionId === sessionId,
+                ),
+          }).catch(() => {
+            // A notification is a best-effort hint. Durable polling is truth.
           });
         }
       } catch (err) {
@@ -214,6 +256,11 @@ export function useChatPromptWatcher(
   useVisibilityGatedPoll(() => refreshRef.current?.(), POLL_INTERVAL_MS, {
     enabled: client !== null,
     hiddenIntervalMs: HIDDEN_POLL_INTERVAL_MS,
-    revision: questionsSignal + plansSignal + folderSignal + writebackSignal,
+    revision:
+      questionsSignal +
+      plansSignal +
+      folderSignal +
+      writebackSignal +
+      inboxSignal,
   });
 }

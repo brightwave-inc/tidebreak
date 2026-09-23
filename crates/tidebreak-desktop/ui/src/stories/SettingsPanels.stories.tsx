@@ -1,10 +1,16 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { useState } from "react";
 import { fn } from "storybook/test";
 import { AgentsPanel } from "@/settings/AgentsPanel";
 import { AppearancePanel } from "@/settings/AppearancePanel";
 import { CompactionPanel } from "@/settings/CompactionPanel";
 import { ModelsPanel } from "@/settings/ModelsPanel";
+import { NotificationsPanel } from "@/settings/NotificationsPanel";
 import { UpdatesPanel } from "@/settings/UpdatesPanel";
+import {
+  setFinishedNotificationsEnabled,
+  setNeedsYouNotificationsEnabled,
+} from "@/NotificationPreferences";
 import type { PromptCacheRetention } from "@/api";
 import type { ThemeMode } from "@/theme";
 import type { DesktopUpdateState } from "@/updates";
@@ -22,14 +28,43 @@ const idleUpdate: DesktopUpdateState = {
 };
 
 type SettingsShowcaseProps = {
-  panel: "appearance" | "agents" | "context" | "models" | "updates";
+  panel:
+    | "appearance"
+    | "notifications"
+    | "agents"
+    | "context"
+    | "models"
+    | "updates";
   loadState?: "ready" | "loading" | "failed";
   turnRecapsEnabled?: boolean;
   promptCacheRetention?: PromptCacheRetention;
   theme?: ThemeMode;
   updateState?: DesktopUpdateState;
   upToDate?: boolean;
+  /** Notifications: tell you when an agent stops for you. */
+  needsYou?: boolean;
+  /** Notifications: tell you when an agent finishes or fails. */
+  finished?: boolean;
 };
+
+/**
+ * The panel reads its switches from this device's storage when it mounts,
+ * so the story writes them first.
+ */
+function NotificationsShowcase({
+  needsYou,
+  finished,
+}: {
+  needsYou: boolean;
+  finished: boolean;
+}) {
+  useState(() => {
+    setNeedsYouNotificationsEnabled(needsYou);
+    setFinishedNotificationsEnabled(finished);
+    return null;
+  });
+  return <NotificationsPanel />;
+}
 
 function SettingsShowcase({
   panel,
@@ -39,9 +74,20 @@ function SettingsShowcase({
   theme = "system",
   updateState = idleUpdate,
   upToDate = false,
+  needsYou = true,
+  finished = true,
 }: SettingsShowcaseProps) {
   if (panel === "appearance") {
     return <AppearancePanel mode={theme} onChange={fn()} />;
+  }
+  if (panel === "notifications") {
+    return (
+      <NotificationsShowcase
+        key={`${needsYou}-${finished}`}
+        needsYou={needsYou}
+        finished={finished}
+      />
+    );
   }
   if (panel === "agents") {
     return (
@@ -104,6 +150,25 @@ export const AppearanceSystem: Story = {};
 export const AppearanceDark: Story = {
   args: { theme: "dark" },
   globals: { theme: "dark" },
+};
+
+/** Both switches on: what a new install sees. */
+export const Notifications: Story = {
+  args: { panel: "notifications" },
+};
+
+/** Told when an agent needs you, but not when one finishes. */
+export const NotificationsNeedsYouOnly: Story = {
+  args: { panel: "notifications", needsYou: true, finished: false },
+};
+
+export const NotificationsOff: Story = {
+  args: { panel: "notifications", needsYou: false, finished: false },
+};
+
+export const NotificationsCompact: Story = {
+  args: { panel: "notifications" },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };
 
 export const Agents: Story = {

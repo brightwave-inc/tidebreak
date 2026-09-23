@@ -1,18 +1,10 @@
 import { useEffect, useRef } from "react";
 import { useRouterState } from "@tanstack/react-router";
-import { toast } from "sonner";
 
-import type { AgentNotification, ApiClient } from "./api";
-import {
-  isWindowFocused,
-  presentNativeNotification,
-  requestUserAttention,
-} from "./host";
-import {
-  notificationPresent,
-  viewingNotificationConversation,
-} from "./notificationPresent";
-import { desktopNotificationsEnabled } from "./NotificationPreferences";
+import { presentFinished } from "./agentNotify";
+import type { ApiClient } from "./api";
+import { requestUserAttention } from "./host";
+import { viewingNotificationConversation } from "./notificationPresent";
 import { useNotifications } from "./NotificationStore";
 import { useRefreshSignals } from "./RefreshSignals";
 import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
@@ -27,13 +19,6 @@ const POLL_INTERVAL_MS = 30_000;
 const HIDDEN_POLL_INTERVAL_MS = 60_000;
 
 const storeActions = useNotifications.getState();
-
-export function notificationHref(row: AgentNotification): string {
-  if (row.context.surface === "chat") {
-    return `/c/${row.context.chatId}`;
-  }
-  return `/code/w/${row.context.workspaceId}`;
-}
 
 /**
  * Polls the durable agent-finished log and presents each new unread row once.
@@ -83,7 +68,21 @@ export function useAgentNotifications(client: ApiClient | null): void {
         );
         for (const row of fresh) {
           presentedRef.current.add(row.id);
-          void presentRow(row, pathnameRef.current, client).catch(() => {
+          void presentFinished(row, {
+            viewing: viewingNotificationConversation(
+              pathnameRef.current,
+              row.context,
+            ),
+            stillUnread: () =>
+              useNotifications
+                .getState()
+                .notifications.some(
+                  (current) => current.id === row.id && !current.readAt,
+                ),
+            onOpen: () => {
+              void client.markNotificationsRead([row.id]);
+            },
+          }).catch(() => {
             void requestUserAttention().catch(() => {});
           });
         }
@@ -126,39 +125,4 @@ export function useAgentNotifications(client: ApiClient | null): void {
       })
       .catch(() => {});
   }, [client, notifications, pathname]);
-}
-
-async function presentRow(
-  row: AgentNotification,
-  pathname: string,
-  client: ApiClient,
-): Promise<void> {
-  const windowFocused = await isWindowFocused();
-  const kind = notificationPresent({
-    windowFocused,
-    viewingConversation: viewingNotificationConversation(pathname, row.context),
-    permission: windowFocused ? "granted" : "prompt",
-    enabled: desktopNotificationsEnabled(),
-  });
-  if (kind === "skip") return;
-  if (kind === "toast") {
-    toast(row.title, {
-      action: {
-        label: "Open",
-        onClick: () => {
-          window.location.hash = `#${notificationHref(row)}`;
-          void client.markNotificationsRead([row.id]);
-        },
-      },
-    });
-    return;
-  }
-  if (kind === "native") {
-    const shown = await presentNativeNotification(row.title, "");
-    if (!shown) {
-      void requestUserAttention().catch(() => {});
-    }
-    return;
-  }
-  void requestUserAttention().catch(() => {});
 }

@@ -78,7 +78,17 @@ export type ChatSessionState = {
    * null when the held transcript reaches the start of the conversation.
    */
   earlierCursor: number | null;
+  /**
+   * How the last turn you watched end ended, for the composer's status
+   * region to say so. Only a live terminal frame sets it: a replayed one is
+   * an ending you did not just see, and reopening a chat should not announce
+   * it. The next turn's start clears it.
+   */
+  lastTurnEnding: ChatTurnEnding | null;
 };
+
+/** How a turn ended, as the composer reports it. */
+export type ChatTurnEnding = "finished" | "stopped" | "failed";
 
 export type ChatSessionEffect =
   | { type: "refresh_folder_access" }
@@ -91,6 +101,11 @@ export type ChatSessionEffect =
    */
   | { type: "refresh_task_plan" }
   | { type: "refresh_notifications" }
+  /**
+   * The turn parked on a tool approval. The shell re-reads the inbox, which is
+   * how it notices the park and tells you, instead of waiting for its poll.
+   */
+  | { type: "refresh_inbox" }
   /** A turn began; the host resets cancel state (and steer state when asked). */
   | { type: "turn_began"; turnId: string; startsDifferentTurn: boolean }
   /** A turn reached a terminal event; the host clears cancel/steer state. */
@@ -134,6 +149,7 @@ export function initialChatSessionState(): ChatSessionState {
     sandboxPreparing: false,
     compacting: false,
     earlierCursor: null,
+    lastTurnEnding: null,
   };
 }
 
@@ -153,6 +169,10 @@ export function reduceChatSessionEvent(
   };
   const event = framed.event;
   const effects: ChatSessionEffect[] = [];
+  // How a terminal frame leaves `lastTurnEnding`: said only when you saw the
+  // turn end live.
+  const endedAs = (ending: ChatTurnEnding): ChatTurnEnding | null =>
+    framed.replayed === true ? state.lastTurnEnding : ending;
 
   switch (event.type) {
     case "turn_started": {
@@ -179,6 +199,7 @@ export function reduceChatSessionEvent(
           ...state,
           busy: true,
           activeTurnId: event.turn_id,
+          lastTurnEnding: null,
           // A compaction whose finish event never arrived (disconnect, replay
           // gap) must not label the next turn as compacting.
           compacting: false,
@@ -329,6 +350,7 @@ export function reduceChatSessionEvent(
       const approval = toolApprovalPresentation(event.approval);
       const provisionalToolCallIds = new Set(state.provisionalToolCallIds);
       provisionalToolCallIds.delete(event.call_id);
+      effects.push({ type: "refresh_inbox" });
       return {
         state: {
           ...state,
@@ -469,6 +491,7 @@ export function reduceChatSessionEvent(
           compacting: false,
           activeTurnId: null,
           lastTurnUsage: event.usage,
+          lastTurnEnding: endedAs("finished"),
           provisionalToolCallIds: new Set(),
         },
         effects,
@@ -491,6 +514,7 @@ export function reduceChatSessionEvent(
           compacting: false,
           activeTurnId: null,
           lastTurnUsage: event.usage,
+          lastTurnEnding: endedAs("finished"),
           provisionalToolCallIds: new Set(),
           messages: [
             ...discardToolCalls(state.messages, state.provisionalToolCallIds),
@@ -522,6 +546,7 @@ export function reduceChatSessionEvent(
           compacting: false,
           activeTurnId: null,
           lastTurnUsage: event.usage,
+          lastTurnEnding: endedAs("stopped"),
           provisionalToolCallIds: new Set(),
           messages: [
             ...settleActiveToolCalls(state.messages, "cancelled"),
@@ -551,6 +576,7 @@ export function reduceChatSessionEvent(
           busy: false,
           compacting: false,
           activeTurnId: null,
+          lastTurnEnding: endedAs("failed"),
           provisionalToolCallIds: new Set(),
           messages: [
             ...settleActiveToolCalls(state.messages, "failed"),

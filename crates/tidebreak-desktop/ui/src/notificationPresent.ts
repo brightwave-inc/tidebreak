@@ -1,4 +1,7 @@
-/** How one unread agent-finished row is shown. Never toast and native. */
+/**
+ * How one agent notice is shown: a finished or failed turn, or an agent that
+ * stopped for you. Never toast and native.
+ */
 export type NotificationPresentKind = "skip" | "toast" | "native" | "dock";
 
 export type NotificationPermissionState =
@@ -8,10 +11,12 @@ export type NotificationPermissionState =
   | "unavailable";
 
 /**
- * Pick one presentation for a newly unread agent-finished row.
+ * Pick one presentation for a new agent notice.
  *
- * Window focus is the main window, not `document.hidden`. Viewing the
- * conversation itself is enough signal; anything else toast or native.
+ * Window focus is the main window, not `document.hidden`. Looking at the
+ * conversation in a focused window is signal enough, so it skips. Anywhere
+ * else in a focused window gets a toast. A window in the background gets a
+ * desktop banner.
  */
 export function notificationPresent(input: {
   windowFocused: boolean;
@@ -49,4 +54,16 @@ export function viewingNotificationConversation(
     pathname === `/code/w/${context.workspaceId}` ||
     pathname.startsWith(`/code/w/${context.workspaceId}/`)
   );
+}
+
+/** Where opening a notification row takes you. */
+export function notificationHref(row: {
+  context:
+    | { surface: "chat"; chatId: string }
+    | { surface: "code"; workspaceId: string };
+}): string {
+  if (row.context.surface === "chat") {
+    return `/c/${row.context.chatId}`;
+  }
+  return `/code/w/${row.context.workspaceId}`;
 }

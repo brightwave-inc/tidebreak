@@ -314,6 +314,7 @@ describe("agent notifications", () => {
           id: "notification-1",
           kind: "agent_completed",
           title: "Fix the updater finished",
+          body: null,
           context: {
             surface: "code",
             sessionId: "session-1",
@@ -325,6 +326,24 @@ describe("agent notifications", () => {
       ],
       nextCursor: "cursor-1",
     });
+  });
+
+  it("carries the one line under a notification's title", () => {
+    expect(
+      parseAgentNotificationPage({
+        notifications: [
+          { ...notification, body: "The updater now retries once." },
+        ],
+      })?.notifications[0]?.body,
+    ).toBe("The updater now retries once.");
+    // An empty or oversized body is a bad response, not a blank banner.
+    for (const body of ["", "x".repeat(513)]) {
+      expect(
+        parseAgentNotificationPage({
+          notifications: [{ ...notification, body }],
+        }),
+      ).toBeNull();
+    }
   });
 
   it("rejects unknown kinds, context detail, and extra page fields", () => {

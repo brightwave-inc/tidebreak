@@ -10,7 +10,8 @@ export type RefreshTarget =
   | "planApprovals"
   | "taskPlan"
   | "notifications"
-  | "queuedTurns";
+  | "queuedTurns"
+  | "inbox";
 
 /**
  * A revision counter per pollable target.
@@ -31,6 +32,11 @@ export type RefreshSignalStore = {
   notifications: number;
   /** A queued turn was added, promoted, or the turn ahead of it ended. */
   queuedTurns: number;
+  /**
+   * The open chat parked on a tool approval. Nothing else re-reads the inbox
+   * for it, and the inbox read is what tells you an agent needs you.
+   */
+  inbox: number;
   signal: (target: RefreshTarget) => void;
 };
 
@@ -43,6 +49,7 @@ export function createRefreshSignalStore() {
     taskPlan: 0,
     notifications: 0,
     queuedTurns: 0,
+    inbox: 0,
     signal: (target) =>
       set(
         (state) =>

@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import type { CodeApprovalSnapshot, CodeApprovalDecision } from "../api/types";
+import { oneLine, type NeedsYouQuestion } from "../needsYou";
 import { UserQuestionsCard } from "../UserQuestionsCard";
 import { MessageMarkdown } from "../MessageMarkdown";
 import { toolPreviewPresentation } from "../ToolPreview";
@@ -478,6 +479,52 @@ function otherSummary(summary: string): string {
     return "The engine needs approval";
   }
   return trimmed;
+}
+
+/**
+ * A parked approval as the one question it asks, for a notification or a
+ * screen reader: the card's title, then the action the card shows under it.
+ * A question card asks its first question, and a plan names its title.
+ */
+export function codeApprovalQuestion(
+  approval: CodeApprovalSnapshot,
+): NeedsYouQuestion {
+  const title = approvalTitle(approval);
+  const withAction = (action: string): NeedsYouQuestion => {
+    const line = oneLine(action);
+    return {
+      kind: "approval",
+      text: oneLine(line ? `${title} ${line}` : title),
+    };
+  };
+  switch (approval.kind.type) {
+    case "questions":
+      return {
+        kind: "question",
+        text: oneLine(approval.kind.questions[0]?.question || title),
+      };
+    case "plan":
+      return {
+        kind: "plan",
+        text: oneLine(planProposal(approval.harness_raw_json)?.title ?? title),
+      };
+    case "command":
+      return withAction(approval.kind.cmd);
+    case "file_write":
+      return approval.kind.paths.length > 1
+        ? {
+            kind: "approval",
+            text: `Write these ${approval.kind.paths.length} files?`,
+          }
+        : withAction(approval.kind.paths[0] ?? "");
+    case "tool_use":
+      return withAction(
+        toolPreviewPresentation(approval.kind.preview).headline,
+      );
+    case "network":
+    case "other":
+      return withAction(otherSummary(approval.kind.summary));
+  }
 }
 
 /** Past this, the payload is a file, not something a reader scrolls. */

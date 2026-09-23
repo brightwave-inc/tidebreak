@@ -7,18 +7,24 @@ use sea_orm::{
     QuerySelect, Set,
 };
 
-use crate::code::WorkspaceId;
-use crate::error::{AgentError, Result};
+use crate::code::{Event, WorkspaceId};
+use crate::error::{provider_failure_detail, AgentError, AgentErrorInfo, Result};
 use crate::id::{NotificationId, SessionId, TurnId};
 use crate::model::OwnerId;
 use crate::storage::{
-    code_notification_dedupe_key, notification_title, work_notification_dedupe_key, Notification,
-    NotificationContext, NotificationKind, NotificationListCursor,
+    code_notification_dedupe_key, notification_body_line, notification_title,
+    work_notification_dedupe_key, Notification, NotificationContext, NotificationKind,
+    NotificationListCursor,
 };
 
 use super::super::{entities, store_err, DbStore};
 
 const MAX_PAGE: u64 = 100;
+
+/// How far back a Code turn's closing message is looked for. A turn that
+/// journals more events than this after its closing message is rare, and its
+/// notification goes without a body.
+const CLOSING_MESSAGE_EVENT_WINDOW: u64 = 200;
 
 /// Insert one Work turn settlement. Idempotent on `(owner, dedupe_key)`.
 pub(in crate::db) async fn record_work_turn_notification(
@@ -27,15 +33,20 @@ pub(in crate::db) async fn record_work_turn_notification(
     turn_id: TurnId,
     kind: NotificationKind,
 ) -> Result<Option<Notification>> {
-    record_work_turn_notification_on(&store.conn, chat_id, turn_id, kind).await
+    record_work_turn_notification_on(&store.conn, chat_id, turn_id, kind, None).await
 }
 
 /// Insert one Work turn settlement on the caller's transaction.
+///
+/// `failure` is the error a failed turn ended with. The body shows it only
+/// when the provider reported it, the same rule the transcript follows, so a
+/// banner never says more than the conversation does.
 pub(in crate::db) async fn record_work_turn_notification_on<C>(
     conn: &C,
     chat_id: SessionId,
     turn_id: TurnId,
     kind: NotificationKind,
+    failure: Option<&AgentErrorInfo>,
 ) -> Result<Option<Notification>>
 where
     C: ConnectionTrait,
@@ -48,16 +59,48 @@ where
         return Ok(None);
     };
     let owner = OwnerId::new(&chat.owner)?;
+    let body = match kind {
+        NotificationKind::AgentCompleted => work_closing_message_on(conn, chat_id, turn_id)
+            .await?
+            .as_deref()
+            .and_then(notification_body_line),
+        NotificationKind::AgentFailed => failure
+            .and_then(|failure| provider_failure_detail(&failure.kind, &failure.message))
+            .as_deref()
+            .and_then(notification_body_line),
+    };
     insert_notification_on(
         conn,
         &owner,
         kind,
         notification_title(chat.title.as_deref(), kind),
+        body,
         NotificationContext::Chat { chat_id },
         work_notification_dedupe_key(kind, chat_id, turn_id),
     )
     .await
     .map(Some)
+}
+
+/// The assistant message a Work turn ended on. Completion writes it earlier
+/// in the same transaction as the terminal event.
+async fn work_closing_message_on<C>(
+    conn: &C,
+    chat_id: SessionId,
+    turn_id: TurnId,
+) -> Result<Option<String>>
+where
+    C: ConnectionTrait,
+{
+    Ok(entities::message::Entity::find()
+        .filter(entities::message::Column::ChatId.eq(chat_id.0))
+        .filter(entities::message::Column::TurnId.eq(turn_id.0))
+        .filter(entities::message::Column::Role.eq("assistant"))
+        .order_by_desc(entities::message::Column::Seq)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .map(|message| message.content))
 }
 
 /// Insert one Code turn settlement. Idempotent on `(owner, dedupe_key)`.
@@ -79,11 +122,16 @@ pub(in crate::db) async fn record_code_turn_notification(
         turn_id,
         workspace_title,
         kind,
+        None,
     )
     .await
 }
 
 /// Insert one Code turn settlement on the caller's transaction.
+///
+/// `failure` is the bounded message a failed turn ended with: the same text
+/// the turn's review card shows.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn record_code_turn_notification_on<C>(
     conn: &C,
     owner: &OwnerId,
@@ -92,15 +140,26 @@ pub(in crate::db) async fn record_code_turn_notification_on<C>(
     turn_id: TurnId,
     workspace_title: Option<&str>,
     kind: NotificationKind,
+    failure: Option<&str>,
 ) -> Result<Notification>
 where
     C: ConnectionTrait,
 {
+    let body = match kind {
+        NotificationKind::AgentCompleted => {
+            code_closing_message_on(conn, owner, session_id, turn_id)
+                .await?
+                .as_deref()
+                .and_then(notification_body_line)
+        }
+        NotificationKind::AgentFailed => failure.and_then(notification_body_line),
+    };
     insert_notification_on(
         conn,
         owner,
         kind,
         notification_title(workspace_title.or(Some("Code")), kind),
+        body,
         NotificationContext::Code {
             session_id,
             workspace_id,
@@ -110,11 +169,48 @@ where
     .await
 }
 
+/// The engine's closing message for `turn_id`: its last top-level assistant
+/// message, read back from the journal to the turn's start.
+///
+/// A subagent's messages answer the parent, not you, so they are skipped. So
+/// is a row that does not decode as a Code event: a body is not worth failing
+/// the terminal append that mints this notification.
+async fn code_closing_message_on<C>(
+    conn: &C,
+    owner: &OwnerId,
+    session_id: SessionId,
+    turn_id: TurnId,
+) -> Result<Option<String>>
+where
+    C: ConnectionTrait,
+{
+    let rows = entities::event::Entity::find()
+        .filter(entities::event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::event::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::event::Column::Seq)
+        .limit(CLOSING_MESSAGE_EVENT_WINDOW)
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    for row in rows {
+        match serde_json::from_value::<Event>(row.event) {
+            Ok(Event::TurnStarted { turn_id: started }) if started == turn_id => break,
+            Ok(Event::AssistantMessage {
+                text,
+                parent_call_id: None,
+            }) => return Ok(Some(text)),
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
 async fn insert_notification_on<C>(
     conn: &C,
     owner: &OwnerId,
     kind: NotificationKind,
     title: String,
+    body: Option<String>,
     context: NotificationContext,
     dedupe_key: String,
 ) -> Result<Notification>
@@ -129,6 +225,7 @@ where
         owner: Set(owner.as_str().to_owned()),
         kind: Set(kind.as_str().to_owned()),
         title: Set(title),
+        body: Set(body),
         context: Set(context_json),
         dedupe_key: Set(dedupe_key.clone()),
         created_at: Set(created_at),
@@ -254,6 +351,7 @@ fn notification_from_row(row: entities::notification::Model) -> Result<Notificat
         id: NotificationId(row.id),
         kind,
         title: row.title,
+        body: row.body,
         context,
         created_at: row.created_at,
         read_at: row.read_at,

@@ -113,6 +113,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260922_000001_incarnation_wip_time",
             "m20260923_000001_project_instructions",
             "m20260923_000002_memory_evidence_event_kind",
+            "m20260923_000003_notification_body",
         ]
     );
     assert!(db
