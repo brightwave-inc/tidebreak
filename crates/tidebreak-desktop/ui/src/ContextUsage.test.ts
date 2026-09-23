@@ -4,6 +4,7 @@ import {
   contextUsageLevel,
   contextUsagePercent,
   formatTokenCount,
+  occupancyTokens,
   summedTurnTokens,
 } from "./ContextUsage";
 
@@ -13,6 +14,16 @@ const USAGE = {
   cache_read_input_tokens: 60_000,
   cache_creation_input_tokens: 2_500,
 };
+
+describe("occupancy", () => {
+  it("does not treat summed spend as how full the window is", () => {
+    expect(occupancyTokens(USAGE)).toBeNull();
+  });
+
+  it("uses the last call's prompt when the turn published it", () => {
+    expect(occupancyTokens({ ...USAGE, context_tokens: 44_172 })).toBe(44_172);
+  });
+});
 
 describe("turn spend", () => {
   it("counts every disjoint field once", () => {

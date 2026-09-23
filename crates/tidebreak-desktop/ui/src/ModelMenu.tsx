@@ -492,7 +492,9 @@ export function ModelMenu({
       warnAboutPromptCacheChange();
     }
     pickedModel.current = true;
-    void onChange(model.key);
+    void Promise.resolve(onChange(model.key)).catch(() => {
+      toast.error("Could not update the model. Try again.");
+    });
   }
 
   const visibleModels = searching ? searchResults : (activeGroup?.models ?? []);
@@ -806,7 +808,9 @@ export function ReasoningEffortSubMenu({
           onSelect={() => {
             if (isDefault) return;
             warnAboutPromptCacheChange();
-            void onChange(null);
+            void Promise.resolve(onChange(null)).catch(() => {
+              toast.error("Could not update reasoning effort. Try again.");
+            });
           }}
           className="flex items-center gap-2"
         >
@@ -823,7 +827,9 @@ export function ReasoningEffortSubMenu({
               onSelect={() => {
                 if (selected) return;
                 warnAboutPromptCacheChange();
-                void onChange(option.value);
+                void Promise.resolve(onChange(option.value)).catch(() => {
+                  toast.error("Could not update reasoning effort. Try again.");
+                });
               }}
               className="flex items-center gap-2"
             >

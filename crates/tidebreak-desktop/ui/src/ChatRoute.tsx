@@ -11,7 +11,7 @@ import type {
 } from "./api";
 import { useApp } from "./AppContext";
 import { ChatHeaderTitle } from "./ChatHeaderTitle";
-import { summedTurnTokens } from "./ContextUsage";
+import { occupancyTokens } from "./ContextUsage";
 import { ChatStatusChip } from "./ChatStatusChip";
 import { useChatMemoryPresence } from "./chatMemoryPresence";
 import { useChatHydration } from "./useChatHydration";
@@ -394,13 +394,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       () => {
         setComposerDraft("");
         images.clear();
-        const current =
-          useComposerDrafts.getState().attachments[chatId]?.pastedTexts ?? [];
-        composerDraftActions.setPastedTexts(
-          chatId,
-          current.filter((item) => !queuedPastedTextIds.has(item.id)),
-        );
-        composerDraftActions.setFolders(chatId, []);
+        clearQueuedComposerAttachments(chatId, queuedPastedTextIds);
         voice.resetInputUsed();
       },
     );
@@ -876,14 +870,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           contextUsage={
             lastTurnUsage
               ? {
-                  // Chat has no per-call figure to read, so the ring keeps
-                  // the summed turn totals it always used. That carries the
-                  // same over-read code mode just fixed: a multi-call turn
-                  // re-sends its transcript, so this runs to several prompts
-                  // where the window only ever held one. Fixing it needs the
-                  // provider paths to publish the last call's prompt on
-                  // `RendererTurnUsage`, which is not in this change.
-                  contextTokens: summedTurnTokens(lastTurnUsage),
+                  contextTokens: occupancyTokens(lastTurnUsage),
                   spend: {
                     input: lastTurnUsage.input_tokens,
                     output: lastTurnUsage.output_tokens,
@@ -1087,6 +1074,26 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
 function withoutConnectionState(status: string): string {
   return status.replace(/ · (?:live|reconnecting)$/, "");
+}
+
+/**
+ * Drop the files and skills a queued turn already took, the same way send
+ * does. Queue used to leave them in the composer, so the next message sent
+ * the same attachments and re-invoked the same skills.
+ */
+export function clearQueuedComposerAttachments(
+  chatId: string,
+  queuedPastedTextIds: ReadonlySet<string>,
+): void {
+  const drafts = useComposerDrafts.getState();
+  drafts.setFiles(chatId, []);
+  drafts.setSkills(chatId, []);
+  const current = drafts.attachments[chatId]?.pastedTexts ?? [];
+  drafts.setPastedTexts(
+    chatId,
+    current.filter((item) => !queuedPastedTextIds.has(item.id)),
+  );
+  drafts.setFolders(chatId, []);
 }
 
 /**

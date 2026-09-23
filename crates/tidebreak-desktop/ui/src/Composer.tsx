@@ -508,6 +508,9 @@ export function Composer({
   const steerTooLong =
     active && [...submissionText.trim()].length > MAX_STEER_CHARACTERS;
   const imageBlocker = imageSendBlocker(images);
+  const attachmentsBlockSteer =
+    active &&
+    ((images?.items.length ?? 0) > 0 || (files?.items.length ?? 0) > 0);
   const voiceWorking = voice?.state !== undefined && voice.state !== "idle";
   const canSubmit =
     !inputDisabled &&
@@ -517,7 +520,8 @@ export function Composer({
     !steerHasUnsupportedCharacter &&
     !steerTooLong &&
     imageBlocker === null &&
-    (!busy || active);
+    (!busy || active) &&
+    !(attachmentsBlockSteer && !willQueue);
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -877,6 +881,7 @@ export function Composer({
     }
     const submissionKey = resetKey;
     const queueing = willQueue && intent !== "steer";
+    if (active && !queueing && attachmentsBlockSteer) return;
     await (active ? (queueing ? onQueue() : onSteer()) : onSend());
     historyIndexRef.current = null;
 
@@ -1268,7 +1273,11 @@ export function Composer({
             : voice?.state === "transcribing"
               ? "Transcribing…"
               : active
-                ? "Guide the active response…"
+                ? willQueue
+                  ? attachmentsBlockSteer
+                    ? "Queue a follow-up…"
+                    : `Queue a follow-up (${modEnter} to steer)`
+                  : "Guide the active response…"
                 : "Message Tidebreak…"
         }
         aria-label="Message"
@@ -1409,7 +1418,9 @@ export function Composer({
               {(hasDraft || steerPending) && (
                 <WithTooltip
                   label={
-                    willQueue ? (
+                    attachmentsBlockSteer ? (
+                      "Queue to include attachments"
+                    ) : willQueue ? (
                       <>
                         Queue · Enter
                         <span className="mt-1 block font-normal text-primary-foreground/80">
@@ -1427,9 +1438,11 @@ export function Composer({
                     size="xs"
                     className="h-8 min-w-[5rem] px-3 text-sm"
                     aria-label={
-                      willQueue
-                        ? "Queue message for after this response"
-                        : "Steer active response"
+                      attachmentsBlockSteer && !willQueue
+                        ? "Queue to include attachments"
+                        : willQueue
+                          ? "Queue message for after this response"
+                          : "Steer active response"
                     }
                     disabled={!canSubmit}
                   >

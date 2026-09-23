@@ -14,6 +14,20 @@ import type { RendererTurnUsage } from "./generated/wire";
  * only ever held one. Use it for "what did this turn cost", never for "how
  * full is the window" — that reading is `CodeUsage.context_tokens`.
  */
+/**
+ * Prompt tokens resident on the last model call, when the turn published them.
+ *
+ * Chat usage today is spend only. Occupancy belongs on a per-call figure such
+ * as `context_tokens`; until that field exists, this is not a reading.
+ */
+export function occupancyTokens(
+  usage: RendererTurnUsage & { context_tokens?: number },
+): number | null {
+  const resident = usage.context_tokens;
+  if (typeof resident === "number" && resident > 0) return resident;
+  return null;
+}
+
 export function summedTurnTokens(usage: RendererTurnUsage): number {
   return (
     usage.input_tokens +
