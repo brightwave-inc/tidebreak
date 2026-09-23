@@ -259,6 +259,11 @@ pub enum MemoryEvidence {
         message_id: MessageId,
     },
     /// One durable code-journal event.
+    ///
+    /// Records saved before the shared-noun rename spell this kind
+    /// `code_event`. A migration rewrites them, and the alias keeps any copy
+    /// the migration cannot reach readable.
+    #[serde(alias = "code_event")]
     Event {
         /// Session that owns the event sequence.
         session_id: SessionId,

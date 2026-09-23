@@ -547,3 +547,90 @@ async fn a_session_counts_only_the_proposals_its_own_journal_justifies() {
         0
     );
 }
+
+/// A record saved before the shared-noun rename spells its code-session
+/// evidence `code_event`. It still loads, so the memory list keeps working on
+/// a profile the rename migration has not reached.
+#[tokio::test]
+async fn a_record_saved_before_the_evidence_rename_still_loads() {
+    let (_directory, store) = temp_store().await;
+    let owner = OwnerId::new("user:alice").unwrap();
+    let record = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Active,
+        "Smoke test",
+        "Always run it.",
+        1,
+    );
+    let id = record.id;
+    store.put(&owner, record).await.unwrap();
+    let session = uuid::Uuid::new_v4();
+    sea_orm::ConnectionTrait::execute_unprepared(
+        &store.conn,
+        &format!(
+            r#"UPDATE memory_record SET provenance = '{{"author":"model","origin":{{}},"evidence":[{{"kind":"code_event","session_id":"{session}","seq":3}}]}}'"#
+        ),
+    )
+    .await
+    .unwrap();
+
+    let listed = store
+        .list(&owner, MemoryListFilter::default())
+        .await
+        .unwrap();
+
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, id);
+    assert!(matches!(
+        listed[0].provenance.evidence.as_slice(),
+        [MemoryEvidence::Event { seq: 3, .. }]
+    ));
+}
+
+/// One record this build cannot read leaves the list, not the whole page.
+#[tokio::test]
+async fn one_unreadable_record_does_not_hide_the_rest() {
+    let (_directory, store) = temp_store().await;
+    let owner = OwnerId::new("user:alice").unwrap();
+    let kept = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Active,
+        "Kept",
+        "Readable.",
+        1,
+    );
+    let broken = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Active,
+        "Broken",
+        "Unreadable.",
+        2,
+    );
+    let kept_id = kept.id;
+    let broken_id = broken.id;
+    store.put(&owner, kept).await.unwrap();
+    store.put(&owner, broken).await.unwrap();
+    entities_set_kind(&store, broken_id, "not_a_kind").await;
+
+    let listed = store
+        .list(&owner, MemoryListFilter::default())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        listed.iter().map(|record| record.id).collect::<Vec<_>>(),
+        [kept_id]
+    );
+}
+
+async fn entities_set_kind(store: &crate::db::DbStore, id: MemoryRecordId, kind: &str) {
+    crate::db::entities::memory_record::Entity::update_many()
+        .col_expr(
+            crate::db::entities::memory_record::Column::Kind,
+            sea_orm::sea_query::Expr::value(kind),
+        )
+        .filter(crate::db::entities::memory_record::Column::Id.eq(id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+}
