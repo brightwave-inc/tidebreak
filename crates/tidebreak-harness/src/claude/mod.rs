@@ -588,14 +588,6 @@ pub(crate) mod tests {
         assert!(first_result < notice);
     }
 
-    /// Captured on 2.1.259: the engine names its subagent tool `Agent`, and
-    /// the span every adapter emits for a subagent is `Task`, which the rail
-    /// and the transcript look for. The subagent's own calls attach to it.
-    ///
-    /// Run in the background, the call settles at once with a placeholder
-    /// while the subagent works on; its end arrives as a notification after
-    /// the turn's result, and reaches the transcript as a notice naming it.
-    /// Run in the foreground, its own tool result reports its end.
     /// What the pinned release says about which turn a line belongs to,
     /// captured on 2.1.259 with a client `uuid` on each user line.
     ///
@@ -667,6 +659,14 @@ pub(crate) mod tests {
         assert!(started < last_result);
     }
 
+    /// Captured on 2.1.259: the engine names its subagent tool `Agent`, and
+    /// the span every adapter emits for a subagent is `Task`, which the rail
+    /// and the transcript look for. The subagent's own calls attach to it.
+    ///
+    /// Run in the background, the call settles at once with a placeholder
+    /// while the subagent works on; its end arrives as a notification after
+    /// the turn's result, and reaches the transcript as a notice naming it.
+    /// Run in the foreground, its own tool result reports its end.
     #[test]
     fn fixture_replay_subagent_tasks() {
         for (name, background) in [("subagent-task", true), ("subagent-task-foreground", false)] {

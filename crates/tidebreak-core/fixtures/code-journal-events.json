@@ -171,5 +171,12 @@
     "type": "session_tree",
     "children": [],
     "wait": null
+  },
+  {
+    "type": "background_activity",
+    "event": {
+      "type": "assistant_message",
+      "text": "The background job finished."
+    }
   }
 ]

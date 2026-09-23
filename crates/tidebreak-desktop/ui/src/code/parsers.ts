@@ -4227,6 +4227,21 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
     return null;
   }
   switch (value.type) {
+    case "background_activity": {
+      // What the engine did on its own: one ordinary event, never another
+      // wrapper.
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "background_activity" }>>(
+          value,
+          ["type", "event"],
+        )
+      ) {
+        return null;
+      }
+      const inner = parseCodeEvent(value.event);
+      if (!inner || inner.type === "background_activity") return null;
+      return { type: "background_activity", event: inner };
+    }
     case "session_tree": {
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "session_tree" }>>(value, [

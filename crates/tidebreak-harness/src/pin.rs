@@ -514,12 +514,22 @@ pub async fn ensure_installed_version(
     }
     let spec = format!("{}@{}", pin.package, version);
     // A tree npm already installed only lacks the unpacked Grok binary: an
-    // install from before Tidebreak unpacked it. It needs no second download.
-    if !installed_tree(&dir, pin, version) {
+    // install from before Tidebreak unpacked it. It needs no second download
+    // unless the unpack fails on it, when the tree itself may be what is
+    // missing a piece.
+    let fresh = !installed_tree(&dir, pin, version);
+    if fresh {
         npm_install(data_dir, node_root, pin, &dir, version).await?;
     }
     if pin.kind == HarnessKind::Grok {
-        unpack_grok(&dir, pin, version, node_root).await?;
+        if let Err(error) = unpack_grok(&dir, pin, version, node_root).await {
+            if fresh {
+                return Err(error);
+            }
+            tracing::warn!(%error, "could not unpack Grok from its installed tree; installing it again");
+            npm_install(data_dir, node_root, pin, &dir, version).await?;
+            unpack_grok(&dir, pin, version, node_root).await?;
+        }
     }
     managed_binary_version(data_dir, kind, version).ok_or_else(|| {
         format!(
@@ -616,6 +626,7 @@ async fn unpack_grok(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    keep_windows_start_env(&mut command);
     let child = spawn_process_tree(&mut command)
         .map_err(|err| format!("could not unpack Grok {version}: {err}"))?;
     let output = timeout(LOOKUP_TIMEOUT, child.wait_with_output())
@@ -645,6 +656,23 @@ async fn unpack_grok(
     }
     Ok(())
 }
+
+/// Give back what a Windows child needs to start after `env_clear`.
+///
+/// Grok's Windows entrypoint is `grok.cmd`, which runs under `cmd.exe`: it
+/// needs `ComSpec` to find the shell, `SystemRoot` to start at all, and
+/// `PATHEXT` to resolve the commands it runs. Unix has none of these.
+#[cfg(windows)]
+fn keep_windows_start_env(command: &mut Command) {
+    for name in ["SystemRoot", "ComSpec", "PATHEXT"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn keep_windows_start_env(_command: &mut Command) {}
 
 /// The managed binary for `kind`, unpacking an installed Grok binary that is
 /// not unpacked yet.
@@ -1159,6 +1187,54 @@ mod tests {
                 .lines()
                 .count(),
             1
+        );
+    }
+
+    /// A tree npm installed that cannot unpack Grok's binary, such as one
+    /// missing the binary it ships, is installed again once, and the unpack
+    /// runs on the fresh tree. Skipping the install because a tree exists
+    /// left such an install "not installed" for good.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn grok_installs_a_tree_again_when_its_binary_will_not_unpack() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = super::fake_grok_install(tmp.path());
+        let pin = pin_for(HarnessKind::Grok).unwrap();
+        let dir = install_dir(&fake.data_dir, pin);
+        let shipped = dir.join("node_modules/@xai-official/grok-platform/bin/grok");
+        let kept = tmp.path().join("shipped-grok");
+        std::fs::rename(&shipped, &kept).unwrap();
+        let npm = managed_npm_executable(&fake.node_root);
+        std::fs::write(
+            &npm,
+            format!(
+                "#!/bin/sh\nprintf 'npm\\n' >> '{log}'\ncp '{kept}' '{shipped}'\n",
+                log = fake.entrypoint_log.display(),
+                kept = kept.display(),
+                shipped = shipped.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let binary = ensure_installed(&fake.data_dir, HarnessKind::Grok, Some(&fake.node_root))
+            .await
+            .unwrap();
+        assert_eq!(
+            binary,
+            grok_home(&dir)
+                .join("bin")
+                .join(format!("grok-{}", pin.version))
+        );
+        let home = grok_home(&dir).display().to_string();
+        assert_eq!(
+            std::fs::read_to_string(&fake.entrypoint_log)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [home.as_str(), "npm", home.as_str()],
+            "the unpack failed, npm installed the tree again, and the unpack ran once more"
         );
     }
 

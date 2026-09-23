@@ -9,6 +9,7 @@ scenarios = [
   "background-turn-between-turns",
   "background-turn-queued-prompt",
   "background-turn-folded-prompt",
+  "background-turn-stop-queued",
 ]
 
 [managed_human_mcp]
@@ -104,8 +105,9 @@ files = [
   "background-turn-between-turns.ndjson",
   "background-turn-queued-prompt.ndjson",
   "background-turn-folded-prompt.ndjson",
+  "background-turn-stop-queued.ndjson",
 ]
-stdin = "Each capture's <name>.stdin.json lists the user lines written to stdin, each with `before`: how many stdout lines the engine had printed when it was written."
+stdin = "Each capture's <name>.stdin.json lists the lines written to stdin, user lines and control requests, each with `before`: how many stdout lines the engine had printed when it was written."
 captured = "2026-09-23"
 binary = "The pinned install; `claude --version` printed `2.1.259 (Claude Code)`"
 command = "The background-tasks argv: claude -p --output-format stream-json --verbose --include-partial-messages --input-format stream-json --dangerously-skip-permissions --allow-dangerously-skip-permissions --settings '{\"plansDirectory\":\"<private>\"}' --setting-sources user --strict-mcp-config --bare"
@@ -136,6 +138,16 @@ capabilities.
   line into that turn after the command: `started` comes mid-turn, the model
   answers the line, `completed` comes before the `result`, and the `result`
   carries origin kind task-notification and no user_message_uuid.
+- background-turn-stop-queued: the second line is written while the engine's
+  own turn waits on the model, and the engine queues it. Then an `interrupt`
+  control request with `cancel_queued: true` is written (the init line lists
+  interrupt_cancel_queued_v1). The engine closes the second line with a
+  `cancelled` lifecycle, answers the request naming the line under
+  `cancelled` with `still_queued` empty, and ends its own turn with a
+  `result` of terminal_reason aborted_streaming and origin kind
+  task-notification. The line never starts. The same stop without
+  `cancel_queued` (not kept) answered `still_queued: [<line>]`, and the
+  engine then ran the line as its own turn.
 """
 redactions = """
 The repository path became /workspace and the engine's task-output root

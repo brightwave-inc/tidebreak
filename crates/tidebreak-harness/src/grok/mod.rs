@@ -31,7 +31,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 /// Grok's switch that turns off its own update check for one process
 /// (documented in the 1.0.13 binary). Tidebreak runs one exact release, so
 /// every Grok child it starts sets it.
-pub(crate) const DISABLE_AUTOUPDATER_ENV: &str = "GROK_DISABLE_AUTOUPDATER";
+pub const DISABLE_AUTOUPDATER_ENV: &str = "GROK_DISABLE_AUTOUPDATER";
 
 /// Longest line read while waiting for the ACP `initialize` answer. It lists
 /// models and commands, not history, so this is generous.

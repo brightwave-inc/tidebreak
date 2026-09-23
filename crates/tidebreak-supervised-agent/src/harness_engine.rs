@@ -513,6 +513,9 @@ impl HarnessEventSink for TurnSink {
                 text,
                 parent_call_id: None,
             } => self.append_assistant(&text),
+            // What the engine did on its own, such as the turn Claude Code
+            // runs when a background task ends, is never this turn's answer.
+            HarnessEvent::BackgroundActivity { .. } => {}
             HarnessEvent::AssistantMessage {
                 parent_call_id: Some(_),
                 ..
@@ -1769,6 +1772,23 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"p
         assert!(std::str::from_utf8(record.body.as_bytes()).is_ok());
         assert!(record.total_bytes > cap);
         assert_eq!(record.body, "x".repeat(cap - 1));
+    }
+
+    #[tokio::test]
+    async fn the_engines_own_answer_never_joins_the_record() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+            events: vec![
+                HarnessEvent::background(parent_message("The background job finished.")),
+                parent_message("done."),
+                completed_event(),
+            ],
+            outcome: Ok(TurnOutcome::Clean),
+            waits_for_interrupt: false,
+        }]));
+        let mut engine = engine_over(adapter, probe(true));
+        let mut turn = engine.start_turn(request("go")).await.unwrap();
+        assert_eq!(turn.wait().await, TurnEnd::Completed { success: true });
+        assert_eq!(turn.assistant_record().unwrap().body, "done.");
     }
 
     #[tokio::test]

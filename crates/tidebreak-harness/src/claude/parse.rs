@@ -73,6 +73,9 @@ pub struct TurnMark {
     pub command: Option<(String, String)>,
     /// Client uuids of the user lines the line says its turn took.
     pub user_messages: Vec<String>,
+    /// The line is the engine's `system/init`, which it prints as each turn
+    /// starts, whoever asked for the turn (captured on 2.1.259).
+    pub starts_turn: bool,
     /// The line is a `result`, so it ends the turn the engine was running.
     pub ends_turn: bool,
 }
@@ -361,6 +364,7 @@ impl ClaudeStreamParser {
                 if parent_call_id(value).is_some() {
                     return Vec::new();
                 }
+                self.mark.starts_turn = true;
                 if let Some(session_id) = value.get("session_id").and_then(Value::as_str) {
                     self.resume_ref = Some(session_id.to_owned());
                 }

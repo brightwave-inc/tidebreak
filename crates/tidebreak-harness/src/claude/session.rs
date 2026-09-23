@@ -21,7 +21,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at, Instant};
 use tracing::warn;
 
 use crate::child::{turn_outcome, ChildPid};
@@ -32,7 +32,7 @@ use crate::{
     HarnessEvent, HarnessEventSink, HarnessSession, ProcessTreeChild, ProjectConfig, SessionSpec,
     StreamBudget, StreamLine, StreamLineBuffer, TurnInput, TurnOutcome,
 };
-use tidebreak_core::{PermissionMode, ReasoningEffort};
+use tidebreak_core::{PermissionMode, ReasoningEffort, ToolOutcome};
 
 #[cfg(not(test))]
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
@@ -362,8 +362,39 @@ pub(crate) fn bypass_policy(mode: PermissionMode) -> BypassPolicy {
     }
 }
 
-/// A reply to one control request. `Err` carries the engine's reason.
-type ControlReply = Result<(), String>;
+/// A reply to one control request: the engine's `response` payload, `Null`
+/// when it sent none. `Err` carries the engine's reason.
+type ControlReply = Result<serde_json::Value, String>;
+
+/// What the engine's answer to a stop says about the lines in its queue.
+#[derive(Debug, Default)]
+struct StopReceipt {
+    /// Lines the stop cancelled, each closed with a `cancelled` lifecycle.
+    cancelled: Vec<String>,
+    /// Lines that survive the stop. The engine runs them next.
+    still_queued: Vec<String>,
+}
+
+impl StopReceipt {
+    fn read(response: &serde_json::Value) -> Self {
+        let uuids = |key: &str| -> Vec<String> {
+            response
+                .get(key)
+                .and_then(serde_json::Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Self {
+            cancelled: uuids("cancelled"),
+            still_queued: uuids("still_queued"),
+        }
+    }
+}
 
 /// A control request waiting on its `control_response`.
 struct ControlWaiter {
@@ -381,6 +412,13 @@ struct PendingTurn {
     /// said `started`, or a reply named the uuid. From here on, the next
     /// `result` ends this turn.
     started: bool,
+    /// The person asked to stop this turn. A line the engine then cancels
+    /// before it starts ends the turn as stopped, not failed.
+    stopping: bool,
+    /// A failure the engine reported while the line waited. It is this
+    /// turn's error when the engine then cancels the line; otherwise it
+    /// belongs to the turn the engine started on its own.
+    held_failure: Option<String>,
     done: oneshot::Sender<TurnEnd>,
 }
 
@@ -405,6 +443,10 @@ struct ReaderState {
     closed: bool,
     /// Control requests waiting on their `control_response`, by request id.
     controls: HashMap<String, ControlWaiter>,
+    /// Tool calls a turn the engine started on its own opened and has not
+    /// finished, with the `Task` call each ran inside. Their cards are
+    /// settled when that turn or the child ends without finishing them.
+    background_calls: HashMap<String, Option<String>>,
 }
 
 /// What a child's stdout reader shares with the session.
@@ -420,6 +462,11 @@ struct ReaderShared {
     resume_ref: Arc<Mutex<Option<String>>>,
     unrecognized: Arc<AtomicU64>,
     state: Mutex<ReaderState>,
+    /// When the turn the engine is running started, whoever asked for it:
+    /// set by the turn's `system/init` and cleared by its `result`. Between
+    /// the person's turns this is the turn the engine runs on its own, which
+    /// parking must not cut short.
+    turn_started: watch::Sender<Option<Instant>>,
 }
 
 /// Where one line's events go.
@@ -428,10 +475,23 @@ enum Route {
     Turn,
     /// The line ends the user turn in flight.
     EndsTurn(PendingTurn),
+    /// The engine will never run the user's line: it cancelled, refused, or
+    /// discarded the line before a turn took it. The state it reported rides
+    /// along.
+    Dropped(PendingTurn, String),
     /// Activity nobody asked for: between turns, or a turn the engine
     /// started itself.
     Background,
 }
+
+/// The lifecycle states that close a line for good (captured on 2.1.259).
+/// A line that reaches one before `started` never runs, so no `result` will
+/// end its turn.
+const DROPPED_STATES: [&str; 3] = ["cancelled", "refused", "discarded"];
+
+/// The preview on a card the engine's own turn left open when that turn or
+/// the child ended.
+const UNFINISHED_CALL: &str = "Claude Code stopped before this call finished.";
 
 impl ReaderShared {
     fn state(&self) -> std::sync::MutexGuard<'_, ReaderState> {
@@ -449,6 +509,8 @@ impl ReaderShared {
         state.turn = Some(PendingTurn {
             uuid: uuid.to_owned(),
             started: false,
+            stopping: false,
+            held_failure: None,
             done,
         });
         Some(receiver)
@@ -459,8 +521,127 @@ impl ReaderShared {
         self.state().turn = None;
     }
 
+    /// The uuid of the user's line waiting on this child, if one is.
+    fn pending_uuid(&self) -> Option<String> {
+        self.state().turn.as_ref().map(|turn| turn.uuid.clone())
+    }
+
+    /// The person asked to stop the turn in flight, if one is.
+    fn note_stop(&self) {
+        if let Some(turn) = self.state().turn.as_mut() {
+            turn.stopping = true;
+        }
+    }
+
+    /// Keep a failure the engine reported while the user's line waited to
+    /// start. `false` when no line is waiting, and the failure is the engine's
+    /// own.
+    fn hold_failure(&self, message: &str) -> bool {
+        let mut state = self.state();
+        match state.turn.as_mut() {
+            Some(turn) if !turn.started => {
+                turn.held_failure = Some(message.to_owned());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// End the user's turn because the engine said it will not run its line.
+    /// `false` when that line is no longer waiting, or already started.
+    async fn drop_turn(&self, uuid: &str, state: &str) -> bool {
+        let turn = {
+            let mut reader = self.state();
+            match reader.turn.as_ref() {
+                Some(turn) if turn.uuid == uuid && !turn.started => reader.turn.take(),
+                _ => None,
+            }
+        };
+        let Some(turn) = turn else {
+            return false;
+        };
+        self.end_dropped(turn, state, false).await;
+        true
+    }
+
+    /// Report the end of a turn whose line the engine will not run.
+    ///
+    /// A line the person stopped ends as stopped. Otherwise the turn fails
+    /// with the error the engine reported while the line waited, or with what
+    /// the engine said about the line.
+    async fn end_dropped(&self, turn: PendingTurn, state: &str, last: bool) {
+        let stopped = turn.stopping && state == "cancelled";
+        let end = if stopped {
+            if let Some(message) = &turn.held_failure {
+                self.sink.emit(engine_turn_failed(message)).await;
+            }
+            HarnessEvent::TurnInterrupted
+        } else {
+            let message = turn.held_failure.clone().unwrap_or_else(|| {
+                match state {
+                    "refused" => "Claude Code refused the message.",
+                    "discarded" => "Claude Code ended the session before it read the message.",
+                    _ => "Claude Code cancelled the message before it started a turn for it.",
+                }
+                .to_owned()
+            });
+            HarnessEvent::TurnFailed {
+                error: tidebreak_core::BoundedError { message },
+            }
+        };
+        self.sink.emit(end).await;
+        self.settle_stops(&if stopped {
+            Ok(serde_json::Value::Null)
+        } else {
+            Err("the engine dropped the message before the interrupt was acknowledged".into())
+        });
+        let _ = turn.done.send(TurnEnd {
+            saw_terminal: true,
+            eof: last,
+            error: None,
+        });
+    }
+
     fn is_closed(&self) -> bool {
         self.state().closed
+    }
+
+    /// Whether the engine is running a turn that started less than `limit`
+    /// ago. A turn older than that is taken as stuck.
+    fn running_turn_within(&self, limit: Duration) -> bool {
+        self.turn_started
+            .borrow()
+            .is_some_and(|since| since.elapsed() < limit)
+    }
+
+    /// Whether the engine is running a turn at all.
+    fn running_turn(&self) -> bool {
+        self.turn_started.borrow().is_some()
+    }
+
+    /// Wait until the turn the engine is running ends, or until it has run
+    /// for `limit`. Returns at once when no turn is running.
+    async fn wait_for_turn_end(&self, limit: Duration) {
+        let Some(since) = *self.turn_started.borrow() else {
+            return;
+        };
+        let mut started = self.turn_started.subscribe();
+        let _ = timeout_at(since + limit, started.wait_for(Option::is_none)).await;
+    }
+
+    /// Track the engine's own turn boundaries from one line.
+    fn note_turn_bounds(&self, mark: &TurnMark) {
+        if mark.ends_turn {
+            self.turn_started.send_replace(None);
+        } else if mark.starts_turn {
+            self.turn_started.send_if_modified(|since| {
+                if since.is_some() {
+                    return false;
+                }
+                *since = Some(Instant::now());
+                true
+            });
+        }
     }
 
     /// Wait for the `control_response` that answers `request_id`. `None`
@@ -524,7 +705,10 @@ impl ReaderShared {
             .pointer("/response/subtype")
             .and_then(serde_json::Value::as_str)
         {
-            Some("success") => Ok(()),
+            Some("success") => Ok(value
+                .pointer("/response/response")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)),
             Some("error") => Err(value
                 .pointer("/response/error")
                 .and_then(serde_json::Value::as_str)
@@ -543,53 +727,152 @@ impl ReaderShared {
     /// a turn that was already running when the line arrived, so it never
     /// ends the user's turn. The first `result` after `started` does, even
     /// when a turn the engine started itself took the line between two tool
-    /// calls and its `result` names no uuid (captured on 2.1.259).
+    /// calls and its `result` names no uuid (captured on 2.1.259). A line the
+    /// engine closes as `cancelled`, `refused`, or `discarded` before it
+    /// starts never runs, so its turn ends there.
     ///
     /// An engine that reports no lifecycle for the line falls back to the
     /// first `result` after the write, unless that `result` names only other
     /// lines.
-    fn route(&self, mark: &TurnMark) -> Route {
+    ///
+    /// The second value is a failure held while the line waited, released
+    /// once the line starts: it belonged to the turn the engine was running
+    /// on its own.
+    fn route(&self, mark: &TurnMark) -> (Route, Option<String>) {
         let mut state = self.state();
         let ReaderState {
             turn, lifecycle, ..
         } = &mut *state;
         let Some(pending) = turn.as_mut() else {
-            return Route::Background;
+            return (Route::Background, None);
         };
+        let was_started = pending.started;
         if let Some((uuid, command_state)) = &mark.command {
             if *uuid == pending.uuid {
                 *lifecycle = true;
+                if !pending.started && DROPPED_STATES.contains(&command_state.as_str()) {
+                    let dropped = turn.take().expect("the pending turn");
+                    return (Route::Dropped(dropped, command_state.clone()), None);
+                }
                 pending.started |= command_state == "started";
             }
         }
         pending.started |= mark.user_messages.contains(&pending.uuid);
+        let released = if pending.started && !was_started {
+            pending.held_failure.take()
+        } else {
+            None
+        };
         if mark.ends_turn {
             let ours = pending.started || (!*lifecycle && mark.user_messages.is_empty());
             if !ours {
-                return Route::Background;
+                return (Route::Background, released);
             }
-            return Route::EndsTurn(turn.take().expect("the pending turn"));
+            let ended = turn.take().expect("the pending turn");
+            return (Route::EndsTurn(ended), released);
         }
-        if pending.started || !*lifecycle {
+        let route = if pending.started || !*lifecycle {
             Route::Turn
         } else {
             Route::Background
+        };
+        (route, released)
+    }
+
+    /// Deliver one event of the user's turn.
+    ///
+    /// The end of a call that the engine's own turn opened stays with that
+    /// turn's activity, which is where its card is. This happens when the
+    /// engine takes the user's line between two of its own tool calls.
+    async fn emit_turn_event(&self, event: HarnessEvent) {
+        let opened_on_its_own = match &event {
+            HarnessEvent::ToolCompleted { call_id, .. } => {
+                self.state().background_calls.remove(call_id).is_some()
+            }
+            _ => false,
+        };
+        let event = if opened_on_its_own {
+            HarnessEvent::background(event)
+        } else {
+            event
+        };
+        self.sink.emit(event).await;
+    }
+
+    /// Deliver one event of a turn the engine started on its own.
+    async fn emit_background(&self, event: HarnessEvent) {
+        match &event {
+            HarnessEvent::TurnFailed { error } => {
+                if self.hold_failure(&error.message) {
+                    return;
+                }
+            }
+            HarnessEvent::ToolStarted {
+                call_id,
+                parent_call_id,
+                ..
+            } => {
+                self.state()
+                    .background_calls
+                    .insert(call_id.clone(), parent_call_id.clone());
+            }
+            HarnessEvent::ToolCompleted { call_id, .. } => {
+                self.state().background_calls.remove(call_id);
+            }
+            _ => {}
+        }
+        if let Some(event) = background_event(event) {
+            self.sink.emit(event).await;
         }
     }
 
-    /// Stdout closed or failed: nothing more will reach anyone waiting.
-    fn close(&self, error: Option<io::Error>) {
+    /// Settle the cards of calls the engine's own turn opened and will not
+    /// finish now, because that turn or the child ended.
+    async fn settle_open_calls(&self) {
+        let calls = std::mem::take(&mut self.state().background_calls);
+        let mut calls: Vec<(String, Option<String>)> = calls.into_iter().collect();
+        calls.sort();
+        for (call_id, parent_call_id) in calls {
+            self.sink
+                .emit(HarnessEvent::background(HarnessEvent::ToolCompleted {
+                    call_id,
+                    outcome: ToolOutcome::Failed,
+                    preview: UNFINISHED_CALL.to_owned(),
+                    detail: None,
+                    parent_call_id,
+                }))
+                .await;
+        }
+    }
+
+    /// Stdout closed or failed, or the child was stopped: nothing more will
+    /// reach anyone waiting, and no call the engine's own turn opened will
+    /// finish.
+    async fn close(&self, error: Option<io::Error>) {
         let (turn, controls) = {
             let mut state = self.state();
             state.closed = true;
             (state.turn.take(), std::mem::take(&mut state.controls))
         };
+        // A child whose output closed runs no turn.
+        self.turn_started.send_replace(None);
         for waiter in controls.into_values() {
             let _ = waiter.reply.send(Err(
                 "the engine exited before acknowledging the request".into()
             ));
         }
+        self.settle_open_calls().await;
         if let Some(turn) = turn {
+            // What the engine reported while the line waited is the last
+            // word on a turn that ends with the child.
+            if let Some(message) = turn.held_failure {
+                self.sink
+                    .emit(HarnessEvent::HarnessNotice {
+                        level: tidebreak_core::HarnessNoticeLevel::Warning,
+                        message,
+                    })
+                    .await;
+            }
             let _ = turn.done.send(TurnEnd {
                 saw_terminal: false,
                 eof: error.is_none(),
@@ -637,7 +920,7 @@ async fn read_stdout(shared: Arc<ReaderShared>, mut stdout: ChildStdout) {
             flush_unrecognized(&shared, &parser, &mut flushed);
         }
     }
-    shared.close(error);
+    shared.close(error).await;
 }
 
 /// Add the parser's new unrecognized events to the session total. The parser
@@ -677,26 +960,39 @@ async fn read_line(
             *shared.resume_ref.lock().expect("claude resume") = Some(resume.clone());
         }
     }
-    match shared.route(&mark) {
+    let (route, released) = shared.route(&mark);
+    if let Some(message) = released {
+        shared.sink.emit(engine_turn_failed(&message)).await;
+    }
+    // The turn boundary moves once the line's events are out, so nothing
+    // stops the child between a turn's end and the events that report it.
+    match route {
         Route::Turn => {
             for event in events {
-                shared.sink.emit(event).await;
+                shared.emit_turn_event(event).await;
             }
+            shared.note_turn_bounds(&mark);
         }
         Route::Background => {
-            for event in events.into_iter().filter_map(background_event) {
-                shared.sink.emit(event).await;
+            for event in events {
+                shared.emit_background(event).await;
             }
+            if mark.ends_turn {
+                shared.settle_open_calls().await;
+            }
+            shared.note_turn_bounds(&mark);
         }
         Route::EndsTurn(turn) => {
             let interrupted = events
                 .iter()
                 .any(|event| matches!(event, HarnessEvent::TurnInterrupted));
             for event in events {
-                shared.sink.emit(event).await;
+                shared.emit_turn_event(event).await;
             }
+            shared.settle_open_calls().await;
+            shared.note_turn_bounds(&mark);
             shared.settle_stops(&if interrupted {
-                Ok(())
+                Ok(serde_json::Value::Null)
             } else {
                 Err("the turn ended before the interrupt was acknowledged".into())
             });
@@ -706,16 +1002,26 @@ async fn read_line(
                 error: None,
             });
         }
+        Route::Dropped(turn, state) => {
+            // A lifecycle line reports on the user's line; it carries no
+            // activity of its own.
+            for event in events {
+                shared.emit_background(event).await;
+            }
+            shared.end_dropped(turn, &state, last).await;
+            shared.note_turn_bounds(&mark);
+        }
     }
 }
 
 /// An event from activity nobody asked for, the way the transcript keeps it.
 ///
 /// The engine's own turn keeps its messages, tool calls, and notices, such as
-/// the notice that a background task finished. Its streaming text is left
-/// out, because the message that follows repeats it. Its end is not a turn
-/// end the session reports: only a failure reaches the transcript, as a
-/// notice.
+/// the notice that a background task finished, each marked as background
+/// activity. Its streaming text is left out, because the message that
+/// follows repeats it. Its end is not a turn end the session reports: only a
+/// failure reaches the transcript, as a notice. What the engine says about
+/// the session itself stays as it is.
 fn background_event(event: HarnessEvent) -> Option<HarnessEvent> {
     match event {
         HarnessEvent::AssistantDelta { .. }
@@ -724,18 +1030,21 @@ fn background_event(event: HarnessEvent) -> Option<HarnessEvent> {
         | HarnessEvent::TurnStarted
         | HarnessEvent::TurnCompleted { .. }
         | HarnessEvent::TurnInterrupted => None,
-        HarnessEvent::TurnFailed { error } => Some(HarnessEvent::HarnessNotice {
-            level: tidebreak_core::HarnessNoticeLevel::Warning,
-            message: format!(
-                "Claude Code could not finish a turn it started on its own: {}",
-                error.message
-            )
+        HarnessEvent::TurnFailed { error } => Some(engine_turn_failed(&error.message)),
+        HarnessEvent::SessionStarted { .. } | HarnessEvent::ModelReported { .. } => Some(event),
+        other => Some(HarnessEvent::background(other)),
+    }
+}
+
+/// The notice for a turn the engine started on its own that failed.
+fn engine_turn_failed(message: &str) -> HarnessEvent {
+    HarnessEvent::background(HarnessEvent::HarnessNotice {
+        level: tidebreak_core::HarnessNoticeLevel::Warning,
+        message: format!("Claude Code could not finish a turn it started on its own: {message}")
             .chars()
             .take(tidebreak_core::MAX_NOTICE_CHARS)
             .collect(),
-        }),
-        other => Some(other),
-    }
+    })
 }
 
 /// One live `claude` child and the handles a session needs on it.
@@ -816,8 +1125,11 @@ impl EngineChannel {
         if status.is_some() {
             *self.reaped.lock().expect("claude child exit") = status;
         }
-        // Nothing waits on a retired child's output.
+        // Nothing waits on a retired child's output. Closing the reader
+        // answers anyone who still does, and settles the cards of calls the
+        // engine's own turn left open.
         self.stop_reading();
+        self.reader.close(None).await;
         status
     }
 
@@ -888,6 +1200,9 @@ pub struct ClaudeSession {
     /// Monotonic id for control requests, so a late `control_response` is
     /// never confused with the current one.
     next_control_id: AtomicU64,
+    /// How long a turn the engine started on its own may hold off a park or
+    /// a respawn. Past it, the turn is taken as stuck.
+    engine_turn_limit: Duration,
 }
 
 /// Clears the in-flight flag however `run_turn` leaves.
@@ -909,6 +1224,12 @@ impl Drop for TurnGuard<'_> {
 /// (captured with the variable at `0`).
 const AUTO_BACKGROUND_ENV: &str = "CLAUDE_AUTO_BACKGROUND_TASKS";
 
+/// How long a turn the engine runs on its own holds off parking the child or
+/// respawning it for a new launch flag. Such a turn answers a background task
+/// that ended, and can run tools like any turn. One that runs longer than
+/// this is taken as stuck, so an idle child still parks eventually.
+const ENGINE_TURN_LIMIT: Duration = Duration::from_secs(30 * 60);
+
 impl ClaudeSession {
     pub(super) fn new(spec: SessionSpec) -> Self {
         let resume_ref = spec.resume_ref.clone();
@@ -928,6 +1249,7 @@ impl ClaudeSession {
             interrupts_this_turn: AtomicU64::new(0),
             turn_in_flight: AtomicBool::new(false),
             next_control_id: AtomicU64::new(1),
+            engine_turn_limit: ENGINE_TURN_LIMIT,
         }
     }
 
@@ -1130,6 +1452,7 @@ impl ClaudeSession {
             resume_ref: self.resume_ref.clone(),
             unrecognized: self.unrecognized.clone(),
             state: Mutex::new(ReaderState::default()),
+            turn_started: watch::channel(None).0,
         });
         let reader_task = tokio::spawn(read_stdout(reader.clone(), stdout));
 
@@ -1165,10 +1488,7 @@ impl ClaudeSession {
     ) -> Result<(Arc<EngineChannel>, bool), HarnessError> {
         let mut slot = self.channel.lock().await;
         if let Some(channel) = slot.as_ref() {
-            let same_flags = channel.model == self.resolved_model(turn_model)
-                && channel.effort == self.resolved_effort(turn_effort)
-                && channel.fast_mode == self.resolved_fast_mode(turn_model)
-                && *channel.mode.lock().expect("claude child mode") == self.permission_mode();
+            let same_flags = self.launched_with(channel, turn_model, turn_effort);
             // Probing reaps a child that has already exited, so never wait on
             // it again afterwards.
             let exited = channel.has_exited().await;
@@ -1185,6 +1505,19 @@ impl ClaudeSession {
         let channel = self.spawn_child(turn_model, turn_effort)?;
         *slot = Some(channel.clone());
         Ok((channel, true))
+    }
+
+    /// Whether `channel` was launched on the flags this turn runs with.
+    fn launched_with(
+        &self,
+        channel: &EngineChannel,
+        turn_model: Option<&str>,
+        turn_effort: Option<ReasoningEffort>,
+    ) -> bool {
+        channel.model == self.resolved_model(turn_model)
+            && channel.effort == self.resolved_effort(turn_effort)
+            && channel.fast_mode == self.resolved_fast_mode(turn_model)
+            && *channel.mode.lock().expect("claude child mode") == self.permission_mode()
     }
 
     /// Drop the current channel, stopping the process if it is still up.
@@ -1211,7 +1544,7 @@ impl ClaudeSession {
         receiver: oneshot::Receiver<ControlReply>,
     ) -> Result<(), HarnessError> {
         match timeout(CONTROL_RESPONSE_TIMEOUT, receiver).await {
-            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Ok(_))) => Ok(()),
             Ok(Ok(Err(detail))) => Err(HarnessError::PermissionModeSwitchFailed(detail)),
             Ok(Err(_)) => Err(HarnessError::PermissionModeSwitchFailed(
                 "the engine exited before acknowledging the request".into(),
@@ -1220,6 +1553,72 @@ impl ClaudeSession {
                 "timed out waiting for the engine acknowledgement".into(),
             )),
         }
+    }
+
+    /// Ask the engine to end the turn it is running with the `interrupt`
+    /// control request, and wait for its answer. `Err` says why it did not
+    /// confirm.
+    ///
+    /// The request also cancels the lines still waiting in the engine's queue
+    /// (`cancel_queued`, which 2.1.259 advertises as
+    /// `interrupt_cancel_queued_v1`). Without it, a stop while the person's
+    /// line waits behind a turn the engine started on its own would end that
+    /// turn and then run the person's line anyway. The engine closes each
+    /// cancelled line with a `cancelled` lifecycle and names it in the
+    /// answer.
+    async fn request_stop(&self, channel: &EngineChannel) -> Result<StopReceipt, String> {
+        let request_id = format!(
+            "tb-interrupt-{}",
+            self.next_control_id.fetch_add(1, Ordering::SeqCst)
+        );
+        let receiver = channel
+            .reader
+            .await_control(&request_id, true)
+            .ok_or("the engine child closed its output")?;
+        let mut line = serde_json::to_vec(&serde_json::json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": { "subtype": "interrupt", "cancel_queued": true },
+        }))
+        .map_err(|err| format!("could not encode the stop request: {err}"))?;
+        line.push(b'\n');
+        channel.reader.note_stop();
+        if let Err(err) = self.write_line(channel, &line).await {
+            channel.reader.cancel_control(&request_id);
+            return Err(format!("the engine refused the stop request: {err}"));
+        }
+        match timeout(CONTROL_RESPONSE_TIMEOUT, receiver).await {
+            Ok(Ok(reply)) => reply.map(|response| StopReceipt::read(&response)),
+            Ok(Err(_)) => Err("the engine exited before acknowledging the stop".into()),
+            Err(_) => {
+                channel.reader.cancel_control(&request_id);
+                Err("timed out waiting for the engine to acknowledge the stop".into())
+            }
+        }
+    }
+
+    /// Stop the person's line where a stop left it: ended when the engine
+    /// cancelled it, and taken with the process when the engine kept it
+    /// queued, since the engine would run it next.
+    async fn finish_stop(
+        &self,
+        channel: &EngineChannel,
+        receipt: StopReceipt,
+    ) -> Result<(), HarnessError> {
+        let Some(uuid) = channel.reader.pending_uuid() else {
+            return Ok(());
+        };
+        if receipt.cancelled.contains(&uuid) {
+            // The engine's `cancelled` lifecycle ends the turn too; whichever
+            // comes first ends it.
+            channel.reader.drop_turn(&uuid, "cancelled").await;
+            return Ok(());
+        }
+        if receipt.still_queued.contains(&uuid) {
+            warn!("engine kept a stopped line queued; stopping the process");
+            return self.interrupt_process_tree().await;
+        }
+        Ok(())
     }
 
     async fn interrupt_process_tree(&self) -> Result<(), HarnessError> {
@@ -1244,7 +1643,7 @@ impl ClaudeSession {
         // before this turn counts as running, so a stop aimed at this turn is
         // never answered as a stale one.
         let current = self.channel.lock().await.clone();
-        if let Some(channel) = current {
+        if let Some(channel) = &current {
             channel.reader.settle_stops(&Err(
                 "the prior turn ended before the interrupt was acknowledged".into(),
             ));
@@ -1252,6 +1651,22 @@ impl ClaudeSession {
         self.interrupts_this_turn.store(0, Ordering::SeqCst);
         self.turn_in_flight.store(true, Ordering::SeqCst);
         let _in_flight = TurnGuard(&self.turn_in_flight);
+        // A turn on a new launch flag respawns the child. A turn the engine
+        // is running on its own finishes first, so its answer is not lost.
+        if let Some(channel) = current.filter(|channel| {
+            !self.launched_with(channel, input.model.as_deref(), input.reasoning_effort)
+        }) {
+            channel
+                .reader
+                .wait_for_turn_end(self.engine_turn_limit)
+                .await;
+            // A stop while this turn waited ended the engine's turn, and it
+            // was meant for this one too, which has not reached the engine.
+            if self.interrupts_this_turn.load(Ordering::SeqCst) > 0 {
+                self.spec.sink.emit(HarnessEvent::TurnInterrupted).await;
+                return Ok(TurnOutcome::Clean);
+            }
+        }
         // The engine names this uuid in what it reports about the line, which
         // is how the turn's own `result` is told from any other.
         let uuid = uuid::Uuid::new_v4().to_string();
@@ -1368,51 +1783,42 @@ impl HarnessSession for ClaudeSession {
     /// stopping the process. That still leaves the session usable: the next
     /// turn respawns and resumes.
     ///
-    /// A stop that arrives with no turn running never takes the process. The
-    /// per-turn adapter had no child at all between turns, and a session-long
-    /// child must not be worse to stop into.
+    /// The person's line can be waiting behind a turn the engine started on
+    /// its own, the one it runs when a background task ends. The stop then
+    /// ends that turn and cancels the line, which ends the person's turn as
+    /// stopped (captured on 2.1.259).
+    ///
+    /// A stop that arrives with no turn of the person's running never takes
+    /// the process. The per-turn adapter had no child at all between turns,
+    /// and a session-long child must not be worse to stop into. The engine
+    /// can still be running a turn of its own then, and the stop asks it to
+    /// end that turn.
     async fn interrupt(&self) -> Result<(), HarnessError> {
         let Some(channel) = self.channel.lock().await.clone() else {
             return Ok(());
         };
         if !self.turn_in_flight.load(Ordering::SeqCst) {
-            return Ok(());
+            if !channel.reader.running_turn() {
+                return Ok(());
+            }
+            return self
+                .request_stop(&channel)
+                .await
+                .map(|_| ())
+                .map_err(|detail| {
+                    HarnessError::Other(format!(
+                        "Claude Code did not stop the turn it started on its own: {detail}"
+                    ))
+                });
         }
         let asked = self.interrupts_this_turn.fetch_add(1, Ordering::SeqCst);
         if asked > 0 {
             return self.interrupt_process_tree().await;
         }
-
-        let request_id = format!(
-            "tb-interrupt-{}",
-            self.next_control_id.fetch_add(1, Ordering::SeqCst)
-        );
-        let Some(receiver) = channel.reader.await_control(&request_id, true) else {
-            // Stdout already closed: the turn is ending on its own.
-            return self.interrupt_process_tree().await;
-        };
-        let mut line = serde_json::to_vec(&serde_json::json!({
-            "type": "control_request",
-            "request_id": request_id,
-            "request": { "subtype": "interrupt" },
-        }))
-        .map_err(|err| HarnessError::Other(format!("encode interrupt: {err}")))?;
-        line.push(b'\n');
-        if let Err(err) = self.write_line(&channel, &line).await {
-            channel.reader.cancel_control(&request_id);
-            warn!(%err, "engine child refused a stop request; stopping the process");
-            return self.interrupt_process_tree().await;
-        }
-
-        match timeout(CONTROL_RESPONSE_TIMEOUT, receiver).await {
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(detail))) => {
-                warn!(%detail, "engine rejected a stop request; stopping the process");
-                self.interrupt_process_tree().await
-            }
-            Ok(Err(_)) => self.interrupt_process_tree().await,
-            Err(_) => {
-                channel.reader.cancel_control(&request_id);
+        match self.request_stop(&channel).await {
+            Ok(receipt) => self.finish_stop(&channel, receipt).await,
+            Err(detail) => {
+                warn!(%detail, "engine did not take a stop request; stopping the process");
                 self.interrupt_process_tree().await
             }
         }
@@ -1500,7 +1906,20 @@ impl HarnessSession for ClaudeSession {
     /// Release the idle child (decision 0064). The next turn takes the
     /// respawn path [`Self::ensure_channel`] already owns, so it resumes the
     /// engine session exactly like a dead-child replacement.
+    ///
+    /// No turn of the person's runs here, but the engine may be running one
+    /// of its own, after a background task ended. Stopping the child would
+    /// lose that turn's answer, so the park waits for its `result`: this
+    /// answers [`HarnessError::EngineBusy`] and keeps the child. A turn that
+    /// has run past [`ENGINE_TURN_LIMIT`] is taken as stuck and parks anyway.
     async fn park(&self) -> Result<(), HarnessError> {
+        let channel = self.channel.lock().await.clone();
+        if channel.is_some_and(|channel| channel.reader.running_turn_within(self.engine_turn_limit))
+        {
+            return Err(HarnessError::EngineBusy(
+                "Claude Code is finishing a turn it started on its own".into(),
+            ));
+        }
         self.retire_channel().await;
         Ok(())
     }
@@ -2942,10 +3361,11 @@ done
 
     /// A stand-in engine that replays a capture from the pinned release.
     ///
-    /// For each user line it reads, it prints what the real engine printed
-    /// after that line and before the next one. The captured client uuids
-    /// become the ones this session sent, the way the engine names back
-    /// whatever uuid it receives.
+    /// For each line it reads, it prints what the real engine printed after
+    /// that line and before the next one. The captured client uuids and
+    /// control request ids become the ones this session sent, the way the
+    /// engine names back whatever it receives. Every line it reads is kept in
+    /// `stdin.ndjson`.
     fn replay_engine(dir: &Path, capture: &str) -> PathBuf {
         let stdout =
             std::fs::read_to_string(capture_dir().join(format!("{capture}.ndjson"))).unwrap();
@@ -2958,10 +3378,14 @@ done
             writes[0]["before"], 0,
             "the engine prints nothing unprompted"
         );
-        let captured: Vec<&str> = writes
-            .iter()
-            .map(|write| write["line"]["uuid"].as_str().unwrap())
-            .collect();
+        let captured = |field: &str| -> Vec<Option<String>> {
+            writes
+                .iter()
+                .map(|write| write["line"][field].as_str().map(str::to_owned))
+                .collect()
+        };
+        let uuids = captured("uuid");
+        let requests = captured("request_id");
         for (index, write) in writes.iter().enumerate() {
             let start = usize::try_from(write["before"].as_u64().unwrap()).unwrap();
             let end = writes.get(index + 1).map_or(lines.len(), |next| {
@@ -2969,8 +3393,18 @@ done
             });
             let mut segment = lines[start..end].join("\n");
             segment.push('\n');
-            for (number, uuid) in captured.iter().enumerate() {
-                segment = segment.replace(uuid, &format!("@uuid{}@", number + 1));
+            for (number, uuid) in uuids.iter().enumerate() {
+                if let Some(uuid) = uuid {
+                    segment = segment.replace(uuid, &format!("@uuid{}@", number + 1));
+                }
+            }
+            for (number, request) in requests.iter().enumerate() {
+                if let Some(request) = request {
+                    segment = segment.replace(
+                        &format!("\"request_id\":\"{request}\""),
+                        &format!("\"request_id\":\"@request{}@\"", number + 1),
+                    );
+                }
             }
             std::fs::write(dir.join(format!("segment-{}.ndjson", index + 1)), segment).unwrap();
         }
@@ -2982,8 +3416,10 @@ n=0
 subst=""
 while IFS= read -r line; do
   n=$((n+1))
+  printf '%s\n' "$line" >> "{dir}/stdin.ndjson"
   uuid=$(printf '%s' "$line" | sed -n 's/.*"uuid":"\([^"]*\)".*/\1/p')
-  subst="$subst -e s/@uuid$n@/$uuid/g"
+  request=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+  subst="$subst -e s/@uuid$n@/$uuid/g -e s/@request$n@/$request/g"
   segment="{dir}/segment-$n.ndjson"
   if [ -f "$segment" ]; then sed $subst "$segment"; fi
 done
@@ -3007,6 +3443,31 @@ done
                 HarnessEvent::AssistantMessage { text: said, parent_call_id: None } if said == text
             )
         })
+    }
+
+    /// What the engine did on its own, unwrapped.
+    fn on_its_own(events: &[HarnessEvent]) -> Vec<HarnessEvent> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::BackgroundActivity { event } => Some((**event).clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn says_on_its_own(events: &[HarnessEvent], text: &str) -> bool {
+        says(&on_its_own(events), text)
+    }
+
+    fn notices(events: &[HarnessEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::HarnessNotice { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     async fn run_to_end(session: &ClaudeSession, text: &str) -> TurnOutcome {
@@ -3039,15 +3500,16 @@ done
         ));
         assert_eq!(completions(&first), 1);
 
-        // Nobody is running a turn, and the engine's output still arrives.
+        // Nobody is running a turn, and the engine's output still arrives,
+        // marked as the engine's own.
         let notice = "Background command \"Run a short background job\" completed (exit code 0)";
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let events = sink.snapshot();
-                let noticed = events.iter().any(|event| {
-                    matches!(event, HarnessEvent::HarnessNotice { message, .. } if message == notice)
-                });
-                if noticed && says(&events, "The background job finished.") {
+                let noticed = notices(&on_its_own(&events))
+                    .iter()
+                    .any(|said| said == notice);
+                if noticed && says_on_its_own(&events, "The background job finished.") {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3056,6 +3518,10 @@ done
         .await
         .expect("the background task's end never reached the transcript between turns");
         let between = sink.snapshot();
+        assert!(
+            !says(&between, "The background job finished."),
+            "the engine's own answer is never the person's"
+        );
         assert_eq!(
             completions(&between),
             1,
@@ -3116,6 +3582,9 @@ done
     /// first, with a `result` that comes after the line was sent. That
     /// `result` precedes the line's `started` lifecycle, so it is not the
     /// user's, and the user's turn runs to its own.
+    ///
+    /// The engine's own answer arrives while the user's turn waits, and it is
+    /// marked as the engine's own, so nothing takes it for the person's reply.
     #[tokio::test]
     async fn a_line_queued_behind_the_engines_own_turn_waits_for_its_own_result() {
         let dir = tempfile::tempdir().unwrap();
@@ -3129,8 +3598,22 @@ done
 
         let events = sink.snapshot();
         let second = &events[before..];
-        assert!(says(second, "The background job finished."));
-        assert!(says(second, "done."));
+        assert!(says_on_its_own(second, "The background job finished."));
+        assert!(
+            !says(second, "The background job finished."),
+            "the engine's own answer is not the person's reply: {second:?}"
+        );
+        let own_answer = second
+            .iter()
+            .position(|event| matches!(event, HarnessEvent::BackgroundActivity { .. }))
+            .unwrap();
+        let reply = second
+            .iter()
+            .position(|event| {
+                matches!(event, HarnessEvent::AssistantMessage { text, .. } if text == "done.")
+            })
+            .unwrap();
+        assert!(own_answer < reply, "the engine's turn ran first");
         assert!(
             second.iter().all(|event| !matches!(
                 event,
@@ -3150,6 +3633,9 @@ done
     /// The turn's `result` names no user line and says the engine started
     /// it, yet it is the end of the user's turn: the line's `started`
     /// lifecycle came first. Waiting for another `result` would hang.
+    ///
+    /// What the engine did before it took the line is its own; the tool call
+    /// it opened then finishes there too, so its card settles.
     #[tokio::test]
     async fn a_line_folded_into_the_engines_own_turn_ends_with_that_turn() {
         let dir = tempfile::tempdir().unwrap();
@@ -3165,7 +3651,38 @@ done
         ));
 
         let events = sink.snapshot();
-        assert!(says(&events[before..], "done."));
+        let second = &events[before..];
+        assert!(says(second, "done."));
+        // The engine's own turn began before the second line was sent, so
+        // its first lines can land on either side of `before`.
+        assert!(says_on_its_own(
+            &events,
+            "The background job finished. Checking its output."
+        ));
+        assert!(!says(
+            &events,
+            "The background job finished. Checking its output."
+        ));
+        let own = on_its_own(&events);
+        let started: Vec<&str> = own
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::ToolStarted { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let finished: Vec<&str> = own
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::ToolCompleted { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started.len(), 1, "{own:?}");
+        assert_eq!(
+            started, finished,
+            "the engine's own call settles as its own"
+        );
         assert_eq!(completions(&events), 2);
     }
 
@@ -3217,5 +3734,522 @@ done
             socket: PathBuf::from("/managed.sock"),
         });
         assert_eq!(background(&session), ["0"], "managed human tools win");
+    }
+
+    async fn wait_until(sink: &Recorder, what: &str, done: impl Fn(&[HarnessEvent]) -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !done(&sink.snapshot()) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("never saw {what}: {:?}", sink.snapshot()));
+    }
+
+    async fn wait_for_file(path: &Path) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{} never appeared", path.display()));
+    }
+
+    fn alive(pid: i64) -> bool {
+        // SAFETY: signal 0 only probes for the process; it delivers nothing.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    /// Where a turn ended, as the person's turn reports it.
+    fn turn_ends(events: &[HarnessEvent]) -> Vec<&HarnessEvent> {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    HarnessEvent::TurnCompleted { .. }
+                        | HarnessEvent::TurnFailed { .. }
+                        | HarnessEvent::TurnInterrupted
+                )
+            })
+            .collect()
+    }
+
+    /// A fake engine whose first user turn ends a background task: once the
+    /// turn's `result` is out, the engine runs a turn of its own. That turn
+    /// says "checking the task", opens the call `toolu_own`, and waits for
+    /// the file `$RELEASE`. Then the call finishes, the turn says "the task
+    /// passed", and ends with its own `result`. A stop ends the turn at once.
+    /// Launches go to `$LAUNCHES` and stops to `$STOPS`.
+    fn engine_with_its_own_turn(dir: &Path) -> PathBuf {
+        write_engine(
+            dir,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$LAUNCHES"
+while IFS= read -r line; do
+  case "$line" in
+    *control_request*)
+      printf '%s\n' "$line" >> "$STOPS"
+      id=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"still_queued":[],"cancelled":[]}}}\n' "$id"
+      printf '{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming","origin":{"kind":"task-notification"},"session_id":"sess-own"}\n'
+      ;;
+    *)
+      printf '{"type":"system","subtype":"init","session_id":"sess-own","claude_code_version":"2.1.259"}\n'
+      printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-own","usage":{}}\n'
+      if [ ! -e "$OWN_TURN" ]; then
+        : > "$OWN_TURN"
+        printf '{"type":"system","subtype":"init","session_id":"sess-own","claude_code_version":"2.1.259"}\n'
+        printf '{"type":"assistant","message":{"id":"msg_own_1","content":[{"type":"text","text":"checking the task"},{"type":"tool_use","id":"toolu_own","name":"Bash","input":{"command":"sleep 1"}}]},"parent_tool_use_id":null}\n'
+        (
+          i=0
+          while [ ! -e "$RELEASE" ] && [ "$i" -lt 500 ]; do sleep 0.02; i=$((i+1)); done
+          printf '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_own","content":"ok"}]},"parent_tool_use_id":null}\n'
+          printf '{"type":"assistant","message":{"id":"msg_own_2","content":[{"type":"text","text":"the task passed"}]},"parent_tool_use_id":null}\n'
+          printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","origin":{"kind":"task-notification"},"session_id":"sess-own","usage":{}}\n'
+        ) &
+      fi
+      ;;
+  esac
+done
+"#,
+        )
+    }
+
+    /// A session on [`engine_with_its_own_turn`], with its files in `dir`.
+    fn session_with_its_own_turn(dir: &Path, sink: Arc<Recorder>) -> ClaudeSession {
+        let binary = engine_with_its_own_turn(dir);
+        let mut session = session_with(binary, dir, sink);
+        for name in ["RELEASE", "STOPS", "LAUNCHES", "OWN_TURN"] {
+            let path = dir.join(name.to_ascii_lowercase());
+            session
+                .spec
+                .extra_env
+                .push((name.into(), path.to_string_lossy().into_owned()));
+        }
+        session
+    }
+
+    /// The engine's own turn has started and said its first words.
+    async fn wait_for_its_own_turn(sink: &Recorder) {
+        wait_until(sink, "the engine's own turn", |events| {
+            says_on_its_own(events, "checking the task")
+        })
+        .await;
+    }
+
+    /// The idle park fires while the engine runs a turn of its own, after a
+    /// background task ended. Stopping the child then would lose that turn's
+    /// answer, so the park waits, keeping the child, until its `result`
+    /// lands.
+    #[tokio::test]
+    async fn a_park_waits_for_the_turn_the_engine_started_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Recorder::default());
+        let session = session_with_its_own_turn(dir.path(), sink.clone());
+
+        run_to_end(&session, "start a background task").await;
+        wait_for_its_own_turn(&sink).await;
+        let pid = session.child_pid().expect("the child runs its own turn");
+
+        assert!(matches!(
+            session.park().await,
+            Err(HarnessError::EngineBusy(_))
+        ));
+        assert_eq!(session.child_pid(), Some(pid));
+        assert!(alive(pid), "the park kept the child");
+
+        std::fs::write(dir.path().join("release"), "").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while matches!(session.park().await, Err(HarnessError::EngineBusy(_))) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the park never went through after the engine's turn ended");
+        let events = sink.snapshot();
+        assert!(
+            says_on_its_own(&events, "the task passed"),
+            "the engine's answer landed before its child was stopped"
+        );
+        assert_eq!(session.child_pid(), None);
+        assert_eq!(completions(&events), 1);
+        assert!(
+            on_its_own(&events).iter().any(|event| matches!(
+                event,
+                HarnessEvent::ToolCompleted { call_id, outcome: ToolOutcome::Succeeded, .. }
+                    if call_id == "toolu_own"
+            )),
+            "its call finished on its own: {events:?}"
+        );
+    }
+
+    /// A turn the engine never ends does not hold its child forever: past the
+    /// limit, it is taken as stuck and the park goes through. The call it
+    /// left open is settled, so its card does not run forever.
+    #[tokio::test]
+    async fn a_turn_the_engine_never_ends_still_parks_after_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Recorder::default());
+        let mut session = session_with_its_own_turn(dir.path(), sink.clone());
+        session.engine_turn_limit = Duration::from_millis(200);
+
+        run_to_end(&session, "start a background task").await;
+        wait_for_its_own_turn(&sink).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while session.park().await.is_err() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a stuck turn held the child past its limit");
+        assert_eq!(session.child_pid(), None);
+        let own = on_its_own(&sink.snapshot());
+        assert!(!says(&own, "the task passed"));
+        assert!(
+            own.iter().any(|event| matches!(
+                event,
+                HarnessEvent::ToolCompleted { call_id, outcome: ToolOutcome::Failed, preview, .. }
+                    if call_id == "toolu_own" && preview == UNFINISHED_CALL
+            )),
+            "the open call was settled: {own:?}"
+        );
+    }
+
+    /// No turn of the person's is running, but the engine is running one of
+    /// its own. A stop asks the engine to end that turn, and leaves the child
+    /// up.
+    #[tokio::test]
+    async fn a_stop_between_turns_ends_the_turn_the_engine_started_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Recorder::default());
+        let session = session_with_its_own_turn(dir.path(), sink.clone());
+
+        run_to_end(&session, "start a background task").await;
+        wait_for_its_own_turn(&sink).await;
+        let pid = session.child_pid().expect("the child runs its own turn");
+
+        session.interrupt().await.unwrap();
+        let stops = read_lines(&dir.path().join("stops"));
+        assert_eq!(stops.len(), 1, "the engine was asked to stop its turn");
+        assert_eq!(session.child_pid(), Some(pid), "a stop never takes it");
+        assert!(alive(pid));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while session.park().await.is_err() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the stopped turn never ended");
+        let events = sink.snapshot();
+        assert_eq!(
+            turn_ends(&events).len(),
+            1,
+            "the stopped turn is not a turn the session reports: {events:?}"
+        );
+        assert!(
+            on_its_own(&events).iter().any(|event| matches!(
+                event,
+                HarnessEvent::ToolCompleted { call_id, preview, .. }
+                    if call_id == "toolu_own" && preview == UNFINISHED_CALL
+            )),
+            "the call the stop cut short was settled: {events:?}"
+        );
+    }
+
+    /// A turn on another model respawns the child. A turn the engine is
+    /// running on its own finishes first, so its answer is not lost.
+    #[tokio::test]
+    async fn a_model_switch_waits_for_the_engines_own_turn_before_it_respawns() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Recorder::default());
+        let session = Arc::new(session_with_its_own_turn(dir.path(), sink.clone()));
+
+        run_to_end(&session, "start a background task").await;
+        wait_for_its_own_turn(&sink).await;
+        let pid = session.child_pid().expect("the child runs its own turn");
+
+        let switched = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move {
+                session
+                    .run_turn(TurnInput {
+                        model: Some("claude-other".into()),
+                        ..turn("carry on")
+                    })
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(session.child_pid(), Some(pid), "the child finishes first");
+        assert!(alive(pid));
+        assert_eq!(read_lines(&dir.path().join("launches")).len(), 1);
+
+        std::fs::write(dir.path().join("release"), "").unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), switched)
+            .await
+            .expect("the switched turn never ended")
+            .expect("turn task panicked")
+            .unwrap();
+        assert!(matches!(outcome, TurnOutcome::Clean));
+        assert!(says_on_its_own(&sink.snapshot(), "the task passed"));
+        let launches = read_lines(&dir.path().join("launches"));
+        assert_eq!(launches.len(), 2, "{launches:?}");
+        assert!(
+            launches[1].contains("--model claude-other"),
+            "{}",
+            launches[1]
+        );
+        assert_eq!(completions(&sink.snapshot()), 2);
+    }
+
+    /// Captured on 2.1.259: the person's line waits behind a turn the engine
+    /// started on its own, and the person stops it. Sent with
+    /// `cancel_queued`, the stop ends the engine's turn and cancels the line:
+    /// the engine closes the line with `cancelled` before it answers the stop,
+    /// and names it in the answer. The person's turn ends as stopped instead
+    /// of running after all, and the child stays up. Without
+    /// `cancel_queued`, the answer names the line in `still_queued` and the
+    /// engine runs it next (also captured).
+    #[tokio::test]
+    async fn a_stop_while_the_line_waits_stops_the_persons_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = replay_engine(dir.path(), "background-turn-stop-queued");
+        let sink = Arc::new(Recorder::default());
+        let session = Arc::new(session_with(binary, dir.path(), sink.clone()));
+
+        run_to_end(&session, "start a background job").await;
+        let pid = session
+            .child_pid()
+            .expect("the child stays up between turns");
+        let waits = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { session.run_turn(turn("Say the word done.")).await }
+        });
+        let received = dir.path().join("stdin.ndjson");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while read_lines(&received).len() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the second line never reached the engine");
+        let before = sink.snapshot().len();
+
+        session.interrupt().await.unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), waits)
+            .await
+            .expect("the stopped turn never ended")
+            .expect("turn task panicked")
+            .unwrap();
+        assert!(matches!(outcome, TurnOutcome::Clean));
+        let events = sink.snapshot();
+        assert!(
+            matches!(
+                turn_ends(&events[before..])[..],
+                [HarnessEvent::TurnInterrupted]
+            ),
+            "the person's turn ended as stopped: {events:?}"
+        );
+        assert!(!says(&events, "done."), "the stopped line never ran");
+        let sent = read_lines(&received);
+        assert_eq!(sent.len(), 3, "one stop did it: {sent:?}");
+        let stop: serde_json::Value = serde_json::from_str(&sent[2]).unwrap();
+        assert_eq!(stop["request"]["cancel_queued"], true);
+        assert_eq!(session.child_pid(), Some(pid), "the child stays up");
+        assert!(alive(pid));
+    }
+
+    /// The engine's answer to a stop says what became of the person's
+    /// waiting line. A line it names as cancelled ends the turn as stopped,
+    /// even with no lifecycle line to say so. A line it names as still
+    /// queued would run next, so the stop takes the process instead.
+    #[tokio::test]
+    async fn a_stop_answer_decides_what_becomes_of_the_waiting_line() {
+        for answer in ["cancelled", "still_queued"] {
+            let dir = tempfile::tempdir().unwrap();
+            let waiting = dir.path().join("waiting");
+            let binary = write_engine(
+                dir.path(),
+                &format!(
+                    r#"#!/bin/sh
+n=0
+while IFS= read -r line; do
+  case "$line" in
+    *control_request*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      held=$(cat {waiting})
+      if [ "{answer}" = cancelled ]; then
+        printf '{{"type":"control_response","response":{{"subtype":"success","request_id":"%s","response":{{"still_queued":[],"cancelled":["%s"]}}}}}}\n' "$id" "$held"
+      else
+        printf '{{"type":"control_response","response":{{"subtype":"success","request_id":"%s","response":{{"still_queued":["%s"]}}}}}}\n' "$id" "$held"
+      fi
+      printf '{{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming","origin":{{"kind":"task-notification"}},"session_id":"sess-answer"}}\n'
+      ;;
+    *)
+      n=$((n+1))
+      uuid=$(printf '%s' "$line" | sed -n 's/.*"uuid":"\([^"]*\)".*/\1/p')
+      if [ "$n" -eq 1 ]; then
+        printf '{{"type":"system","subtype":"init","session_id":"sess-answer","claude_code_version":"2.1.259"}}\n'
+        printf '{{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-answer","user_message_uuids":["%s"],"usage":{{}}}}\n' "$uuid"
+        printf '{{"type":"system","subtype":"init","session_id":"sess-answer","claude_code_version":"2.1.259"}}\n'
+        printf '{{"type":"assistant","message":{{"id":"msg_own","content":[{{"type":"text","text":"checking the task"}}]}},"parent_tool_use_id":null}}\n'
+      else
+        printf '{{"type":"command_lifecycle","command_uuid":"%s","state":"queued","uuid":"life-q","session_id":"sess-answer"}}\n' "$uuid"
+        printf '%s' "$uuid" > {waiting}
+      fi
+      ;;
+  esac
+done
+"#,
+                    waiting = waiting.display(),
+                ),
+            );
+            let sink = Arc::new(Recorder::default());
+            let session = Arc::new(session_with(binary, dir.path(), sink.clone()));
+
+            run_to_end(&session, "start a background task").await;
+            wait_for_its_own_turn(&sink).await;
+            let pid = session.child_pid().expect("the child runs its own turn");
+            let waits = tokio::spawn({
+                let session = Arc::clone(&session);
+                async move { session.run_turn(turn("Say the word done.")).await }
+            });
+            wait_for_file(&waiting).await;
+            // The line is written; let the reader see it queued.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            session.interrupt().await.unwrap();
+            let outcome = tokio::time::timeout(Duration::from_secs(5), waits)
+                .await
+                .unwrap_or_else(|_| panic!("{answer}: the stopped turn never ended"))
+                .expect("turn task panicked");
+            if answer == "cancelled" {
+                assert!(matches!(outcome, Ok(TurnOutcome::Clean)), "{outcome:?}");
+                assert!(
+                    matches!(
+                        turn_ends(&sink.snapshot())[1..],
+                        [HarnessEvent::TurnInterrupted]
+                    ),
+                    "{:?}",
+                    sink.snapshot()
+                );
+                assert_eq!(session.child_pid(), Some(pid), "the child stays up");
+            } else {
+                assert!(!alive(pid), "the stop took the process");
+                assert_eq!(session.child_pid(), None);
+            }
+        }
+    }
+
+    /// A line the engine closes before it starts it never runs, so no
+    /// `result` will end its turn. The turn ends there, with the error the
+    /// engine reported while the line waited when there is one. That error
+    /// is the person's turn failing, not a turn the engine started on its
+    /// own.
+    #[tokio::test]
+    async fn a_line_the_engine_drops_before_it_starts_ends_its_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = write_engine(
+            dir.path(),
+            r#"#!/bin/sh
+n=0
+while IFS= read -r line; do
+  n=$((n+1))
+  uuid=$(printf '%s' "$line" | sed -n 's/.*"uuid":"\([^"]*\)".*/\1/p')
+  case "$n" in
+    1)
+      printf '{"type":"command_lifecycle","command_uuid":"%s","state":"queued","uuid":"life-1","session_id":"sess-drop"}\n' "$uuid"
+      printf '{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","result":"API Error: 400 the request was refused","session_id":"sess-drop"}\n'
+      printf '{"type":"command_lifecycle","command_uuid":"%s","state":"cancelled","uuid":"life-2","session_id":"sess-drop"}\n' "$uuid"
+      ;;
+    2)
+      printf '{"type":"command_lifecycle","command_uuid":"%s","state":"refused","uuid":"life-3","session_id":"sess-drop"}\n' "$uuid"
+      ;;
+    *)
+      printf '{"type":"command_lifecycle","command_uuid":"%s","state":"queued","uuid":"life-4","session_id":"sess-drop"}\n' "$uuid"
+      printf '{"type":"command_lifecycle","command_uuid":"%s","state":"started","uuid":"life-5","session_id":"sess-drop"}\n' "$uuid"
+      printf '{"type":"system","subtype":"init","session_id":"sess-drop","claude_code_version":"2.1.259"}\n'
+      printf '{"type":"assistant","message":{"id":"msg_done","content":[{"type":"text","text":"done."}]},"parent_tool_use_id":null}\n'
+      printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-drop","user_message_uuids":["%s"],"usage":{}}\n' "$uuid"
+      ;;
+  esac
+done
+"#,
+        );
+        let sink = Arc::new(Recorder::default());
+        let session = session_with(binary, dir.path(), sink.clone());
+
+        assert!(matches!(
+            run_to_end(&session, "first").await,
+            TurnOutcome::Clean
+        ));
+        let first = sink.snapshot();
+        assert!(
+            matches!(
+                turn_ends(&first)[..],
+                [HarnessEvent::TurnFailed { error }] if error.message == "API Error: 400 the request was refused"
+            ),
+            "the turn failed with the engine's error: {first:?}"
+        );
+        assert!(
+            on_its_own(&first).is_empty(),
+            "the failure was the person's turn, not the engine's own: {first:?}"
+        );
+
+        run_to_end(&session, "second").await;
+        let second = &sink.snapshot()[first.len()..];
+        assert!(
+            matches!(
+                turn_ends(second)[..],
+                [HarnessEvent::TurnFailed { error }] if error.message == "Claude Code refused the message."
+            ),
+            "{second:?}"
+        );
+
+        run_to_end(&session, "third").await;
+        let events = sink.snapshot();
+        assert!(says(&events, "done."), "the session still works");
+        assert_eq!(completions(&events), 1);
+    }
+
+    /// An engine that reports no `command_lifecycle` lines gets the first
+    /// `result` after the write as the end of the turn, unless that `result`
+    /// names only other lines.
+    #[tokio::test]
+    async fn without_lifecycle_lines_the_first_result_that_is_not_another_lines_ends_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = write_engine(
+            dir.path(),
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-old","user_message_uuids":["someone-else"],"usage":{}}\n'
+  printf '{"type":"system","subtype":"init","session_id":"sess-old","claude_code_version":"2.1.238"}\n'
+  printf '{"type":"assistant","message":{"id":"msg_answer","content":[{"type":"text","text":"the answer"}]},"parent_tool_use_id":null}\n'
+  printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-old","usage":{}}\n'
+done
+"#,
+        );
+        let sink = Arc::new(Recorder::default());
+        let session = session_with(binary, dir.path(), sink.clone());
+
+        for _ in 0..2 {
+            let before = sink.snapshot().len();
+            assert!(matches!(
+                run_to_end(&session, "ask").await,
+                TurnOutcome::Clean
+            ));
+            let turn = &sink.snapshot()[before..];
+            assert!(
+                says(turn, "the answer"),
+                "the turn ran to its own result: {turn:?}"
+            );
+            assert!(matches!(
+                turn.last(),
+                Some(HarnessEvent::TurnCompleted { .. })
+            ));
+        }
+        assert_eq!(completions(&sink.snapshot()), 2);
     }
 }

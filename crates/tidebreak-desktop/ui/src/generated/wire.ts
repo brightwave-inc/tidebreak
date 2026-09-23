@@ -2435,7 +2435,11 @@ children: Array<SessionTreeChild>,
 /**
  * Present only when a parent wait is known; never inferred.
  */
-wait: SessionTreeWait | null, };
+wait: SessionTreeWait | null, } | { "type": "background_activity",
+/**
+ * What the engine did.
+ */
+event: Event, };
 
 /**
  * The execution backend that ran a command, as a closed vocabulary.
