@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { userEvent, within } from "storybook/test";
 
-import type { DataOverview } from "@/api";
+import { HttpError, type DataOverview } from "@/api";
 import {
   DataPrivacyPanel,
   type DataPrivacyHost,
@@ -51,12 +51,18 @@ function stubClient(options?: {
   overview?: DataOverview;
   pending?: boolean;
   fail?: boolean;
+  member?: boolean;
 }) {
   return {
     getDataOverview: () => {
       if (options?.pending) return new Promise<DataOverview>(() => {});
       if (options?.fail) {
         return Promise.reject(new Error("The server did not answer."));
+      }
+      if (options?.member) {
+        return Promise.reject(
+          new HttpError(403, "administrator access required"),
+        );
       }
       return Promise.resolve(options?.overview ?? overview);
     },
@@ -163,6 +169,18 @@ export const PostgresServer: Story = {
           "This server keeps conversations in PostgreSQL. Back it up with pg_dump, as the self-hosting guide describes.",
       },
     }) as never,
+  },
+};
+
+/**
+ * A member of a shared server in a browser. The folder, the backup, and the
+ * settings are the administrator's; the member exports their own
+ * conversations.
+ */
+export const SharedServerMember: Story = {
+  args: {
+    host: stubHost({ local: false }),
+    client: stubClient({ member: true }) as never,
   },
 };
 

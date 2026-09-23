@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import type {
-  ApiClient,
-  ConversationExportFormat,
-  ConversationExportRequest,
-  DataOverview,
+import {
+  HttpError,
+  type ApiClient,
+  type ConversationExportFormat,
+  type ConversationExportRequest,
+  type DataOverview,
 } from "@/api";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
@@ -114,6 +115,10 @@ export function DataPrivacyPanel({
   const [overview, setOverview] = useState<DataOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // A member of a shared server: the profile, its backup, and its settings
+  // are the administrator's. The export reads only the member's own
+  // conversations, so it stays.
+  const [memberOnly, setMemberOnly] = useState(false);
   const [working, setWorking] = useState<Working>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
@@ -128,10 +133,15 @@ export function DataPrivacyPanel({
     setLoadError(null);
     try {
       setOverview(await client.getDataOverview());
+      setMemberOnly(false);
     } catch (caught) {
-      setLoadError(
-        friendlyErrorMessage(caught, "Could not read the data folder."),
-      );
+      if (caught instanceof HttpError && caught.status === 403) {
+        setMemberOnly(true);
+      } else {
+        setLoadError(
+          friendlyErrorMessage(caught, "Could not read the data folder."),
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -242,51 +252,61 @@ export function DataPrivacyPanel({
         />
       )}
 
-      <SettingsSection
-        title="Where your data lives"
-        description={
-          overview?.storage === "postgres"
-            ? "Conversations live in PostgreSQL. This folder holds logs, tools, and working files."
-            : "Everything is in one folder. Your keys stay in the keychain, and code worktrees keep their own folder."
-        }
-      >
-        {loading && overview === null ? (
-          <p className="text-sm text-muted-foreground" role="status">
-            Reading the data folder…
-          </p>
-        ) : overview === null ? (
-          <div className="flex flex-col items-start gap-3">
-            <SettingsError>{loadError}</SettingsError>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void reload()}
-            >
-              Try again
-            </Button>
-          </div>
-        ) : (
-          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-            <div className="flex min-w-0 flex-1 basis-64 flex-col gap-1">
-              <p className="text-sm font-medium">Data folder</p>
-              <p className="font-mono text-xs break-all text-muted-foreground">
-                {overview.data_dir}
-              </p>
-            </div>
-            {local && (
+      {memberOnly && (
+        <SettingsStatus
+          tone="neutral"
+          label="An administrator keeps this server's data"
+          description="Where it lives, its backups, and its settings are theirs. You can export your own conversations."
+        />
+      )}
+
+      {!memberOnly && (
+        <SettingsSection
+          title="Where your data lives"
+          description={
+            overview?.storage === "postgres"
+              ? "Conversations live in PostgreSQL. This folder holds logs, tools, and working files."
+              : "Everything is in one folder. Your keys stay in the keychain, and code worktrees keep their own folder."
+          }
+        >
+          {loading && overview === null ? (
+            <p className="text-sm text-muted-foreground" role="status">
+              Reading the data folder…
+            </p>
+          ) : overview === null ? (
+            <div className="flex flex-col items-start gap-3">
+              <SettingsError>{loadError}</SettingsError>
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={reveal}
+                onClick={() => void reload()}
               >
-                {revealLabel(userAgent)}
+                Try again
               </Button>
-            )}
-          </div>
-        )}
-      </SettingsSection>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+              <div className="flex min-w-0 flex-1 basis-64 flex-col gap-1">
+                <p className="text-sm font-medium">Data folder</p>
+                <p className="font-mono text-xs break-all text-muted-foreground">
+                  {overview.data_dir}
+                </p>
+              </div>
+              {local && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={reveal}
+                >
+                  {revealLabel(userAgent)}
+                </Button>
+              )}
+            </div>
+          )}
+        </SettingsSection>
+      )}
 
       {overview && (
         <SettingsSection
@@ -330,28 +350,32 @@ export function DataPrivacyPanel({
 
       {(local || browser) && (
         <SettingsSection
-          title="Back up and export"
+          title={memberOnly ? "Export" : "Back up and export"}
           description="Take a copy with you, or keep one somewhere safe."
         >
-          <ActionRow
-            title="Back up"
-            description={
-              reasonNoBackup ??
-              "The database with your conversations and memory, the files you attached, and the files Tidebreak made, as one .tar.gz. Your keys are not in it."
-            }
-          >
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={
-                working !== null || overview === null || reasonNoBackup !== null
+          {!memberOnly && (
+            <ActionRow
+              title="Back up"
+              description={
+                reasonNoBackup ??
+                "The database with your conversations and memory, the files you attached, and the files Tidebreak made, as one .tar.gz. Your keys are not in it."
               }
-              onClick={backUp}
             >
-              {working === "backup" ? "Backing up…" : "Back up…"}
-            </Button>
-          </ActionRow>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={
+                  working !== null ||
+                  overview === null ||
+                  reasonNoBackup !== null
+                }
+                onClick={backUp}
+              >
+                {working === "backup" ? "Backing up…" : "Back up…"}
+              </Button>
+            </ActionRow>
+          )}
           <ActionRow
             title="Export conversations"
             description="Your conversations as Markdown files or one JSON file, all of them or the ones you choose."
@@ -407,7 +431,7 @@ export function DataPrivacyPanel({
         </ul>
       </SettingsSection>
 
-      {!attachedRemotely && (
+      {!attachedRemotely && !memberOnly && (
         <SettingsSection title="Danger zone">
           <ActionRow
             title="Reset settings"

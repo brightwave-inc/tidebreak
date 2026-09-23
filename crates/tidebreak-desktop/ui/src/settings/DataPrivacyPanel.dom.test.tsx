@@ -9,7 +9,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { DataOverview } from "@/api";
+import { HttpError, type DataOverview } from "@/api";
 import { DELETE_ALL_DATA_PHRASE } from "@/host";
 import { STORAGE_KEY as THEME_KEY } from "@/theme";
 import {
@@ -49,15 +49,20 @@ const conversations: ExportableConversation[] = [
 
 function renderPanel({
   data = overview,
+  overviewError,
   attachedRemotely = false,
   local = true,
 }: {
   data?: DataOverview;
+  overviewError?: Error;
   attachedRemotely?: boolean;
   local?: boolean;
 } = {}) {
   const client = {
-    getDataOverview: vi.fn(async () => data),
+    getDataOverview: vi.fn(async () => {
+      if (overviewError) throw overviewError;
+      return data;
+    }),
     resetSettings: vi.fn(async () => ({}) as never),
     downloadProfileBackup: vi.fn(),
     downloadConversationExport: vi.fn(),
@@ -246,5 +251,22 @@ describe("DataPrivacyPanel", () => {
     ]) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     }
+  });
+
+  it("leaves a member of a shared server the export and nothing of the administrator's", async () => {
+    renderPanel({
+      local: false,
+      overviewError: new HttpError(403, "administrator access required"),
+    });
+    expect(
+      await screen.findByText("An administrator keeps this server's data"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export…" })).toBeEnabled();
+    for (const name of ["Back up…", "Reset settings…", "Try again"]) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
+    expect(
+      screen.queryByText(/administrator access required/),
+    ).not.toBeInTheDocument();
   });
 });
