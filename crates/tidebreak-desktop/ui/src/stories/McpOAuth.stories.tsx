@@ -1,11 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import type { McpServerInfo } from "@/api";
-import {
-  McpOAuthControl,
-  McpTierChip,
-  mcpServerStatus,
-} from "@/settings/McpPanel";
-import { SettingsSection, SettingsStatus } from "@/settings/primitives";
+import { McpServerSummary } from "@/settings/McpPanel";
+import { SettingsSection } from "@/settings/primitives";
 import {
   mcpOauthAccessDenied,
   mcpOauthAuthorizing,
@@ -58,12 +54,9 @@ const rows: Row[] = [
 ];
 
 function SignInRow({ row }: { row: Row }) {
-  const status = row.server.oauth_status;
   return (
     <SettingsSection title={row.title}>
-      <SettingsStatus {...mcpServerStatus(row.server)} />
-      <McpTierChip curated={row.server.curated} />
-      {status ? <McpOAuthControl status={status} busy={row.busy} /> : null}
+      <McpServerSummary server={row.server} busy={row.busy} />
     </SettingsSection>
   );
 }
@@ -71,7 +64,7 @@ function SignInRow({ row }: { row: Row }) {
 function OauthStatesShowcase({ only }: { only?: string }) {
   const shown = only ? rows.filter((row) => row.title === only) : rows;
   return (
-    <div className="mx-auto flex max-w-xl flex-col gap-10 p-6">
+    <div className="mx-auto flex max-w-xl flex-col gap-10">
       {shown.map((row) => (
         <SignInRow key={row.title} row={row} />
       ))}
@@ -82,7 +75,9 @@ function OauthStatesShowcase({ only }: { only?: string }) {
 const meta = {
   title: "Settings/MCP OAuth",
   component: OauthStatesShowcase,
-  parameters: { layout: "fullscreen" },
+  // Padded, not fullscreen: the fullscreen surface clips at the viewport,
+  // and the full list of states is taller than one.
+  parameters: { layout: "padded" },
 } satisfies Meta<typeof OauthStatesShowcase>;
 
 export default meta;

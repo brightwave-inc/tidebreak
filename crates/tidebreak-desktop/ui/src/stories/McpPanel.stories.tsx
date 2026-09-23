@@ -109,12 +109,15 @@ export const StdioProtocolFailure: Story = {
 };
 
 /** A remote server imported without the OAuth flag that asks for a sign-in:
- * Connect, not an authentication failure. */
+ * Connect, not an authentication failure. Padded so the row below the
+ * import section scrolls into view. */
 export const RemoteServerNeedsSignIn: Story = {
   args: { client: stubClient([mcpSignInServer(mcpOauthNotConnected)]) },
+  parameters: { layout: "padded" },
 };
 
 /** The same server while the person finishes signing in in the browser. */
 export const RemoteServerWaitingForSignIn: Story = {
   args: { client: stubClient([mcpSignInServer(mcpOauthAuthorizing)]) },
+  parameters: { layout: "padded" },
 };

@@ -251,6 +251,45 @@ export function mcpServerStatus(server: McpServerInfo): McpServerStatus {
   };
 }
 
+/**
+ * The top of a configured server's settings: the status line, then one row
+ * with the server's tier and, for a server that signs in, its sign-in
+ * action. The row keeps the chip and the button at their own size instead of
+ * stretching them across the column.
+ */
+export function McpServerSummary({
+  server,
+  busy = false,
+  disabled = false,
+  onConnect,
+  onDisconnect,
+}: {
+  server: McpServerInfo;
+  busy?: boolean;
+  disabled?: boolean;
+  onConnect?: () => void;
+  onDisconnect?: () => void;
+}) {
+  const oauth = oauthStatusOf(server);
+  return (
+    <>
+      <SettingsStatus {...mcpServerStatus(server)} />
+      <div className="flex flex-wrap items-center gap-2">
+        <McpTierChip curated={server.curated} />
+        {oauth ? (
+          <McpOAuthControl
+            status={oauth}
+            busy={busy}
+            disabled={disabled}
+            onConnect={onConnect}
+            onDisconnect={onDisconnect}
+          />
+        ) : null}
+      </div>
+    </>
+  );
+}
+
 /** The OAuth status the server reported for an HTTP server, or `null` when
  * nothing about it involves OAuth. The server decides: a saved `oauth` flag
  * is not needed, so an imported server that asks for a sign-in gets one. */
@@ -1058,21 +1097,13 @@ export function McpPanel({
                 key={index}
                 title={server.name || `Server ${index + 1}`}
               >
-                <SettingsStatus {...mcpServerStatus(server)} />
-
-                <McpTierChip curated={server.curated} />
-                {(() => {
-                  const oauthStatus = oauthStatusOf(server);
-                  return oauthStatus ? (
-                    <McpOAuthControl
-                      status={oauthStatus}
-                      busy={oauthWorking === server.name}
-                      disabled={working && oauthWorking !== server.name}
-                      onConnect={() => void connectOauth(server.name)}
-                      onDisconnect={() => void disconnectOauth(server.name)}
-                    />
-                  ) : null;
-                })()}
+                <McpServerSummary
+                  server={server}
+                  busy={oauthWorking === server.name}
+                  disabled={working && oauthWorking !== server.name}
+                  onConnect={() => void connectOauth(server.name)}
+                  onDisconnect={() => void disconnectOauth(server.name)}
+                />
 
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex-1">
@@ -1220,7 +1251,7 @@ export function McpPanel({
 
                     <SettingsField
                       label="Bearer token variable"
-                      hint="Optional. Tidebreak reads this variable from the process environment it started with and never displays the value. Export it in the shell you start Tidebreak from, then restart Tidebreak. A Dock or Finder launch does not see variables from your shell profile."
+                      hint="Optional. Leave it blank for a server you sign in to with Connect. Tidebreak reads this variable from the process environment it started with and never displays the value. Export it in the shell you start Tidebreak from, then restart Tidebreak. A Dock or Finder launch does not see variables from your shell profile."
                     >
                       <Input
                         value={server.bearer_token_env ?? ""}
