@@ -132,6 +132,74 @@ async fn postgres_v060_upgrade_keeps_release_rows() {
     assert_eq!(snapshot.migration_count, 3);
 }
 
+/// A server older than its database refuses it with a message an operator can
+/// act on, and leaves the newer build's migration record alone.
+#[tokio::test]
+async fn postgres_database_from_a_newer_build_is_refused_readably() {
+    let source_url = match std::env::var("TIDEBREAK_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("TIDEBREAK_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("TIDEBREAK_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let suffix = format!("newer_{}", uuid::Uuid::new_v4().simple());
+    let (database_name, database_url) =
+        create_sibling_database(&source_url, &suffix).await.unwrap();
+
+    let result = exercise_newer_build_refusal(&database_url).await;
+    drop_sibling_database(&source_url, &database_name).await;
+    let (message, migration_count) = result.unwrap();
+
+    assert_eq!(
+        message,
+        "This Tidebreak profile was written by a newer version. Install that version or \
+         later, or restore a backup."
+    );
+    assert_eq!(
+        migration_count,
+        i64::try_from(tidebreak_core::db::migration_names().len()).unwrap() + 1
+    );
+}
+
+async fn exercise_newer_build_refusal(url: &str) -> Result<(String, i64), String> {
+    DbStore::connect(url)
+        .await
+        .map_err(|error| error.to_string())?
+        .close()
+        .await
+        .map_err(|error| error.to_string())?;
+    let newer = Database::connect(url)
+        .await
+        .map_err(|error| error.to_string())?;
+    newer
+        .execute_unprepared(
+            "INSERT INTO seaql_migrations (version, applied_at) \
+             VALUES ('m20991231_000001_from_a_newer_build', 0)",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let message = match DbStore::connect(url).await {
+        Ok(store) => {
+            store.close().await.map_err(|error| error.to_string())?;
+            return Err("a database from a newer build was opened".to_owned());
+        }
+        Err(error) => error.to_string(),
+    };
+    let migration_count = newer
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT count(*)::bigint AS migration_count FROM seaql_migrations".to_owned(),
+        ))
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "the migration count query returned no row".to_owned())?
+        .try_get("", "migration_count")
+        .map_err(|error| error.to_string())?;
+    newer.close().await.map_err(|error| error.to_string())?;
+    Ok((message, migration_count))
+}
+
 async fn exercise_pre_pin_upgrade(url: &str) -> Result<PrePinUpgradeSnapshot, String> {
     let setup = Database::connect(url)
         .await

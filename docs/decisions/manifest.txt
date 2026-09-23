@@ -108,3 +108,4 @@
 0097  0097-connections-are-plural-and-typed.md
 0098  0098-standalone-machine-attach-on-mobile.md
 0099  0099-memory-is-agent-curated-and-automatic.md
+0100  0100-the-1-0-compatibility-surface.md

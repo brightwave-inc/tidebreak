@@ -11,15 +11,14 @@ const idle: DesktopUpdateState = {
 };
 
 describe("UpdatesPanel", () => {
-  it("warns that pre-v1 updates may wipe local data", () => {
+  it("does not warn that an update may wipe local data", () => {
+    // Updates keep local data: the database upgrades in place, and a copy
+    // is saved first.
     const markup = renderToStaticMarkup(
       <UpdatesPanel state={idle} onCheck={vi.fn()} onRestart={vi.fn()} />,
     );
 
-    expect(markup).toContain("Pre-v1 data warning");
-    expect(markup).toContain(
-      "any update may wipe all Tidebreak data on this device",
-    );
+    expect(markup).not.toContain("wipe");
   });
 
   it("keeps update checks disabled outside supported packaged builds", () => {

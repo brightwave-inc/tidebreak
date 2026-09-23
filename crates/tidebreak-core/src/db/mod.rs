@@ -204,16 +204,69 @@ impl DbStore {
     /// Most callers should use [`Self::connect`]. This constructor is for
     /// hosts and integration fixtures that need deliberate pool sizing or
     /// timeout policy rather than SeaORM's defaults.
+    ///
+    /// A database that records a migration this build does not have was
+    /// written by a newer build. The connect refuses it before changing
+    /// anything, with a message a person can act on.
     pub async fn connect_with_options(options: ConnectOptions) -> Result<Self> {
+        Self::connect_and_migrate(options, None).await
+    }
+
+    /// Connect like [`Self::connect_with_options`], and copy a SQLite
+    /// database into `backups` before this connect migrates it.
+    ///
+    /// The copy is taken only when the database already holds something to
+    /// lose: at least one migration recorded, and at least one pending. It is
+    /// named `pre-migration-<version>-<timestamp>.db`, and `backups` keeps the
+    /// two newest. If the copy fails, no migration runs. PostgreSQL gets no
+    /// copy, because its operator owns its backups.
+    pub async fn connect_with_pre_migration_backup(
+        options: ConnectOptions,
+        backups: &std::path::Path,
+    ) -> Result<Self> {
+        Self::connect_and_migrate(options, Some(backups)).await
+    }
+
+    async fn connect_and_migrate(
+        options: ConnectOptions,
+        backups: Option<&std::path::Path>,
+    ) -> Result<Self> {
         let options = with_sqlite_write_policy(options);
         let conn = Database::connect(options).await.map_err(store_err)?;
+        let sqlite = conn.get_database_backend() == sea_orm::DatabaseBackend::Sqlite;
         // WAL lets a reader (e.g. the UI listing chats) proceed concurrently
         // with a writer (a turn appending messages). SQLite-only; it's a
         // persistent, file-level setting, so running it once at connect suffices.
-        if conn.get_database_backend() == sea_orm::DatabaseBackend::Sqlite {
+        if sqlite {
             conn.execute_unprepared("PRAGMA journal_mode=WAL;")
                 .await
                 .map_err(store_err)?;
+        }
+        let recorded = recorded_migrations(&conn).await?;
+        let chain = migration_names();
+        let unknown: Vec<&str> = recorded
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !chain.iter().any(|known| known == name))
+            .collect();
+        if !unknown.is_empty() {
+            // SeaORM would refuse too, naming each "missing migration file".
+            // That reads like a broken install rather than a downgrade.
+            tracing::error!(
+                ?unknown,
+                "the database records migrations this build does not have; a newer build wrote it"
+            );
+            return Err(written_by_a_newer_version(backups));
+        }
+        let pending = chain.iter().filter(|name| !recorded.contains(name)).count();
+        if let Some(backups) = backups.filter(|_| sqlite && pending > 0 && !recorded.is_empty()) {
+            let copy =
+                backup::copy_before_migrating(&conn, backups, crate::VERSION, Utc::now()).await?;
+            tracing::info!(
+                backup = %copy.display(),
+                pending,
+                "saved a copy of the local database before migrating it"
+            );
         }
         migration::Migrator::up(&conn, None)
             .await
@@ -223,10 +276,11 @@ impl DbStore {
 
     /// Close the connection pool, releasing every database file handle before
     /// returning. Dropping the store closes connections asynchronously, which
-    /// is fine at process exit — but a caller that deletes or replaces the
-    /// SQLite files next (restart simulations, the pre-v1 reset lifecycle)
-    /// must close explicitly: Windows refuses to delete a file another handle
-    /// still has open or memory-mapped.
+    /// is fine at process exit — but a caller that deletes, moves, or replaces
+    /// the SQLite files next (restart simulations, the desktop lifecycle that
+    /// sets an unreadable profile aside) must close explicitly: Windows
+    /// refuses to delete or rename a file another handle still has open or
+    /// memory-mapped.
     pub async fn close(self) -> Result<()> {
         self.conn.close().await.map_err(store_err)
     }
@@ -284,6 +338,72 @@ impl DbStore {
     ) -> Result<bool> {
         ops::turn::heartbeat_turn(self, id, lease_token, now, lease_expires_at).await
     }
+}
+
+/// The name of every schema migration this build carries, in the order it
+/// applies them.
+///
+/// A database records the name of each migration it has taken, and the chain
+/// only ever grows at the end, so a database written by an older build records
+/// a prefix of this list.
+pub fn migration_names() -> Vec<String> {
+    migration::Migrator::migrations()
+        .iter()
+        .map(|migration| migration.name().to_owned())
+        .collect()
+}
+
+/// The migration names `conn` has recorded, without creating the table that
+/// records them.
+async fn recorded_migrations(conn: &DatabaseConnection) -> Result<Vec<String>> {
+    let table = migration::Migrator::migration_table_name().to_string();
+    if !sea_orm_migration::SchemaManager::new(conn)
+        .has_table(&table)
+        .await
+        .map_err(store_err)?
+    {
+        return Ok(Vec::new());
+    }
+    Ok(sea_orm_migration::seaql_migrations::Entity::find()
+        .all(conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(|row| row.version)
+        .collect())
+}
+
+/// The refusal a downgrade gets. The boot screen shows it as written, so it
+/// says what happened and what to do next.
+fn written_by_a_newer_version(backups: Option<&std::path::Path>) -> AgentError {
+    let restore = match backups {
+        Some(backups) => format!("restore a backup from {}", backups.display()),
+        None => "restore a backup".to_owned(),
+    };
+    AgentError::msg(format!(
+        "This Tidebreak profile was written by a newer version. Install that version or \
+         later, or {restore}."
+    ))
+}
+
+/// Create a SQLite database at `url` that has taken only the first `steps`
+/// migrations, the shape an older build leaves behind.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub async fn migrate_sqlite_partially_for_tests(url: &str, steps: u32) -> Result<()> {
+    let conn = Database::connect(url).await.map_err(store_err)?;
+    migration::Migrator::up(&conn, Some(steps))
+        .await
+        .map_err(store_err)?;
+    conn.close().await.map_err(store_err)
+}
+
+/// Apply every migration through `conn`, so a test controls the connection
+/// the chain runs on, such as one that never checkpoints its WAL.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub async fn migrate_for_tests(conn: &DatabaseConnection) -> Result<()> {
+    migration::Migrator::up(conn, None).await.map_err(store_err)
 }
 
 /// Return one migrated SQLite template shared by every nextest process.
@@ -3454,6 +3574,8 @@ mod entities;
 /// Schema v1, defined once via SeaORM's schema builder; it emits dialect-correct
 /// DDL for whichever backend is connected.
 mod migration;
+
+pub mod backup;
 
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { AlertTriangle, RefreshCw, RotateCw } from "lucide-react";
+import { RefreshCw, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { ClipboardCopyButton } from "../ClipboardCopyButton";
@@ -64,20 +64,6 @@ export function UpdatesPanel({
       description="Tidebreak checks shortly after launch and every five minutes, and downloads updates in the background. A downloaded update installs only after you choose Restart to update."
       busy={busy}
     >
-      <div
-        className="notice-surface notice-warning flex items-start gap-3 rounded-md border px-4 py-3"
-        aria-label="Pre-v1 update warning"
-      >
-        <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-        <div className="flex min-w-0 flex-col gap-0.5 text-sm">
-          <strong className="font-medium">Pre-v1 data warning</strong>
-          <p>
-            Until Tidebreak reaches version 1.0, any update may wipe all
-            Tidebreak data on this device.
-          </p>
-        </div>
-      </div>
-
       <SettingsSection title="Automatic updates">
         <p className="text-sm text-muted-foreground" aria-live="polite">
           {updateStateSummary(state)}

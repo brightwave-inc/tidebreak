@@ -9,11 +9,11 @@
 //! be shadowed by local state.
 //!
 //! The provisioned tier lives in a sidecar file, `{data_dir}/gateway-policy.json`
-//! ([`ProvisionedPolicyFile`]), not in the SQLite settings table: the pre-v1
-//! schema-epoch lifecycle ([`crate::desktop_schema`]) deletes the database on
-//! a baseline bump, and policy stored there would vanish with it — resolving
-//! the profile unmanaged and orphaning the gateway session the policy had
-//! authorized. Sidecar files survive the reset, so the policy now does too.
+//! ([`ProvisionedPolicyFile`]), not in the SQLite settings table: the schema
+//! lifecycle ([`crate::desktop_schema`]) moves a database it cannot carry
+//! forward into a backup folder, and policy stored there would leave with it —
+//! resolving the profile unmanaged and orphaning the gateway session the
+//! policy had authorized. Sidecar files stay put, so the policy does too.
 //!
 //! Nothing here changes behavior yet. Lockdown of the BYOK and MCP write
 //! paths, the settings surfaces, and the sign-in gate all read this policy
@@ -33,8 +33,8 @@ use serde::{Deserialize, Serialize};
 use tidebreak_core::{sync_directory, AgentError, Config, PermissionMode, Result, Store};
 
 /// The filename the provisioned policy lives under, directly in the data
-/// directory. Deliberately outside the SQLite profile: a pre-v1 schema-epoch
-/// reset deletes the database files but leaves the rest of the data
+/// directory. Deliberately outside the SQLite profile: a schema reset moves
+/// the database files into a backup folder but leaves the rest of the data
 /// directory in place, and the policy must be in the surviving set or the
 /// reset would resolve the profile unmanaged and orphan its gateway session.
 const PROVISIONED_POLICY_FILE: &str = "gateway-policy.json";

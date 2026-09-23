@@ -103,40 +103,52 @@ The main local data is easy to recognize:
 | `tidebreak-schema.json` | which schema pin this profile holds |
 | `orphaned-code-worktrees.json` | code worktrees a reset left on disk |
 | `blobs/` | retained immutable document bytes |
+| `backups/` | copies taken before a migration, and profiles set aside |
 | `tidebreak.lock` | proof that one process owns this data directory |
 | OS keychain | desktop provider credentials, kept outside the database — one item per profile |
 
 A schema change is an appended migration, so local data survives it
-([decision 61](decisions/0061-schema-changes-are-migrations.md)). The marker
-records which pin the profile holds. A profile at the pin is kept and its
-marker re-stamped. A profile below the pin predates the migration chain and
-holds a schema nothing recorded, so opening it rebuilds `tidebreak.db` and its
-SQLite journals once, and never again. Startup also removes the retired
-`vectors/` directory when it is safe to open the current schema.
+([decision 61](decisions/0061-schema-changes-are-migrations.md)), and 1.x keeps
+that chain ([decision 100](decisions/0100-the-1-0-compatibility-surface.md)).
+Before the desktop app migrates an existing database, it copies the database
+with `VACUUM INTO` to `backups/pre-migration-<version>-<timestamp>.db` and
+keeps the two newest copies. If the copy fails, no migration runs. A database
+that records a migration this build does not have came from a newer build.
+Opening it fails with "This Tidebreak profile was written by a newer version",
+and nothing changes.
 
-Code worktrees are the exception to "rebuilt": they live outside the data
-directory because they hold uncommitted user work, so a reset records them in
+The marker records which pin the profile holds. A profile at the pin is kept
+and its marker re-stamped. A profile without a marker is judged by the
+migrations its database recorded: a prefix of this build's chain that goes past
+the baseline is kept and gets a fresh marker. A profile below the pin predates
+the migration chain and holds a schema nothing recorded, so it is set aside
+once, and so is a database this build cannot read. Setting a profile aside
+moves `tidebreak.db`, its SQLite journals, `blobs/`, and the host broker's
+durable files into `backups/unrecognized-<timestamp>/`, copies the schema
+marker there too, logs the path at warning level, and starts a fresh profile.
+Nothing on this path deletes data. Startup also removes the retired `vectors/`
+directory when it is safe to open the current schema.
+
+Code worktrees live outside the data directory because they hold uncommitted
+user work, so setting a profile aside records them in
 `orphaned-code-worktrees.json` and leaves the trees, their `.git/worktrees`
 entries, and their branches alone. Unknown or newer lifecycle markers fail
-closed so a prerelease binary cannot silently erase a future stable database,
-and the destructive path is disabled at runtime for package major version 1
-and later.
+closed so a prerelease binary cannot silently erase a future stable database.
+Builds with product major `0` or `1` share this lifecycle; a later major is
+refused until it defines its own.
 
-Source bytes under `blobs/` are physically retained during the reset, but their
-database records are gone. They are therefore unreachable through the product
-and become eligible for the normal orphan-retirement process after its 24-hour
-age grace. Private scratch is likewise retained but scoped under now-unreachable
-random conversation/run IDs. Native client-execution receipts, the stable
-executor identity, broker grants, and the broker audit log are preserved;
-native recovery still has to validate them against the new canonical database
-and fails closed when their old conversation no longer exists.
+The fresh profile keeps private scratch, native client-execution receipts, and
+the stable executor identity where they were. Scratch stays scoped under
+conversation and run IDs the fresh database does not know. Native recovery
+still validates receipts against the new canonical database and fails closed
+when their old conversation no longer exists.
 
 To change the schema, append a migration to `Migrator::migrations` in
 `crates/tidebreak-core/src/db/migration.rs`. Do not edit the baseline —
 `the_schema_baseline_is_pinned` fails on that, and says so, because an edit
 there reaches a fresh database and no existing one. `LAST_RESET_EPOCH` in
 `crates/tidebreak-server/src/desktop_schema.rs` names the baseline the chain
-starts from and does not move for a schema change.
+starts from and never moves again, not for a schema change and not for 1.0.
 
 Non-secret provider settings and the default model live in the operational
 store and can change while the process runs. Model routing observes those

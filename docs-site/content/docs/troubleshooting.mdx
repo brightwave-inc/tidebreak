@@ -62,9 +62,37 @@ pointed at the same directory.
 
 ## Chats disappeared after an update
 
-Desktop upgrades from v0.61.0 onward keep local data. Opening a database from
-v0.60.0 or earlier still rebuilds the SQLite profile once. Export anything you
-need to keep with **Save as…** on outputs before that one-time rebuild.
+Desktop upgrades from v0.61.0 onward keep your chats. Tidebreak upgrades the
+local database in place. Before an update changes the database, Tidebreak
+saves a copy in the `backups/` folder of the
+[application data directory](/installation#where-your-data-lives).
+
+If chats are missing after an update, look in `backups/`:
+
+- `pre-migration-<version>-<time>.db` is the database as it was before an
+  update changed it. Tidebreak keeps the two newest.
+- `unrecognized-<time>/` holds a profile that Tidebreak could not open, such as
+  one from v0.60.0 or earlier. Tidebreak moved it aside, started a fresh
+  profile, and wrote the folder's path to `logs/tidebreak.log`.
+
+To restore a backup:
+
+1. Quit Tidebreak.
+2. Move `tidebreak.db`, `tidebreak.db-wal`, and `tidebreak.db-shm` out of the
+   application data directory.
+3. Copy the backup into the application data directory. Rename a
+   `pre-migration-…` file to `tidebreak.db`. From an `unrecognized-…` folder,
+   copy every file and folder it holds.
+4. Open a Tidebreak version that can read the backup. For a
+   `pre-migration-…` copy, that is the version you used before the update, or
+   a later one. For an `unrecognized-…` folder, it is the version that wrote
+   the profile.
+
+## Tidebreak says the profile was written by a newer version
+
+You opened an older version of Tidebreak than the one that last used this
+profile. Tidebreak changes nothing and stops. Install the newer version again,
+or restore a backup from `backups/` with the steps above.
 
 ## Reporting a problem
 

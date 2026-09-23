@@ -183,3 +183,11 @@ these fixtures with its `UPDATE_*` variable is green. The fixtures make a change
 visible; they cannot decide whether it is compatible. A green suite is not
 evidence this record is being followed — the absence of a fixture diff in a
 schema-touching PR is.
+
+## Amended 2026-09-23
+
+[Decision 100](0100-the-1-0-compatibility-surface.md) keeps this chain through
+`1.0.0`. The 1.0 squash is cancelled, `LAST_RESET_EPOCH` stays at 41, and the
+product-major guard accepts major `1`. `reset_pre_v1_state` is gone: a profile
+below the pin, or one the build cannot read, moves into
+`backups/unrecognized-<timestamp>/` instead of being deleted.
