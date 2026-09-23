@@ -282,19 +282,7 @@ async fn post_apply(
 }
 
 async fn mcp_server_names(router: &Router, bearer: &str) -> Vec<String> {
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/mcp/servers")
-                .header(header::AUTHORIZATION, bearer)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let info: serde_json::Value = json_body(response).await;
+    let info = get_mcp_servers_json(router, bearer).await;
     info["servers"]
         .as_array()
         .unwrap()
@@ -375,6 +363,96 @@ async fn only_an_administrator_imports_mcp_servers() {
         mcp_server_names(&router, &admin).await,
         vec!["local_command".to_owned()]
     );
+}
+
+/// An imported remote server that sends a credential from this machine's
+/// environment arrives turned off, even when the file has it on: nothing
+/// connects, so the variable's value goes nowhere. Only a decision that turns
+/// it on starts it. Here that start fails, because the test leaves the
+/// variable unset, and the server stays off.
+#[tokio::test]
+async fn a_remote_server_that_sends_a_credential_imports_turned_off() {
+    const TOKEN: &str = "TIDEBREAK_TEST_IMPORT_BEARER_UNSET_3C9E";
+    assert!(std::env::var_os(TOKEN).is_none());
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let document = WorkspaceConfigDocument {
+        tidebreak_config: FORMAT_VERSION,
+        exported_at: chrono::Utc::now(),
+        sections: crate::workspace_config::WorkspaceConfigSections {
+            code_repositories: vec![],
+            mcp_servers: vec![crate::workspace_config::ExportedMcpServer {
+                name: "search".into(),
+                command: None,
+                args: vec![],
+                env: vec![],
+                env_from: vec![],
+                cwd: None,
+                url: Some("https://mcp.example.test/search".into()),
+                bearer_token_env: Some(TOKEN.into()),
+                oauth: false,
+                gateway_endpoint: None,
+                request_timeout_ms: 60_000,
+                enabled: true,
+            }],
+        },
+    };
+
+    let imported = post_apply(
+        &router,
+        &bearer,
+        false,
+        &WorkspaceConfigApplyRequest {
+            document: document.clone(),
+            decisions: vec![add_decision("search", None)],
+        },
+    )
+    .await;
+    assert_eq!(imported.status(), StatusCode::OK);
+    let info = get_mcp_servers_json(&router, &bearer).await;
+    assert_eq!(info["servers"][0]["name"], "search");
+    assert_eq!(info["servers"][0]["enabled"], false);
+    assert_eq!(info["servers"][0]["health"], "disabled");
+
+    let start = WorkspaceConfigDecision {
+        action: WorkspaceConfigAction::Replace,
+        ..add_decision("search", Some(true))
+    };
+    let started = post_apply(
+        &router,
+        &bearer,
+        false,
+        &WorkspaceConfigApplyRequest {
+            document,
+            decisions: vec![start],
+        },
+    )
+    .await;
+    assert_ne!(started.status(), StatusCode::OK);
+    let error: AgentErrorInfo = json_body(started).await;
+    assert!(
+        error.message.contains("search") && error.message.contains("failed to start"),
+        "the decision turned the server on, so apply tried to start it: {}",
+        error.message
+    );
+    let info = get_mcp_servers_json(&router, &bearer).await;
+    assert_eq!(info["servers"][0]["enabled"], false);
+}
+
+async fn get_mcp_servers_json(router: &Router, bearer: &str) -> serde_json::Value {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/mcp/servers")
+                .header(header::AUTHORIZATION, bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    json_body(response).await
 }
 
 /// A refused decision anywhere in the request leaves this machine as it was:

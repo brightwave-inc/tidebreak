@@ -52,6 +52,15 @@ const document: WorkspaceConfigDocument = {
         request_timeout_ms: 60_000,
         enabled: true,
       },
+      {
+        name: "status",
+        args: [],
+        env: [],
+        env_from: [],
+        url: "https://status.example.com/mcp",
+        request_timeout_ms: 60_000,
+        enabled: true,
+      },
     ],
   },
 };
@@ -165,7 +174,9 @@ describe("PortableConfigSection", () => {
 
     const search = within(row("search"));
     expect(search.getByText("https://mcp.example.com/search")).toBeVisible();
-    expect(search.getByText("SEARCH_TOKEN")).toBeVisible();
+    expect(row("search")).toHaveTextContent(
+      "Sends SEARCH_TOKEN to mcp.example.com.",
+    );
 
     const repo = within(row("tidebreak"));
     expect(repo.getByText("/Users/alex/src/tidebreak")).toBeVisible();
@@ -235,7 +246,7 @@ describe("PortableConfigSection", () => {
         },
         {
           section: "mcp_servers",
-          key: "search",
+          key: "status",
           status: "new",
           differing_fields: [],
           remap_fields: [],
@@ -249,14 +260,75 @@ describe("PortableConfigSection", () => {
       name: "Start docs after import",
     });
     expect(start).not.toBeChecked();
-    // A remote server runs nothing on this computer, so it has no switch.
-    expect(within(row("search")).queryByRole("switch")).not.toBeInTheDocument();
+    // A remote server that sends nothing from this computer imports as the
+    // file has it, so it has no switch.
+    expect(within(row("status")).queryByRole("switch")).not.toBeInTheDocument();
+    expect(row("status")).not.toHaveTextContent("Sends");
 
     await user.click(screen.getByRole("button", { name: "Apply" }));
     await waitFor(() => expect(applyWorkspaceConfig).toHaveBeenCalledTimes(1));
-    const [docs, search] = applyWorkspaceConfig.mock.calls[0][0].decisions;
+    const [docs, status] = applyWorkspaceConfig.mock.calls[0][0].decisions;
     expect(docs.enabled).toBe(false);
-    expect(search.enabled).toBeUndefined();
+    expect(status.enabled).toBeUndefined();
+  });
+
+  it("imports a remote server that sends a credential turned off by default", async () => {
+    const user = userEvent.setup();
+    const { applyWorkspaceConfig } = renderSection({
+      entries: [
+        {
+          section: "mcp_servers",
+          key: "search",
+          status: "new",
+          differing_fields: [],
+          remap_fields: [],
+        },
+      ],
+    });
+    await importDocument(user);
+    await screen.findByLabelText("Import preview");
+
+    // The row names the variable and the host its value would go to.
+    expect(row("search")).toHaveTextContent(
+      "Sends SEARCH_TOKEN to mcp.example.com.",
+    );
+    expect(
+      screen.getByRole("switch", { name: "Start search after import" }),
+    ).not.toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(applyWorkspaceConfig).toHaveBeenCalled());
+    expect(applyWorkspaceConfig.mock.calls[0][0].decisions[0].enabled).toBe(
+      false,
+    );
+  });
+
+  it("connects a remote server that sends a credential only when you turn it on", async () => {
+    const user = userEvent.setup();
+    const { applyWorkspaceConfig } = renderSection({
+      entries: [
+        {
+          section: "mcp_servers",
+          key: "search",
+          status: "new",
+          differing_fields: [],
+          remap_fields: [],
+        },
+      ],
+    });
+    await importDocument(user);
+
+    await user.click(
+      await screen.findByRole("switch", { name: "Start search after import" }),
+    );
+    expect(
+      screen.getByText("Connects when you apply the import."),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(applyWorkspaceConfig).toHaveBeenCalled());
+    expect(applyWorkspaceConfig.mock.calls[0][0].decisions[0].enabled).toBe(
+      true,
+    );
   });
 
   it("asks to start a local command server only when you turn it on", async () => {

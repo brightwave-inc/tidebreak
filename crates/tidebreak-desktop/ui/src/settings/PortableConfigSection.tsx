@@ -52,9 +52,10 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
   const [remaps, setRemaps] = useState<Record<string, Record<string, string>>>(
     {},
   );
-  // Local command servers the person chose to start after import. Every one
-  // starts turned off: starting one runs a program on this computer, and
-  // Tidebreak asks for that in a native dialog, never by default.
+  // Servers the person chose to start after import. Every one starts turned
+  // off: a local command runs a program on this computer, which Tidebreak
+  // also asks about in a native dialog, and a remote server that sends a
+  // credential hands a value from this computer to the file's URL.
   const [starts, setStarts] = useState<Record<string, boolean>>({});
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
@@ -163,8 +164,11 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
             action: actions[key] ?? "skip",
             remaps: filledRemaps(remaps[key]),
           };
+          // A server that runs a command or sends a credential starts only
+          // when the person switched it on for this row. Saying so every time
+          // keeps the file's own flag out of the decision.
           const server = findMcpServer(preview.document, entry);
-          if (server && startsLocalCommand(server)) {
+          if (server?.enabled && waitsForStart(server)) {
             decision.enabled = starts[key] === true;
           }
           return decision;
@@ -239,8 +243,9 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
             <DialogTitle>Import workspace configuration</DialogTitle>
             <DialogDescription>
               Review what each entry runs and connects to. Tidebreak overwrites
-              an existing record only when you choose Replace, and local MCP
-              servers import turned off unless you choose to start them.
+              an existing record only when you choose Replace. An MCP server
+              that runs a command or sends a credential from this computer
+              imports turned off unless you start it.
             </DialogDescription>
           </DialogHeader>
           {preview && (
@@ -343,9 +348,34 @@ function findRepository(
   );
 }
 
-/** An enabled server with a command starts a program on this computer. */
-function startsLocalCommand(server: ExportedMcpServer): boolean {
-  return server.enabled && server.command !== undefined;
+/**
+ * The environment variables whose values a remote server sends to its URL:
+ * its bearer token variable. The server applies the same rule, and covers
+ * process environment names too in case a remote server ever carries one.
+ */
+function sentVariables(server: ExportedMcpServer): string[] {
+  if (server.url === undefined) return [];
+  return [
+    ...(server.bearer_token_env ? [server.bearer_token_env] : []),
+    ...server.env_from,
+    ...server.env,
+  ];
+}
+
+/** A server whose start needs the person's switch for this row: it runs a
+ * command on this computer, or sends a value from this computer's
+ * environment to a URL the file chose. */
+function waitsForStart(server: ExportedMcpServer): boolean {
+  return server.command !== undefined || sentVariables(server).length > 0;
+}
+
+/** The host a URL names, for a sentence. */
+function urlHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 type Detail = { label: string; value: string };
@@ -370,14 +400,10 @@ function mcpDetails(server: ExportedMcpServer): Detail[] {
   if (server.gateway_endpoint) {
     details.push({ label: "Gateway endpoint", value: server.gateway_endpoint });
   }
-  if (server.env_from.length > 0) {
+  // A remote server's variables show as what they are: values sent to its
+  // host, in the sentence under these details.
+  if (server.command !== undefined && server.env_from.length > 0) {
     details.push({ label: "Environment", value: server.env_from.join(", ") });
-  }
-  if (server.bearer_token_env) {
-    details.push({
-      label: "Bearer token variable",
-      value: server.bearer_token_env,
-    });
   }
   return details;
 }
@@ -461,9 +487,10 @@ function PreviewRow({
     : repo
       ? repositoryDetails(repo)
       : [];
-  const local = server !== undefined && server.command !== undefined;
-  const offersStart =
-    server !== undefined && startsLocalCommand(server) && action !== "skip";
+  const local = server?.command !== undefined;
+  const sent = server ? sentVariables(server) : [];
+  const waits = server !== undefined && waitsForStart(server);
+  const offersStart = waits && server?.enabled === true && action !== "skip";
   return (
     <li className="rounded-lg border p-3">
       <p className="text-sm font-medium break-all">{title}</p>
@@ -484,6 +511,12 @@ function PreviewRow({
             </Fragment>
           ))}
         </dl>
+      )}
+      {server?.url && sent.length > 0 && (
+        <p className="mt-2 text-xs break-words">
+          Sends <code className="font-mono">{sent.join(", ")}</code> to{" "}
+          <code className="font-mono">{urlHost(server.url)}</code>.
+        </p>
       )}
       <div
         className="mt-3 flex flex-wrap gap-2"
@@ -517,14 +550,16 @@ function PreviewRow({
               Start after import
             </label>
             <p id={`${startId}-hint`} className="text-xs text-muted-foreground">
-              {start
-                ? "Tidebreak shows you the command and asks before it runs."
-                : "Imports turned off. You can turn it on later in Connected apps."}
+              {!start
+                ? "Imports turned off. You can turn it on later in Connected apps."
+                : local
+                  ? "Tidebreak shows you the command and asks before it runs."
+                  : "Connects when you apply the import."}
             </p>
           </div>
         </div>
       )}
-      {local && server?.enabled === false && action !== "skip" && (
+      {waits && server?.enabled === false && action !== "skip" && (
         <p className="mt-2 text-xs text-muted-foreground">
           Imports turned off, as in the file.
         </p>

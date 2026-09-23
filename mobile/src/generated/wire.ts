@@ -6153,9 +6153,11 @@ export type WorkspaceConfigApplyResult = { applied: number, skipped: number, };
 export type WorkspaceConfigDecision = { section: WorkspaceConfigSectionId, key: string, action: WorkspaceConfigAction, remaps: { [key in string]: string },
 /**
  * For an MCP server: whether it runs on this machine. Absent keeps the
- * file's own flag. The desktop sends `false` for a local command server
- * the person has not chosen to start, so the import writes it turned off
- * and asks for no confirmation. Refused on a code repository entry.
+ * file's own flag, except that a remote server that sends a credential
+ * from this machine's environment imports turned off. The desktop sends
+ * `false` for a local command server or a credential-sending remote
+ * server the person has not chosen to start. Refused on a code
+ * repository entry.
  */
 enabled?: boolean, };
 

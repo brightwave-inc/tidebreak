@@ -139,9 +139,11 @@ pub struct WorkspaceConfigDecision {
     #[serde(default)]
     pub remaps: BTreeMap<String, String>,
     /// For an MCP server: whether it runs on this machine. Absent keeps the
-    /// file's own flag. The desktop sends `false` for a local command server
-    /// the person has not chosen to start, so the import writes it turned off
-    /// and asks for no confirmation. Refused on a code repository entry.
+    /// file's own flag, except that a remote server that sends a credential
+    /// from this machine's environment imports turned off. The desktop sends
+    /// `false` for a local command server or a credential-sending remote
+    /// server the person has not chosen to start. Refused on a code
+    /// repository entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub enabled: Option<bool>,
@@ -556,9 +558,14 @@ pub fn imported_mcp_definition(
         .iter()
         .find(|item| item.name == decision.key)?;
     let mut definition = apply_mcp_remap(exported_mcp_to_definition(exported), &decision.remaps);
-    if let Some(enabled) = decision.enabled {
-        definition.enabled = enabled;
-    }
+    // An explicit choice wins. Without one, a remote server that sends a
+    // credential from this machine's environment imports turned off: the
+    // file names the URL the value would go to, so only the person's switch
+    // for this row turns it on. Everything else keeps the file's flag.
+    definition.enabled = match decision.enabled {
+        Some(enabled) => enabled,
+        None => definition.enabled && !sends_environment_credential(&definition),
+    };
     Some(definition)
 }
 
@@ -566,6 +573,18 @@ pub fn imported_mcp_definition(
 /// saved: an enabled `command` server.
 pub fn starts_local_command(definition: &McpServerDefinition) -> bool {
     definition.enabled && definition.command.is_some()
+}
+
+/// Whether a remote server sends a value from this machine's environment to
+/// the URL it names. Today that is its bearer token variable: validation
+/// keeps process environment names off remote servers, and the check covers
+/// them anyway so a later schema cannot slip one past it. An imported server
+/// like this starts turned off unless the person turns it on.
+pub fn sends_environment_credential(definition: &McpServerDefinition) -> bool {
+    definition.url.is_some()
+        && (definition.bearer_token_env.is_some()
+            || !definition.env_from.is_empty()
+            || !definition.env.is_empty())
 }
 
 /// Every local command an apply would start: the imported MCP servers that
@@ -885,5 +904,40 @@ mod tests {
         let off = imported_mcp_definition(&request.document, &request.decisions[3])
             .expect("the file names the server");
         assert!(!off.enabled, "the decision turns the server off");
+    }
+
+    /// A remote server that sends a credential from this machine's
+    /// environment imports turned off unless the decision turns it on. A
+    /// remote server that sends nothing keeps the file's flag.
+    #[test]
+    fn a_remote_server_that_sends_a_credential_imports_turned_off_by_default() {
+        let mut sends = sample_mcp();
+        sends.name = "search".into();
+        sends.command = None;
+        sends.args = vec![];
+        sends.env = vec![];
+        sends.env_from = vec![];
+        sends.url = Some("https://mcp.example.com/search".into());
+        sends.bearer_token_env = Some("SEARCH_TOKEN".into());
+        let mut quiet = sends.clone();
+        quiet.name = "status".into();
+        quiet.bearer_token_env = None;
+        let document = envelope(vec![], vec![sends, quiet]);
+        let resolve = |key: &str, enabled: Option<bool>| {
+            imported_mcp_definition(
+                &document,
+                &mcp_decision(key, WorkspaceConfigAction::Add, enabled),
+            )
+            .expect("the file names the server")
+        };
+
+        let default = resolve("search", None);
+        assert!(sends_environment_credential(&default));
+        assert!(!default.enabled, "the file's flag is not consent");
+        assert!(resolve("search", Some(true)).enabled);
+        assert!(
+            resolve("status", None).enabled,
+            "a remote server that sends no credential keeps the file's flag"
+        );
     }
 }

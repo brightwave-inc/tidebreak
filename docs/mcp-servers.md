@@ -65,15 +65,25 @@ never overwrites a record unless you choose Replace. A newer
 `tidebreak_config` version is refused with a message to upgrade or re-export.
 
 Apply checks every entry before it writes anything, so a refused entry
-leaves this machine unchanged. A local command server imports turned off
-unless you turn on **Start after import** for it. On the desktop, starting
-one needs the same native confirmation as saving an enabled command server
-(decision 27): the app lists the commands in an OS dialog, and nothing is
-imported if you decline. `POST /workspace-config/apply` refuses an import
-that would start a local command on the desktop with
-`native_confirmation_required`. On a multi-user deployment, only an
-administrator can import MCP servers, the same rule `PUT /mcp/servers`
-follows; a member can still import repository entries.
+leaves this machine unchanged. Two kinds of MCP server import turned off
+unless you turn on **Start after import** for them:
+
+- A local command server. On the desktop, starting one also needs the same
+  native confirmation as saving an enabled command server (decision 27): the
+  app lists the commands in an OS dialog, and nothing is imported if you
+  decline. `POST /workspace-config/apply` refuses an import that would start
+  a local command on the desktop with `native_confirmation_required`.
+- A remote server that sends a credential from this computer's environment,
+  which today means one with a bearer token variable. Its row says which
+  variable it sends to which host, for example "Sends GITHUB_TOKEN to
+  mcp.example.com." The switch is the consent; no OS dialog follows. Without
+  an explicit choice, apply writes such a server turned off even when the
+  file has it on.
+
+A remote server that sends nothing from this computer imports as the file has
+it. On a multi-user deployment, only an administrator can import MCP servers,
+the same rule `PUT /mcp/servers` follows; a member can still import
+repository entries.
 
 The child environment starts empty, and **no environment value of any kind
 lives in a definition**. Executables, arguments, working directories, and URLs

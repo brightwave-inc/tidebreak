@@ -49,6 +49,15 @@ const document: WorkspaceConfigDocument = {
         request_timeout_ms: 60_000,
         enabled: true,
       },
+      {
+        name: "status",
+        args: [],
+        env: [],
+        env_from: [],
+        url: "https://status.example.com/mcp",
+        request_timeout_ms: 60_000,
+        enabled: true,
+      },
     ],
   },
 };
@@ -94,8 +103,9 @@ async function openPreview(canvasElement: HTMLElement) {
 
 /**
  * The import preview. Every row shows what the entry runs and connects to,
- * only new entries start on Add, and a local MCP server imports turned off
- * unless the reader starts it, which the desktop then confirms natively.
+ * and only new entries start on Add. An MCP server that runs a local command
+ * or sends a credential from this computer imports turned off unless the
+ * reader starts it; the desktop also confirms a local command natively.
  */
 const meta = {
   title: "Settings/Portable configuration preview",
@@ -109,13 +119,16 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** A new local command server, a new remote server, and a repository that
- * already matches. The local server waits turned off. */
+/** A new local command server, a new remote server that sends a credential,
+ * a new remote server that sends nothing, and a repository that already
+ * matches. The first two wait turned off; the third imports as the file has
+ * it. */
 export const Clean: Story = {
   args: {
     client: previewClient([
       entry("mcp_servers", "docs", "new"),
       entry("mcp_servers", "search", "new"),
+      entry("mcp_servers", "status", "new"),
       entry("code_repositories", repoKey, "identical"),
     ]),
   },
@@ -131,6 +144,20 @@ export const StartLocalServer: Story = {
     const dialog = within(await openPreview(canvasElement));
     await userEvent.click(
       dialog.getByRole("switch", { name: "Start docs after import" }),
+    );
+  },
+};
+
+/** The reader chose to start the remote server that sends SEARCH_TOKEN. It
+ * connects when the import is applied; the switch is the consent. */
+export const StartCredentialServer: Story = {
+  args: {
+    client: previewClient([entry("mcp_servers", "search", "new")]),
+  },
+  play: async ({ canvasElement }) => {
+    const dialog = within(await openPreview(canvasElement));
+    await userEvent.click(
+      dialog.getByRole("switch", { name: "Start search after import" }),
     );
   },
 };
