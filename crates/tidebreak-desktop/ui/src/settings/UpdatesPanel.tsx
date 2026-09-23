@@ -1,12 +1,18 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { RefreshCw, RotateCw } from "lucide-react";
+import { CircleCheck, Download, RefreshCw, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import { ClipboardCopyButton } from "../ClipboardCopyButton";
 import { hasNativeHost } from "../host";
-import type { DesktopUpdateState } from "../updates";
-import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
+import type { DesktopUpdatePreferences, DesktopUpdateState } from "../updates";
+import {
+  SettingsError,
+  SettingsField,
+  SettingsPanel,
+  SettingsSection,
+} from "./primitives";
 
 export function updateStateSummary(state: DesktopUpdateState): string {
   if (!state.enabled) {
@@ -15,6 +21,10 @@ export function updateStateSummary(state: DesktopUpdateState): string {
   switch (state.status) {
     case "checking":
       return "Checking for updates…";
+    case "available":
+      return state.version
+        ? `Version ${state.version} is available.`
+        : "An update is available.";
     case "downloading":
       return state.version
         ? `Downloading and verifying version ${state.version}…`
@@ -28,40 +38,66 @@ export function updateStateSummary(state: DesktopUpdateState): string {
   }
 }
 
+/** The result a check that found nothing newer leaves on screen. */
+export function upToDateMessage(version: string | null): string {
+  return version
+    ? `You're up to date · Tidebreak ${version}`
+    : "You're up to date.";
+}
+
+const AUTOMATIC_DOWNLOADS_HINT =
+  "Tidebreak downloads new versions in the background. When this is off, Tidebreak tells you when an update is available and downloads it only when you ask.";
+
 export function UpdatesPanel({
   state,
   upToDate = false,
+  appVersion,
+  preferences,
+  preferencesSaving = false,
+  preferencesError = null,
   onCheck,
+  onDownload,
   onRestart,
+  onAutomaticDownloadsChange,
 }: {
   state: DesktopUpdateState;
   /** The most recent explicit check confirmed the app is current. */
   upToDate?: boolean;
+  /** The running version. When omitted, the panel asks the desktop app. */
+  appVersion?: string | null;
+  /** The automatic-download setting, or `null` until the desktop reports it. */
+  preferences: DesktopUpdatePreferences | null;
+  preferencesSaving?: boolean;
+  preferencesError?: string | null;
   onCheck: () => Promise<DesktopUpdateState>;
+  onDownload: () => Promise<unknown>;
   onRestart: () => Promise<void>;
+  onAutomaticDownloadsChange: (enabled: boolean) => void;
 }) {
-  const [version, setVersion] = useState<string | null>(null);
+  const [reportedVersion, setReportedVersion] = useState<string | null>(null);
+  const version = appVersion ?? reportedVersion;
   const busy = state.status === "checking" || state.status === "downloading";
+  const managed = preferences?.managed ?? false;
 
   // Only the packaged desktop host can report its version; a browser dev build
   // has none, so the line falls back to a plain note there.
   useEffect(() => {
-    if (!hasNativeHost()) return;
+    if (appVersion !== undefined || !hasNativeHost()) return;
     let cancelled = false;
     void getVersion()
       .then((value) => {
-        if (!cancelled) setVersion(value);
+        if (!cancelled) setReportedVersion(value);
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [appVersion]);
 
   return (
     <SettingsPanel
       title="Updates"
-      description="Tidebreak checks shortly after launch and every five minutes, and downloads updates in the background. A downloaded update installs only after you choose Restart to update."
+      description="Tidebreak checks for updates shortly after launch and every five minutes. An update installs only after you choose Restart to update."
       busy={busy}
     >
       <SettingsSection title="Automatic updates">
@@ -69,8 +105,15 @@ export function UpdatesPanel({
           {updateStateSummary(state)}
         </p>
         {upToDate && (
-          <p className="text-sm text-muted-foreground" role="status">
-            Tidebreak is up to date.
+          <p
+            className="flex items-start gap-2 text-sm text-foreground"
+            role="status"
+          >
+            <CircleCheck
+              className="mt-0.5 size-3.5 shrink-0 text-success"
+              aria-hidden="true"
+            />
+            {upToDateMessage(version)}
           </p>
         )}
         {state.error && <SettingsError>{state.error}</SettingsError>}
@@ -79,6 +122,11 @@ export function UpdatesPanel({
             <Button type="button" onClick={() => void onRestart()}>
               <RotateCw />
               Restart to update
+            </Button>
+          ) : state.status === "available" ? (
+            <Button type="button" onClick={() => void onDownload()}>
+              <Download />
+              Download update
             </Button>
           ) : (
             <Button
@@ -96,6 +144,25 @@ export function UpdatesPanel({
             </Button>
           )}
         </div>
+        <SettingsField
+          label="Download updates automatically"
+          hint={
+            managed ? "Managed by your organization." : AUTOMATIC_DOWNLOADS_HINT
+          }
+        >
+          <Switch
+            checked={preferences?.automaticDownloads ?? true}
+            disabled={
+              !state.enabled ||
+              preferences === null ||
+              managed ||
+              preferencesSaving
+            }
+            onCheckedChange={onAutomaticDownloadsChange}
+            aria-label="Download updates automatically"
+          />
+        </SettingsField>
+        {preferencesError && <SettingsError>{preferencesError}</SettingsError>}
       </SettingsSection>
 
       <SettingsSection title="About">

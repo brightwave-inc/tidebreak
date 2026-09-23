@@ -4,14 +4,24 @@ import { fn } from "storybook/test";
 
 import { UpdateReadyCard } from "@/UpdateReadyCard";
 
+const CHECK_FAILED =
+  "Could not check for updates. Tidebreak could not reach the update server. Check your internet connection and try again.";
+
 function UpdateReadyCardStory({
   status,
   version,
 }: {
-  status: "checking" | "downloading" | "ready";
+  status:
+    | "checking"
+    | "downloading"
+    | "available"
+    | "up-to-date"
+    | "failed"
+    | "ready";
   version: string | null;
 }) {
   const [visible, setVisible] = useState(true);
+  const dismiss = () => setVisible(false);
   return (
     <div className="h-screen bg-page-background p-8">
       <div className="mx-auto max-w-2xl rounded-xl border border-border-subtle bg-background p-8">
@@ -29,14 +39,36 @@ function UpdateReadyCardStory({
         <UpdateReadyCard
           version={version}
           onRestart={fn()}
-          onDismiss={() => setVisible(false)}
+          onDismiss={dismiss}
         />
       )}
-      {visible && status !== "ready" && (
+      {visible && status === "available" && (
+        <UpdateReadyCard
+          status="available"
+          version={version}
+          onDownload={fn()}
+          onDismiss={dismiss}
+        />
+      )}
+      {visible && status === "up-to-date" && (
+        <UpdateReadyCard
+          status="up-to-date"
+          version={version}
+          onDismiss={dismiss}
+        />
+      )}
+      {visible && status === "failed" && (
+        <UpdateReadyCard
+          status="failed"
+          message={CHECK_FAILED}
+          onDismiss={dismiss}
+        />
+      )}
+      {visible && (status === "checking" || status === "downloading") && (
         <UpdateReadyCard
           status={status}
           version={version}
-          onDismiss={() => setVisible(false)}
+          onDismiss={dismiss}
         />
       )}
     </div>
@@ -65,4 +97,19 @@ export const Downloading: Story = {
 
 export const VersionUnavailable: Story = {
   args: { version: null },
+};
+
+/** Automatic downloads are off, so the release waits for you to download it. */
+export const Available: Story = {
+  args: { status: "available", version: "0.115.0" },
+};
+
+/** The check you asked for found nothing newer than the version you run. */
+export const UpToDate: Story = {
+  args: { status: "up-to-date", version: "0.114.0" },
+};
+
+/** The check you asked for failed, and the card says why. */
+export const CheckFailed: Story = {
+  args: { status: "failed", version: null },
 };

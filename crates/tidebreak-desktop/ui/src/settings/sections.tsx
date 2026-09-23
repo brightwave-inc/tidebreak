@@ -26,6 +26,7 @@ import { useApp } from "@/AppContext";
 import { useChatListStore } from "@/ChatListStore";
 import { useManagedPolicy } from "@/managedPolicy";
 import { useTheme } from "@/theme";
+import { downloadDesktopUpdate, useDesktopUpdatePreferences } from "@/updates";
 import { AppearancePanel } from "./AppearancePanel";
 import { AgentsPanel } from "./AgentsPanel";
 import { ExecPanel } from "./ExecPanel";
@@ -185,12 +186,20 @@ function AppearanceSection() {
 function UpdatesSection() {
   const { updateState, updateUpToDate, checkForUpdate, restartForUpdate } =
     useApp();
+  const updatePreferences = useDesktopUpdatePreferences();
   return (
     <UpdatesPanel
       state={updateState}
       upToDate={updateUpToDate}
+      preferences={updatePreferences.preferences}
+      preferencesSaving={updatePreferences.saving}
+      preferencesError={updatePreferences.error}
       onCheck={checkForUpdate}
+      onDownload={downloadDesktopUpdate}
       onRestart={restartForUpdate}
+      onAutomaticDownloadsChange={(enabled) =>
+        void updatePreferences.setAutomaticDownloads(enabled)
+      }
     />
   );
 }
@@ -465,7 +474,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "updates",
     label: "Updates",
-    keywords: "update version release restart",
+    keywords:
+      "update version release restart download automatically background up to date",
     group: "application",
     icon: RefreshCw,
     iconClass: "text-icon-green",

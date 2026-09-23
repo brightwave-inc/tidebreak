@@ -397,9 +397,18 @@ updater archive.
 
 Packaged macOS apps check `latest.json` 15 seconds after launch and every five
 minutes. When a newer signed version is available, the Tauri updater downloads
-and installs it in place, then emits a ready state to the UI. The user must
-choose **Restart to update** before Tidebreak relaunches; the app never
-interrupts active work automatically. Development builds do not contact an update feed. Packaged staging builds
+it in the background, verifies its signature, and stages the archive in an
+`updates` folder under the app's cache directory. The app then emits a ready
+state to the UI. The user must choose **Restart to update** before Tidebreak
+reads the staged archive back, checks that it still matches what was
+verified, installs it, and relaunches; the app never interrupts active work
+automatically. A staged archive that a newer release supersedes, that the
+feed withdraws, or that fails to install is deleted, and each launch deletes
+archives that earlier runs left behind. With **Download updates
+automatically** turned off in **Settings → Updates**, or by the
+`DownloadUpdatesAutomatically` [managed policy](managed-policy.md), the app
+still checks and reports the update as available, and downloads it only when
+the user chooses **Download update**. Development builds do not contact an update feed. Packaged staging builds
 check the staging feed under `/tidebreak/staging/latest.json` instead.
 
 The first release containing this client integration is a bootstrap release:

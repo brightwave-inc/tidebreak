@@ -18,8 +18,10 @@ Local-first does not mean the app never talks to the network. Packaged
 release builds check `https://downloads.brightwave.io/tidebreak/` for a
 signed update 15 seconds after launch and every five minutes
 (`crates/tidebreak-desktop/src/updater.rs`). There is no setting that turns
-those checks off; development builds do not contact the feed. The first time
-you use each feature, the app also downloads:
+those checks off; development builds do not contact the feed. When a check
+finds a new version, the app downloads it in the background. To download only
+when you ask, turn off **Download updates automatically** in **Settings →
+Updates**. The first time you use each feature, the app also downloads:
 
 - the voice helper from `downloads.brightwave.io` (local transcription)
 - Node from `nodejs.org` (skills and coding engines)

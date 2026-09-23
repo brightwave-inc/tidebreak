@@ -47,7 +47,12 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const updateReady = updateState.status === "ready";
+  const updateNotice =
+    updateState.status === "ready"
+      ? "update ready"
+      : updateState.status === "available"
+        ? "update available"
+        : null;
 
   return (
     <SidebarRail>
@@ -88,10 +93,10 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
       <SidebarFooter className="border-t border-border-subtle px-2 py-1.5">
         <div className="flex items-center gap-1" aria-label="App controls">
           <SidebarUtilityButton
-            label={updateReady ? "Settings, update ready" : "Settings"}
+            label={updateNotice ? `Settings, ${updateNotice}` : "Settings"}
             icon={Settings}
             onClick={() => void navigate({ to: "/settings" })}
-            indicator={updateReady}
+            indicator={updateNotice !== null}
           />
           <SidebarUtilityButton
             label={`Theme: ${themeMode}. Click to change.`}

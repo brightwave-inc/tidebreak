@@ -128,7 +128,12 @@ import { RepositoryTrustSheetHost } from "./code/RepositoryTrustStore";
 import { EngineSignInHost } from "./code/EngineSignIn";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { useUiStore } from "./UiStore";
-import { UPDATE_CHECK_REQUESTED_EVENT, useDesktopUpdates } from "./updates";
+import {
+  downloadDesktopUpdate,
+  UPDATE_CHECK_REQUESTED_EVENT,
+  useDesktopUpdates,
+  type DesktopUpdateState,
+} from "./updates";
 import { UpdateReadyCard } from "./UpdateReadyCard";
 
 /**
@@ -141,6 +146,16 @@ import { UpdateReadyCard } from "./UpdateReadyCard";
 const CLOSE_TAB_REQUESTED_EVENT = "desktop-close-tab-requested";
 const DISMISSED_UPDATE_VERSION_KEY = "tidebreak.dismissed-update-version";
 const UNKNOWN_UPDATE_VERSION = "unknown";
+
+/**
+ * What dismissing the update card remembers. A ready update keeps the bare
+ * version, as it always has; an offered one is its own notice, so dismissing
+ * "available" never hides the "ready" card for the same version later.
+ */
+function updateNoticeKey(state: DesktopUpdateState): string {
+  const version = state.version ?? UNKNOWN_UPDATE_VERSION;
+  return state.status === "available" ? `available:${version}` : version;
+}
 
 /** Move focus to whichever composer the current route has on screen. */
 function focusComposer(): void {
@@ -267,7 +282,12 @@ export function AppShell() {
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState(() =>
     window.localStorage.getItem(DISMISSED_UPDATE_VERSION_KEY),
   );
-  const [explicitUpdateCheckOpen, setExplicitUpdateCheckOpen] = useState(false);
+  // The check the native "Check for Updates…" item started: `running` while
+  // it runs, then `settled` when it found nothing new or failed, so its
+  // result stays on screen until you dismiss it or another check starts.
+  const [explicitUpdateCheck, setExplicitUpdateCheck] = useState<
+    "running" | "settled" | null
+  >(null);
   // The first-run macOS setup ask. The hook answers false for every install
   // past the ask, and the dialog reads permissions and watches window focus
   // for as long as it is mounted, so it is mounted only when it is asking.
@@ -298,14 +318,37 @@ export function AppShell() {
     shellShortcutMode(router.state.location.pathname);
 
   // The native "Check for Updates…" menu item keeps the reader in place and
-  // raises the update card while the explicit check runs. Automatic checks
-  // stay quiet unless they stage an update.
+  // raises the update card while the explicit check runs. A check that finds
+  // nothing new, or fails, leaves its result in the card; one that finds an
+  // update hands over to the update card, even one you dismissed before,
+  // because you asked. Automatic checks stay quiet unless they find an update.
   useNativeHostEvent(UPDATE_CHECK_REQUESTED_EVENT, () => {
-    setExplicitUpdateCheckOpen(true);
-    void desktopUpdates
-      .check()
-      .finally(() => setExplicitUpdateCheckOpen(false));
+    setExplicitUpdateCheck("running");
+    void desktopUpdates.check().then((next) => {
+      if (!next.enabled) {
+        setExplicitUpdateCheck(null);
+        return;
+      }
+      if (next.status === "idle") {
+        setExplicitUpdateCheck("settled");
+        return;
+      }
+      setExplicitUpdateCheck(null);
+      setDismissedUpdateVersion(null);
+      window.localStorage.removeItem(DISMISSED_UPDATE_VERSION_KEY);
+    });
   });
+
+  // A settled result describes the last explicit check. Once the state moves
+  // on, because another check started or an update turned up, it goes.
+  const updateStatus = desktopUpdates.state.status;
+  useEffect(() => {
+    if (updateStatus !== "idle") {
+      setExplicitUpdateCheck((current) =>
+        current === "settled" ? null : current,
+      );
+    }
+  }, [updateStatus]);
 
   // Help > Documentation. Listened for here rather than beside the shortcuts
   // the other menu items run: those wait behind the sign-in gate, and the
@@ -1053,10 +1096,10 @@ export function AppShell() {
   }
 
   function dismissUpdateNotice() {
-    const version = desktopUpdates.state.version;
-    setDismissedUpdateVersion(version ?? UNKNOWN_UPDATE_VERSION);
-    if (version) {
-      window.localStorage.setItem(DISMISSED_UPDATE_VERSION_KEY, version);
+    const key = updateNoticeKey(desktopUpdates.state);
+    setDismissedUpdateVersion(key);
+    if (desktopUpdates.state.version) {
+      window.localStorage.setItem(DISMISSED_UPDATE_VERSION_KEY, key);
     }
   }
 
@@ -1279,21 +1322,42 @@ export function AppShell() {
           )}
           <SidebarExpandStrip macOverlay={macOverlayTitlebar} />
           <ComputerUseIndicator />
-          {explicitUpdateCheckOpen &&
-            desktopUpdates.state.status !== "ready" && (
+          {explicitUpdateCheck === "running" &&
+            (updateStatus === "checking" || updateStatus === "downloading") && (
               <UpdateReadyCard
-                status={
-                  desktopUpdates.state.status === "downloading"
-                    ? "downloading"
-                    : "checking"
-                }
+                status={updateStatus}
                 version={desktopUpdates.state.version}
-                onDismiss={() => setExplicitUpdateCheckOpen(false)}
+                onDismiss={() => setExplicitUpdateCheck(null)}
               />
             )}
-          {desktopUpdates.state.status === "ready" &&
+          {explicitUpdateCheck === "settled" &&
+            updateStatus === "idle" &&
+            (desktopUpdates.state.error ? (
+              <UpdateReadyCard
+                status="failed"
+                message={desktopUpdates.state.error}
+                onDismiss={() => setExplicitUpdateCheck(null)}
+              />
+            ) : (
+              <UpdateReadyCard
+                status="up-to-date"
+                version={appVersion}
+                onDismiss={() => setExplicitUpdateCheck(null)}
+              />
+            ))}
+          {updateStatus === "available" &&
             dismissedUpdateVersion !==
-              (desktopUpdates.state.version ?? UNKNOWN_UPDATE_VERSION) && (
+              updateNoticeKey(desktopUpdates.state) && (
+              <UpdateReadyCard
+                status="available"
+                version={desktopUpdates.state.version}
+                onDownload={() => void downloadDesktopUpdate()}
+                onDismiss={dismissUpdateNotice}
+              />
+            )}
+          {updateStatus === "ready" &&
+            dismissedUpdateVersion !==
+              updateNoticeKey(desktopUpdates.state) && (
               <UpdateReadyCard
                 version={desktopUpdates.state.version}
                 onRestart={() => void onRestartForUpdate()}

@@ -13,7 +13,11 @@ import {
 } from "@/NotificationPreferences";
 import type { PromptCacheRetention } from "@/api";
 import type { ThemeMode } from "@/theme";
-import type { DesktopUpdateState } from "@/updates";
+import {
+  DEFAULT_UPDATE_PREFERENCES,
+  type DesktopUpdatePreferences,
+  type DesktopUpdateState,
+} from "@/updates";
 import {
   SettingsStoryHarness,
   storyModels,
@@ -45,6 +49,7 @@ type SettingsShowcaseProps = {
   needsYou?: boolean;
   /** Notifications: tell you when an agent finishes or fails. */
   finished?: boolean;
+  updatePreferences?: DesktopUpdatePreferences | null;
 };
 
 /**
@@ -76,6 +81,7 @@ function SettingsShowcase({
   upToDate = false,
   needsYou = true,
   finished = true,
+  updatePreferences = DEFAULT_UPDATE_PREFERENCES,
 }: SettingsShowcaseProps) {
   if (panel === "appearance") {
     return <AppearancePanel mode={theme} onChange={fn()} />;
@@ -129,8 +135,12 @@ function SettingsShowcase({
     <UpdatesPanel
       state={updateState}
       upToDate={upToDate}
+      appVersion="0.114.0"
+      preferences={updatePreferences}
       onCheck={fn(async () => updateState)}
+      onDownload={fn(async () => updateState)}
       onRestart={fn(async () => {})}
+      onAutomaticDownloadsChange={fn()}
     />
   );
 }
@@ -258,4 +268,35 @@ export const UpdatesDisabled: Story = {
 
 export const UpToDate: Story = {
   args: { panel: "updates", upToDate: true },
+};
+
+export const UpdateCheckFailed: Story = {
+  args: {
+    panel: "updates",
+    updateState: {
+      ...idleUpdate,
+      error:
+        "Could not check for updates. Tidebreak could not reach the update server. Check your internet connection and try again.",
+    },
+  },
+};
+
+export const UpdateAvailable: Story = {
+  args: {
+    panel: "updates",
+    updateState: {
+      status: "available",
+      version: "0.115.0",
+      error: null,
+      enabled: true,
+    },
+    updatePreferences: { automaticDownloads: false, managed: false },
+  },
+};
+
+export const UpdatesManagedByOrganization: Story = {
+  args: {
+    panel: "updates",
+    updatePreferences: { automaticDownloads: false, managed: true },
+  },
 };

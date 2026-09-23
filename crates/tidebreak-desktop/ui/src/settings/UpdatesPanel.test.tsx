@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { DesktopUpdateState } from "../updates";
+import type { DesktopUpdatePreferences, DesktopUpdateState } from "../updates";
 import { UpdatesPanel, updateStateSummary } from "./UpdatesPanel";
 
 const idle: DesktopUpdateState = {
@@ -10,25 +10,37 @@ const idle: DesktopUpdateState = {
   enabled: true,
 };
 
+const automatic: DesktopUpdatePreferences = {
+  automaticDownloads: true,
+  managed: false,
+};
+
+function panel(
+  state: DesktopUpdateState,
+  preferences: DesktopUpdatePreferences | null = automatic,
+) {
+  return renderToStaticMarkup(
+    <UpdatesPanel
+      state={state}
+      appVersion="0.114.0"
+      preferences={preferences}
+      onCheck={vi.fn()}
+      onDownload={vi.fn()}
+      onRestart={vi.fn()}
+      onAutomaticDownloadsChange={vi.fn()}
+    />,
+  );
+}
+
 describe("UpdatesPanel", () => {
   it("does not warn that an update may wipe local data", () => {
     // Updates keep local data: the database upgrades in place, and a copy
     // is saved first.
-    const markup = renderToStaticMarkup(
-      <UpdatesPanel state={idle} onCheck={vi.fn()} onRestart={vi.fn()} />,
-    );
-
-    expect(markup).not.toContain("wipe");
+    expect(panel(idle)).not.toContain("wipe");
   });
 
   it("keeps update checks disabled outside supported packaged builds", () => {
-    const markup = renderToStaticMarkup(
-      <UpdatesPanel
-        state={{ ...idle, enabled: false }}
-        onCheck={vi.fn()}
-        onRestart={vi.fn()}
-      />,
-    );
+    const markup = panel({ ...idle, enabled: false });
 
     expect(markup).toContain("available in packaged release builds");
     expect(markup).toContain("disabled");
@@ -40,9 +52,7 @@ describe("UpdatesPanel", () => {
       status: "ready",
       version: "1.2.3",
     };
-    const markup = renderToStaticMarkup(
-      <UpdatesPanel state={state} onCheck={vi.fn()} onRestart={vi.fn()} />,
-    );
+    const markup = panel(state);
 
     expect(updateStateSummary(state)).toContain("Version 1.2.3");
     expect(markup).toContain("Restart to update");
@@ -53,17 +63,25 @@ describe("UpdatesPanel", () => {
     expect(markup).not.toContain("Check for updates");
   });
 
+  it("offers the download when an update waits to be downloaded", () => {
+    const state: DesktopUpdateState = {
+      ...idle,
+      status: "available",
+      version: "1.2.3",
+    };
+    const markup = panel(state, { automaticDownloads: false, managed: false });
+
+    expect(updateStateSummary(state)).toBe("Version 1.2.3 is available.");
+    expect(markup).toContain("Download update");
+    expect(markup).not.toContain("Restart to update</button>");
+    expect(markup).toContain("downloads it only when you ask");
+  });
+
   it("shows generic host errors without exposing updater diagnostics", () => {
-    const markup = renderToStaticMarkup(
-      <UpdatesPanel
-        state={{
-          ...idle,
-          error: "Could not check for updates. Try again later.",
-        }}
-        onCheck={vi.fn()}
-        onRestart={vi.fn()}
-      />,
-    );
+    const markup = panel({
+      ...idle,
+      error: "Could not check for updates. Try again later.",
+    });
 
     expect(markup).toContain("Could not check for updates");
     expect(markup).toContain('role="alert"');
