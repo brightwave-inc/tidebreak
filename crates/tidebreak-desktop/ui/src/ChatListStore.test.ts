@@ -198,6 +198,25 @@ describe("archiving", () => {
     expect(state.archivedChats).toEqual([]);
   });
 
+  it("drops the archived copy once the list holds the chat again", () => {
+    // A message sent into an archived conversation brings it back on the
+    // server; the next list read is where the renderer learns that.
+    useChatListStore.setState({
+      archivedChats: [
+        { ...chat("chat-9", "Old plan"), archived_at: "2026-09-01T10:00:00Z" },
+      ],
+      revision: 0,
+    });
+    const store = useChatListStore.getState();
+    expect(
+      store.acceptFetchedChats(
+        [chat("chat-9", "Old plan"), chat("chat-1", "Roadmap")],
+        0,
+      ),
+    ).toBe(true);
+    expect(useChatListStore.getState().archivedChats).toEqual([]);
+  });
+
   it("adopts an archived chat opened by id into the archive", () => {
     useChatListStore.getState().adoptChat({
       ...chat("chat-9", "Old plan"),

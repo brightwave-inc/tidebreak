@@ -465,7 +465,12 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                 .flatten()
                 .collect::<Vec<_>>()
                 .join(",");
-                println!("{:<36}  {title:<40}  {model}  {state}", listing.chat.id);
+                let row = format!("{:<36}  {title:<40}  {model}", listing.chat.id);
+                if state.is_empty() {
+                    println!("{row}");
+                } else {
+                    println!("{row}  {state}");
+                }
             }
         }
         Command::ChatCreate => {

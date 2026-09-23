@@ -240,8 +240,10 @@ function GatedShellHooks({
  * to the local server.
  *
  * Everything here outlives a conversation. Anything scoped to one — its
- * transcript, its socket, its composer, and now its rail — belongs to the chat
- * route, which is remounted per chat and so cannot carry state across a switch.
+ * transcript, its socket, its composer — belongs to the chat route, which is
+ * remounted per chat and so cannot carry state across a switch. The rail sits
+ * between the two: the Work layout route mounts it once, so it outlives each
+ * conversation but not the Work half of the app.
  *
  * The mutations below stay here because they outlive the route that triggers
  * them: deleting the open conversation has to survive that conversation's own
@@ -1463,7 +1465,8 @@ export function AppShell() {
               />
             )}
           </FloatingNotices>
-          {/* Each route renders its own rail beside its content — see RouteFrame. */}
+          {/* Each layout route renders its rail beside its content — see
+              WorkLayout and CodeLayout. */}
           <div className="app-body">
             <DocumentTitle />
             <Outlet />

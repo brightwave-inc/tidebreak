@@ -122,6 +122,19 @@ function mergeStreamedTitles(
   return { chats: merged, streamedTitles };
 }
 
+/**
+ * The archive without anything the list now holds. A new turn brings an
+ * archived conversation back on the server, and the list that says so is the
+ * first the renderer hears of it.
+ */
+function withoutListed(archived: Chat[], listed: Chat[]): Chat[] {
+  if (archived.length === 0) return archived;
+  const ids = new Set(listed.map((chat) => chat.id));
+  return archived.some((chat) => ids.has(chat.id))
+    ? archived.filter((chat) => !ids.has(chat.id))
+    : archived;
+}
+
 export function createChatListStore() {
   return create<ChatListStore>()((set, get) => ({
     chats: [],
@@ -140,6 +153,7 @@ export function createChatListStore() {
     setChats: (chats) =>
       set((state) => ({
         ...mergeStreamedTitles(chats, state.streamedTitles),
+        archivedChats: withoutListed(state.archivedChats, chats),
         chatsLoaded: true,
         revision: state.revision + 1,
       })),
@@ -147,6 +161,7 @@ export function createChatListStore() {
       if (get().revision !== startedAt) return false;
       set((state) => ({
         ...mergeStreamedTitles(chats, state.streamedTitles),
+        archivedChats: withoutListed(state.archivedChats, chats),
         chatsLoaded: true,
         chatsError: null,
       }));
