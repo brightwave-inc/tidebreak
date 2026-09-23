@@ -201,16 +201,16 @@ fn render_overview(overview: &DataOverview) -> String {
     out
 }
 
-/// Sizes the way the file manager reports them: powers of 1000.
+/// Sizes the way the desktop's settings show them: powers of 1024.
 fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["bytes", "KB", "MB", "GB", "TB"];
-    if bytes < 1000 {
+    if bytes < 1024 {
         return format!("{bytes} bytes");
     }
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1000.0 && unit < UNITS.len() - 1 {
-        value /= 1000.0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
         unit += 1;
     }
     format!("{value:.1} {}", UNITS[unit])
@@ -390,11 +390,11 @@ mod tests {
     }
 
     #[test]
-    fn sizes_read_the_way_a_file_manager_shows_them() {
+    fn sizes_read_the_way_the_desktop_shows_them() {
         assert_eq!(human_bytes(0), "0 bytes");
-        assert_eq!(human_bytes(999), "999 bytes");
-        assert_eq!(human_bytes(1_500), "1.5 KB");
-        assert_eq!(human_bytes(12_345_678), "12.3 MB");
-        assert_eq!(human_bytes(2_000_000_000), "2.0 GB");
+        assert_eq!(human_bytes(1_023), "1023 bytes");
+        assert_eq!(human_bytes(1_536), "1.5 KB");
+        assert_eq!(human_bytes(12_582_912), "12.0 MB");
+        assert_eq!(human_bytes(2_147_483_648), "2.0 GB");
     }
 }

@@ -308,7 +308,14 @@ A destructive action goes through `useConfirm`, which opens the shared
 `AlertDialog`: a title that asks the question, a description that names the
 consequence, a safe Cancel default, and the `destructive` action variant on
 the confirm button. `destructive` is the only chromatic button fill. Do not
-add type-to-confirm fields or a second confirmation shape.
+add a second confirmation shape.
+
+Typing to confirm is reserved for the one action that cannot be undone and
+takes everything with it: Delete all data, which erases the profile and its
+keychain items and quits. It uses the same dialog with `requireText`, and the
+confirm button stays disabled until the phrase is typed. Do not ask for typing
+anywhere else; deleting a conversation or a memory is confirmed with the
+button alone.
 
 ### Notices and errors
 

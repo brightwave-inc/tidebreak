@@ -9,6 +9,7 @@ import {
   Gauge,
   Globe,
   GitBranch,
+  HardDrive,
   KeyRound,
   Palette,
   RefreshCw,
@@ -22,7 +23,7 @@ import {
   MessagesSquare,
 } from "lucide-react";
 
-import { useApp } from "@/AppContext";
+import { useApp, useAttachedRemotely } from "@/AppContext";
 import { useChatListStore } from "@/ChatListStore";
 import { useManagedPolicy } from "@/managedPolicy";
 import { useTheme } from "@/theme";
@@ -47,6 +48,7 @@ import { ChannelPreferencesPanel } from "./ChannelPreferencesPanel";
 import { GitSourceControlPanel } from "./GitSourceControlPanel";
 import { MemoryPanel } from "./MemoryPanel";
 import { InstructionsPanel } from "./InstructionsPanel";
+import { DataPrivacyPanel, nativeDataPrivacyHost } from "./DataPrivacyPanel";
 import { NotificationsPanel } from "./NotificationsPanel";
 
 /**
@@ -276,6 +278,25 @@ function InstructionsSection() {
   return <InstructionsPanel client={client} />;
 }
 
+function DataPrivacySection() {
+  const { client } = useApp();
+  const attachedRemotely = useAttachedRemotely();
+  const chats = useChatListStore((state) => state.chats);
+  const navigate = useNavigate();
+  return (
+    <DataPrivacyPanel
+      client={client}
+      host={nativeDataPrivacyHost()}
+      attachedRemotely={attachedRemotely}
+      conversations={chats}
+      onOpenSection={(path) => {
+        const to: string = `/settings/${path}`;
+        void navigate({ to });
+      }}
+    />
+  );
+}
+
 export type SettingsSectionDef = {
   /** The path segment under `/settings`, and its address. */
   path: string;
@@ -501,6 +522,16 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: ScrollText,
     iconClass: "text-icon-amber",
     Component: InstructionsSection,
+  },
+  {
+    path: "data-privacy",
+    label: "Data and privacy",
+    keywords:
+      "backup back up export delete erase reset privacy storage disk space folder location telemetry network",
+    group: "application",
+    icon: HardDrive,
+    iconClass: "text-icon-cyan",
+    Component: DataPrivacySection,
   },
 ];
 

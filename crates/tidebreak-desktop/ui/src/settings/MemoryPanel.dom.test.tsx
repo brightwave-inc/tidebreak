@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -79,11 +85,17 @@ function stubClient(records: MemoryRecord[], memory: MemorySettings) {
       revision: 2,
     }),
   );
+  const deleteMemoryRecord = vi.fn(async (_id: string) => undefined);
+  const deleteAllMemoryRecords = vi.fn(async () => ({
+    deleted: records.length,
+  }));
   return {
     client: {
       getSettings: async () => ({ memory }),
       putSettings,
       listMemoryRecords: async () => records,
+      deleteMemoryRecord,
+      deleteAllMemoryRecords,
       getMemoryDigest: async () => ({
         scope: { kind: "personal" },
         markdown: "",
@@ -98,8 +110,19 @@ function stubClient(records: MemoryRecord[], memory: MemorySettings) {
     putSettings,
     setMemoryRecordStatus,
     updateMemoryRecord,
+    deleteMemoryRecord,
+    deleteAllMemoryRecords,
   };
 }
+
+const forgotten: MemoryRecord = {
+  ...fact,
+  id: "3f19d0d5-8f46-4f57-a35a-000000000005",
+  status: "archived",
+  title: "When naming branches",
+  body: "Prefix them with the ticket number.",
+  revision: 2,
+};
 
 afterEach(() => {
   cleanup();
@@ -174,6 +197,79 @@ describe("MemoryPanel", () => {
         author: "user",
       }),
     );
+  });
+
+  it("deletes a line for good, behind a confirmation, rather than archiving it", async () => {
+    const { client, deleteMemoryRecord, setMemoryRecordStatus } = stubClient(
+      [preference],
+      on,
+    );
+    render(<MemoryPanel client={client} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Delete" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Delete this memory?" }),
+    ).toBeInTheDocument();
+    expect(deleteMemoryRecord).not.toHaveBeenCalled();
+
+    const dialog = screen.getByRole("alertdialog");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Delete" }),
+    );
+    await waitFor(() =>
+      expect(deleteMemoryRecord).toHaveBeenCalledWith(preference.id),
+    );
+    expect(setMemoryRecordStatus).not.toHaveBeenCalled();
+  });
+
+  it("keeps forgotten lines collapsed, and restores or deletes one", async () => {
+    const { client, deleteMemoryRecord, setMemoryRecordStatus } = stubClient(
+      [preference, forgotten],
+      on,
+    );
+    render(<MemoryPanel client={client} />);
+    const toggle = await screen.findByRole("button", {
+      name: "Show 1 forgotten record",
+    });
+    expect(screen.queryByText("When naming branches")).not.toBeInTheDocument();
+
+    await userEvent.click(toggle);
+    expect(screen.getByText("When naming branches")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Restore" }));
+    expect(setMemoryRecordStatus).toHaveBeenCalledWith(forgotten.id, {
+      expected_revision: 2,
+      status: "active",
+    });
+
+    const deletes = screen.getAllByRole("button", { name: "Delete" });
+    await userEvent.click(deletes[deletes.length - 1]);
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Delete" }),
+    );
+    await waitFor(() =>
+      expect(deleteMemoryRecord).toHaveBeenCalledWith(forgotten.id),
+    );
+  });
+
+  it("deletes everything, forgotten lines included, from the danger zone", async () => {
+    const { client, deleteAllMemoryRecords } = stubClient(
+      [preference, forgotten],
+      on,
+    );
+    render(<MemoryPanel client={client} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Delete everything" }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    expect(
+      within(dialog).getByText(/all 2 records, forgotten ones included/),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Delete everything" }),
+    );
+    await waitFor(() => expect(deleteAllMemoryRecords).toHaveBeenCalledOnce());
   });
 
   it("names the missing utility model without hiding what it knows", async () => {

@@ -9,6 +9,7 @@ import {
 import type {
   MemoryAuthor,
   MemoryCaps,
+  MemoryDeleteAllResult,
   MemoryDigest,
   MemoryEvidence,
   MemoryKind,
@@ -146,6 +147,17 @@ export function withMemoryApi<TBase extends Constructor<HttpCore>>(
 
     async deleteMemoryRecord(recordId: MemoryRecordId): Promise<void> {
       await this.json(`/memory/records/${encodeURIComponent(recordId)}`, {
+        method: "DELETE",
+        headers: this.headers(),
+      });
+    }
+
+    /**
+     * Delete every record the caller has, forgotten ones included, with
+     * their history. Answers how many went.
+     */
+    deleteAllMemoryRecords(): Promise<MemoryDeleteAllResult> {
+      return this.json("/memory/records", {
         method: "DELETE",
         headers: this.headers(),
       });

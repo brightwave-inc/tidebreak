@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Brain } from "lucide-react";
+import { Brain, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 
 import type {
@@ -10,6 +10,11 @@ import type {
   MemoryRecord,
 } from "../api";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   Empty,
   EmptyDescription,
@@ -49,6 +54,11 @@ type Draft = { id: string; title: string; body: string };
  * is known, in two groups, each line editable and forgettable with a way
  * back to the conversation it came from. No lifecycle states, revisions,
  * or meters: those are how the store works, not what the person needs.
+ *
+ * Forget stops Tidebreak using a record and keeps it, so a forgotten topic
+ * is not learned again right away (decision 0099). Delete removes the record
+ * and its history for good. Forgotten records sit in a collapsed list where
+ * each one can come back or go for good.
  */
 export function MemoryPanel({
   client,
@@ -117,6 +127,48 @@ export function MemoryPanel({
     }, "Could not save memory settings.");
   }
 
+  function restore(record: MemoryRecord) {
+    void run(async () => {
+      await client.setMemoryRecordStatus(record.id, {
+        expected_revision: record.revision,
+        status: "active",
+      });
+      toast.success("Restored");
+      await reload();
+    }, "Could not restore this memory.");
+  }
+
+  async function deletePermanently(record: MemoryRecord) {
+    const ok = await confirm({
+      title: "Delete this memory?",
+      description:
+        "Tidebreak removes it and its history, and stops using it. It can learn it again if the topic comes up.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
+    void run(async () => {
+      await client.deleteMemoryRecord(record.id);
+      toast.success("Deleted");
+      await reload();
+    }, "Could not delete this memory.");
+  }
+
+  async function deleteEverything(count: number) {
+    const ok = await confirm({
+      title: "Delete every memory?",
+      description: `Tidebreak deletes all ${count} ${count === 1 ? "record" : "records"}, forgotten ones included, with their history. This cannot be undone.`,
+      confirmLabel: "Delete everything",
+      destructive: true,
+    });
+    if (!ok) return;
+    void run(async () => {
+      await client.deleteAllMemoryRecords();
+      toast.success("Deleted every memory");
+      await reload();
+    }, "Could not delete every memory.");
+  }
+
   function forget(record: MemoryRecord) {
     void run(async () => {
       await client.setMemoryRecordStatus(record.id, {
@@ -151,7 +203,7 @@ export function MemoryPanel({
   async function forgetEverything(active: MemoryRecord[]) {
     const ok = await confirm({
       title: "Forget everything?",
-      description: `Tidebreak stops using all ${active.length} ${active.length === 1 ? "record" : "records"} in every conversation. Nothing is deleted, and new memories are still saved.`,
+      description: `Tidebreak stops using all ${active.length} ${active.length === 1 ? "record" : "records"} in every conversation. They move to Forgotten, where you can restore them, and new memories are still saved.`,
       confirmLabel: "Forget everything",
       destructive: true,
     });
@@ -169,6 +221,8 @@ export function MemoryPanel({
   }
 
   const active = records?.filter((record) => record.status === "active") ?? [];
+  const forgotten =
+    records?.filter((record) => record.status === "archived") ?? [];
   const about = active.filter((record) => groupOf(record.kind) === "about");
   const notes = active.filter((record) => groupOf(record.kind) === "notes");
   const nearlyFull =
@@ -277,6 +331,7 @@ export function MemoryPanel({
                   onEdit={setEditing}
                   onSave={save}
                   onForget={forget}
+                  onDelete={(record) => void deletePermanently(record)}
                   onOpenConversation={onOpenConversation}
                 />
               </SettingsSection>
@@ -292,22 +347,66 @@ export function MemoryPanel({
                   onEdit={setEditing}
                   onSave={save}
                   onForget={forget}
+                  onDelete={(record) => void deletePermanently(record)}
                   onOpenConversation={onOpenConversation}
                 />
               </SettingsSection>
-              <SettingsSection title="Danger zone">
+            </>
+          )}
+          {forgotten.length > 0 && (
+            <SettingsSection
+              title="Forgotten"
+              description="Tidebreak no longer uses these, and does not learn them again right away. Restore one to use it again, or delete it for good."
+            >
+              <ForgottenList
+                records={forgotten}
+                working={working}
+                onRestore={restore}
+                onDelete={(record) => void deletePermanently(record)}
+              />
+            </SettingsSection>
+          )}
+          {records.length > 0 && (
+            <SettingsSection title="Danger zone">
+              {active.length > 0 && (
+                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                  <div className="min-w-0 flex-1 basis-64">
+                    <p className="text-sm font-medium">Forget everything</p>
+                    <p className="text-xs text-muted-foreground">
+                      Stop using every record. They move to Forgotten, where you
+                      can restore them.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={working}
+                    onClick={() => void forgetEverything(active)}
+                  >
+                    Forget everything
+                  </Button>
+                </div>
+              )}
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                <div className="min-w-0 flex-1 basis-64">
+                  <p className="text-sm font-medium">Delete everything</p>
+                  <p className="text-xs text-muted-foreground">
+                    Delete every record, forgotten ones included, with its
+                    history. This cannot be undone.
+                  </p>
+                </div>
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="destructive"
                   size="sm"
-                  className="self-start"
                   disabled={working}
-                  onClick={() => void forgetEverything(active)}
+                  onClick={() => void deleteEverything(records.length)}
                 >
-                  Forget everything
+                  Delete everything
                 </Button>
-              </SettingsSection>
-            </>
+              </div>
+            </SettingsSection>
           )}
           {error && <SettingsError>{error}</SettingsError>}
         </>
@@ -325,6 +424,7 @@ function MemoryList({
   onEdit,
   onSave,
   onForget,
+  onDelete,
   onOpenConversation,
 }: {
   records: MemoryRecord[];
@@ -334,6 +434,7 @@ function MemoryList({
   onEdit: (draft: Draft | null) => void;
   onSave: (record: MemoryRecord, title: string, body: string) => void;
   onForget: (record: MemoryRecord) => void;
+  onDelete: (record: MemoryRecord) => void;
   onOpenConversation?: (chatId: string) => void;
 }) {
   if (records.length === 0) {
@@ -432,6 +533,14 @@ function MemoryList({
                   >
                     Forget
                   </button>
+                  <button
+                    type="button"
+                    className="underline-offset-2 hover:underline"
+                    disabled={working}
+                    onClick={() => onDelete(record)}
+                  >
+                    Delete
+                  </button>
                 </div>
               </>
             )}
@@ -439,6 +548,74 @@ function MemoryList({
         );
       })}
     </ul>
+  );
+}
+
+/**
+ * Forgotten records, collapsed until the person opens them. Each can come
+ * back, or go for good.
+ */
+function ForgottenList({
+  records,
+  working,
+  onRestore,
+  onDelete,
+}: {
+  records: MemoryRecord[];
+  working: boolean;
+  onRestore: (record: MemoryRecord) => void;
+  onDelete: (record: MemoryRecord) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+        >
+          <ChevronRight
+            className={`size-3.5 transition-transform ${open ? "rotate-90" : ""}`}
+            aria-hidden="true"
+          />
+          {open ? "Hide" : "Show"} {records.length} forgotten{" "}
+          {records.length === 1 ? "record" : "records"}
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <ul className="mt-3 flex flex-col divide-y divide-border">
+          {records.map((record) => (
+            <li key={record.id} className="flex flex-col gap-2 py-3 first:pt-0">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">{record.title}</p>
+                <p className="mt-0.5 text-sm whitespace-pre-wrap text-muted-foreground">
+                  {record.body}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <span>Forgotten {formatDay(record.updated_at)}</span>
+                <button
+                  type="button"
+                  className="underline-offset-2 hover:underline"
+                  disabled={working}
+                  onClick={() => onRestore(record)}
+                >
+                  Restore
+                </button>
+                <button
+                  type="button"
+                  className="underline-offset-2 hover:underline"
+                  disabled={working}
+                  onClick={() => onDelete(record)}
+                >
+                  Delete
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 

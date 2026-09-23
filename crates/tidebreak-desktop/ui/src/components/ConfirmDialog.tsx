@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   type ReactElement,
@@ -16,6 +17,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Input } from "@/components/ui/input";
 
 export type ConfirmOptions = {
   title: string;
@@ -23,6 +25,12 @@ export type ConfirmOptions = {
   confirmLabel?: string;
   cancelLabel?: string;
   destructive?: boolean;
+  /**
+   * A phrase the person types before the confirm button enables. Reserved
+   * for erasing the whole profile (DESIGN.md, Destructive actions); every
+   * other destructive action is confirmed with the button alone.
+   */
+  requireText?: string;
 };
 
 export type DecideOptions = ConfirmOptions & {
@@ -127,49 +135,88 @@ export function useConfirm(): {
       }}
     >
       {pending && (
-        <AlertDialogContent key={pending.id}>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{pending.title}</AlertDialogTitle>
-            {pending.description && (
-              <AlertDialogDescription>
-                {pending.description}
-              </AlertDialogDescription>
-            )}
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel
-              onClick={() => {
-                buttonResultRef.current = "cancel";
-              }}
-            >
-              {pending.cancelLabel ?? "Cancel"}
-            </AlertDialogCancel>
-            {pending.alternativeLabel && (
-              <AlertDialogAction
-                variant="outline"
-                // Stacked on a narrow window, the buttons get their spacing
-                // from their own top margin, the way Cancel does.
-                className="mt-2 sm:mt-0"
-                onClick={() => {
-                  buttonResultRef.current = "alternative";
-                }}
-              >
-                {pending.alternativeLabel}
-              </AlertDialogAction>
-            )}
-            <AlertDialogAction
-              variant={pending.destructive ? "destructive" : "default"}
-              onClick={() => {
-                buttonResultRef.current = "confirm";
-              }}
-            >
-              {pending.confirmLabel ?? "Confirm"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
+        <ConfirmContent
+          key={pending.id}
+          pending={pending}
+          onChoose={(result) => {
+            buttonResultRef.current = result;
+          }}
+        />
       )}
     </AlertDialog>
   );
 
   return { confirm, decide, dialog };
+}
+
+/** One request's dialog, which keeps what has been typed for that request. */
+function ConfirmContent({
+  pending,
+  onChoose,
+}: {
+  pending: PendingConfirm;
+  onChoose: (result: Decision) => void;
+}) {
+  const [typed, setTyped] = useState("");
+  const inputId = useId();
+  const required = pending.requireText;
+  const confirmed = required === undefined || typed.trim() === required;
+  return (
+    <AlertDialogContent>
+      <AlertDialogHeader>
+        <AlertDialogTitle>{pending.title}</AlertDialogTitle>
+        {pending.description && (
+          <AlertDialogDescription
+            asChild={typeof pending.description !== "string"}
+          >
+            {typeof pending.description === "string" ? (
+              pending.description
+            ) : (
+              <div>{pending.description}</div>
+            )}
+          </AlertDialogDescription>
+        )}
+      </AlertDialogHeader>
+      {required !== undefined && (
+        <div className="flex flex-col gap-2">
+          <label htmlFor={inputId} className="text-sm text-muted-foreground">
+            Type <span className="font-medium text-foreground">{required}</span>{" "}
+            to confirm.
+          </label>
+          <Input
+            id={inputId}
+            value={typed}
+            autoComplete="off"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            onChange={(event) => setTyped(event.target.value)}
+          />
+        </div>
+      )}
+      <AlertDialogFooter>
+        <AlertDialogCancel onClick={() => onChoose("cancel")}>
+          {pending.cancelLabel ?? "Cancel"}
+        </AlertDialogCancel>
+        {pending.alternativeLabel && (
+          <AlertDialogAction
+            variant="outline"
+            // Stacked on a narrow window, the buttons get their spacing
+            // from their own top margin, the way Cancel does.
+            className="mt-2 sm:mt-0"
+            onClick={() => onChoose("alternative")}
+          >
+            {pending.alternativeLabel}
+          </AlertDialogAction>
+        )}
+        <AlertDialogAction
+          variant={pending.destructive ? "destructive" : "default"}
+          disabled={!confirmed}
+          onClick={() => onChoose("confirm")}
+        >
+          {pending.confirmLabel ?? "Confirm"}
+        </AlertDialogAction>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+  );
 }

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
-const SIDEBAR_COLLAPSED_KEY = "tidebreak.sidebar-collapsed";
-const SIDEBAR_WIDTH_KEY = "tidebreak.sidebar-width";
+export const SIDEBAR_COLLAPSED_KEY = "tidebreak.sidebar-collapsed";
+export const SIDEBAR_WIDTH_KEY = "tidebreak.sidebar-width";
 const MODEL_MENU_NOT_CONNECTED_KEY =
   "tidebreak.model-menu-not-connected-collapsed";
 const ACTIVE_TURN_SEND_MODE_KEY = "tidebreak.composer.sendMode";

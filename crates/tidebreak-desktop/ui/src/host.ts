@@ -1,6 +1,10 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Chat, ConsentStatementSnapshot } from "./api";
+import type {
+  Chat,
+  ConsentStatementSnapshot,
+  ConversationExportRequest,
+} from "./api";
 
 /** Whether the broker can currently reach a listed folder. "unavailable" is
  * the set-aside state: the approval and attachment stand, but the directory
@@ -391,4 +395,48 @@ export function saveWorkspaceConfig(contents: string): Promise<boolean> {
 /** Open a portable workspace configuration through the native file dialog. */
 export function pickWorkspaceConfig(): Promise<string | null> {
   return invoke("pick_workspace_config");
+}
+
+/** A file a Data and privacy command wrote where the person chose. */
+export type SavedFile = {
+  path: string;
+  bytes: number;
+  /** Files in a backup, or conversations in an export, as the server said. */
+  count: number | null;
+};
+
+/** Open this computer's Tidebreak data folder in its file manager. */
+export function revealDataDirectory(): Promise<void> {
+  return invoke("reveal_data_directory");
+}
+
+/**
+ * Back up the profile to a file the person picks in the native save dialog.
+ * The desktop streams it to disk, so a large profile never passes through
+ * the window. Resolves `null` when the dialog was dismissed.
+ */
+export function saveProfileBackup(): Promise<SavedFile | null> {
+  return invoke("save_profile_backup");
+}
+
+/** Export conversations to a file the person picks. `null` when dismissed. */
+export function saveConversationExport(
+  request: ConversationExportRequest,
+): Promise<SavedFile | null> {
+  return invoke("save_conversation_export", { request });
+}
+
+/**
+ * What the person types to confirm Delete all data. The native command checks
+ * the same phrase, so the dialog cannot be skipped by calling it directly.
+ */
+export const DELETE_ALL_DATA_PHRASE = "delete all data";
+
+/**
+ * Delete this computer's Tidebreak data and its keychain items, then quit.
+ * On success the app exits and this never resolves; it rejects with the
+ * reason when nothing was deleted.
+ */
+export function deleteAllData(confirmation: string): Promise<void> {
+  return invoke("delete_all_data", { confirmation });
 }

@@ -8,9 +8,9 @@
  * Finished and failed turns. The key predates the second switch, when it was
  * the only one, so an existing "off" carries over.
  */
-const FINISHED_KEY = "tidebreak.desktop-notifications";
+export const FINISHED_KEY = "tidebreak.desktop-notifications";
 /** Approvals, questions, and plans an agent stopped for. */
-const NEEDS_YOU_KEY = "tidebreak.needs-you-notifications";
+export const NEEDS_YOU_KEY = "tidebreak.needs-you-notifications";
 
 function enabled(key: string): boolean {
   if (typeof window === "undefined") return true;

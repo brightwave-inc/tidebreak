@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   WorkspaceConfigDocument,
   WorkspaceConfigApplyRequest,
+  WorkspaceConfigApplyResult,
   WorkspaceConfigPreview,
 } from "@/api/types";
 import { PortableConfigSection } from "./PortableConfigSection";
@@ -67,14 +68,17 @@ const document: WorkspaceConfigDocument = {
 
 afterEach(cleanup);
 
-function renderSection(preview: WorkspaceConfigPreview) {
+function renderSection(
+  preview: WorkspaceConfigPreview,
+  apply: (
+    request: WorkspaceConfigApplyRequest,
+  ) => Promise<WorkspaceConfigApplyResult> = async () => ({
+    applied: 1,
+    skipped: 0,
+  }),
+) {
   const previewWorkspaceConfig = vi.fn(async () => preview);
-  const applyWorkspaceConfig = vi.fn(
-    async (_request: WorkspaceConfigApplyRequest) => ({
-      applied: 1,
-      skipped: 0,
-    }),
-  );
+  const applyWorkspaceConfig = vi.fn(apply);
   render(
     <PortableConfigSection
       client={{
@@ -231,6 +235,108 @@ describe("PortableConfigSection", () => {
       ["docs", "skip"],
       ["search", "add"],
     ]);
+  });
+
+  it("keeps an entry that needs a path on Skip until you enter one", async () => {
+    const user = userEvent.setup();
+    const { applyWorkspaceConfig } = renderSection({
+      entries: [
+        {
+          section: "code_repositories",
+          key: "https://github.com/brightwave-inc/tidebreak.git",
+          status: "needs_remap",
+          differing_fields: [],
+          remap_fields: ["root_path"],
+        },
+      ],
+    });
+    await importDocument(user);
+    await screen.findByLabelText("Import preview");
+
+    const repo = within(row("tidebreak"));
+    expect(repo.getByRole("button", { name: "Skip" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(repo.getByRole("button", { name: "Add" })).toBeDisabled();
+    expect(
+      repo.getByText(/Skipped until you enter the path on this machine/),
+    ).toBeVisible();
+
+    await user.type(
+      screen.getByLabelText(
+        "Remap root_path for https://github.com/brightwave-inc/tidebreak.git",
+      ),
+      "/Users/me/src/tidebreak",
+    );
+    expect(repo.getByRole("button", { name: "Add" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(applyWorkspaceConfig).toHaveBeenCalled());
+    const [decision] = applyWorkspaceConfig.mock.calls[0][0].decisions;
+    expect(decision.action).toBe("add");
+    expect(decision.remaps).toEqual({ root_path: "/Users/me/src/tidebreak" });
+  });
+
+  it("reports what the import applied and skipped", async () => {
+    const user = userEvent.setup();
+    renderSection(
+      {
+        entries: [
+          {
+            section: "mcp_servers",
+            key: "status",
+            status: "new",
+            differing_fields: [],
+            remap_fields: [],
+          },
+        ],
+      },
+      async () => ({ applied: 1, skipped: 2 }),
+    );
+    await importDocument(user);
+    await screen.findByLabelText("Import preview");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(await screen.findByText("Import finished")).toBeVisible();
+    expect(
+      screen.getAllByText("Imported 1 entry and skipped 2.").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("says what failed and that nothing changed", async () => {
+    const user = userEvent.setup();
+    renderSection(
+      {
+        entries: [
+          {
+            section: "mcp_servers",
+            key: "status",
+            status: "new",
+            differing_fields: [],
+            remap_fields: [],
+          },
+        ],
+      },
+      async () => {
+        throw new Error(
+          "external MCP server status failed to start. Nothing changed.",
+        );
+      },
+    );
+    await importDocument(user);
+    await screen.findByLabelText("Import preview");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(await screen.findByText("The import did not run")).toBeVisible();
+    expect(
+      screen.getAllByText(/failed to start\. Nothing changed\./).length,
+    ).toBeGreaterThan(0);
+    // The dialog stays open so the person can change a choice and retry.
+    expect(screen.getByLabelText("Import preview")).toBeVisible();
   });
 
   it("imports a local command server turned off unless you start it", async () => {
