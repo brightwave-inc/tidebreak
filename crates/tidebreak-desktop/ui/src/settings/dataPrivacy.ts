@@ -70,7 +70,7 @@ export const OUTBOUND_TRAFFIC: readonly OutboundTraffic[] = [
     id: "web",
     title: "Web search and pages",
     what: "Searches go to your search provider, or to your model provider's own search. Pages the agent reads are fetched from this computer.",
-    off: "Set Search mode to Off. A conversation set to Offline blocks both.",
+    off: "Set Search mode to Off to stop searches. The agent still reads pages; set a conversation to Offline to stop both.",
     section: { path: "web-search", label: "Web search" },
   },
   {
