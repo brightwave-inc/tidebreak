@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatDocumentTitle, pageNameForPath } from "./documentTitle";
+import { formatDocumentTitle, pageNameForPath } from "./pageTitle";
 
 describe("document title", () => {
   it("names library routes", () => {

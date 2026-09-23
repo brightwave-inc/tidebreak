@@ -3,7 +3,7 @@ import { useRouterState } from "@tanstack/react-router";
 
 import { useChatListStore } from "./ChatListStore";
 import { useCodeCatalogStore } from "./code/CodeCatalogStore";
-import { formatDocumentTitle, pageNameForPath } from "./documentTitle";
+import { formatDocumentTitle, pageNameForPath } from "./pageTitle";
 import { useProjectListStore } from "./ProjectListStore";
 import { SETTINGS_SECTIONS } from "./settings/sections";
 import { useActiveChatId } from "./useActiveChatId";

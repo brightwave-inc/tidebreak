@@ -5,6 +5,21 @@ import { useRouter } from "@tanstack/react-router";
 let lastFocusedPath: string | null = null;
 
 /**
+ * Whether a route change may move focus to the page heading.
+ *
+ * Focus stays put while the person is typing or a dialog owns it, so a
+ * navigation that happens under them (sending a first message opens its chat)
+ * does not pull the caret away.
+ */
+export function headingMayTakeFocus(active: Element | null): boolean {
+  if (!(active instanceof HTMLElement) || active === document.body) return true;
+  if (active.isContentEditable) return false;
+  return !active.closest(
+    "input, textarea, select, [contenteditable]:not([contenteditable='false']), dialog, [role='dialog'], [role='alertdialog']",
+  );
+}
+
+/**
  * A route and the rail that belongs to it, side by side.
  *
  * The shell renders the window, the client and the outlet; the rail is chosen
@@ -33,6 +48,7 @@ export function RouteFrame({
       const previous = lastFocusedPath;
       lastFocusedPath = pathname;
       if (previous === null || previous === pathname) return;
+      if (!headingMayTakeFocus(document.activeElement)) return;
       heading.focus({ preventScroll: true });
     };
     apply();
