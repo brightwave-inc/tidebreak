@@ -7315,6 +7315,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-web-kit",
  "opus-decoder",
+ "plist",
  "reqwest",
  "semver",
  "serde",
