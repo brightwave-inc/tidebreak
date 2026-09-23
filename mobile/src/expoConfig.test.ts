@@ -8,6 +8,7 @@ const mobileRoot = join(here, "..");
 const expoCli = join(mobileRoot, "node_modules/expo/bin/cli");
 
 type PublicExpoConfig = {
+  userInterfaceStyle?: string;
   scheme?: string;
   android?: {
     intentFilters?: Array<{
@@ -54,6 +55,7 @@ describe("Expo config", () => {
     (appVariant, scheme) => {
       const config = resolvePublicConfig(appVariant);
 
+      expect(config.userInterfaceStyle).toBe("automatic");
       expect(config.scheme).toBe(scheme);
       expect(config.extra?.oauthRedirectUri).toBe(`${scheme}://callback`);
       expect(config.android?.intentFilters).toContainEqual({

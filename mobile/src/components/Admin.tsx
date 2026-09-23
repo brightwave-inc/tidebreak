@@ -18,6 +18,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { useThemeColors } from "../useThemeColors";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Card, EmptyState, Meter } from "./Console";
 import { StatusPill } from "./Controls";
@@ -183,12 +184,13 @@ export function FilterField({
   onChange: (next: string) => void;
   placeholder: string;
 }) {
+  const colors = useThemeColors();
   return (
     <TextInput
       value={value}
       onChangeText={onChange}
       placeholder={placeholder}
-      placeholderTextColor="#697386"
+      placeholderTextColor={colors.mutedForeground}
       accessibilityLabel={placeholder}
       autoCapitalize="none"
       autoCorrect={false}

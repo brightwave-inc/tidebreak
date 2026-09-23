@@ -1,0 +1,107 @@
+/**
+ * Colors used from JavaScript (navigation chrome, StatusBar, placeholders,
+ * and icons) and as NativeWind CSS variables. Keep these in lockstep with
+ * `global.css`.
+ */
+export const theme = {
+  light: {
+    background: "#fcfcfd",
+    foreground: "#1b1d22",
+    pageBackground: "#f4f5f7",
+    border: "#e4e6ea",
+    muted: "#f0f1f4",
+    mutedForeground: "#6b7280",
+    primary: "#1f2329",
+    primaryForeground: "#f7f8fa",
+    critical: "#c2413b",
+    criticalForeground: "#7f1d1d",
+    criticalBackground: "#fef2f2",
+    criticalBorder: "#7f1d1d",
+    success: "#2f9e62",
+    successForeground: "#166534",
+    successBackground: "#ecfdf3",
+    successBorder: "#a7dfbd",
+    info: "#3b82c4",
+    infoForeground: "#1d4ed8",
+    infoBackground: "#eff6ff",
+    infoBorder: "#b7d5f3",
+    warning: "#c9891a",
+    warningForeground: "#92400e",
+    warningBackground: "#fff8e8",
+    warningBorder: "#efd39a",
+    live: "#0f8f86",
+    liveForeground: "#0b625d",
+    liveBackground: "#e8f8f6",
+    liveBorder: "#9dd8d2",
+  },
+  dark: {
+    background: "#16181c",
+    foreground: "#f4f5f7",
+    pageBackground: "#1c1e22",
+    border: "#2e3238",
+    muted: "#25282d",
+    mutedForeground: "#9ca3af",
+    primary: "#e8eaed",
+    primaryForeground: "#1c1e22",
+    critical: "#ef6b65",
+    criticalForeground: "#fecaca",
+    criticalBackground: "#3a1a1a",
+    criticalBorder: "#7f1d1d",
+    success: "#4ade80",
+    successForeground: "#bbf7d0",
+    successBackground: "#14532d",
+    successBorder: "#166534",
+    info: "#60a5fa",
+    infoForeground: "#bfdbfe",
+    infoBackground: "#1e3a5f",
+    infoBorder: "#1d4ed8",
+    warning: "#fbbf24",
+    warningForeground: "#fde68a",
+    warningBackground: "#422006",
+    warningBorder: "#92400e",
+    live: "#2dd4bf",
+    liveForeground: "#99f6e4",
+    liveBackground: "#134e4a",
+    liveBorder: "#0f766e",
+  },
+} as const;
+
+export type ColorSchemeName = "light" | "dark";
+export type ThemeTokens = (typeof theme)[ColorSchemeName];
+
+export function schemeOf(value: string | null | undefined): ColorSchemeName {
+  return value === "dark" ? "dark" : "light";
+}
+
+export function cssVarsFor(tokens: ThemeTokens): Record<string, string> {
+  return {
+    "--background": tokens.background,
+    "--foreground": tokens.foreground,
+    "--page-background": tokens.pageBackground,
+    "--border": tokens.border,
+    "--muted": tokens.muted,
+    "--muted-foreground": tokens.mutedForeground,
+    "--primary": tokens.primary,
+    "--primary-foreground": tokens.primaryForeground,
+    "--critical": tokens.critical,
+    "--critical-foreground": tokens.criticalForeground,
+    "--critical-background": tokens.criticalBackground,
+    "--critical-border": tokens.criticalBorder,
+    "--success": tokens.success,
+    "--success-foreground": tokens.successForeground,
+    "--success-background": tokens.successBackground,
+    "--success-border": tokens.successBorder,
+    "--info": tokens.info,
+    "--info-foreground": tokens.infoForeground,
+    "--info-background": tokens.infoBackground,
+    "--info-border": tokens.infoBorder,
+    "--warning": tokens.warning,
+    "--warning-foreground": tokens.warningForeground,
+    "--warning-background": tokens.warningBackground,
+    "--warning-border": tokens.warningBorder,
+    "--live": tokens.live,
+    "--live-foreground": tokens.liveForeground,
+    "--live-background": tokens.liveBackground,
+    "--live-border": tokens.liveBorder,
+  };
+}

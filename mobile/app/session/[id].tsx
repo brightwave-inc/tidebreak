@@ -15,6 +15,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CodeApprovalCard } from "../../src/components/CodeApprovalCard";
 import { Button, LoadingState, StatusPill } from "../../src/components/Controls";
+import { useThemeColors } from "../../src/useThemeColors";
 import { ErrorText } from "../../src/components/Screen";
 import {
   decideCodeApproval,
@@ -44,6 +45,7 @@ const PIN_THRESHOLD = 80;
 type SendMode = "steer" | "followup";
 
 export default function SessionDetailScreen() {
+  const colors = useThemeColors();
   const router = useRouter();
   const params = useLocalSearchParams<{
     id?: string;
@@ -450,7 +452,7 @@ export default function SessionDetailScreen() {
                   ? "Queue a follow-up turn"
                   : "Send a follow-up turn"
             }
-            placeholderTextColor="#697386"
+            placeholderTextColor={colors.mutedForeground}
             value={message}
             onChangeText={setMessage}
             editable={

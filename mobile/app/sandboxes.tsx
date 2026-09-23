@@ -18,6 +18,7 @@ import {
 } from "../src/components/Console";
 import { ConsoleLink } from "../src/components/Admin";
 import { ownerDirectory, ownerLabel } from "../src/lib/admin";
+import { useThemeColors } from "../src/useThemeColors";
 import { phaseChip } from "../src/lib/consoleLabels";
 import { relative } from "../src/lib/consoleTime";
 import type { SandboxView } from "../src/lib/consoleTypes";
@@ -185,6 +186,7 @@ function ScopeTab({
  * misreading.
  */
 export default function SandboxesScreen() {
+  const colors = useThemeColors();
   const router = useRouter();
   const connection = useActiveConnection();
   const isAdmin = administers(connection);
@@ -346,7 +348,7 @@ export default function SandboxesScreen() {
                   ? "Filter by task, repo, profile, or owner"
                   : "Filter by task, repo, or profile"
               }
-              placeholderTextColor="#697386"
+              placeholderTextColor={colors.mutedForeground}
               accessibilityLabel="Filter sandboxes"
               className="min-h-11 rounded-lg border border-border bg-background px-3 py-2.5 text-base text-foreground"
             />

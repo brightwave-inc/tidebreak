@@ -7,6 +7,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { PushSync } from "../src/push/registration";
 import { connections, hydrateConnections } from "../src/session/runtime";
 import { useConnectionStore } from "../src/session/store";
+import { useThemeColors, useThemeCssVars } from "../src/useThemeColors";
 
 const queryClient = new QueryClient();
 
@@ -14,6 +15,8 @@ export default function RootLayout() {
   const setHydrated = useConnectionStore((state) => state.setHydrated);
   const apply = useConnectionStore((state) => state.apply);
   const [ready, setReady] = useState(false);
+  const colors = useThemeColors();
+  const cssVars = useThemeCssVars();
 
   useEffect(() => {
     // Every change to the connection set lands here: pairing, switching,
@@ -32,15 +35,16 @@ export default function RootLayout() {
   }
 
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
+    <GestureHandlerRootView style={[{ flex: 1 }, cssVars]}>
       <QueryClientProvider client={queryClient}>
         <StatusBar style="auto" />
         <PushSync />
         <Stack
           screenOptions={{
             headerShadowVisible: false,
-            headerStyle: { backgroundColor: "#f4f5f7" },
-            contentStyle: { backgroundColor: "#f4f5f7" },
+            headerStyle: { backgroundColor: colors.pageBackground },
+            headerTintColor: colors.foreground,
+            contentStyle: { backgroundColor: colors.pageBackground },
             // Chevron-only back button; the default inherits the previous
             // route's title and falls back to its file name ("index").
             headerBackButtonDisplayMode: "minimal",

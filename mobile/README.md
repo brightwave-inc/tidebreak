@@ -4,7 +4,9 @@ Supervision-first Expo client for hosted Tidebreak. This slice pairs the phone
 with a Model Gateway deployment, attaches to the advertised Tidebreak machine,
 and supervises existing code sessions: live timelines, pending approvals,
 approve or deny-with-feedback decisions, steering, interrupts, and follow-up
-turns. Workspace/session launch and general chats remain separate later slices.
+turns. You can also open existing chats and attach a Tidebreak machine
+directly with a URL and token. This is a preview for Model Gateway and
+self-hosted machines, not a client for a local-only desktop install.
 
 The app lives here, outside the Cargo workspace. It does not share the desktop
 UI package.
@@ -116,8 +118,9 @@ Push rides the gateway (mg ADR 0093) and is offered only where
 
 The app holds several connections at once and one is active
 (decision [97](../docs/decisions/0097-connections-are-plural-and-typed.md)).
-A connection has a kind: `gateway` is an OAuth pairing, and `machine` — a
-direct URL with a static token — is declared but unimplemented.
+A connection has a kind: `gateway` is an OAuth pairing, and `machine` is a
+direct URL with a static token from that machine's roster. The welcome
+screen and Settings → Connections both offer that path.
 
 - Each connection keeps its own credential under its own secure-store key, so
   signing out of one leaves the others signed in. Access tokens stay in memory.

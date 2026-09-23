@@ -15,6 +15,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { useThemeColors } from "../../src/useThemeColors";
 import {
   Card,
   ChipPill,
@@ -291,6 +292,7 @@ export default function SandboxRoute() {
  * instead.
  */
 function SandboxDetail({ id }: { id: string }) {
+  const colors = useThemeColors();
   const router = useRouter();
   const queryClient = useQueryClient();
   const insets = useSafeAreaInsets();
@@ -666,7 +668,7 @@ function SandboxDetail({ id }: { id: string }) {
               }`}
               multiline
               placeholder="Steer this run…"
-              placeholderTextColor="#697386"
+              placeholderTextColor={colors.mutedForeground}
               accessibilityLabel="Steering message"
               value={message}
               onChangeText={setMessage}
