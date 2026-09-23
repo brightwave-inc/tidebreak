@@ -174,7 +174,12 @@ impl BrowserCapfile {
     fn from_env() -> Result<Self> {
         let path = std::env::var_os("TIDEBREAK_BROWSER_CAPFILE")
             .map(PathBuf::from)
-            .ok_or_else(|| AgentError::config("TIDEBREAK_BROWSER_CAPFILE is not set"))?;
+            .ok_or_else(|| {
+                AgentError::config(
+                    "TIDEBREAK_BROWSER_CAPFILE is not set; browser commands run inside a \
+                     Tidebreak session that publishes this capfile",
+                )
+            })?;
         Self::load(&path)
     }
 
@@ -712,7 +717,7 @@ pub(crate) enum BrowserCommand {
 pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCommand, String> {
     let mut args = args.into_iter();
     let Some(verb) = args.next() else {
-        return Err(BROWSER_USAGE.to_string());
+        return Err("browser requires a subcommand".to_string());
     };
     match verb.as_str() {
         "list" => {
@@ -1326,35 +1331,6 @@ fn set_browser_action(
     }
     Ok(())
 }
-
-/// Usage text shown for `tidebreak browser` (and `browser-mcp`).
-pub(crate) const BROWSER_USAGE: &str = "\
-usage: tidebreak browser list --json
-       tidebreak browser navigate --browser-id <id> --url <url> --json
-       tidebreak browser snapshot --browser-id <id> [--max-nodes <n>] --json
-       tidebreak browser wait --browser-id <id> --snapshot-id <id> --document-epoch <n> \
-              (--url-changed | --load-state <idle|loading|ready> | \
-               --text-present <text> | --text-absent <text>) \
-              [--timeout-ms <ms>] --json
-       tidebreak browser screenshot --browser-id <id> --snapshot-id <id> \
-              --document-epoch <n> [--max-width <px>] [--max-height <px>] \
-              [--output <path>] --json
-       tidebreak browser act --browser-id <id> --snapshot-id <id> \
-              --document-epoch <n> --ref <ref> \
-              (--click | --focus | --hover | --fill <text> | --select <value> | \
-               --check | --uncheck | --press <key> | --scroll-into-view) \
-              [--execution-mode <background|foreground>] --json
-       tidebreak browser open --url <url> --json
-       tidebreak browser close --browser-id <id> --json
-       tidebreak browser activate --browser-id <id> --json
-       tidebreak browser diagnostics --browser-id <id> \
-              [--after-sequence <n>] [--max-entries <n>] --json
-
-With --output, screenshot writes the decoded image to the given path with
-private permissions and prints JSON without base-64 pixels.
-
-Browser commands use the session-private capfile named by
-TIDEBREAK_BROWSER_CAPFILE. They do not take --server/--attach.";
 
 // ---------------------------------------------------------------------------
 // CLI runner

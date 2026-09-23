@@ -684,7 +684,11 @@ impl Config {
         let profile = match profile.filter(|value| !value.is_empty()).as_deref() {
             None | Some("desktop") => Profile::Desktop,
             Some("self_host" | "selfhost") => Profile::SelfHost,
-            Some(other) => return Err(AgentError::config(format!("unknown profile: {other}"))),
+            Some(other) => {
+                return Err(AgentError::config(format!(
+                    "unknown profile: {other} (valid values: desktop, self_host)"
+                )));
+            }
         };
         let data_dir = match data_dir.filter(|dir| !dir.is_empty()) {
             Some(dir) => PathBuf::from(dir),
@@ -1097,6 +1101,30 @@ mod tests {
                 .as_deref(),
             Some(std::path::Path::new("/opt/tidebreak/ui"))
         );
+    }
+
+    #[test]
+    fn unknown_profile_lists_valid_values() {
+        let error = Config::from_vars(
+            Some("bogus".into()),
+            Some(OsString::from("/data")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown profile: bogus"));
+        assert!(error.contains("desktop"));
+        assert!(error.contains("self_host"));
     }
 
     #[test]

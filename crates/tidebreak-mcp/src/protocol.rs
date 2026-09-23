@@ -203,6 +203,20 @@ pub struct ToolDescriptor {
     pub description: String,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    /// Human title for UI clients. Tool names stay the wire identifiers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
+}
+
+/// MCP tool annotations derived from a Tidebreak approval class.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolAnnotations {
+    #[serde(rename = "readOnlyHint")]
+    pub read_only_hint: bool,
+    #[serde(rename = "destructiveHint")]
+    pub destructive_hint: bool,
 }
 
 /// Params of `tools/call`.

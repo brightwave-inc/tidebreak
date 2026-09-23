@@ -367,9 +367,19 @@ async fn one_turn(
                 }
             }
             RendererAgentEvent::TurnCompleted { .. } => break 0,
-            RendererAgentEvent::TurnFailed { category, .. } => {
+            RendererAgentEvent::TurnFailed {
+                category,
+                detail,
+                model,
+            } => {
                 printer.finish();
-                eprintln!("tidebreak: turn failed ({})", category.as_str());
+                let model_line = model
+                    .as_ref()
+                    .map(|identity| format!("{}/{}", identity.provider.as_str(), identity.id));
+                eprint!(
+                    "{}",
+                    turn_failed_notice(category.as_str(), detail.as_deref(), model_line.as_deref())
+                );
                 break EXIT_TURN_UNSUCCESSFUL;
             }
             RendererAgentEvent::TurnRefused { refusal, .. } => {
@@ -1031,6 +1041,36 @@ fn tool_failure_notice(reason: crate::api::wire::RendererToolFailureReason) -> &
     }
 }
 
+/// Human notice for a failed `-p` turn: category, optional detail, optional
+/// model identity, and a one-line next step.
+fn turn_failed_notice(category: &str, detail: Option<&str>, model: Option<&str>) -> String {
+    let mut text = format!("tidebreak: turn failed ({category})");
+    if let Some(detail) = detail.map(str::trim).filter(|detail| !detail.is_empty()) {
+        text.push_str(": ");
+        text.push_str(detail);
+    }
+    text.push('\n');
+    if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+        text.push_str("  model: ");
+        text.push_str(model);
+        text.push('\n');
+    }
+    text.push_str("  ");
+    text.push_str(turn_failure_hint(category));
+    text.push('\n');
+    text
+}
+
+fn turn_failure_hint(category: &str) -> &'static str {
+    match category {
+        "auth" => "run `tidebreak provider set-key <kind>`",
+        "rate_limited" => "wait, then run the turn again",
+        "provider_access" => "check the provider account, then try a different model or key",
+        "transient" => "run the turn again",
+        _ => "check the server logs, then try again",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,5 +1101,17 @@ mod tests {
             tool_failure_notice(crate::api::wire::RendererToolFailureReason::ProviderUnavailable),
             "the execution provider is unavailable"
         );
+    }
+
+    #[test]
+    fn a_failed_turn_prints_detail_and_an_auth_hint() {
+        let notice = turn_failed_notice(
+            "auth",
+            Some("invalid api key"),
+            Some("anthropic/claude-sonnet"),
+        );
+        assert!(notice.contains("turn failed (auth): invalid api key"));
+        assert!(notice.contains("model: anthropic/claude-sonnet"));
+        assert!(notice.contains("run `tidebreak provider set-key <kind>`"));
     }
 }

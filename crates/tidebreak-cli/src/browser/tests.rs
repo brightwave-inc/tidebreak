@@ -990,7 +990,10 @@ fn parse_browser_rejects_unknown_verb() {
 #[test]
 fn parse_browser_empty_is_usage() {
     let err = parse_browser(vec![]).unwrap_err();
-    assert!(err.contains("usage"), "error: {err}");
+    assert!(
+        err.contains("browser requires a subcommand"),
+        "error: {err}"
+    );
 }
 
 // -- JSON round-trip contracts -----------------------------------------
