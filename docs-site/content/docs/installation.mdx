@@ -128,6 +128,13 @@ Code worktrees live outside that directory, by default under
 `~/Tidebreak/workspaces`. You can change the root in settings; existing
 workspaces stay where they are.
 
+**Settings → Data and privacy** shows this directory and how much disk each
+part of it uses. From there you can open it in your file manager, back it up as
+one `.tar.gz`, export your conversations as Markdown or JSON, reset your
+settings, or delete everything. The page also lists what Tidebreak sends off
+your computer, and how to turn each one off. The CLI does the backup and the
+export too: see [`tidebreak data`](/headless#data).
+
 Provider API keys are **not** in the application data directory. They go to
 your OS credential store — Login Keychain on macOS, Credential Manager on
 Windows, or Secret Service on Linux — under the service name `tidebreak`. A
@@ -147,6 +154,12 @@ this directory in your own backups, like any other data you cannot lose.
 
 Delete the app, then the data Tidebreak left behind. The application data
 directory holds `backups/`, so copy out any backup you want to keep first.
+
+To remove the data and your keys in one step, use **Delete all data** in
+**Settings → Data and privacy** before you delete the app. It asks you to type
+`delete all data`, deletes the application data directory and this
+installation's keychain items, and quits. It leaves your code worktrees and
+repositories alone.
 
 On macOS:
 
