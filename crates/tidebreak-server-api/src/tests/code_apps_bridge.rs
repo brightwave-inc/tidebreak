@@ -3,8 +3,59 @@
 
 use super::code::*;
 
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
+use tower::ServiceExt as _;
+
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::CapLevel;
+
+/// A session-scoped bearer is the only credential the engine-facing MCP
+/// routes know, so the peer address is their second gate: a request from
+/// anywhere but this machine is refused before its bearer is looked up, and
+/// so is one whose peer the server cannot see.
+#[tokio::test]
+async fn the_engine_mcp_routes_answer_loopback_peers_only() {
+    let (router, _token, _runtime, _dir) =
+        code_app_with(ScriptedAdapter::new(plain_text_script())).await;
+    for path in ["/code/mcp/approval-prompt", "/code/mcp/connected-apps"] {
+        let ask = |peer: Option<&'static str>| {
+            let router = router.clone();
+            async move {
+                let mut request = Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(header::AUTHORIZATION, "Bearer not-a-session-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+                    ))
+                    .unwrap();
+                if let Some(peer) = peer {
+                    request.extensions_mut().insert(axum::extract::ConnectInfo(
+                        peer.parse::<std::net::SocketAddr>().unwrap(),
+                    ));
+                }
+                router.oneshot(request).await.unwrap().status()
+            }
+        };
+        assert_eq!(
+            ask(Some("203.0.113.9:40000")).await,
+            StatusCode::FORBIDDEN,
+            "{path}: a routable peer never reaches the bearer check"
+        );
+        assert_eq!(
+            ask(None).await,
+            StatusCode::FORBIDDEN,
+            "{path}: an unknown peer is refused, not trusted"
+        );
+        assert_eq!(
+            ask(Some("127.0.0.1:40000")).await,
+            StatusCode::UNAUTHORIZED,
+            "{path}: a loopback peer proceeds to the bearer check"
+        );
+    }
+}
 
 /// A session on an external engine is handed the bridge, and the bridge
 /// answers that session's token with the mounted MCP tools. Without the

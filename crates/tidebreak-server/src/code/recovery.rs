@@ -1290,6 +1290,7 @@ mod tests {
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
         })
         .await
         .unwrap();
@@ -1661,6 +1662,7 @@ mod tests {
                 native: None,
                 tool_bridge: None,
                 apps: None,
+                project_config: tidebreak_harness::ProjectConfig::Skip,
             })
             .await
             .unwrap();

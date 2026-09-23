@@ -30,6 +30,23 @@ where the next one goes in settings; existing workspaces stay where they are,
 because git records absolute paths and moving a checkout is a repair operation
 rather than a rename.
 
+## Repository trust
+
+A repository can carry settings for the coding agents themselves: Claude Code
+hooks and MCP servers in `.claude/settings.json` and `.mcp.json`, Codex's
+`.codex/config.toml`, opencode's `opencode.json` and plugins, and instruction
+files such as `CLAUDE.md` and `AGENTS.md`. Those settings can run commands on
+your computer as soon as a session starts, outside Tidebreak's approvals.
+
+So Tidebreak starts every agent without a repository's own settings until you
+trust the repository. Before the first session in a repository that has them,
+Tidebreak lists each file and what it would do, and asks you to **Trust this
+repository** or **Continue without its settings**. Your answer covers every
+workspace of the repository. To change it later, open the repository's
+settings and use the **Trust this repository** switch.
+
+Trust a repository only if you trust everyone who can change it.
+
 ## Harnesses
 
 A **harness** is the coding-agent CLI Tidebreak drives. Four are supported:

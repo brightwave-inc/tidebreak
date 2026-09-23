@@ -956,6 +956,13 @@ pub async fn list_cli_models(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Listing models belongs to no repository. Run it where no project config
+    // can be found, so a checkout the server happens to run in never has its
+    // plugins or servers started by a probe.
+    let Ok(neutral) = tempfile::tempdir() else {
+        return Vec::new();
+    };
+    command.current_dir(neutral.path());
     apply_captured_env(&mut command, env);
     let Ok(child) = spawn_process_tree(&mut command) else {
         return Vec::new();

@@ -118,6 +118,7 @@ import {
   type ShellShortcutMode,
 } from "./ShellShortcuts";
 import { CommandPaletteDialog } from "./CommandPaletteDialog";
+import { RepositoryTrustSheetHost } from "./code/RepositoryTrustStore";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { useUiStore } from "./UiStore";
 import { UPDATE_CHECK_REQUESTED_EVENT, useDesktopUpdates } from "./updates";
@@ -1268,6 +1269,7 @@ export function AppShell() {
             onOpenChange={setShortcutsOpen}
           />
           <CommandPaletteDialog />
+          <RepositoryTrustSheetHost />
           {computerUseSetupPrompt && (
             <ComputerUseSetupDialog
               open={!computerUseSetupDismissed}

@@ -1446,6 +1446,35 @@ comments: Array<PullRequestComment>, };
 export type CodePrMergeMethod = "squash" | "merge" | "rebase";
 
 /**
+ * One effect a config file has, counted.
+ */
+export type CodeProjectConfigEffect = { kind: CodeProjectConfigEffectKind, count: number, };
+
+/**
+ * What loading one engine config file would do.
+ */
+export type CodeProjectConfigEffectKind = "hooks" | "mcp_servers" | "plugins" | "packages" | "environment_variables" | "permission_rules" | "helper_commands" | "custom_tools" | "workflows" | "scheduled_tasks" | "agents" | "commands" | "skills" | "instructions" | "settings";
+
+/**
+ * One engine config file or directory a checkout carries.
+ */
+export type CodeProjectConfigFile = {
+/**
+ * Path from the checkout root with `/` separators. A directory ends in
+ * `/`.
+ */
+path: string,
+/**
+ * The engines that load it.
+ */
+engines: Array<HarnessKind>,
+/**
+ * What loading it would do. Empty when the contents could not be read,
+ * which still counts as config the engine would load.
+ */
+effects: Array<CodeProjectConfigEffect>, };
+
+/**
  * How strongly a workspace is tied to a pull request (decision 77).
  *
  * `gh pr create` mints authored attribution. A push whose branch is or
@@ -1495,6 +1524,25 @@ export type CodeRepoSource = { kind: string, available: boolean, remediation?: s
  * set may grow without a client release (decision 17).
  */
 export type CodeRepoSources = { sources: Array<CodeRepoSource>, chooses_destination: boolean, };
+
+/**
+ * Whether engines load the configuration a repository carries for them:
+ * hooks, MCP servers, plugins, environment, and other engine settings.
+ */
+export type CodeRepoTrust = "undecided" | "trusted" | "untrusted";
+
+/**
+ * A repository's trust decision and the engine config a checkout of it
+ * carries: `GET /code/repos/{id}/trust` scans the repository's main
+ * checkout, and `GET /code/workspaces/{id}/trust` scans that workspace's
+ * worktree, which is what its sessions would load.
+ */
+export type CodeRepoTrustSnapshot = { repo_id: RepoId, trust: CodeRepoTrust,
+/**
+ * Engine config the scanned checkout carries, in a stable order. Empty
+ * when it carries none.
+ */
+files: Array<CodeProjectConfigFile>, };
 
 /**
  * Whether the request creates a child session or continues an existing one.
@@ -5133,6 +5181,15 @@ total: number, };
  * or a `contribute` row.
  */
 export type SessionVisibility = "private" | "deployment";
+
+/**
+ * `PUT /code/repos/{id}/trust`.
+ */
+export type SetCodeRepoTrustBody = {
+/**
+ * `true` trusts the repository; `false` continues without its config.
+ */
+trusted: boolean, };
 
 /**
  * Body of `PUT /code/worktree-root`. A null or blank root clears the setting.

@@ -345,6 +345,13 @@ async fn observe_commands(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // The probe belongs to no repository. Run it where no project config can
+    // be found, so a checkout the server happens to run in never has its
+    // hooks run by a probe.
+    let Ok(neutral) = tempfile::tempdir() else {
+        return Vec::new();
+    };
+    command.current_dir(neutral.path());
     command.env_clear();
     for (key, value) in crate::filter_child_env(env.iter().cloned()) {
         command.env(key, value);

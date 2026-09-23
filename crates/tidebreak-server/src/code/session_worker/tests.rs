@@ -265,6 +265,7 @@ async fn a_stale_local_worker_leaves_sandbox_queue_rows_for_the_remote_driver() 
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
         })
         .await
         .unwrap();
@@ -383,6 +384,7 @@ async fn an_engine_observed_decision_settles_its_own_approval_row() {
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
         })
         .await
         .unwrap();
@@ -528,6 +530,7 @@ async fn a_send_over_an_internal_turn_waiting_on_a_client_is_refused() {
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
         })
         .await
         .unwrap();
@@ -641,6 +644,7 @@ async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
         })
         .await
         .unwrap();
@@ -798,6 +802,7 @@ async fn client_and_agent_run_parks_resume_after_a_worker_restart() {
                 native: None,
                 tool_bridge: None,
                 apps: None,
+                project_config: tidebreak_harness::ProjectConfig::Skip,
             })
             .await
             .unwrap();
@@ -871,6 +876,7 @@ async fn client_and_agent_run_parks_resume_after_a_worker_restart() {
                 native: None,
                 tool_bridge: None,
                 apps: None,
+                project_config: tidebreak_harness::ProjectConfig::Skip,
             })
             .await
             .unwrap();
@@ -991,6 +997,7 @@ async fn a_decision_on_the_running_leg_resumes_the_park() {
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
         })
         .await
         .unwrap();
@@ -1113,6 +1120,7 @@ async fn an_interrupt_closes_a_parked_turn() {
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
         })
         .await
         .unwrap();
@@ -1217,6 +1225,7 @@ async fn a_confirmed_setting_reservation_wins_over_an_already_queued_idle_turn()
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
         })
         .await
         .unwrap();
@@ -1335,6 +1344,7 @@ async fn a_queued_turn_uses_a_later_setting_committed_before_promotion() {
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
         })
         .await
         .unwrap();
@@ -2012,6 +2022,7 @@ async fn an_update_quiesce_refuses_new_turns_until_resumed() {
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
         })
         .await
         .unwrap();

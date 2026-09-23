@@ -24,7 +24,10 @@ export function RepositorySettingsDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  client: Pick<ApiClient, "getCodeRepo" | "patchCodeRepo">;
+  client: Pick<
+    ApiClient,
+    "getCodeRepo" | "patchCodeRepo" | "getCodeRepoTrust" | "setCodeRepoTrust"
+  >;
   repoId: string | null;
   repoLabel: string;
   onSaved?: (repo: CodeRepoSnapshot) => void;

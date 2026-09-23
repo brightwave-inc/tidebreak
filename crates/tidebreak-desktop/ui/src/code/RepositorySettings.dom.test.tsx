@@ -3,7 +3,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CodeRepoSnapshot } from "@/api/types";
+import type { CodeRepoSnapshot, CodeRepoTrustSnapshot } from "@/api/types";
 import { RepositorySettings } from "./RepositorySettings";
 
 afterEach(cleanup);
@@ -24,6 +24,28 @@ function repo(overrides: Partial<CodeRepoSnapshot> = {}): CodeRepoSnapshot {
   } as CodeRepoSnapshot;
 }
 
+function trust(
+  overrides: Partial<CodeRepoTrustSnapshot> = {},
+): CodeRepoTrustSnapshot {
+  return {
+    repo_id: "repo-1",
+    trust: "undecided",
+    files: [],
+    ...overrides,
+  };
+}
+
+/** The trust half of the client, answering with one stored decision. */
+function trustClient(stored: CodeRepoTrustSnapshot = trust()) {
+  return {
+    getCodeRepoTrust: vi.fn(async () => stored),
+    setCodeRepoTrust: vi.fn(async (_id: string, trusted: boolean) => ({
+      ...stored,
+      trust: trusted ? ("trusted" as const) : ("untrusted" as const),
+    })),
+  };
+}
+
 describe("RepositorySettings", () => {
   it("saves an edited setup script when the field is committed", async () => {
     const user = userEvent.setup();
@@ -34,6 +56,7 @@ describe("RepositorySettings", () => {
         ...stored,
         setup_script: "pnpm install --frozen-lockfile",
       })),
+      ...trustClient(),
     };
     render(
       <RepositorySettings
@@ -68,6 +91,7 @@ describe("RepositorySettings", () => {
         ...stored,
         ...(body as object),
       })),
+      ...trustClient(),
     };
     render(
       <RepositorySettings
@@ -104,6 +128,7 @@ describe("RepositorySettings", () => {
     const client = {
       getCodeRepo: vi.fn(async () => repo()),
       patchCodeRepo: vi.fn(),
+      ...trustClient(),
     };
     render(
       <RepositorySettings
@@ -120,7 +145,11 @@ describe("RepositorySettings", () => {
   });
 
   it("says what to do when the repository is not registered", async () => {
-    const client = { getCodeRepo: vi.fn(), patchCodeRepo: vi.fn() };
+    const client = {
+      getCodeRepo: vi.fn(),
+      patchCodeRepo: vi.fn(),
+      ...trustClient(),
+    };
     render(
       <RepositorySettings
         client={client}
@@ -135,5 +164,48 @@ describe("RepositorySettings", () => {
       ),
     ).toBeInTheDocument();
     expect(client.getCodeRepo).not.toHaveBeenCalled();
+    expect(client.getCodeRepoTrust).not.toHaveBeenCalled();
+  });
+
+  it("revokes trust from the switch and lists what the checkout carries", async () => {
+    const user = userEvent.setup();
+    const trustHalf = trustClient(
+      trust({
+        trust: "trusted",
+        files: [
+          {
+            path: ".claude/settings.json",
+            engines: ["claude_code"],
+            effects: [{ kind: "hooks", count: 2 }],
+          },
+        ],
+      }),
+    );
+    const client = {
+      getCodeRepo: vi.fn(async () => repo()),
+      patchCodeRepo: vi.fn(),
+      ...trustHalf,
+    };
+    render(
+      <RepositorySettings
+        client={client}
+        repoId="repo-1"
+        repoLabel="brightwave-inc/tidebreak"
+      />,
+    );
+
+    const trustSwitch = await screen.findByRole("switch", {
+      name: "Trust this repository",
+    });
+    expect(trustSwitch).toBeChecked();
+    expect(screen.getByText(".claude/settings.json")).toBeInTheDocument();
+    expect(screen.getByText(/2 hooks/)).toBeInTheDocument();
+
+    await user.click(trustSwitch);
+
+    await waitFor(() =>
+      expect(trustHalf.setCodeRepoTrust).toHaveBeenCalledWith("repo-1", false),
+    );
+    await waitFor(() => expect(trustSwitch).not.toBeChecked());
   });
 });

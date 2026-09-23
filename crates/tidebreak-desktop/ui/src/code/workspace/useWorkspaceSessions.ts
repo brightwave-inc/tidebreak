@@ -34,6 +34,7 @@ import {
   waitForCodeSessionHydrated,
 } from "../CodeSessionRegistry";
 import { submitFirstCodeTurn } from "../publishCodeSessionImages";
+import { confirmRepositoryTrust } from "../RepositoryTrustStore";
 import { useConversationDigests } from "../CodeUpdatesStore";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { useNavigate } from "@tanstack/react-router";
@@ -305,6 +306,20 @@ export function useWorkspaceSessions({
         const listed = preferredCodeModels(harness, native, gateway);
         const posted =
           model ?? listed.find((option) => option.default)?.id ?? listed[0]?.id;
+        // A repository's own engine config can run commands the moment the
+        // engine starts, so a session that would load it asks first.
+        if (workspace) {
+          await confirmRepositoryTrust({
+            client: startedWithClient,
+            workspace,
+            harness,
+          });
+          if (!isCurrent()) {
+            throw new Error(
+              "The Code connection changed before the session started. Send the message again.",
+            );
+          }
+        }
         created = await startedWithClient.createCodeSession(workspaceId, {
           harness,
           permission_mode: permissionMode,

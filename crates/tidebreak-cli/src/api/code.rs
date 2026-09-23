@@ -784,6 +784,9 @@ mod tests {
         for (name, kind, value) in &fixtures {
             match kind.as_str() {
                 "repo" => round_trip::<CodeRepoSnapshot>(name, value),
+                "repo_trust" => {
+                    round_trip::<tidebreak_server::wire::CodeRepoTrustSnapshot>(name, value)
+                }
                 "workspace" => round_trip::<CodeWorkspaceSnapshot>(name, value),
                 "session" => round_trip::<SessionSnapshot>(name, value),
                 "turn" => round_trip::<SubmitTurnResponse>(name, value),

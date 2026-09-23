@@ -320,6 +320,7 @@ fn unit_session(sink: Arc<dyn crate::HarnessEventSink>) -> CodexSession {
         native: None,
         tool_bridge: None,
         apps: None,
+        project_config: crate::ProjectConfig::Load,
     })
 }
 
@@ -632,6 +633,7 @@ fn spec_for(
         native: None,
         tool_bridge: None,
         apps: None,
+        project_config: crate::ProjectConfig::Load,
     }
 }
 
@@ -2195,4 +2197,51 @@ async fn correlated_steer_timeout_does_not_hold_terminal_drain_forever() {
     }
     session.expire_control_requests();
     assert!(!session.controls_pending());
+}
+
+/// A repository the user has not trusted runs Codex with its worktree
+/// marked untrusted, which keeps `.codex/` config, hooks, rules, and the
+/// `AGENTS.md` files off even when `~/.codex/config.toml` trusts the main
+/// checkout. A trusted repository launches with no override.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_untrusted_repository_marks_its_worktree_untrusted_for_codex() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("codex");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >\"$FAKE_CODEX_ARGV\"\n{}",
+        FAKE_APP_SERVER.trim_start_matches("#!/bin/sh\n")
+    );
+    write_app_server(&binary, &script);
+    let argv_log = dir.path().join("argv.log");
+    for project_config in [crate::ProjectConfig::Skip, crate::ProjectConfig::Load] {
+        let mut spec = spec_for(dir.path(), &binary, None);
+        spec.project_config = project_config;
+        spec.extra_env.push((
+            "FAKE_CODEX_ARGV".into(),
+            argv_log.to_string_lossy().into_owned(),
+        ));
+        let session = CodexSession::new(spec);
+        session.ensure_child().await.unwrap();
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        let projects = argv.lines().find(|arg| arg.starts_with("projects="));
+        match project_config {
+            crate::ProjectConfig::Skip => {
+                let table: toml::Table = toml::from_str(
+                    projects.expect("an untrusted repository marks its worktree untrusted"),
+                )
+                .unwrap();
+                let worktree = dir.path().to_str().unwrap();
+                assert_eq!(
+                    table["projects"][worktree]["trust_level"].as_str(),
+                    Some("untrusted"),
+                    "{argv}"
+                );
+            }
+            crate::ProjectConfig::Load => {
+                assert_eq!(projects, None, "a trusted repository launches as it did");
+            }
+        }
+        session.park().await.unwrap();
+    }
 }

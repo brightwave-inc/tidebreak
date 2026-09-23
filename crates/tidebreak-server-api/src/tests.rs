@@ -64,6 +64,7 @@ mod code_pr_facts;
 mod code_recap;
 #[cfg(unix)]
 mod code_reconcile;
+mod code_repo_trust;
 mod code_rewrite;
 mod code_settings;
 mod code_steer;

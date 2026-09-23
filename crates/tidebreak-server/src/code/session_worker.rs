@@ -179,6 +179,11 @@ pub(crate) struct WorkerHandle {
     /// binary compares against this to find the workers still on the old
     /// file. `None` for an in-process engine.
     pub binary: Option<std::path::PathBuf>,
+    /// Whether the engine this worker launches loads the repository's own
+    /// engine config, copied from the repository's trust decision at spawn.
+    /// A changed decision compares against this to find the workers still
+    /// launched under the old one.
+    pub project_config: tidebreak_harness::ProjectConfig,
     pub commands: mpsc::Sender<WorkerCommand>,
     pub queue: TurnQueue,
     pub sink: Arc<LiveSink>,
@@ -886,6 +891,7 @@ pub(crate) fn spawn_session_worker(
     WorkerHandle {
         spawn_epoch,
         binary: None,
+        project_config: tidebreak_harness::ProjectConfig::Skip,
         commands: tx,
         queue,
         sink,

@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
-import type { CodeRepoSnapshot } from "@/api/types";
+import type { CodeRepoSnapshot, CodeRepoTrustSnapshot } from "@/api/types";
 import { RepositorySettings } from "@/code/RepositorySettings";
 import { codeRepositories } from "./fixtures";
 
@@ -19,7 +19,37 @@ const stored: CodeRepoSnapshot = {
   ],
 };
 
-function client(repo: CodeRepoSnapshot | null, delayMs = 0) {
+/** An undecided repository whose checkout has Claude Code settings. */
+const undecided: CodeRepoTrustSnapshot = {
+  repo_id: stored.id,
+  trust: "undecided",
+  files: [
+    {
+      path: ".claude/settings.json",
+      engines: ["claude_code"],
+      effects: [
+        { kind: "hooks", count: 2 },
+        { kind: "environment_variables", count: 1 },
+      ],
+    },
+    {
+      path: ".mcp.json",
+      engines: ["claude_code"],
+      effects: [{ kind: "mcp_servers", count: 1 }],
+    },
+    {
+      path: "AGENTS.md",
+      engines: ["codex", "opencode"],
+      effects: [{ kind: "instructions", count: 1 }],
+    },
+  ],
+};
+
+function client(
+  repo: CodeRepoSnapshot | null,
+  delayMs = 0,
+  trust: CodeRepoTrustSnapshot = undecided,
+) {
   return {
     getCodeRepo: async () => {
       if (delayMs) await new Promise((done) => setTimeout(done, delayMs));
@@ -30,6 +60,18 @@ function client(repo: CodeRepoSnapshot | null, delayMs = 0) {
       _id: string,
       body: Partial<CodeRepoSnapshot>,
     ): Promise<CodeRepoSnapshot> => ({ ...(repo ?? stored), ...body }),
+    getCodeRepoTrust: async () => {
+      if (delayMs) await new Promise((done) => setTimeout(done, delayMs));
+      if (!repo) throw new Error("repo 404");
+      return trust;
+    },
+    setCodeRepoTrust: async (
+      _id: string,
+      trusted: boolean,
+    ): Promise<CodeRepoTrustSnapshot> => ({
+      ...trust,
+      trust: trusted ? "trusted" : "untrusted",
+    }),
   };
 }
 
@@ -62,6 +104,33 @@ type Story = StoryObj<typeof meta>;
 
 /** Both scripts set and two quick actions, one of them auto-run on create. */
 export const Configured: Story = {};
+
+/**
+ * A trusted repository: the switch is on, and the checkout's engine settings
+ * are listed so the reader sees what trust covers. Turning it off revokes.
+ */
+export const Trusted: Story = {
+  args: {
+    client: client(stored, 0, { ...undecided, trust: "trusted" }) as never,
+  },
+};
+
+/**
+ * The reader chose to continue without the repository's settings; engines
+ * skip them until the switch goes on.
+ */
+export const NotTrusted: Story = {
+  args: {
+    client: client(stored, 0, { ...undecided, trust: "untrusted" }) as never,
+  },
+};
+
+/** A checkout with no engine settings of its own. */
+export const NoEngineSettings: Story = {
+  args: {
+    client: client(stored, 0, { ...undecided, files: [] }) as never,
+  },
+};
 
 /** A fresh registration: defaults for the refs, no scripts, no actions. */
 export const Empty: Story = {

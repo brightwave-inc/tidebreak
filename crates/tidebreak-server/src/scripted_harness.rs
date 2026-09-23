@@ -158,6 +158,9 @@ pub struct ScriptedAdapter {
     /// Connected-apps channel each launch was handed, `None` when it was
     /// handed none.
     launched_apps: Arc<std::sync::Mutex<Vec<Option<tidebreak_harness::AppsChannelSpec>>>>,
+    /// Whether each launch was told to load the repository's own engine
+    /// config.
+    launched_project_configs: Arc<std::sync::Mutex<Vec<tidebreak_harness::ProjectConfig>>>,
     /// Files to materialize in the worktree at the start of each turn.
     writes: Vec<ScriptedWrite>,
     /// Sleep once at the start of each turn, so a caller can observe Running
@@ -207,6 +210,7 @@ impl ScriptedAdapter {
             probes: Arc::new(AtomicU64::new(0)),
             launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
             launched_apps: Arc::new(std::sync::Mutex::new(Vec::new())),
+            launched_project_configs: Arc::new(std::sync::Mutex::new(Vec::new())),
             authenticated: Arc::new(std::sync::Mutex::new(Some(true))),
             writes: Vec::new(),
             turn_delay: Duration::ZERO,
@@ -233,6 +237,16 @@ impl ScriptedAdapter {
     #[cfg(any(test, feature = "test-support"))]
     pub fn launched_apps(&self) -> Vec<Option<tidebreak_harness::AppsChannelSpec>> {
         self.launched_apps
+            .lock()
+            .expect("scripted launches")
+            .clone()
+    }
+
+    /// Whether each launched session was told to load the repository's own
+    /// engine config, in order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn launched_project_configs(&self) -> Vec<tidebreak_harness::ProjectConfig> {
+        self.launched_project_configs
             .lock()
             .expect("scripted launches")
             .clone()
@@ -534,6 +548,10 @@ impl HarnessAdapter for ScriptedAdapter {
             .lock()
             .expect("scripted launches")
             .push(spec.apps.clone());
+        self.launched_project_configs
+            .lock()
+            .expect("scripted launches")
+            .push(spec.project_config);
         Ok(Box::new(ScriptedSession {
             sink: spec.sink,
             events: self.events.clone(),
@@ -1032,6 +1050,7 @@ mod tests {
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
         }
     }
 

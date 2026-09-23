@@ -22,6 +22,7 @@ import {
   waitForCodeSessionHydrated,
 } from "./CodeSessionRegistry";
 import { submitFirstCodeTurn } from "./publishCodeSessionImages";
+import { confirmRepositoryTrust } from "./RepositoryTrustStore";
 
 /** What the first session of a workspace is created with. */
 export type FirstSessionSettings = {
@@ -146,6 +147,13 @@ export async function startFirstSession(input: {
       requested: settings.model,
       models: input.models,
       defaultModelKey: input.defaultModelKey,
+    });
+    // A repository's own engine config can run commands the moment the
+    // engine starts, so its first session asks before loading it.
+    await confirmRepositoryTrust({
+      client,
+      workspace,
+      harness: settings.harness,
     });
     const session = await client.createCodeSession(workspace.id, {
       harness: settings.harness,

@@ -341,7 +341,9 @@ Codex through an `mcp_servers` override with the bearer in
 ACP `mcpServers` list. The in-process engine reads the MCP runtime directly,
 so a chat sees the same tools on every engine. Gateway bearers and
 attestation stay inside the server; the child only ever holds the loopback
-token.
+token. Claude Code reads its MCP config from a file only the session's user
+can read, never from its arguments, because any local account can read a
+process's arguments.
 
 Session-long children spawn lazily on the first turn, and an idle session's
 child is parked — stopped, then respawned and resumed by the next turn
@@ -361,6 +363,41 @@ harness are established by the fixture-capture spike and recorded in the
 fixture manifests — deliberately not transcribed here, so this page cannot
 drift from captured reality
 ([`0031`](decisions/0031-harness-adapter-boundary.md)).
+
+### Repository trust
+
+A repository can carry its own engine config: Claude Code's
+`.claude/settings.json` hooks and `.mcp.json` servers, Codex's
+`.codex/config.toml`, opencode's `opencode.json` and `.opencode/` plugins,
+and the instruction files each engine reads. A headless engine loads them
+without asking, as you, outside Tidebreak's approvals and sandbox. So every
+engine launches with its project-level config turned off until you trust the
+repository (`ProjectConfig` on the launch spec):
+
+- Claude Code: `--setting-sources user --strict-mcp-config`, plus
+  `CLAUDE_CODE_DISABLE_CRON=1` for `.claude/scheduled_tasks.json`.
+- Codex: `-c projects={"<worktree>"={trust_level="untrusted"}}`, which wins
+  over any trust the main checkout has in `~/.codex/config.toml`.
+- opencode: `OPENCODE_DISABLE_PROJECT_CONFIG` and
+  `OPENCODE_DISABLE_EXTERNAL_SKILLS`.
+- Grok: Grok keeps its own folder trust, which Tidebreak never grants over
+  ACP; an untrusted launch also turns off `.envrc` evaluation.
+
+The decision is the `tidebreak.trusted` key in the repository's own git
+config, so every worktree reads the same answer and nothing needs a
+migration. A missing or unreadable key is undecided, and undecided launches
+without the config. A session with no workspace involves no repository and
+launches as the engine would on its own.
+
+Before the first session in an undecided repository, the desktop reads
+`GET /code/workspaces/{id}/trust`. When the worktree carries config the
+chosen engine would load, it shows a sheet listing each file and what it
+does, and records the answer; otherwise it starts without asking. The
+repository's settings show the decision with a switch that revokes it. A
+changed decision restarts idle sessions of the repository at once, and a
+working session after its turn ends. The scan lives in
+`crates/tidebreak-harness/src/project_config.rs` and each engine's switch in
+its adapter; both were checked against the pinned engine versions.
 
 ### The internal engine
 
@@ -527,6 +564,7 @@ Sessions, updates, and approvals use the unprefixed routes shown here.
 
 ```
 POST/GET        /code/repos                GET/PATCH/DELETE /code/repos/{id}
+GET/PUT         /code/repos/{id}/trust     {trusted}  engines load the repo's own config
 GET             /code/repos/sources        POST /code/repos/clone    GET /code/repos/clone/{job}
 POST/GET        /sessions                  a session with no workspace (internal engine)
 GET             /sessions/{id}
@@ -540,6 +578,7 @@ GET/PATCH       /code/workspaces/{id}
 POST            /code/workspaces/{id}/archive        {force?}
 POST            /code/workspaces/{id}/restore        back from a reclaim tier (0059)
 POST            /code/workspaces/{id}/retry-setup    run setup again on the same worktree
+GET             /code/workspaces/{id}/trust          the repo's trust and the worktree's engine config
 POST            /code/workspaces/{id}/sessions       {harness, permission_mode,
                                                      model?, reasoning_effort?, fast_mode?}
 POST/GET        /sessions/{id}/turns                 {message}  (queued while running —
@@ -564,6 +603,7 @@ GET             /approvals?state=pending
 POST            /approvals/{id}/decision             {decision: approve | deny | approve_with_grant | answers | plan_decision, ...}
 POST            /code/mcp/approval-prompt            loopback approval endpoint (0033)
 POST            /code/mcp/connected-apps             loopback MCP bridge over every mounted MCP server, for external engines
+                                                     (both answer loopback peers only)
 
 GET             /code/workspaces/{id}/files          changed files vs base, per-turn filter
 GET             /code/workspaces/{id}/diff?turn=&file=   bounded unified diff
@@ -663,6 +703,10 @@ of its own: registering one opens the new-workspace dialog, and picking one on
   `TerminalPane` (ephemeral renderer over the cursor-read
   API; replays recent bytes on mount; chunked writes on a frame budget).
 - Settings: one new section, "Coding engines" — the doctor.
+- Repository trust: `RepositoryTrustStore.tsx` asks before the first session
+  in an undecided repository with `RepositoryTrustSheet`, a dialog mounted
+  once in the shell; `RepositoryTrustSettings` shows and revokes the decision
+  in the repository's settings.
 - Wire: generated types plus hand-written validators in
   `ui/src/code/parsers.ts`, per [`docs/wire-types.md`](wire-types.md).
 

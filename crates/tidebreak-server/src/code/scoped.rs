@@ -186,6 +186,35 @@ impl ScopedCode {
         self.runtime.save_repo(repo).await
     }
 
+    /// The repository's trust decision and the engine config its main
+    /// checkout carries.
+    pub async fn repo_trust(
+        &self,
+        id: RepoId,
+    ) -> Result<crate::code::types::CodeRepoTrustSnapshot, ServerError> {
+        self.runtime.repo_trust(&self.owner, id).await
+    }
+
+    /// Record the repository's trust decision. Owner only: repositories are
+    /// never shared across owners.
+    pub async fn set_repo_trust(
+        &self,
+        id: RepoId,
+        trusted: bool,
+    ) -> Result<crate::code::types::CodeRepoTrustSnapshot, ServerError> {
+        self.runtime.set_repo_trust(&self.owner, id, trusted).await
+    }
+
+    /// The trust decision for the workspace's repository and the engine
+    /// config its worktree carries. Owner only: a reader with session access
+    /// neither starts sessions there nor decides what they load.
+    pub async fn workspace_trust(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<crate::code::types::CodeRepoTrustSnapshot, ServerError> {
+        self.runtime.workspace_trust(&self.owner, id).await
+    }
+
     pub async fn remove_repo(&self, id: RepoId, reclaim_checkout: bool) -> Result<(), ServerError> {
         self.runtime
             .remove_repo(&self.owner, id, reclaim_checkout)

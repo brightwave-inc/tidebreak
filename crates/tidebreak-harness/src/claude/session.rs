@@ -27,8 +27,8 @@ use crate::claude::parse::ClaudeStreamParser;
 use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
     spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError,
-    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
-    TurnInput, TurnOutcome,
+    HarnessEvent, HarnessSession, ProcessTreeChild, ProjectConfig, SessionSpec, StreamBudget,
+    StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::{PermissionMode, ReasoningEffort};
 
@@ -127,6 +127,35 @@ pub(crate) fn settings_flags(
         serde_json::Value::Object(settings).to_string(),
     ])
 }
+
+/// Claude Code's switches for a repository the user has not trusted.
+///
+/// Print mode skips the engine's own workspace-trust prompt, so without these
+/// a cloned repository's config runs as the user when the child starts.
+/// Checked against 2.1.259:
+///
+/// - `--setting-sources user` leaves out the project and local sources: both
+///   `.claude/settings*.json` files with their hooks, environment,
+///   permissions, helper commands, and plugins; `.mcp.json`; `CLAUDE.md` and
+///   the rules files; and the project's agents, commands, skills, output
+///   styles, and workflows. `--settings` still applies.
+/// - `--strict-mcp-config` keeps the MCP servers to the ones Tidebreak names
+///   in `--mcp-config`.
+#[must_use]
+pub(crate) fn project_config_flags(project_config: ProjectConfig) -> Vec<String> {
+    match project_config {
+        ProjectConfig::Skip => vec![
+            "--setting-sources".into(),
+            "user".into(),
+            "--strict-mcp-config".into(),
+        ],
+        ProjectConfig::Load => Vec::new(),
+    }
+}
+
+/// The headless scheduler reads `.claude/scheduled_tasks.json` whatever the
+/// setting sources say, so a launch in an untrusted repository turns it off.
+const DISABLE_CRON_ENV: &str = "CLAUDE_CODE_DISABLE_CRON";
 
 /// One file-system entry under Claude's default plan directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,12 +270,47 @@ fn hash_file(path: &Path) -> io::Result<u64> {
 }
 
 fn ensure_private_directory(path: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(path)?;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
+    Ok(())
+}
+
+/// The file in the session's private directory that holds the MCP config.
+const MCP_CONFIG_FILE: &str = "mcp-config.json";
+
+/// Replace `path` with `contents`, readable and writable by this user only.
+///
+/// The bytes land in a fresh owner-only file beside `path` and are renamed
+/// over it, so a child that starts while a respawn rewrites the file never
+/// reads a half-written document.
+fn write_private_file(path: &Path, contents: &str) -> io::Result<()> {
+    let directory = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a private file needs a parent directory",
+        )
+    })?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".mcp-config-").suffix(".json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    let mut file = builder.tempfile_in(directory)?;
+    io::Write::write_all(file.as_file_mut(), contents.as_bytes())?;
+    file.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -423,6 +487,9 @@ struct TurnRead {
 /// Live Claude Code session: one child for the session lifetime.
 pub struct ClaudeSession {
     spec: SessionSpec,
+    /// Tidebreak-owned directory only this session's user can open. It holds
+    /// the Plan-mode files and the MCP config, which carries bearer tokens.
+    private_directory: PathBuf,
     /// Tidebreak-owned destination for Claude's Plan-mode files.
     plans_directory: PathBuf,
     /// The session's current permission mode, which a live switch moves.
@@ -464,11 +531,12 @@ impl ClaudeSession {
     pub(super) fn new(spec: SessionSpec) -> Self {
         let resume_ref = spec.resume_ref.clone();
         let permission_mode = spec.permission_mode;
-        let plans_directory = std::env::temp_dir()
-            .join("tidebreak-claude-plans")
-            .join(uuid::Uuid::new_v4().to_string());
+        let private_directory =
+            std::env::temp_dir().join(format!("tidebreak-claude-{}", uuid::Uuid::new_v4()));
+        let plans_directory = private_directory.join("plans");
         Self {
             spec,
+            private_directory,
             plans_directory,
             permission_mode: Mutex::new(permission_mode),
             resume_ref: Mutex::new(resume_ref),
@@ -572,20 +640,27 @@ impl ClaudeSession {
             argv.push(model);
         }
         argv.extend(effort_flags(self.resolved_effort(turn_effort)));
+        ensure_private_directory(&self.private_directory)?;
         ensure_private_directory(&self.plans_directory)?;
         argv.extend(settings_flags(
             &self.plans_directory,
             self.spec.fast_mode,
             self.resolved_model(turn_model).as_deref(),
         )?);
-        if let Some(flags) = crate::claude::browser::launch_args_for_mcp_channels_and_tools(
+        argv.extend(project_config_flags(self.spec.project_config));
+        if let Some(config) = crate::claude::browser::mcp_launch_config(
             self.spec.approval.as_ref(),
             self.spec.browser.as_ref(),
             self.spec.native.as_ref(),
             self.spec.apps.as_ref(),
             self.spec.tool_bridge.as_ref(),
         )? {
-            argv.extend(flags);
+            // The document carries bearer tokens, and any local account can
+            // read a process's arguments. Argv names a file only this user
+            // can read.
+            let path = self.private_directory.join(MCP_CONFIG_FILE);
+            write_private_file(&path, config.document())?;
+            argv.extend(config.flags(&path)?);
         }
         if self.permission_mode() == PermissionMode::Ask
             && self.spec.tool_bridge.is_some()
@@ -613,6 +688,9 @@ impl ClaudeSession {
             // Managed human tools must remain in the foreground of the native turn.
             env.retain(|(name, _)| name != "CLAUDE_AUTO_BACKGROUND_TASKS");
             env.push(("CLAUDE_AUTO_BACKGROUND_TASKS".into(), "0".into()));
+        }
+        if self.spec.project_config == ProjectConfig::Skip {
+            crate::override_env(&mut env, DISABLE_CRON_ENV, "1");
         }
         let plan = LaunchPlan {
             argv,
@@ -1265,8 +1343,16 @@ impl HarnessSession for ClaudeSession {
         if let Some(channel) = taken {
             channel.stop(None).await;
         }
-        let _ = std::fs::remove_dir_all(&self.plans_directory);
+        let _ = std::fs::remove_dir_all(&self.private_directory);
         Ok(())
+    }
+}
+
+impl Drop for ClaudeSession {
+    /// The private directory holds a config with live bearer tokens; a
+    /// session dropped without [`HarnessSession::shutdown`] still removes it.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.private_directory);
     }
 }
 
@@ -1494,6 +1580,7 @@ mod tests {
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: crate::ProjectConfig::Load,
         })
     }
 
@@ -1521,6 +1608,14 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    /// The MCP config a launch plan names, read from the private file that
+    /// `--mcp-config` points at.
+    fn read_mcp_config(path: &str) -> serde_json::Value {
+        let path = Path::new(path);
+        assert!(path.is_absolute(), "--mcp-config names a file: {path:?}");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
     async fn run_interrupt_case(
@@ -1671,6 +1766,7 @@ done
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: crate::ProjectConfig::Load,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         let index = plan.argv.iter().position(|arg| arg == "--effort").unwrap();
@@ -1821,8 +1917,8 @@ done
     async fn native_tool_bridge_paths_reach_shell_children_without_ambient_overrides() {
         use tidebreak_core::HarnessKind;
         let dir = tempfile::tempdir().unwrap();
-        let session = session_with("/bin/true".into(), dir.path(), Arc::new(Discard));
-        let mut spec = session.spec;
+        let mut session = session_with("/bin/true".into(), dir.path(), Arc::new(Discard));
+        let spec = &mut session.spec;
         spec.env.extend([
             ("TIDEBREAK_TOOL_HELPER".into(), "/untrusted/helper".into()),
             ("TIDEBREAK_TOOL_SOCKET".into(), "/untrusted/socket".into()),
@@ -1912,6 +2008,7 @@ done
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: crate::ProjectConfig::Load,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         assert_eq!(
@@ -1927,7 +2024,7 @@ done
             .iter()
             .position(|arg| arg == "--mcp-config")
             .unwrap();
-        let config: serde_json::Value = serde_json::from_str(&plan.argv[config_index + 1]).unwrap();
+        let config = read_mcp_config(&plan.argv[config_index + 1]);
         assert!(
             config["mcpServers"].get("tb-approvals").is_some(),
             "merged config keeps the approval HTTP server"
@@ -1943,6 +2040,124 @@ done
                 .count(),
             1,
             "both channels keep exactly one permission-prompt-tool flag"
+        );
+    }
+
+    /// Any local account can read another process's arguments. A spawned
+    /// engine must find its bearer tokens in a file only its user can read,
+    /// never on its command line.
+    #[tokio::test]
+    async fn a_spawned_engine_reads_bearer_tokens_from_a_private_file_not_its_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv_log = dir.path().join("argv.log");
+        let seen_config = dir.path().join("seen-config.json");
+        let binary = write_engine(
+            dir.path(),
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$@" > {argv_log}
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "--mcp-config" ]; then cat "$arg" > {seen_config}; fi
+  previous="$arg"
+done
+while IFS= read -r line; do
+  printf '{{"type":"system","subtype":"init","session_id":"sess-mcp","claude_code_version":"2.1.259"}}\n'
+  printf '{{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-mcp","usage":{{"input_tokens":1,"output_tokens":1}}}}\n'
+done
+"#,
+                argv_log = argv_log.display(),
+                seen_config = seen_config.display(),
+            ),
+        );
+        let mut session =
+            session_with_mode(binary, dir.path(), Arc::new(Discard), PermissionMode::Ask);
+        session.spec.approval = Some(ApprovalChannelSpec {
+            mcp_endpoint_url: "http://127.0.0.1:9999/code/mcp/approval-prompt".into(),
+            token: "approval-bearer-secret".into(),
+            completer: Arc::new(NoopCompleter),
+        });
+        session.spec.apps = Some(crate::AppsChannelSpec {
+            mcp_endpoint_url: "http://127.0.0.1:9999/code/mcp/connected-apps".into(),
+            token: "apps-bearer-secret".into(),
+        });
+
+        assert!(matches!(
+            session.run_turn(turn("hello")).await.unwrap(),
+            TurnOutcome::Clean
+        ));
+
+        let argv = read_lines(&argv_log);
+        let config_path = argv
+            .windows(2)
+            .find(|pair| pair[0] == "--mcp-config")
+            .map(|pair| PathBuf::from(&pair[1]))
+            .expect("the engine is still told where its MCP servers are");
+        for token in ["approval-bearer-secret", "apps-bearer-secret"] {
+            assert!(
+                !argv.iter().any(|arg| arg.contains(token)),
+                "{token} reached the engine's arguments: {argv:?}"
+            );
+        }
+        let seen = std::fs::read_to_string(&seen_config).unwrap();
+        assert!(seen.contains("Bearer approval-bearer-secret"), "{seen}");
+        assert!(seen.contains("Bearer apps-bearer-secret"), "{seen}");
+        assert!(config_path.starts_with(&session.private_directory));
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode(&config_path),
+            0o600,
+            "only the session's user reads it"
+        );
+        assert_eq!(mode(&session.private_directory), 0o700);
+
+        Box::new(session).shutdown().await.unwrap();
+        assert!(!config_path.exists(), "shutdown takes the tokens off disk");
+    }
+
+    /// Print mode skips the engine's own trust prompt, so an untrusted
+    /// repository's settings, MCP servers, and scheduled tasks stay off only
+    /// because the launch says so. A trusted one launches as it always did.
+    #[test]
+    fn an_untrusted_repository_launches_without_its_engine_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = session_with_mode(
+            PathBuf::from("/usr/bin/claude"),
+            dir.path(),
+            Arc::new(Discard),
+            PermissionMode::Auto,
+        );
+        session.spec.extra_env = vec![(DISABLE_CRON_ENV.into(), "0".into())];
+
+        session.spec.project_config = ProjectConfig::Skip;
+        let plan = session.compose_plan_for(None, None).unwrap();
+        assert!(plan
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["--setting-sources", "user"]));
+        assert!(plan.argv.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert_eq!(
+            plan.env
+                .iter()
+                .filter(|(name, _)| name == DISABLE_CRON_ENV)
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            ["1"],
+            "the untrusted switch wins over the settings overlay"
+        );
+
+        session.spec.project_config = ProjectConfig::Load;
+        let plan = session.compose_plan_for(None, None).unwrap();
+        assert!(!plan.argv.iter().any(|arg| arg == "--setting-sources"));
+        assert!(!plan.argv.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert_eq!(
+            plan.env
+                .iter()
+                .filter(|(name, _)| name == DISABLE_CRON_ENV)
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            ["0"],
+            "a trusted repository keeps the settings overlay as it is"
         );
     }
 
@@ -1999,7 +2214,7 @@ done
             .iter()
             .position(|arg| arg == "--mcp-config")
             .unwrap();
-        let config: serde_json::Value = serde_json::from_str(&plan.argv[position + 1]).unwrap();
+        let config = read_mcp_config(&plan.argv[position + 1]);
         assert!(config["mcpServers"].get("tb-apps").is_some());
         assert!(config["mcpServers"]["tb-apps"].get("timeout").is_none());
         let human = &config["mcpServers"]["tb-human"];
@@ -2057,6 +2272,7 @@ done
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: crate::ProjectConfig::Load,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         let index = plan

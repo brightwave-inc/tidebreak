@@ -7,6 +7,7 @@ import type {
   CodeHarnessInstallSnapshot,
   CodeRepoSnapshot,
   CodeRepoSources,
+  CodeRepoTrustSnapshot,
   CodeSubscriptionUsage,
   CodeWorktreeRoot,
   HarnessDoctorReport,
@@ -21,6 +22,7 @@ import {
   parseCodeHarnessInstall,
   parseCodeRepo,
   parseCodeRepoSources,
+  parseCodeRepoTrust,
   parseCodeSubscriptionUsage,
   parseCodeWorktreeRoot,
   type ParsedHarnessModelList,
@@ -102,6 +104,59 @@ export function withCodeReposApi<TBase extends Constructor<HttpCore>>(
         method: "DELETE",
         headers: this.headers(),
       });
+    }
+
+    /**
+     * Whether engines load the repository's own config, and the engine
+     * config its main checkout carries.
+     */
+    async getCodeRepoTrust(repoId: string): Promise<CodeRepoTrustSnapshot> {
+      return requireParsed(
+        parseCodeRepoTrust(
+          await this.json(`/code/repos/${encodeURIComponent(repoId)}/trust`, {
+            headers: this.headers(),
+          }),
+        ),
+        "repository trust",
+      );
+    }
+
+    /**
+     * Trust the repository, or continue without its config. Live sessions of
+     * the repository move onto the decision.
+     */
+    async setCodeRepoTrust(
+      repoId: string,
+      trusted: boolean,
+    ): Promise<CodeRepoTrustSnapshot> {
+      return requireParsed(
+        parseCodeRepoTrust(
+          await this.json(`/code/repos/${encodeURIComponent(repoId)}/trust`, {
+            method: "PUT",
+            headers: this.headers(true),
+            body: JSON.stringify({ trusted }),
+          }),
+        ),
+        "repository trust",
+      );
+    }
+
+    /**
+     * The trust decision for a workspace's repository and the engine config
+     * its worktree carries: what a session started there would load.
+     */
+    async getCodeWorkspaceTrust(
+      workspaceId: string,
+    ): Promise<CodeRepoTrustSnapshot> {
+      return requireParsed(
+        parseCodeRepoTrust(
+          await this.json(
+            `/code/workspaces/${encodeURIComponent(workspaceId)}/trust`,
+            { headers: this.headers() },
+          ),
+        ),
+        "repository trust",
+      );
     }
 
     /**

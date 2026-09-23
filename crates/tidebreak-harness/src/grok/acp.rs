@@ -320,6 +320,11 @@ impl GrokSession {
         }
         let resume = self.resume_ref.lock().expect("grok resume").clone();
         let mut params = json!({"cwd":self.spec.worktree,"mcpServers":acp_mcp_servers(self.spec.apps.as_ref()),"_meta":{"yoloMode":false,"autoMode":false}});
+        if self.spec.project_config == crate::ProjectConfig::Skip {
+            // Grok's own per-session switch for `.envrc`, beside the
+            // environment one: an untrusted repository's script never runs.
+            params["_meta"]["x.ai/skip_envrc"] = json!(true);
+        }
         let method = if let Some(id) = &resume {
             params["sessionId"] = json!(id);
             "session/load"

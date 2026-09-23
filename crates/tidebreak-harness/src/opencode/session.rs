@@ -514,7 +514,50 @@ fn pick_loopback_port() -> Result<u16, HarnessError> {
     Ok(listener.local_addr()?.port())
 }
 
+/// opencode's switches for a repository the user has not trusted. Checked
+/// against 1.18.27:
+///
+/// - `OPENCODE_DISABLE_PROJECT_CONFIG` leaves out `opencode.json(c)` up to
+///   the worktree root; every project `.opencode/` directory with its
+///   plugins, tools, agents, commands, modes, and skills, and the package
+///   install that runs there; and the top-level instruction files.
+/// - `OPENCODE_DISABLE_EXTERNAL_SKILLS` leaves out the `.claude/skills` and
+///   `.agents/skills` directories, which the first switch does not reach.
+///
+/// The config Tidebreak passes in `OPENCODE_CONFIG_CONTENT` still applies.
+pub(crate) fn project_config_env(
+    project_config: crate::ProjectConfig,
+) -> &'static [(&'static str, &'static str)] {
+    match project_config {
+        crate::ProjectConfig::Skip => &[
+            ("OPENCODE_DISABLE_PROJECT_CONFIG", "true"),
+            ("OPENCODE_DISABLE_EXTERNAL_SKILLS", "true"),
+        ],
+        crate::ProjectConfig::Load => &[],
+    }
+}
+
 impl OpencodeSession {
+    /// The launch plan for this session's serve child on `port`.
+    fn serve_plan(&self, port: u16) -> Result<LaunchPlan, HarnessError> {
+        let mut plan = compose_serve_plan(ServeLaunch {
+            binary: self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
+            extra_argv: &self.spec.extra_argv,
+            cwd: &self.spec.worktree,
+            snapshot_env: &self.spec.env,
+            extra_env: &self.spec.extra_env,
+            port,
+            browser: self.spec.browser.as_ref(),
+            native: self.spec.native.as_ref(),
+            apps: None,
+            relay_key_env: self.spec.relay_key_env.as_deref(),
+        })?;
+        for (key, value) in project_config_env(self.spec.project_config) {
+            crate::override_env(&mut plan.env, key, value);
+        }
+        Ok(plan)
+    }
+
     /// A live child, spawned and bootstrapped if there is none (decision
     /// 0064).
     ///
@@ -555,18 +598,7 @@ impl OpencodeSession {
             self.pid.clear();
         }
         let port = pick_loopback_port()?;
-        let plan = compose_serve_plan(ServeLaunch {
-            binary: self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
-            extra_argv: &self.spec.extra_argv,
-            cwd: &self.spec.worktree,
-            snapshot_env: &self.spec.env,
-            extra_env: &self.spec.extra_env,
-            port,
-            browser: self.spec.browser.as_ref(),
-            native: self.spec.native.as_ref(),
-            apps: None,
-            relay_key_env: self.spec.relay_key_env.as_deref(),
-        })?;
+        let plan = self.serve_plan(port)?;
         let mut command = Command::new(&plan.argv[0]);
         command
             .args(&plan.argv[1..])
@@ -1146,7 +1178,44 @@ mod tests {
             native: None,
             tool_bridge: None,
             apps: None,
+            project_config: crate::ProjectConfig::Load,
         })
+    }
+
+    /// A repository the user has not trusted runs opencode with its project
+    /// config and repository skills turned off, whatever the settings overlay
+    /// says. A trusted one launches with neither switch.
+    #[test]
+    fn an_untrusted_repository_turns_off_opencode_project_config() {
+        let env_value = |plan: &LaunchPlan, key: &str| {
+            plan.env
+                .iter()
+                .filter(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut session = unit_session();
+        session.spec.extra_env = vec![("OPENCODE_DISABLE_PROJECT_CONFIG".into(), "false".into())];
+
+        session.spec.project_config = crate::ProjectConfig::Skip;
+        let plan = session.serve_plan(4096).unwrap();
+        assert_eq!(
+            env_value(&plan, "OPENCODE_DISABLE_PROJECT_CONFIG"),
+            ["true"]
+        );
+        assert_eq!(
+            env_value(&plan, "OPENCODE_DISABLE_EXTERNAL_SKILLS"),
+            ["true"]
+        );
+
+        session.spec.project_config = crate::ProjectConfig::Load;
+        let plan = session.serve_plan(4096).unwrap();
+        assert_eq!(
+            env_value(&plan, "OPENCODE_DISABLE_PROJECT_CONFIG"),
+            ["false"],
+            "a trusted repository keeps the settings overlay as it is"
+        );
+        assert!(env_value(&plan, "OPENCODE_DISABLE_EXTERNAL_SKILLS").is_empty());
     }
 
     /// Decision 0064: parking and stopping a session with no child must be
@@ -2213,5 +2282,9 @@ mod tests {
             "http://127.0.0.1:9999/code/mcp/connected-apps"
         );
         assert_eq!(entry["headers"]["Authorization"], "Bearer apps-token");
+        assert!(
+            !plan.argv.iter().any(|arg| arg.contains("apps-token")),
+            "the bearer rides the environment, never argv"
+        );
     }
 }
