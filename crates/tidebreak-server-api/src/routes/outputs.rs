@@ -60,9 +60,9 @@ pub const MAX_OUTPUT_REVISION_BODY_BYTES: usize = 2 * tidebreak_core::MAX_DELIVE
 /// One row of the outputs catalog.
 ///
 /// The output records are also read back by the CLI through [`crate::wire`],
-/// so they reject unknown keys the way the renderer's guards do.
+/// which ignores keys it does not know so a newer server can add one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DeliverableSummary {
     pub output_id: OutputId,
     pub filename: String,
@@ -77,7 +77,7 @@ pub struct DeliverableSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DeliverablesCatalog {
     pub deliverables: Vec<DeliverableSummary>,
     /// Whether the conversation has more outputs than one answer carries.
@@ -86,7 +86,7 @@ pub struct DeliverablesCatalog {
 
 /// A bounded text preview of one exact revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DeliverablePreview {
     pub output_id: OutputId,
     pub filename: String,
@@ -103,7 +103,7 @@ pub struct DeliverablePreview {
 
 /// One row of an output's version history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct OutputRevisionInfo {
     pub revision_id: OutputRevisionId,
     pub ordinal: u32,
@@ -149,8 +149,7 @@ impl OutputRevisionProducer {
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
+    rename_all_fields = "camelCase"
 )]
 pub enum OutputRevisionSource {
     Document {
@@ -166,7 +165,7 @@ pub enum OutputRevisionSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct OutputRevisionsCatalog {
     pub output_id: OutputId,
     pub revisions: Vec<OutputRevisionInfo>,

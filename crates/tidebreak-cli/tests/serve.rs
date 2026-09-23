@@ -64,7 +64,11 @@ fn serve_announces_its_address_and_answers_health() {
     stream.read_to_string(&mut response).unwrap();
 
     assert!(response.contains("200 OK"), "response: {response}");
-    assert!(response.trim_end().ends_with("ok"), "response: {response}");
+    assert!(
+        response.contains(r#""status":"ok""#),
+        "response: {response}"
+    );
+    assert!(response.contains(r#""api_level":"#), "response: {response}");
 }
 
 /// A headless binary must reject desktop startup before it opens local storage.

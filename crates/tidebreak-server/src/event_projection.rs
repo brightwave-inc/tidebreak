@@ -40,6 +40,12 @@ use ts_rs::TS;
 /// only ordering there is. A metadata frame carries no sequence because it is
 /// not part of that order, and a client tells the two apart by the `metadata`
 /// discriminator rather than by a sequence it would have to invent.
+//
+// Decoding ignores keys a frame does not declare, at every level, so a newer
+// server can add one without breaking an older client. The fixture round trip
+// in `tidebreak-server`'s `wire_types` is where an undeclared key fails, and
+// that is the only place it should, so do not add `deny_unknown_fields` to
+// these types. A plain comment, so the generated `wire.ts` does not carry it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(untagged)]
 pub enum RendererChatFrame {
@@ -53,7 +59,7 @@ pub enum RendererChatFrame {
 
 /// Chat metadata pushed to an open client, outside the turn journal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(tag = "metadata", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "metadata", rename_all = "snake_case")]
 pub enum RendererChatMetadata {
     /// The chat was named — by titling, for a chat that had no name.
     Titled { title: String },
@@ -90,7 +96,6 @@ impl From<&crate::bus::ChatMetadataNotice> for RendererChatMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(deny_unknown_fields)]
 pub struct RendererSequencedEvent {
     pub seq: i64,
     pub event: RendererAgentEvent,
@@ -120,7 +125,6 @@ pub struct RendererSequencedEvent {
 /// It is a faithful measure of what the turn cost and a ceiling on what the
 /// window held.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(deny_unknown_fields)]
 pub struct RendererTurnUsage {
     /// Fresh prompt tokens, excluding both cache figures below.
     pub input_tokens: u32,
@@ -145,7 +149,6 @@ impl From<tidebreak_core::Usage> for RendererTurnUsage {
 
 /// Bounded refusal metadata safe to present in the desktop transcript.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(deny_unknown_fields)]
 pub struct RendererRefusal {
     pub category: Option<String>,
     pub partial_output: bool,
@@ -163,7 +166,6 @@ pub enum RendererRefusalSource {
 
 /// Exact model route involved in a provider failure, with no diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(deny_unknown_fields)]
 pub struct RendererModelIdentity {
     pub id: String,
     pub provider: crate::providers::ProviderKind,
@@ -193,7 +195,7 @@ impl From<&tidebreak_core::RefusalOutcome> for RendererRefusal {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum RendererAgentEvent {
     TurnStarted {
         turn_id: TurnId,
@@ -407,7 +409,6 @@ pub enum RendererToolStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(deny_unknown_fields)]
 pub struct RendererToolFailure {
     pub code: RendererToolFailureCode,
     pub reason: RendererToolFailureReason,

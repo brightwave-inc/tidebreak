@@ -134,6 +134,8 @@ pub mod scripted_harness;
 mod scripted_provider;
 /// Rewriting stored credentials so the running binary owns their keychain items.
 pub mod secret_rehome;
+/// The version handshake: what a server reports, and whether a client reads it.
+pub mod server_version;
 mod source_tools;
 pub mod state;
 mod store_ownership;

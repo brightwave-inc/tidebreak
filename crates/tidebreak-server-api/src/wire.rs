@@ -8,46 +8,58 @@
 //! types from, so a rename is a compile error in the CLI the way it is a type
 //! error in the renderer.
 //!
-//! # Strictness
+//! # Reading tolerantly
 //!
-//! A client that decodes through these types gets the renderer's contract, not
-//! a looser one:
+//! A client can be a release behind the server it attaches to, so these types
+//! read the way such a client has to:
 //!
+//! - Unknown keys are ignored at every level. A newer server can add a field
+//!   without breaking an older client. None of the types a client reads here
+//!   declares `deny_unknown_fields`; request bodies the server reads still do.
 //! - Every vocabulary is closed. Tool names, approval kinds, tool statuses,
 //!   failure categories, and grant rungs are the server's own enums, so a
 //!   value outside them fails to decode rather than folding to a string.
-//! - Every frame rejects unknown keys (`deny_unknown_fields`), matching the
-//!   renderer's `onlyKeys` guards. A field the server does not declare is not
-//!   part of the contract, and a client that silently dropped it could not
-//!   tell a newer server from a malformed frame.
-//! - An event type the client does not know fails the frame. The client drops
-//!   that frame and does not advance its cursor past it, so a reconnect replays
-//!   it and drops it again. This is the one place a version-skewed client (a
-//!   CLI attached to a newer desktop) loses information, and it is deliberate:
-//!   the renderer ships with its server and never sees a newer event, so a
-//!   tolerant client would be the only surface with a different contract.
+//! - An event type the client does not know fails its frame. The CLI skips
+//!   that frame, counts it, and says so on stderr, and it moves its cursor
+//!   past the frame so a reconnect does not replay it.
+//!
+//! Strictness lives in the tests instead. The fixtures below are serialized
+//! from these same types, and every test that reads them decodes each entry
+//! and serializes it back. A key the type does not declare drops out of that
+//! round trip and fails it, so drift between the server and a reader still
+//! fails a test without failing a user one release behind.
+//!
+//! A change a tolerant reader cannot absorb, such as a removed or renamed
+//! field, raises [`API_LEVEL`]. The version handshake then turns the gap into
+//! an "update Tidebreak" message instead of a decode error.
+//!
+//! # Version
+//!
+//! [`ServerVersion`] is what `GET /version` answers, and what `/healthz` and
+//! `/auth/discovery` carry beside their own keys. [`compatibility`] compares
+//! it with [`MIN_API_LEVEL`] through [`API_LEVEL`], the range a client built
+//! from this source reads.
 //!
 //! # REST records
 //!
 //! The records the CLI reads over HTTP — the model catalog, the provider
 //! list, the MCP server listing, agent runs, and conversation outputs — are
-//! the same response types the routes serialize, re-exported below. They
-//! carry the same contract as the frames: closed vocabularies and
-//! `deny_unknown_fields` on every record but one. [`McpServerInfo`] flattens
-//! its definition, and serde cannot guard unknown keys across a flatten, so
-//! that record alone tolerates them; its envelope, [`McpServersInfo`], does
-//! not. The fixtures in `fixtures/rest-records.json` hold one real value per
-//! record, serialized by the generator test in `wire_types.rs`, and the CLI
-//! decodes every entry.
+//! the same response types the routes serialize, re-exported below. They read
+//! the same way as the frames, with one exception: [`CustomModelConfig`],
+//! nested in a provider row, keeps `deny_unknown_fields` because the provider
+//! update body shares it. The fixtures in `fixtures/rest-records.json` hold one
+//! real value per record, serialized by the generator test in
+//! `wire_types.rs`, and the CLI decodes every entry.
 //!
 //! # Code mode
 //!
 //! The same module carries the code-mode surface the CLI drives: repo,
 //! workspace, session, turn, approval, and delivery snapshots, the sequenced
 //! event frame on `/sessions/{id}/events`, and the notices on
-//! `/updates`. They follow the strictness above. The one shape a client
-//! composes itself is the response to `POST /sessions/{id}/turns`, which
-//! is a [`TurnSnapshot`] or [`QueuedTurn`], both on `202`.
+//! `/updates`. They read the same way. The one shape a client composes itself
+//! is the response to `POST /sessions/{id}/turns`, which is a
+//! [`TurnSnapshot`] or [`QueuedTurn`], both on `202`. The two share no
+//! required field, so a snapshot cannot decode as the other.
 //!
 //! # Limits
 //!
@@ -64,6 +76,9 @@ pub use crate::event_projection::{
 };
 pub use crate::providers::ProviderKind;
 pub use crate::routes::{AgentActivityHistoryItem, AgentActivityKind, AgentActivityOutcome};
+pub use crate::server_version::{
+    compatibility, Compatibility, ServerVersion, API_LEVEL, MIN_API_LEVEL,
+};
 
 // REST records (brightwave-inc/tidebreak#3005). One block per route family.
 pub use crate::mcp_config::{McpHealth, McpServerDefinition, McpServerInfo, McpServersInfo};
@@ -81,7 +96,7 @@ pub use crate::routes::{
 
 // Code mode: the snapshots the REST routes return, the per-session event
 // frame, and the notices on `/updates`. Same contract as the chat
-// socket above: closed vocabularies, unknown keys rejected, an unknown notice
+// socket above: closed vocabularies, unknown keys ignored, an unknown notice
 // or event type failing its frame. The fixtures in `fixtures/code-frames.json`
 // are serialized from these types (see `wire_code_fixtures`).
 pub use crate::code::types::{
@@ -225,21 +240,32 @@ mod tests {
         );
     }
 
-    /// Unknown keys fail the frame, at every level a client decodes.
+    /// A key a newer server added is ignored at every level a client decodes,
+    /// and the frame reads exactly as it would without it.
     #[test]
-    fn frames_reject_unknown_keys() {
-        let event = r#"{"seq":1,"event":{"type":"text_delta","text":"hi"}}"#;
-        assert!(serde_json::from_str::<RendererChatFrame>(event).is_ok());
-        for malformed in [
-            r#"{"seq":1,"event":{"type":"text_delta","text":"hi"},"extra":1}"#,
-            r#"{"seq":1,"event":{"type":"text_delta","text":"hi","extra":1}}"#,
-            r#"{"metadata":"titled","title":"A chat","extra":1}"#,
-            r#"{"seq":1,"event":{"type":"turn_completed","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"extra":1}}}"#,
+    fn frames_ignore_unknown_keys() {
+        for (with_extra, without) in [
+            (
+                r#"{"seq":1,"event":{"type":"text_delta","text":"hi"},"extra":1}"#,
+                r#"{"seq":1,"event":{"type":"text_delta","text":"hi"}}"#,
+            ),
+            (
+                r#"{"seq":1,"event":{"type":"text_delta","text":"hi","extra":1}}"#,
+                r#"{"seq":1,"event":{"type":"text_delta","text":"hi"}}"#,
+            ),
+            (
+                r#"{"metadata":"titled","title":"A chat","extra":1}"#,
+                r#"{"metadata":"titled","title":"A chat"}"#,
+            ),
+            (
+                r#"{"seq":1,"event":{"type":"turn_completed","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"extra":1}}}"#,
+                r#"{"seq":1,"event":{"type":"turn_completed","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+            ),
         ] {
-            assert!(
-                serde_json::from_str::<RendererChatFrame>(malformed).is_err(),
-                "should reject: {malformed}"
-            );
+            let tolerated = serde_json::from_str::<RendererChatFrame>(with_extra)
+                .unwrap_or_else(|error| panic!("should read {with_extra}: {error}"));
+            let plain = serde_json::from_str::<RendererChatFrame>(without).expect("decodes");
+            assert_eq!(tolerated, plain, "{with_extra}");
         }
     }
 

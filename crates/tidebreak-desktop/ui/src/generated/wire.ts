@@ -5035,6 +5035,20 @@ replacement?: boolean,
 truncated?: boolean, };
 
 /**
+ * What a server says about its own build.
+ */
+export type ServerVersion = {
+/**
+ * The Tidebreak release the server runs, such as `1.3.0`.
+ */
+version: string,
+/**
+ * The API level the server serves. Clients compare it with the range
+ * they read.
+ */
+api_level: number, };
+
+/**
  * What one `session_access` row lets its subject do (decision 0086).
  *
  * Ownership stays separate: it is the session's execution identity and its
@@ -6346,3 +6360,12 @@ export const RENDERER_TOOL_NAMES = [
 export const MAX_WIRE_ID_CHARS = 128;
 export const MAX_WIRE_TIMESTAMP_CHARS = 64;
 export const MAX_WIRE_CURSOR_CHARS = 256;
+
+/**
+ * The server API levels a client built from this source reads.
+ *
+ * Generated from `tidebreak_server::wire`. A client compares a server's
+ * `api_level` with this range before it attaches.
+ */
+export const MIN_API_LEVEL = 1;
+export const API_LEVEL = 1;

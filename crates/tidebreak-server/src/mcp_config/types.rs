@@ -790,12 +790,11 @@ impl McpHealth {
 /// One renderer-safe server projection. Resolved `env_from` values and child
 /// process details are intentionally absent.
 //
-// Also read back by the CLI through [`crate::wire`]. This is the one record
-// on that surface that tolerates unknown keys: `definition` is flattened,
-// and serde does not support `deny_unknown_fields` on either side of a
-// flatten (the flattened struct's own guard is ignored on the way through).
-// The envelope, [`McpServersInfo`], still rejects them. A plain comment, not
-// a doc comment, so the generated `wire.ts` does not carry it.
+// Also read back by the CLI through [`crate::wire`], which ignores keys a
+// record does not declare, like every record on that surface. `definition`
+// is flattened, and serde would not honor `deny_unknown_fields` across a
+// flatten anyway. A plain comment, not a doc comment, so the generated
+// `wire.ts` does not carry it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct McpServerInfo {
     #[serde(flatten)]
@@ -824,7 +823,6 @@ pub struct McpServerInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct McpServersInfo {
     pub servers: Vec<McpServerInfo>,
 }
