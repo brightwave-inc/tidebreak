@@ -1,0 +1,76 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "codex",
+    "harness_version": "0.153.4",
+    "resume_ref": "01a0cf1b-6867-7980-9ec6-d090576189a1"
+  },
+  {
+    "type": "model_reported",
+    "model": "gpt-5.5"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "ws_fixture01",
+    "name": "webSearch",
+    "detail": {
+      "kind": "search",
+      "query": "codex app-server protocol webSearch item"
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "ws_fixture01",
+    "outcome": "succeeded",
+    "preview": "",
+    "detail": {
+      "kind": "search",
+      "query": "codex app-server protocol webSearch item"
+    }
+  },
+  {
+    "type": "tool_started",
+    "call_id": "call_fixture_view_image",
+    "name": "imageView",
+    "detail": {
+      "kind": "file_read",
+      "path": "/workspace/pixel.png"
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "call_fixture_view_image",
+    "outcome": "succeeded",
+    "preview": "",
+    "detail": {
+      "kind": "file_read",
+      "path": "/workspace/pixel.png"
+    }
+  },
+  {
+    "type": "assistant_delta",
+    "text": "Searched the web and viewed pix"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "el.png: a 16x16 color gradient."
+  },
+  {
+    "type": "assistant_message",
+    "text": "Searched the web and viewed pixel.png: a 16x16 color gradient."
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 12046,
+      "output_tokens": 55,
+      "cache_read_input_tokens": 11754,
+      "cache_creation_input_tokens": 0,
+      "context_tokens": 12046,
+      "first_call_context_tokens": 11754
+    }
+  }
+]

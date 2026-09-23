@@ -1,0 +1,197 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "claude_code",
+    "harness_version": "2.1.259",
+    "resume_ref": "92fbf3cc-5ce3-450b-a250-97ac14d1020b"
+  },
+  {
+    "type": "model_reported",
+    "model": "claude-opus-5[1m]"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "Run the scripted ste"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "ps in order and keep"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " each command short."
+  },
+  {
+    "type": "model_reported",
+    "model": "claude-opus-5"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "Now a long"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "er foregro"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "und comman"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "d."
+  },
+  {
+    "type": "assistant_message",
+    "text": "Now a longer foreground command."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_016AALXy97uhpfIb70KBIvva",
+    "name": "Bash",
+    "detail": {
+      "kind": "command",
+      "cmd": "sleep 33 && echo long-done",
+      "cwd": ""
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_016AALXy97uhpfIb70KBIvva",
+    "outcome": "succeeded",
+    "preview": "long-done"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_01s3yi9ktz2XItc20wdeeBLT",
+    "name": "Bash",
+    "detail": {
+      "kind": "command",
+      "cmd": "sleep 8 && echo bg-done",
+      "cwd": ""
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_01s3yi9ktz2XItc20wdeeBLT",
+    "outcome": "succeeded",
+    "preview": "Command running in background with ID: bveh6t5cu. Output is being written to: /tmp/redacted/92fbf3cc-5ce3-450b-a250-97ac14d1020b/tasks/bveh6t5cu.output. You will be notified when it completes. To check interim output, use Read on that file path."
+  },
+  {
+    "type": "assistant_delta",
+    "text": "Committi"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "ng the n"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "ew file."
+  },
+  {
+    "type": "assistant_message",
+    "text": "Committing the new file."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_01QBcpp0FoTrdgFcQmMj6pJ7",
+    "name": "Bash",
+    "detail": {
+      "kind": "command",
+      "cmd": "git add -A && git commit -m \"fixture commit\"",
+      "cwd": ""
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_01QBcpp0FoTrdgFcQmMj6pJ7",
+    "outcome": "succeeded",
+    "preview": "[main c9ec934] fixture commit\n 1 file changed, 1 insertion(+)\n create mode 100644 fixture.txt"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_018Z4X0Bb20f6JRRQzRbno6n",
+    "name": "Bash",
+    "detail": {
+      "kind": "command",
+      "cmd": "gh pr create --title fixture --body fixture",
+      "cwd": ""
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_018Z4X0Bb20f6JRRQzRbno6n",
+    "outcome": "succeeded",
+    "preview": "https://github.com/example/fixture/pull/1"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "All scripted steps are done: the long command"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " finished, the background job is running, the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " commit landed, and the pull request is open."
+  },
+  {
+    "type": "assistant_message",
+    "text": "All scripted steps are done: the long command finished, the background job is running, the commit landed, and the pull request is open."
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 55,
+      "output_tokens": 192,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "context_tokens": 55
+    }
+  },
+  {
+    "type": "harness_notice",
+    "level": "info",
+    "message": "Background command \"Run a short background job\" completed (exit code 0)"
+  },
+  {
+    "type": "model_reported",
+    "model": "claude-opus-5[1m]"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "Noted. The background "
+  },
+  {
+    "type": "assistant_delta",
+    "text": "job has finished; noth"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "ing else is left to do"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "model_reported",
+    "model": "claude-opus-5"
+  },
+  {
+    "type": "assistant_message",
+    "text": "Noted. The background job has finished; nothing else is left to do."
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 17,
+      "output_tokens": 16,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "context_tokens": 17
+    }
+  }
+]

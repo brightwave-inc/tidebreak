@@ -226,7 +226,15 @@ impl GrokStreamParser {
                 // does not belong in the normalized transcript.
                 Vec::new()
             }
-            "plan" | "max_turns_reached" => {
+            "plan" => {
+                // The whole todo list, restated after each `todo_write` call
+                // and once more, all done, when the turn ends (captured over
+                // ACP on 1.0.13). Each `todo_write` already has its own tool
+                // card showing the list, as Claude's `TodoWrite` does, so the
+                // restatement adds nothing to the transcript.
+                Vec::new()
+            }
+            "max_turns_reached" => {
                 self.count_unrecognized(kind, value);
                 Vec::new()
             }
@@ -773,6 +781,17 @@ fn tool_preview(value: &Value) -> String {
         if !text.is_empty() {
             return bound(&text, MAX_PREVIEW_CHARS);
         }
+    }
+    // A `todo_write` result carries the plan as a checklist the engine also
+    // gives the model: `- [in_progress] 2: Draft the notes`. That reads as
+    // the plan; the raw output around it does not.
+    if let Some(plan) = value
+        .pointer("/rawOutput/TodosUpdated/summary_for_prompt")
+        .and_then(Value::as_str)
+        .map(str::trim_end)
+        .filter(|plan| !plan.is_empty())
+    {
+        return bound(plan, MAX_PREVIEW_CHARS);
     }
     if let Some(output) = value.get("rawOutput") {
         let rendered = match output {

@@ -92,6 +92,7 @@ impl HarnessAdapter for InternalAdapter {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         }
     }
 

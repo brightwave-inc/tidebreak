@@ -130,7 +130,9 @@ done
 "#;
 
 /// The same stand-in, but its `thread/resume` succeeds — the engine still
-/// holds the thread, as it does after a park (decision 0064).
+/// holds the thread, as it does after a park (decision 0064). A resume that
+/// asks for the thread's history is recorded as such: 0.153.4 answers one
+/// with a deprecation notice and the whole history on one line.
 #[cfg(unix)]
 const FAKE_RESUMABLE_APP_SERVER: &str = r#"#!/bin/sh
 while IFS= read -r line; do
@@ -146,7 +148,10 @@ while IFS= read -r line; do
   printf '{"id":%s,"result":{"thread":{"id":"THREAD-1","cliVersion":"0.147.0","turns":[]}}}\n' "$id"
   ;;
 *'"method":"thread/resume"'*)
-  printf 'thread/resume\n' >>"$FAKE_CODEX_CALLS"
+  case "$line" in
+  *'"excludeTurns":true'*) printf 'thread/resume\n' >>"$FAKE_CODEX_CALLS" ;;
+  *) printf 'thread/resume with history\n' >>"$FAKE_CODEX_CALLS" ;;
+  esac
   printf '{"id":%s,"result":{"thread":{"id":"THREAD-1","cliVersion":"0.147.0","turns":[]}}}\n' "$id"
   ;;
 *'"method":"turn/start"'*)
@@ -771,7 +776,8 @@ async fn a_stale_resume_ref_reports_a_lost_resume() {
 }
 
 /// Decision 0064: a parked thread that has run resumes on a replacement
-/// child, with `thread/resume` on the wire and the same thread id kept.
+/// child, with `thread/resume` on the wire and the same thread id kept. The
+/// resume asks for no history: nothing reads it, and the engine deprecates it.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_parked_thread_is_resumed_on_the_next_turn() {

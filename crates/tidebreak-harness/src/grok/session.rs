@@ -31,6 +31,8 @@ use uuid::Uuid;
 
 #[path = "acp.rs"]
 mod acp;
+#[cfg(test)]
+pub(crate) use acp::replay_acp_capture;
 pub(crate) use acp::supports_version as supports_acp_version;
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);

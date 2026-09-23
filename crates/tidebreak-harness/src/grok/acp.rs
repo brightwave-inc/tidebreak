@@ -763,6 +763,41 @@ fn usage_fields(usage: &Value) -> Value {
     json!({"input_tokens":number("inputTokens").saturating_sub(number("cachedReadTokens")).saturating_sub(number("cacheCreationTokens")),"output_tokens":number("outputTokens"),"cache_read_input_tokens":number("cachedReadTokens"),"cache_creation_input_tokens":number("cacheCreationTokens"),"reasoning_tokens":number("reasoningTokens")})
 }
 
+/// Replay a captured ACP session the way [`GrokSession::drive_acp`] reads
+/// one: the updates that arrive once the prompt is out, then the prompt's
+/// answer as the turn's end. Returns the events and the unrecognized count.
+#[cfg(test)]
+pub(crate) fn replay_acp_capture(input: &str) -> (Vec<HarnessEvent>, u64) {
+    let mut parser = GrokStreamParser::new();
+    let mut events = Vec::new();
+    let mut prompt_id = None;
+    for line in input.lines().filter(|line| !line.trim().is_empty()) {
+        let frame: Value = serde_json::from_str(line).expect("a captured frame is JSON");
+        let value = &frame["value"];
+        match frame["direction"].as_str() {
+            Some("client") if value["method"] == "session/prompt" => {
+                prompt_id = value.get("id").cloned();
+            }
+            Some("server") if prompt_id.is_some() => {
+                if value["method"] == "session/update" {
+                    if let Some(mapped) = map_update(&value["params"]["update"]) {
+                        events.extend(parser.push_line(&mapped.to_string()));
+                    }
+                } else if value.get("method").is_none() && value.get("id") == prompt_id.as_ref() {
+                    let end = json!({
+                        "type": "end",
+                        "sessionId": "fixture-session",
+                        "stopReason": value["result"]["stopReason"],
+                    });
+                    events.extend(parser.push_line(&end.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    (events, parser.unrecognized())
+}
+
 /// The cut, restated against the mapped update rather than the whole frame,
 /// when it landed inside the update.
 fn update_cut(cut: CutLine, mapped: Value) -> Option<CutLine> {
@@ -800,6 +835,8 @@ fn map_update(update: &Value) -> Option<Value> {
         | "user_message_chunk"
         | "current_mode_update"
         | "config_option_update" => None,
+        // The print stream's `plan` line; the parser says why it adds nothing.
+        "plan" => Some(json!({"type":"plan"})),
         _ => Some(json!({"type":format!("acp/{kind}")})),
     }
 }

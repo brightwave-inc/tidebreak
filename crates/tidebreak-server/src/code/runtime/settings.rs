@@ -962,6 +962,7 @@ mod selected_model_capabilities_tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         }
     }
 
@@ -977,6 +978,7 @@ mod selected_model_capabilities_tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         };
         let capabilities =
             CodeRuntime::selected_model_capabilities(&adapter, &probe, Some("configured")).await;
@@ -1119,6 +1121,7 @@ mod signed_out_refusal_tests {
             stderr: String::new(),
             env,
             commands: Vec::new(),
+            reported_efforts: None,
         }
     }
 

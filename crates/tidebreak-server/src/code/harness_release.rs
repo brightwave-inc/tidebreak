@@ -553,6 +553,7 @@ mod tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         }
     }
 

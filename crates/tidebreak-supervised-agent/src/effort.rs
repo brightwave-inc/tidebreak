@@ -224,6 +224,7 @@ mod tests {
             stderr: String::new(),
             env: vec![(OsString::from("PATH"), OsString::from("/usr/bin"))],
             commands: Vec::new(),
+            reported_efforts: None,
         }
     }
 

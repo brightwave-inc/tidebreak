@@ -427,6 +427,24 @@ impl CodexStreamParser {
                 Vec::new()
             }
             "thread/started" => self.emit_session_started(&params),
+            "deprecationNotice" => {
+                // The engine telling its client, or the person's own config,
+                // that a setting or request shape is going away (captured on
+                // 0.153.4 for a legacy config key). It says nothing about the
+                // session's work, so it goes to the log rather than the
+                // transcript.
+                let summary = params
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                tracing::info!(
+                    target: "tidebreak_harness::codex",
+                    summary = %bound(&summary, MAX_NOTICE_CHARS),
+                    "engine deprecation notice"
+                );
+                Vec::new()
+            }
             "account/rateLimits/updated"
             | "hook/completed"
             | "hook/started"
@@ -442,6 +460,8 @@ impl CodexStreamParser {
             | "mcpServer/startupStatus/updated"
             | "remoteControl/status/changed"
             | "serverRequest/resolved"
+            // The legacy twin of the `contextCompaction` item, which reports
+            // the compaction itself. 0.153.4 no longer sends this one at all.
             | "thread/compacted"
             | "thread/goal/updated"
             | "thread/queue/changed"
@@ -479,6 +499,10 @@ impl CodexStreamParser {
             Some("mcpToolCall") => self.emit_mcp_tool_started(&item, parent_call_id),
             Some("fileChange") => self.emit_file_change_started(&item, parent_call_id),
             Some("collabAgentToolCall") => self.emit_collab_started(&item, parent_call_id),
+            Some("webSearch") => self.emit_web_search_started(&item, parent_call_id),
+            Some("imageView") => self.emit_image_view(&item, parent_call_id, false),
+            // The completion reports the compaction once it has happened.
+            Some("contextCompaction") => Vec::new(),
             Some("subAgentActivity" | "userMessage" | "agentMessage" | "reasoning") => Vec::new(),
             Some(other) => {
                 self.count_unrecognized(&format!("item/started/{other}"), &item);
@@ -513,6 +537,17 @@ impl CodexStreamParser {
                     }]
                 }
             }
+            Some("webSearch") => self.emit_web_search_completed(&item, parent_call_id),
+            Some("imageView") => self.emit_image_view(&item, parent_call_id, true),
+            // A subagent's own compaction is its business; the parent's
+            // changes what the model remembers of this conversation.
+            Some("contextCompaction") if parent_call_id.is_none() => {
+                vec![HarnessEvent::HarnessNotice {
+                    level: HarnessNoticeLevel::Info,
+                    message: "Codex compacted the conversation to fit its context window.".into(),
+                }]
+            }
+            Some("contextCompaction") => Vec::new(),
             Some("subAgentActivity" | "userMessage" | "reasoning") => Vec::new(),
             Some(other) => {
                 self.count_unrecognized(&format!("item/completed/{other}"), &item);
@@ -906,6 +941,9 @@ impl CodexStreamParser {
                 }]
             }
             "initialize" | "turn/interrupt" | "turn/steer" | "" => Vec::new(),
+            // An empty acknowledgement: the compaction then runs as a turn of
+            // its own, which reports itself (captured on 0.153.4).
+            "thread/compact/start" => Vec::new(),
             other => {
                 self.count_unrecognized(&format!("rpc-result/{other}"), value);
                 Vec::new()
@@ -1197,6 +1235,107 @@ impl CodexStreamParser {
         events
     }
 
+    /// A web search the engine ran itself.
+    ///
+    /// The engine opens the item before the search runs, when it usually
+    /// knows no query yet (`"query": ""`, captured on 0.153.4). A card that
+    /// names nothing tells the reader less than no card, so the start waits
+    /// for the query the completion carries.
+    fn emit_web_search_started(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
+        let detail = web_search_detail(item);
+        let Some(call_id) = item_id(item) else {
+            self.count_unrecognized("webSearch/missing-id", item);
+            return Vec::new();
+        };
+        if detail.specificity() == 0 || !self.started_tools.insert(call_id.clone()) {
+            return Vec::new();
+        }
+        vec![HarnessEvent::ToolStarted {
+            call_id,
+            name: "webSearch".into(),
+            detail,
+            parent_call_id,
+        }]
+    }
+
+    /// A finished web search. The item has no status: completing it is the
+    /// engine saying the search ran. Results come back out of band, so the
+    /// card names the query and shows no output.
+    fn emit_web_search_completed(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
+        let detail = web_search_detail(item);
+        let Some(call_id) = item_id(item) else {
+            self.count_unrecognized("webSearch/missing-id", item);
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        if self.started_tools.insert(call_id.clone()) {
+            events.push(HarnessEvent::ToolStarted {
+                call_id: call_id.clone(),
+                name: "webSearch".into(),
+                detail: detail.clone(),
+                parent_call_id: parent_call_id.clone(),
+            });
+        }
+        events.push(HarnessEvent::ToolCompleted {
+            call_id,
+            outcome: ToolOutcome::Succeeded,
+            preview: String::new(),
+            detail: (detail.specificity() > 0).then_some(detail),
+            parent_call_id,
+        });
+        events
+    }
+
+    /// The engine's `view_image` tool reading an image into the model's
+    /// context. The transcript has no image card of its own, so the call
+    /// reads as a file read of that image. Start and completion arrive back
+    /// to back with the same payload and no status (captured on 0.153.4).
+    fn emit_image_view(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+        completed: bool,
+    ) -> Vec<HarnessEvent> {
+        let Some(call_id) = item_id(item) else {
+            self.count_unrecognized("imageView/missing-id", item);
+            return Vec::new();
+        };
+        let detail = ToolDetail::FileRead {
+            path: item
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+        };
+        let mut events = Vec::new();
+        if self.started_tools.insert(call_id.clone()) {
+            events.push(HarnessEvent::ToolStarted {
+                call_id: call_id.clone(),
+                name: "imageView".into(),
+                detail: detail.clone(),
+                parent_call_id: parent_call_id.clone(),
+            });
+        }
+        if completed {
+            events.push(HarnessEvent::ToolCompleted {
+                call_id,
+                outcome: ToolOutcome::Succeeded,
+                preview: String::new(),
+                detail: (detail.specificity() > 0).then_some(detail),
+                parent_call_id,
+            });
+        }
+        events
+    }
+
     fn collab_outcome(&mut self, item: &Value) -> ToolOutcome {
         match item.get("status").and_then(Value::as_str) {
             Some("completed") => ToolOutcome::Succeeded,
@@ -1276,6 +1415,34 @@ fn mcp_tool_preview(item: &Value) -> String {
 
 fn thread_id(params: &Value) -> Option<&str> {
     params.get("threadId").and_then(Value::as_str)
+}
+
+/// A non-empty item id.
+fn item_id(item: &Value) -> Option<String> {
+    item.get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+/// What a web search looked for: its query, or else what its action names.
+fn web_search_detail(item: &Value) -> ToolDetail {
+    let action = item.get("action");
+    let subject = nonempty_text(item.get("query"))
+        .or_else(|| nonempty_text(action.and_then(|action| action.get("query"))))
+        .or_else(|| nonempty_text(action.and_then(|action| action.pointer("/queries/0"))))
+        .or_else(|| nonempty_text(action.and_then(|action| action.get("url"))))
+        .unwrap_or("");
+    ToolDetail::Search {
+        query: bound(subject, MAX_TOOL_SUMMARY_CHARS),
+    }
+}
+
+fn nonempty_text(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
 }
 
 /// The text of a transport reconnect-attempt notice with its `attempt N/M`

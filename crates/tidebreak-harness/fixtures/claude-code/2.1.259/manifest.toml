@@ -1,7 +1,7 @@
 version = "2.1.259"
-protocol = "stdio MCP over the pinned Claude Code CLI"
+protocol = "stdio MCP over the pinned Claude Code CLI; print-mode stream-json for the task scenarios"
 captured = "2026-09-14"
-scenarios = ["managed-human-mcp"]
+scenarios = ["managed-human-mcp", "background-tasks"]
 
 [managed_human_mcp]
 provider = "Scripted localhost Messages provider; no paid inference"
@@ -20,3 +20,42 @@ command = "claude auth login --help"
 captured = "2026-09-23"
 binary = "The pinned @anthropic-ai/claude-code@2.1.259 install under the Tidebreak data directory"
 result = "Sign-in lives under `auth`. The top-level help lists no `login` command, so `claude login` would start a session with login as the prompt."
+
+[background_tasks]
+file = "background-tasks.ndjson"
+captured = "2026-09-23"
+binary = "The pinned install; `claude --version` printed `2.1.259 (Claude Code)`"
+command = "claude -p --output-format stream-json --verbose --include-partial-messages --input-format stream-json --dangerously-skip-permissions --allow-dangerously-skip-permissions --settings '{\"plansDirectory\":\"<private>\"}' --setting-sources user --strict-mcp-config --bare"
+provider = "Scripted localhost Messages provider; no paid inference. ANTHROPIC_API_KEY was a placeholder, CLAUDE_CONFIG_DIR a fresh directory, and --bare skips keychain reads."
+notes = """
+One stream-json user line; stdout only. The scripted model runs a 33-second
+foreground Bash, a Bash with run_in_background, a commit in a throwaway
+repository, and `gh pr create` against a stand-in gh that prints a
+pull-request URL, then answers.
+
+The foreground command registers a task: task_started (is_backgrounded
+false), a tool_progress heartbeat at 30 seconds whose tool_use_id is
+"<call id>-heartbeat-0" and whose parent_tool_use_id is the running call, and
+task_notification just before its tool result. The background command's
+tool result is a placeholder; background_tasks_changed, task_updated, and a
+task_notification with the engine's summary report its end after the turn's
+result. The engine then runs a turn nobody asked for: system/init again, an
+answer, and a second result with origin kind task-notification.
+vcs_state_changed and code_change_published arrive before the tool results of
+the commands that caused them.
+
+--bare offers only Bash, Edit, and Read, so this capture has no subagent and
+no task_progress. The engine names its subagent tool Agent.
+"""
+redactions = """
+The repository path became /workspace, and the engine's task-output root
+/tmp/redacted. Two thinking signatures became REDACTED_SIGNATURE. Session,
+message, request, tool, and task ids and timestamps are kept as emitted.
+"""
+
+[help]
+file = "help.txt"
+command = "claude --help"
+captured = "2026-09-23"
+binary = "The pinned @anthropic-ai/claude-code@2.1.259 install under the Tidebreak data directory"
+result = "`--effort <level>` lists low, medium, high, xhigh, and max. The probe reads the same list from the running engine, and claude::EFFORT_LADDER is held to this capture."

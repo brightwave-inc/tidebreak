@@ -1,0 +1,12 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "codex",
+    "harness_version": "0.153.4",
+    "resume_ref": "01a0cf1b-6867-7980-9ec6-d090576189a1"
+  },
+  {
+    "type": "model_reported",
+    "model": "gpt-5.5"
+  }
+]

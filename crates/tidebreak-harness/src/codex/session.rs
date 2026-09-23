@@ -1078,7 +1078,15 @@ impl CodexSession {
             self.spec.resume_ref.clone()
         };
         let (method, params) = if let Some(resume) = resume {
-            ("thread/resume", json!({ "threadId": resume }))
+            // Nothing reads the history a resume returns, and asking for it
+            // is deprecated: 0.153.4 starts every thread paginated, then
+            // answers a resume without `excludeTurns` with a deprecation
+            // notice and the whole history on one line that grows with every
+            // turn. 0.147.0 accepts the field too.
+            (
+                "thread/resume",
+                json!({ "threadId": resume, "excludeTurns": true }),
+            )
         } else {
             let (sandbox, approval) = thread_start_policy(self.permission_mode());
             let mut params = json!({

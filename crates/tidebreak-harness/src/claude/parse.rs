@@ -46,6 +46,9 @@ pub struct ClaudeStreamParser {
     /// current turn. A cut `assistant` line loses its attribution the same
     /// way a cut result does.
     message_parents: HashMap<String, Option<String>>,
+    /// Tasks running in the background. Their tool call settles at once with
+    /// a placeholder, so their real end arrives only as a notification.
+    background_tasks: HashSet<String>,
     emitted_session: bool,
     reported_model: Option<String>,
 }
@@ -252,6 +255,10 @@ impl ClaudeStreamParser {
             "user" => self.parse_user(value),
             "result" => self.parse_result(value),
             "control_response" => Vec::new(),
+            // A heartbeat every 30 seconds while a tool runs (captured on
+            // 2.1.259). The call's card already shows it running and times
+            // it, and the heartbeat's own `tool_use_id` names no call.
+            "tool_progress" => Vec::new(),
             other => {
                 self.count_unrecognized(other, value);
                 Vec::new()
@@ -314,11 +321,96 @@ impl ClaudeStreamParser {
                 // session-long child (observed on 2.1.238).
                 Vec::new()
             }
+            // The task kinds below were captured on 2.1.259. A task rides on
+            // the tool call that started it: a Bash call that runs for more
+            // than a moment, one run in the background, or a subagent. That
+            // call's card or span is already in the transcript.
+            "task_started" => {
+                self.note_task_started(value);
+                Vec::new()
+            }
+            "task_updated" => {
+                // A patch to the task's state. Only a move to the background
+                // changes anything here: the task's end then arrives as its
+                // notification rather than its tool result.
+                if value
+                    .pointer("/patch/is_backgrounded")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    if let Some(task_id) = value.get("task_id").and_then(Value::as_str) {
+                        self.background_tasks.insert(task_id.to_owned());
+                    }
+                }
+                Vec::new()
+            }
+            "task_notification" => self.parse_task_notification(value),
+            // A subagent's running token and tool counts. Its own calls
+            // already stream into its span.
+            "task_progress"
+            // The whole set of background tasks, restated on every change.
+            // `task_started` and `task_notification` carry the same edges.
+            | "background_tasks_changed"
+            // A commit, push, or pull request a Bash call just made. The
+            // call's card shows the command and its output, and Tidebreak
+            // reads repository and pull-request state from the repository
+            // and the forge, not from the engine's hint.
+            | "vcs_state_changed"
+            | "code_change_published" => Vec::new(),
             other => {
                 self.count_unrecognized(&format!("system/{other}"), value);
                 Vec::new()
             }
         }
+    }
+
+    /// Remember a task whose end its tool result will not report.
+    ///
+    /// A task started in the background settles its tool call at once with
+    /// a placeholder ("Command running in background with ID: …"). A
+    /// housekeeping task the engine marks `skip_transcript` or `ambient` is
+    /// not the person's work, so it is not followed.
+    fn note_task_started(&mut self, value: &Value) {
+        let flag = |key: &str| value.get(key).and_then(Value::as_bool) == Some(true);
+        if !flag("is_backgrounded") || flag("skip_transcript") || flag("ambient") {
+            return;
+        }
+        if let Some(task_id) = value.get("task_id").and_then(Value::as_str) {
+            self.background_tasks.insert(task_id.to_owned());
+        }
+    }
+
+    /// A task finished. A foreground task's own tool result follows and
+    /// reports it. A background task's call settled long ago with a
+    /// placeholder, so its end reaches the transcript as a notice carrying
+    /// the engine's own summary: `Background command "…" completed (exit
+    /// code 0)`.
+    fn parse_task_notification(&mut self, value: &Value) -> Vec<HarnessEvent> {
+        let Some(task_id) = value.get("task_id").and_then(Value::as_str) else {
+            self.count_unrecognized("system/task_notification/missing-task", value);
+            return Vec::new();
+        };
+        if !self.background_tasks.remove(task_id) {
+            return Vec::new();
+        }
+        let status = value.get("status").and_then(Value::as_str).unwrap_or("");
+        let summary = value
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+            .map_or_else(
+                || format!("A background task ended ({status})."),
+                str::to_owned,
+            );
+        vec![HarnessEvent::HarnessNotice {
+            level: if status == "completed" {
+                HarnessNoticeLevel::Info
+            } else {
+                HarnessNoticeLevel::Warning
+            },
+            message: bound(&summary, MAX_NOTICE_CHARS),
+        }]
     }
 
     fn parse_stream_event(&mut self, value: &Value) -> Vec<HarnessEvent> {
@@ -1139,14 +1231,14 @@ mod tests {
         assert_eq!(parser.unrecognized(), 1);
     }
 
-    /// The `result` line names its type after the final text. A final answer
-    /// over the budget used to swallow the turn's end, so the turn never
-    /// finished.
+    /// The `result` line names its type after the final text (captured on
+    /// 2.1.259). A final answer over the budget used to swallow the turn's
+    /// end, so the turn never finished.
     #[test]
     fn a_result_line_over_the_budget_still_ends_the_turn() {
         let mut parser = ClaudeStreamParser::new();
         let line = format!(
-            r#"{{"is_error":false,"num_turns":1,"stop_reason":"end_turn","session_id":"s","usage":{{"input_tokens":3,"output_tokens":4}},"terminal_reason":"completed","subtype":"success","result":"{}","type":"result","uuid":"u"}}"#,
+            r#"{{"duration_api_ms":2607,"stop_reason":"end_turn","session_id":"s","usage":{{"input_tokens":3,"output_tokens":4}},"terminal_reason":"completed","is_error":false,"num_turns":1,"subtype":"success","result":"{}","type":"result","uuid":"u"}}"#,
             huge()
         );
         let events = parser.push_cut_line(&cut(&line));

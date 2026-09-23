@@ -96,6 +96,32 @@ pub fn pin_for(kind: HarnessKind) -> Option<&'static HarnessPin> {
     PINS.iter().find(|pin| pin.kind == kind)
 }
 
+/// The release each engine's hand-kept capability tables were last checked
+/// against.
+///
+/// Tables drift: the Grok effort picker broke twice when a later release
+/// kept an older release's table. So an adapter reads a capability from the
+/// engine at probe time wherever the engine states it, and keeps a table only
+/// where it does not. A pin bump fails
+/// `capability_tables_were_reviewed_for_every_pin` until someone checks the
+/// tables named here against the new release and moves its entry. It sits
+/// beside [`PINS`] so a pin bump sees it, and only the test reads it.
+#[cfg(test)]
+pub(crate) const TABLES_REVIEWED_AT: &[(HarnessKind, &str)] = &[
+    // `claude::EFFORT_LADDER`, the fallback when `claude --help` lists no
+    // `--effort` choices, and the fast-mode ids in
+    // `claude::model_serves_fast_mode`, which the engine states nowhere.
+    (HarnessKind::ClaudeCode, "2.1.259"),
+    // None: `model/list` states each model's effort ladder and fast tier.
+    (HarnessKind::Codex, "0.153.4"),
+    // None: this pin takes no effort control.
+    (HarnessKind::Opencode, "1.18.27"),
+    // `grok::EFFORT_LADDER_*`, the `--reasoning-effort` vocabulary per
+    // release, and `grok::GROK_MODEL_EFFORTS`, the fallback for a model the
+    // ACP `initialize` answer does not list.
+    (HarnessKind::Grok, "1.0.13"),
+];
+
 /// The arguments that start `kind`'s own sign-in, for the pinned binary.
 ///
 /// `None` for an engine Tidebreak ships no pin for, which has nothing to
@@ -550,6 +576,29 @@ mod tests {
                 pin.kind,
                 pin.version,
                 capture.display()
+            );
+        }
+    }
+
+    /// Every pin's hand-kept capability tables were checked against that
+    /// exact release. Moving a pin without looking at its tables is how a
+    /// later release inherited an earlier one's effort ladder.
+    #[test]
+    fn capability_tables_were_reviewed_for_every_pin() {
+        for pin in PINS {
+            let reviewed = TABLES_REVIEWED_AT
+                .iter()
+                .find(|(kind, _)| *kind == pin.kind)
+                .map(|(_, version)| *version);
+            assert_eq!(
+                reviewed,
+                Some(pin.version),
+                "{} is pinned to {} but its capability tables were last checked against {}. \
+                 Check each table TABLES_REVIEWED_AT names for it against the new release, \
+                 then move its entry.",
+                pin.kind,
+                pin.version,
+                reviewed.unwrap_or("no release"),
             );
         }
     }

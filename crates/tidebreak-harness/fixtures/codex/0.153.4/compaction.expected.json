@@ -1,0 +1,62 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "codex",
+    "harness_version": "0.153.4",
+    "resume_ref": "01a0cf1b-8d13-76b3-bdeb-2c89b381b6ec"
+  },
+  {
+    "type": "model_reported",
+    "model": "gpt-5.5"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "Hello from the f"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "ixture provider."
+  },
+  {
+    "type": "assistant_message",
+    "text": "Hello from the fixture provider."
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 11727,
+      "output_tokens": 8,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "context_tokens": 11727,
+      "first_call_context_tokens": 11727
+    }
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "harness_notice",
+    "level": "info",
+    "message": "Codex compacted the conversation to fit its context window."
+  },
+  {
+    "type": "harness_notice",
+    "level": "warning",
+    "message": "Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted."
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 29,
+      "cache_read_input_tokens": 9624,
+      "cache_creation_input_tokens": 0,
+      "context_tokens": 0,
+      "first_call_context_tokens": 11727
+    }
+  }
+]

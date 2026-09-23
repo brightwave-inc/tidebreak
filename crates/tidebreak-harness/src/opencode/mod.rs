@@ -65,6 +65,7 @@ impl HarnessAdapter for OpencodeAdapter {
                     stderr: capture.stderr,
                     env: capture.env,
                     commands: Vec::new(),
+                    reported_efforts: None,
                 }
             }
             Err(err) => HarnessProbe {
@@ -75,6 +76,7 @@ impl HarnessAdapter for OpencodeAdapter {
                 stderr: err.to_string(),
                 env: Vec::new(),
                 commands: Vec::new(),
+                reported_efforts: None,
             },
         }
     }
@@ -534,6 +536,7 @@ mod tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         });
         assert_eq!(caps.resume, CapLevel::Supported);
         assert_eq!(caps.streaming_deltas, CapLevel::Supported);
@@ -559,6 +562,7 @@ mod tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         });
         assert_eq!(caps.reasoning_levels, CapLevel::Unknown);
         // The serve API contract the adapter drives stays advertised.

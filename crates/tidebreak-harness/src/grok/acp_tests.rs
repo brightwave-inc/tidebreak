@@ -966,6 +966,51 @@ fn acp_session_requests_carry_the_apps_bridge_as_an_http_server() {
     assert_eq!(servers[0]["headers"][0]["value"], "Bearer apps-token");
 }
 
+/// Captured on 1.0.13: each `todo_write` arrives as its own tool call, and
+/// a `plan` update restates the whole list after it, plus once more at the
+/// turn's end. The cards carry the plan as the engine's own checklist, and
+/// the restatements are recognized without adding anything.
+#[test]
+fn a_captured_plan_shows_through_its_todo_write_cards() {
+    let input = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/grok/1.0.13/acp-plan.ndjson"),
+    )
+    .unwrap();
+    let (events, unrecognized) = replay_acp_capture(&input);
+    assert_eq!(unrecognized, 0);
+    let started: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            HarnessEvent::ToolStarted { call_id, name, .. } => {
+                Some((call_id.as_str(), name.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        started,
+        [("call_todo_1", "todo_write"), ("call_todo_2", "todo_write")]
+    );
+    let last_plan = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            HarnessEvent::ToolCompleted { preview, .. } => Some(preview.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        last_plan,
+        "- [completed] 1: Survey the workspace\n\
+         - [in_progress] 2: Draft the fixture notes\n\
+         - [cancelled] 3: Publish the notes"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(HarnessEvent::TurnCompleted { .. })
+    ));
+}
+
 /// A tool update over the frame limit used to fail the whole turn. It now
 /// settles the call it reports on, with the marker in place of the image.
 #[test]

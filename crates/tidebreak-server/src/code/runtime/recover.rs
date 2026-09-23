@@ -405,6 +405,7 @@ mod tests {
                     stderr: "the selected pin is missing".into(),
                     env: Vec::new(),
                     commands: Vec::new(),
+                    reported_efforts: None,
                 };
             }
             self.inner.probe(host).await
