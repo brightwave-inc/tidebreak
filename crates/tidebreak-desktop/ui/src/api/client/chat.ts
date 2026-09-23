@@ -182,10 +182,23 @@ export function withChatApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
       });
     }
 
-    listChatMessages(chatId: string): Promise<ChatTranscript> {
-      return this.json(`/chats/${chatId}/messages`, {
-        headers: this.headers(),
-      });
+    /**
+     * A chat's durable transcript. With no page, the whole of it; with one,
+     * at most `limit` turns before the `before` cursor, newest first — the
+     * response's `earlier_cursor` reads the page before that.
+     */
+    listChatMessages(
+      chatId: string,
+      page: { before?: number; limit?: number } = {},
+    ): Promise<ChatTranscript> {
+      const query = new URLSearchParams();
+      if (page.before !== undefined) query.set("before", String(page.before));
+      if (page.limit !== undefined) query.set("limit", String(page.limit));
+      const search = query.toString();
+      return this.json(
+        `/chats/${chatId}/messages${search ? `?${search}` : ""}`,
+        { headers: this.headers() },
+      );
     }
 
     /**

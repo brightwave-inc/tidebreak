@@ -10,6 +10,8 @@ const transcript: ChatTranscript = {
   tool_activity: [],
   terminal_turns: [],
   last_event_seq: 7,
+  has_more: false,
+  earlier_cursor: null,
 };
 
 function deferred<T>() {

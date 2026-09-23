@@ -10,15 +10,25 @@ import { useStreamingTypewriter } from "./useStreamingTypewriter";
 export function AssistantMessageBody({
   text,
   streaming,
+  whole = false,
   containerRef,
 }: {
   text: string;
   streaming: boolean;
+  /**
+   * Parse settled text in one pass. For a transcript that opens many settled
+   * answers at once; see {@link MessageMarkdown}.
+   */
+  whole?: boolean;
   containerRef?: React.Ref<HTMLDivElement>;
 }) {
   const displayed = useStreamingTypewriter(text, streaming);
   return (
-    <MessageMarkdown containerRef={containerRef} streaming={streaming}>
+    <MessageMarkdown
+      containerRef={containerRef}
+      streaming={streaming}
+      whole={whole}
+    >
       {streaming ? displayed : text}
     </MessageMarkdown>
   );

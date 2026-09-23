@@ -14,6 +14,11 @@ import type { ContextUsageReading } from "./ContextUsageIndicator";
 import { followScrollBehavior } from "./ChatScroll";
 import { useTranscriptFollow } from "./useTranscriptFollow";
 import { useChatSessionStore } from "./ChatSessionStore";
+import { prependEarlierPage } from "./ChatSessionReducer";
+import {
+  presentChatTranscript,
+  TRANSCRIPT_PAGE_TURNS,
+} from "./ChatTranscriptPresentation";
 import {
   isOutlineMessage,
   isToolMessage,
@@ -228,6 +233,32 @@ export function ChatView({
     [toolCalls],
   );
   const agentRuns = useAgentRuns(client, chat.id, backgroundAgentSpawnKeys);
+  // Earlier turns arrive a page at a time, above the ones held, when the
+  // reader asks for them.
+  const hasEarlierMessages = useChatSessionStore(
+    (session) => session.earlierCursor !== null,
+  );
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const loadEarlierMessages = useCallback(async () => {
+    const cursor = useChatSessionStore.getState().earlierCursor;
+    if (cursor === null) return;
+    const transcript = await client.listChatMessages(chat.id, {
+      before: cursor,
+      limit: TRANSCRIPT_PAGE_TURNS,
+    });
+    // The session store holds whichever conversation is open now.
+    if (!mounted.current) return;
+    const page = presentChatTranscript(transcript);
+    useChatSessionStore
+      .getState()
+      .update((session) => prependEarlierPage(session, page, cursor));
+  }, [chat.id, client]);
   const taskPlan = useTaskPlan(client, chat.id);
   // The plan belongs to the turn that wrote it, so liveness comes from the
   // session the transcript already tracks rather than from another read: a
@@ -652,6 +683,8 @@ export function ChatView({
             onOutputWritebackCancel={cancelOutputWriteback}
             onSelectPrompt={onSelectPrompt}
             onRetryTurn={onRetryTurn}
+            hasEarlierMessages={hasEarlierMessages}
+            onLoadEarlierMessages={loadEarlierMessages}
             hydrated={hydrated}
             imageClient={client}
             executionConfigClient={client}

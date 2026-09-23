@@ -10,6 +10,8 @@ const transcript = {
   tool_activity: [],
   terminal_turns: [],
   last_event_seq: 7,
+  has_more: false,
+  earlier_cursor: null,
 };
 
 const USAGE = {
@@ -83,6 +85,8 @@ describe("sessionFromOpenedChat", () => {
           },
         ],
         last_event_seq: 12,
+        has_more: false,
+        earlier_cursor: null,
       },
       [],
     );

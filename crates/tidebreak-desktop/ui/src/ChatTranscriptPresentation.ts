@@ -12,6 +12,20 @@ type RetryOptions = {
 
 const TERMINAL_TRANSCRIPT_RETRY_DELAYS_MS = [100, 300] as const;
 
+/**
+ * How many turns a transcript page holds: what opening a chat reads, and what
+ * each "Show earlier messages" adds. Opening a long conversation used to read
+ * and render every turn it ever had.
+ */
+export const TRANSCRIPT_PAGE_TURNS = 40;
+
+/**
+ * How many turns a refresh after a finished turn reads. Only the newest turns
+ * change when one finishes, and the page is spliced in over the ones already
+ * shown, so the rest of a long conversation is not read again.
+ */
+export const TERMINAL_REFRESH_TURNS = 10;
+
 export type PresentedTranscript = {
   lastEventSeq: number;
   messages: ChatMessage[];
@@ -21,6 +35,13 @@ export type PresentedTranscript = {
    * meter. Null for a chat that has never completed one.
    */
   lastTurnUsage: RendererTurnUsage | null;
+  /**
+   * The cursor that reads the page before this one, or null when this page
+   * reaches the start of the conversation.
+   */
+  earlierCursor: number | null;
+  /** The first durable message on this page, where it meets the one before. */
+  firstMessageId: string | null;
 };
 
 /** Convert one durable snapshot into the renderer's closed message model. */
@@ -189,12 +210,19 @@ export function presentChatTranscript(
     // tail. Each turn re-sends the conversation, which makes the latest turn's
     // counts the current account of the window rather than one term in a sum.
     lastTurnUsage: transcript.terminal_turns?.at(-1)?.usage ?? null,
+    earlierCursor: transcript.has_more
+      ? (transcript.earlier_cursor ?? null)
+      : null,
+    firstMessageId: transcript.messages[0]?.id ?? null,
   };
 }
 
 /**
  * Re-fetch a terminal turn from durable state, but return nothing after the
  * caller's chat/generation fence has gone stale.
+ *
+ * Reads only the newest turns: the page is spliced over the transcript already
+ * held, so the earlier conversation stays as it is.
  */
 export async function loadCurrentTerminalTranscript(
   client: TranscriptClient,
@@ -209,7 +237,9 @@ export async function loadCurrentTerminalTranscript(
   for (let attempt = 0; ; attempt += 1) {
     if (!isCurrent()) return null;
     try {
-      const transcript = await client.listChatMessages(chatId);
+      const transcript = await client.listChatMessages(chatId, {
+        limit: TERMINAL_REFRESH_TURNS,
+      });
       if (!isCurrent()) return null;
       return presentChatTranscript(transcript);
     } catch (error) {

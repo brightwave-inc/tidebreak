@@ -3,6 +3,7 @@ import type { AgentEvent, SequencedEvent } from "./api";
 import {
   applyTerminalHydration,
   initialChatSessionState,
+  prependEarlierPage,
   reduceChatSessionEvent,
   type ChatSessionDeps,
   type ChatSessionState,
@@ -807,6 +808,102 @@ describe("applyTerminalHydration", () => {
       lastTurnUsage: null,
     });
     expect(ahead.lastSeq).toBe(99);
+  });
+
+  const question = (id: string): ChatMessage => ({
+    id,
+    role: "user",
+    text: `question ${id}`,
+    createdAt: NOW,
+  });
+  const answer = (id: string, text = `answer ${id}`): ChatMessage => ({
+    id,
+    role: "assistant",
+    text,
+    sources: [],
+    createdAt: NOW,
+  });
+
+  // A refresh after a finished turn reads only the newest turns. Replacing the
+  // whole transcript with that page would drop everything earlier.
+  it("splices a page of the newest turns over the same turns held", () => {
+    const held: ChatSessionState = {
+      ...initialChatSessionState(),
+      earlierCursor: 3,
+      messages: [
+        question("u1"),
+        answer("a1"),
+        question("u2"),
+        answer("a2", "streamed"),
+      ],
+    };
+    const next = applyTerminalHydration(held, {
+      messages: [question("u2"), answer("a2", "final")],
+      messageIds: new Set(["u2", "a2"]),
+      lastEventSeq: 9,
+      lastTurnUsage: null,
+      earlierCursor: 5,
+      firstMessageId: "u2",
+    });
+    expect(next.messages.map((message) => message.id)).toEqual([
+      "u1",
+      "a1",
+      "u2",
+      "a2",
+    ]);
+    expect(next.messages.at(-1)).toMatchObject({ text: "final" });
+    // The earlier conversation is still held, so its cursor still applies.
+    expect(next.earlierCursor).toBe(3);
+    // Rows the refresh did not change keep their objects, and their memo.
+    expect(next.messages[0]).toBe(held.messages[0]);
+    expect(next.messages[2]).toBe(held.messages[2]);
+  });
+
+  it("replaces a transcript the page does not meet, and takes its cursor", () => {
+    const held: ChatSessionState = {
+      ...initialChatSessionState(),
+      messages: [question("m-optimistic")],
+    };
+    const next = applyTerminalHydration(held, {
+      messages: [question("u9"), answer("a9")],
+      messageIds: new Set(["u9", "a9"]),
+      lastEventSeq: 9,
+      lastTurnUsage: null,
+      earlierCursor: 17,
+      firstMessageId: "u9",
+    });
+    expect(next.messages.map((message) => message.id)).toEqual(["u9", "a9"]);
+    expect(next.earlierCursor).toBe(17);
+  });
+});
+
+describe("prependEarlierPage", () => {
+  const page = {
+    messages: [
+      { id: "u0", role: "user", text: "first", createdAt: NOW },
+    ] satisfies ChatMessage[],
+    messageIds: new Set(["u0"]),
+    earlierCursor: null,
+  };
+
+  it("puts the earlier page above the held turns and moves the cursor", () => {
+    const held: ChatSessionState = {
+      ...initialChatSessionState(),
+      earlierCursor: 4,
+      messages: [{ id: "u1", role: "user", text: "second", createdAt: NOW }],
+    };
+    const next = prependEarlierPage(held, page, 4);
+    expect(next.messages.map((message) => message.id)).toEqual(["u0", "u1"]);
+    expect(next.earlierCursor).toBeNull();
+    expect(next.hydratedMessageIds.has("u0")).toBe(true);
+  });
+
+  it("ignores a page read for a cursor the session has moved past", () => {
+    const held: ChatSessionState = {
+      ...initialChatSessionState(),
+      earlierCursor: 2,
+    };
+    expect(prependEarlierPage(held, page, 4)).toBe(held);
   });
 });
 

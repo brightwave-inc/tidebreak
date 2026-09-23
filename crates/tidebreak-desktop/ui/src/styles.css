@@ -748,6 +748,27 @@ body {
     min-height: calc(var(--transcript-viewport, 100dvh) - 8rem);
   }
 
+  /* A settled turn off screen skips layout and paint until it scrolls near.
+   Only in a webview that anchors scrolling: a turn that first renders above
+   the reader changes height, and without anchoring that pushes the page they
+   are reading. Paint containment clips at the turn's box, and tool icons sit
+   out in the column's gutter, so the box reaches into the gutter, and a little
+   past every other edge for focus rings, while its content stays put. */
+  @supports (overflow-anchor: auto) {
+    .message-turn.is-settled {
+      content-visibility: auto;
+      contain-intrinsic-block-size: auto 36rem;
+      margin-block: -0.5rem;
+      margin-inline: -2rem -0.5rem;
+      padding-block: 0.5rem;
+      padding-inline: 2rem 0.5rem;
+    }
+
+    .message-turn.is-settled:not(:first-child) {
+      margin-top: 0.5rem;
+    }
+  }
+
   /* Zero-height landing point for transcript rail and table-of-contents jumps. */
   .transcript-anchor {
     display: block;

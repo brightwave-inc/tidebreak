@@ -1,4 +1,13 @@
-import { memo, useMemo, useRef, useSyncExternalStore } from "react";
+import {
+  memo,
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MutableRefObject,
+} from "react";
 import { Wand2 } from "lucide-react";
 import type { ReactNode, Ref, RefCallback, UIEvent } from "react";
 import type {
@@ -69,6 +78,9 @@ import {
   type MemoryRememberedClient,
 } from "./MemoryRememberedCard";
 import { useStreamStalled } from "./useStreamStalled";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { cn } from "@/lib/utils";
 
 export type ChatMessage =
   | {
@@ -286,6 +298,13 @@ type MessageListProps = {
   onSelectPrompt?: (prompt: string, options?: StarterPromptOptions) => void;
   /** Resend the failed turn. Offered only on the transcript's newest failure. */
   onRetryTurn?: (turn: RetryableTurn) => void;
+  /** The conversation has turns older than the ones in `messages`. */
+  hasEarlierMessages?: boolean;
+  /**
+   * Put the page of turns before the held ones at the top of `messages`.
+   * "Show earlier messages" reveals held turns first, then calls this.
+   */
+  onLoadEarlierMessages?: () => Promise<void>;
   hydrated?: boolean;
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
   executionConfigClient?: Pick<ApiClient, "getExecConfig">;
@@ -355,6 +374,8 @@ export function MessageList({
   onOutputWritebackCancel = () => undefined,
   onSelectPrompt,
   onRetryTurn,
+  hasEarlierMessages = false,
+  onLoadEarlierMessages,
   hydrated = true,
   imageClient,
   executionConfigClient,
@@ -402,15 +423,42 @@ export function MessageList({
       backgroundAgentClient,
     ],
   );
-  // Grouping walks the whole transcript and builds every row's element; memoized
+  // A long conversation opens on its newest turns. The window starts at the
+  // user message that opens its oldest turn; it is set once the transcript
+  // arrives, only ever reaches further back, and new turns join below it.
+  const [windowStart, setWindowStart] = useState<{ id: string | null } | null>(
+    null,
+  );
+  let start = windowStart;
+  if (start === null && hydrated && messages.length > 0) {
+    start = {
+      id: turnWindowStart(messages, messages.length, TRANSCRIPT_TURNS_SHOWN),
+    };
+    setWindowStart(start);
+  }
+  const startIndex = start?.id
+    ? Math.max(
+        0,
+        messages.findIndex((message) => message.id === start.id),
+      )
+    : 0;
+  const visibleMessages = useMemo(
+    () => (startIndex > 0 ? messages.slice(startIndex) : messages),
+    [messages, startIndex],
+  );
+  // Grouping walks the transcript and builds every row's element; memoized
   // so a render whose inputs are unchanged (a scroll, a pending-card flag)
   // reuses the rows instead of rebuilding a long conversation's worth. Each
   // grouping also hands its phases to the next, which reuses the ones a new
   // token did not touch.
   const phaseCache = useRef<ActivityPhaseCache | null>(null);
-  const { items: messageItems, lastTurnStart } = useMemo(() => {
+  const {
+    items: messageItems,
+    lastTurnStart,
+    turnStarts,
+  } = useMemo(() => {
     const grouped = groupMessageItems(
-      messages,
+      visibleMessages,
       busy,
       animateStreaming,
       onApproval,
@@ -426,7 +474,7 @@ export function MessageList({
     phaseCache.current = grouped.phases;
     return grouped;
   }, [
-    messages,
+    visibleMessages,
     busy,
     animateStreaming,
     onApproval,
@@ -438,6 +486,66 @@ export function MessageList({
     backgroundAgents,
     retry,
   ]);
+
+  // The scroll viewport, for keeping the reader's place when earlier turns
+  // appear above it. The caller's ref still gets the element.
+  const scrollElement = useRef<HTMLDivElement | null>(null);
+  const attachScroll = useCallback(
+    (element: HTMLDivElement | null) => {
+      scrollElement.current = element;
+      if (typeof scrollRef === "function") scrollRef(element);
+      else if (scrollRef) {
+        (scrollRef as MutableRefObject<HTMLDivElement | null>).current =
+          element;
+      }
+    },
+    [scrollRef],
+  );
+  // Revealed turns land above what the reader is looking at. Holding their
+  // distance from the bottom keeps that content where it was, whether or not
+  // the webview anchors scrolling itself.
+  const pendingRestore = useRef<{
+    fromBottom: number;
+    firstId: string | undefined;
+  } | null>(null);
+  const firstVisibleId = visibleMessages[0]?.id;
+  useLayoutEffect(() => {
+    const pending = pendingRestore.current;
+    const scroller = scrollElement.current;
+    if (!pending || !scroller || pending.firstId === firstVisibleId) return;
+    pendingRestore.current = null;
+    scroller.scrollTop = scroller.scrollHeight - pending.fromBottom;
+  }, [firstVisibleId]);
+  const [earlier, setEarlier] = useState<"idle" | "loading" | "failed">("idle");
+  const showEarlier = () => {
+    if (earlier === "loading") return;
+    const scroller = scrollElement.current;
+    pendingRestore.current = scroller
+      ? {
+          fromBottom: scroller.scrollHeight - scroller.scrollTop,
+          firstId: firstVisibleId,
+        }
+      : null;
+    if (startIndex > 0) {
+      setWindowStart({
+        id: turnWindowStart(messages, startIndex, TRANSCRIPT_TURNS_SHOWN),
+      });
+      return;
+    }
+    if (!onLoadEarlierMessages) return;
+    // Everything held is on screen now, so the page that arrives is too.
+    setWindowStart({ id: null });
+    setEarlier("loading");
+    onLoadEarlierMessages().then(
+      () => setEarlier("idle"),
+      () => {
+        pendingRestore.current = null;
+        setEarlier("failed");
+      },
+    );
+  };
+  const hasEarlier = startIndex > 0 || hasEarlierMessages;
+
   // Only greet a genuinely empty, fully-hydrated conversation. While an
   // existing chat's transcript is still loading it is transiently empty; showing
   // the welcome there would flash "How can I help?" before its history renders.
@@ -451,7 +559,7 @@ export function MessageList({
 
   if (isEmpty) {
     return (
-      <div className="messages is-empty" ref={scrollRef} onScroll={onScroll}>
+      <div className="messages is-empty" ref={attachScroll} onScroll={onScroll}>
         <WelcomeState
           onSelectPrompt={onSelectPrompt}
           executionConfigClient={executionConfigClient}
@@ -465,7 +573,7 @@ export function MessageList({
   // history lands.
   if (!hydrated && messages.length === 0) {
     return (
-      <div className="messages" ref={scrollRef} onScroll={onScroll}>
+      <div className="messages" ref={attachScroll} onScroll={onScroll}>
         <div className="messages-column">
           <TranscriptSkeleton />
         </div>
@@ -536,24 +644,102 @@ export function MessageList({
 
   const pin = pinLastTurn && lastTurnStart >= 0;
 
-  return (
-    <div className="messages" ref={scrollRef} onScroll={onScroll}>
-      <div className="messages-column" ref={contentRef}>
-        {pin ? (
-          <>
-            {messageItems.slice(0, lastTurnStart)}
-            <div className="message-turn is-pinned">
-              {messageItems.slice(lastTurnStart)}
-              {trailing}
-            </div>
-          </>
-        ) : (
-          <>
-            {messageItems}
-            {trailing}
-          </>
-        )}
+  // One box per turn. A settled turn — every one but the last — can skip
+  // layout and paint while it is off screen (see `.message-turn.is-settled`).
+  const bounds: { item: number; messageId: string | null }[] =
+    turnStarts[0]?.item === 0
+      ? turnStarts
+      : [{ item: 0, messageId: null }, ...turnStarts];
+  const turns = bounds.map((bound, index) => {
+    const last = index === bounds.length - 1;
+    const end = bounds[index + 1]?.item ?? messageItems.length;
+    return (
+      <div
+        key={bound.messageId ? `turn-${bound.messageId}` : "turn-leading"}
+        className={cn("message-turn", last ? pin && "is-pinned" : "is-settled")}
+      >
+        {messageItems.slice(bound.item, end)}
+        {last && pin && trailing}
       </div>
+    );
+  });
+
+  return (
+    <div className="messages" ref={attachScroll} onScroll={onScroll}>
+      <div className="messages-column" ref={contentRef}>
+        {hasEarlier && (
+          <EarlierMessagesControl
+            loading={earlier === "loading"}
+            failed={earlier === "failed"}
+            onShow={showEarlier}
+          />
+        )}
+        {turns}
+        {!pin && trailing}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * How many turns the transcript shows when it opens, and how many more each
+ * "Show earlier messages" reveals. Opening a conversation renders this many
+ * answers at once, so it is sized to keep that under a quarter second: forty
+ * 5 KB answers measured about twice that. A transcript page holds twice as
+ * many turns, so the first reveal needs no fetch.
+ */
+export const TRANSCRIPT_TURNS_SHOWN = 20;
+
+/**
+ * The message that opens the last `turns` turns before `end`, or null when
+ * those turns reach the start of the transcript.
+ */
+export function turnWindowStart(
+  messages: readonly ChatMessage[],
+  end: number,
+  turns: number,
+): string | null {
+  let seen = 0;
+  for (let index = end - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    seen += 1;
+    if (seen === turns) return index > 0 ? message.id : null;
+  }
+  return null;
+}
+
+/**
+ * The way to earlier turns, at the top of the transcript: first the ones held
+ * but not shown, then the conversation's earlier pages.
+ */
+function EarlierMessagesControl({
+  loading,
+  failed,
+  onShow,
+}: {
+  loading: boolean;
+  failed: boolean;
+  onShow: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-1.5 pb-2">
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        disabled={loading}
+        aria-busy={loading}
+        onClick={onShow}
+      >
+        {loading && <Spinner />}
+        Show earlier messages
+      </Button>
+      {failed && (
+        <p className="text-muted-foreground text-xs" role="alert">
+          Could not load earlier messages. Try again.
+        </p>
+      )}
     </div>
   );
 }
@@ -647,6 +833,9 @@ export function groupMessageItems(
   // caller lift the last exchange into a pinned wrapper without re-deriving the
   // turn boundary. Stays -1 for a transcript that opens on activity alone.
   let lastTurnStart = -1;
+  // Where every turn opens, with the message that opens it, so the caller can
+  // give each turn its own box.
+  const turnStarts: { item: number; messageId: string }[] = [];
   // Cards whose whole content is the situation, not the call — a standing
   // call-to-action the reader answers once. Parallel calls that all fail the
   // same way would otherwise stack identical copies of it. The claim is per
@@ -683,6 +872,7 @@ export function groupMessageItems(
     if (!isActivityMessage(message)) {
       if (message.role === "user") {
         lastTurnStart = items.length;
+        turnStarts.push({ item: items.length, messageId: message.id });
         standingCardKeys = new Set<string>();
         turnWebSources = [];
       }
@@ -773,7 +963,7 @@ export function groupMessageItems(
     groupIndex += 1;
   }
 
-  return { items, lastTurnStart, phases: nextPhases };
+  return { items, lastTurnStart, turnStarts, phases: nextPhases };
 }
 
 /** Where the activity phase that starts at `start` ends. */
@@ -1367,7 +1557,7 @@ function MessageBubbleImpl({
           className="message message-assistant message-superseded"
           aria-label="Superseded response, replaced below"
         >
-          <MessageMarkdown>{message.text}</MessageMarkdown>
+          <MessageMarkdown whole>{message.text}</MessageMarkdown>
         </article>
       );
     }
@@ -1385,6 +1575,8 @@ function MessageBubbleImpl({
             <AssistantMessageBody
               text={message.text}
               streaming={busy && animateStreaming}
+              // Only the live bubble can still grow; the rest parse whole.
+              whole={!busy}
               containerRef={richContentRef}
             />
           )}

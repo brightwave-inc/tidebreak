@@ -58,6 +58,37 @@ describe("a code fence that is still streaming", () => {
   });
 });
 
+// Settled text parses in one pass because blocks cost a parse to find and a
+// processor each. It must read exactly as the block-by-block rendering does.
+describe("settled text in one pass", () => {
+  it("renders the same markup as block by block", () => {
+    const source = [
+      "## Heading",
+      "",
+      "A paragraph with **bold**, a [link](https://example.com), and `code`.",
+      "Its second line.",
+      "",
+      "- one",
+      "- two",
+      "",
+      "```ts",
+      "const x: number = 1;",
+      "```",
+      "",
+      "| a | b |",
+      "| - | - |",
+      "| 1 | 2 |",
+      "",
+      "> quoted",
+    ].join("\n");
+    const blocks = render(<MessageMarkdown>{source}</MessageMarkdown>);
+    const whole = render(<MessageMarkdown whole>{source}</MessageMarkdown>);
+    const markup = (container: HTMLElement) =>
+      container.innerHTML.replace(/>\s+</g, "><");
+    expect(markup(whole.container)).toBe(markup(blocks.container));
+  });
+});
+
 describe("table copy", () => {
   it("copies the rendered cells as tab-separated rows", async () => {
     const user = userEvent.setup();

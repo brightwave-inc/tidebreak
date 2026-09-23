@@ -451,6 +451,23 @@ function needsKatex(block: string): boolean {
   return block.includes("$") || block.includes("\\[") || block.includes("\\(");
 }
 
+/**
+ * rehype-highlight builds a fresh highlight.js instance, registering every
+ * grammar, each time a processor attaches it — and react-markdown builds a
+ * processor for every block it renders, so each block paid for fourteen
+ * grammars and each code fence recompiled its own. The transformer keeps no
+ * state between files, so one instance serves every block.
+ */
+const highlightTransformer = (
+  rehypeHighlight as unknown as (
+    options: typeof highlightRehypeOptions,
+  ) => ReturnType<typeof rehypeHighlight>
+)(highlightRehypeOptions);
+
+function rehypeHighlightShared() {
+  return highlightTransformer;
+}
+
 function baseRehypePlugins(
   rehypeKatex?: RehypeKatex,
 ): NonNullable<Options["rehypePlugins"]> {
@@ -461,7 +478,7 @@ function baseRehypePlugins(
     // Highlight only fence-tagged languages; auto-detection on unlabeled blocks
     // guesses wrong too often to be worth it. The language list is a subset of
     // highlight.js's common grammars so the chat route does not ship all 37.
-    [rehypeHighlight, highlightRehypeOptions],
+    rehypeHighlightShared,
     ...(rehypeKatex ? [rehypeKatex] : []),
   ];
 }
@@ -729,6 +746,14 @@ interface MessageMarkdownProps {
    */
   streaming?: boolean;
   /**
+   * Parse the text in one pass instead of block by block, for text that will
+   * not change. Blocks let a growing message re-parse only its tail, but they
+   * cost a parse to find and a processor each; a settled 5 KB answer rendered
+   * in about half the time whole. Ignored with a highlight range or a block
+   * wrapper, which address blocks.
+   */
+  whole?: boolean;
+  /**
    * Give every heading a slug id, for a caller that means to scroll to one.
    * Off for transcripts, where headings from separate messages would collide.
    */
@@ -748,6 +773,8 @@ interface MessageMarkdownProps {
    */
   wrapBlock?: WrapMarkdownBlock;
 }
+
+const EMPTY_BLOCKS: readonly string[] = [];
 
 /**
  * A code fence that is still being typed, drawn as plain text in the same box
@@ -791,21 +818,32 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   children,
   containerRef,
   streaming = false,
+  whole = false,
   headingIds = false,
   highlightRange,
   wrapBlock,
 }: MessageMarkdownProps) {
+  const inOnePass = whole && !streaming && !highlightRange && !wrapBlock;
   // The previous split, so a longer version of the same text re-parses only
   // its last block. A cache, not state: a stale entry only costs a full split.
   const splitCache = useRef<MarkdownBlockSplit | null>(null);
   const split = useMemo(() => {
+    if (inOnePass) return null;
     const next = splitMarkdownSource(children, splitCache.current);
     splitCache.current = next;
     return next;
-  }, [children]);
-  const blocks = split.blocks;
+  }, [children, inOnePass]);
+  const blocks = split?.blocks ?? EMPTY_BLOCKS;
   const blockStarts = useMemo(() => pieceStartOffsets(blocks), [blocks]);
   const lastIndex = blocks.length - 1;
+
+  if (split === null) {
+    return (
+      <div className="message-markdown" ref={containerRef}>
+        <MarkdownBlock block={children} headingIds={headingIds} />
+      </div>
+    );
+  }
 
   return (
     <div className="message-markdown" ref={containerRef}>
