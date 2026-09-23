@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 
 import type { PluginSkillInfo } from "@/api";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
+import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -52,7 +53,11 @@ export function PluginDetailView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <PanelSecondaryHeader showBorder={false} className="pr-1 pl-2">
+      <PanelSecondaryHeader
+        showBorder={false}
+        className="pr-1 pl-2"
+        {...paneHeaderDragRegion()}
+      >
         <Button variant="ghost" size="icon-sm" onClick={onBack}>
           <ChevronLeft className="size-4" />
           <span className="sr-only">Back to plugins</span>

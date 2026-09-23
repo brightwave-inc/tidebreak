@@ -31,6 +31,7 @@ import { useComposerPlugins } from "./plugins/useComposerPlugins";
 import { RouteFrame } from "./RouteFrame";
 import { AppSidebar } from "./sidebar/AppSidebar";
 import { WelcomeState } from "./WelcomeState";
+import { PaneDragBand } from "./WindowDragStrip";
 import type { AttachedFiles } from "./attachments";
 import { MAX_IMAGE_ATTACHMENTS } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
@@ -445,7 +446,8 @@ export function HomeRoute() {
           <h1 className="sr-only" tabIndex={-1}>
             Home
           </h1>
-          <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
+          <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
+            <PaneDragBand />
             {/* The same null state an empty conversation shows: home is where a
               chat starts, so it greets the same way. Picking a starter prompt
               fills the composer rather than sending, the way it does in a chat.

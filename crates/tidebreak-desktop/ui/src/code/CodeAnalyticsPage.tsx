@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeSubscriptionUsage } from "./useCodeSubscriptionUsage";
 
@@ -111,7 +112,10 @@ export function CodeAnalyticsBody() {
 
   return (
     <div className="flex size-full min-h-0 flex-col bg-background">
-      <header className="shrink-0 border-b border-border-subtle px-5 py-4">
+      <header
+        className="shrink-0 border-b border-border-subtle px-5 py-4"
+        {...paneHeaderDragRegion()}
+      >
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">

@@ -44,6 +44,7 @@ import {
   positiveSearchInteger,
 } from "./delivery/helpers";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { toast } from "sonner";
 import { useApp } from "@/AppContext";
 import { useEffect, useMemo, useState } from "react";
@@ -291,7 +292,10 @@ function CodeDeliveryBody({
 
   return (
     <div className="flex size-full min-h-0 flex-col bg-background">
-      <header className="shrink-0 border-b border-border-subtle px-5 pt-4">
+      <header
+        className="shrink-0 border-b border-border-subtle px-5 pt-4"
+        {...paneHeaderDragRegion()}
+      >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">

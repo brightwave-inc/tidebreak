@@ -24,6 +24,7 @@ import { openEngineSignIn } from "./EngineSignIn";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { harnessNeedsNoSignIn, workspaceHarnesses } from "./labels";
 import { middleTruncate } from "./workspaceCards";
+import { PaneDragBand } from "@/WindowDragStrip";
 
 /**
  * `/code` home: the doctor until some engine can run a first turn, then repo
@@ -38,7 +39,8 @@ import { middleTruncate } from "./workspaceCards";
 
 export function CodeHome() {
   return (
-    <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-auto">
+    <div className="content-container relative min-h-0 w-full min-w-0 flex-1 overflow-auto">
+      <PaneDragBand />
       <CodeHomeBody />
     </div>
   );

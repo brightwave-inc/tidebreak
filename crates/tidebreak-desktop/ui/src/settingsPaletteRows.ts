@@ -23,8 +23,9 @@ export function settingsPaletteRows(input: {
     section: "settings",
     label: section.label,
     // So that typing the word finds every section, not only the ones whose
-    // label happens to contain it.
-    keywords: `settings ${section.path.replace(/-/g, " ")}`,
+    // label happens to contain it, and so that the name of a thing inside a
+    // section finds the section that holds it.
+    keywords: `settings ${section.path.replace(/-/g, " ")} ${section.keywords}`,
     icon: section.icon,
     onSelect: () => input.navigate(`/settings/${section.path}`),
   }));

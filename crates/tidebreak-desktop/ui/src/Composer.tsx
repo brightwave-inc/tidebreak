@@ -43,6 +43,7 @@ import {
   withSlashCommands,
   type SlashCommandName,
 } from "./ComposerCommands";
+import { shouldStopTurnKey } from "./ComposerKeys";
 import {
   activeMentionQuery,
   attachableFiles,
@@ -1323,6 +1324,18 @@ function ComposerView({
           }
           if (handleHistoryKey(event)) {
             event.preventDefault();
+            return;
+          }
+          // Escape stops the running turn, as the stop button does, once the
+          // plugins panel is not open to take it first.
+          if (
+            active &&
+            !cancelPending &&
+            panelQuery === null &&
+            shouldStopTurnKey(event.nativeEvent, document)
+          ) {
+            event.preventDefault();
+            void onStop();
             return;
           }
           // Cmd/Ctrl+Enter steers only while a turn is active. When idle the

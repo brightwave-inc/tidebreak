@@ -10,11 +10,11 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { shellShortcutMode } from "./code/routes";
+import { COMPOSER_KEYS } from "./ComposerKeys";
 import {
   groupedShellShortcuts,
   shortcutKeycaps,
   usesCommandModifier,
-  type ShellShortcutDef,
   type ShellShortcutMode,
 } from "./ShellShortcuts";
 
@@ -27,24 +27,40 @@ function Keycap({ children }: { children: string }) {
 }
 
 function ShortcutRow({
-  shortcut,
-  command,
+  description,
+  caps,
 }: {
-  shortcut: ShellShortcutDef;
-  command: boolean;
+  description: string;
+  caps: readonly string[];
 }) {
-  const caps = shortcutKeycaps(shortcut, command);
   return (
     <>
-      <span className="truncate text-sm text-foreground/90">
-        {shortcut.description}
-      </span>
+      <span className="truncate text-sm text-foreground/90">{description}</span>
       <span className="flex shrink-0 items-center gap-1">
         {caps.map((cap) => (
           <Keycap key={cap}>{cap}</Keycap>
         ))}
       </span>
     </>
+  );
+}
+
+function GroupHeading({
+  first,
+  children,
+}: {
+  first: boolean;
+  children: string;
+}) {
+  return (
+    <h3
+      className={cn(
+        "col-span-2 text-2xs font-semibold tracking-[0.08em] text-muted-foreground uppercase",
+        !first && "mt-4",
+      )}
+    >
+      {children}
+    </h3>
   );
 }
 
@@ -56,6 +72,10 @@ function ShortcutRow({
  * that misstates the keys is worse than no dialog at all. Listed for the mode
  * asked for, for the same reason: Cmd+N is one row, and which one is true
  * depends on where the reader pressed it.
+ *
+ * The composer's own keys close the list. The composer answers them itself
+ * rather than through the shell table, and both halves of the app share them,
+ * so they come from `COMPOSER_KEYS` and are listed in every mode.
  *
  * Split from the dialog so a story can draw both modes without standing up a
  * router to answer which one the reader is in.
@@ -76,22 +96,26 @@ export function ShortcutsList({
     >
       {groups.map(({ group, items }, index) => (
         <Fragment key={group}>
-          <h3
-            className={cn(
-              "col-span-2 text-2xs font-semibold tracking-[0.08em] text-muted-foreground uppercase",
-              index > 0 && "mt-4",
-            )}
-          >
-            {group}
-          </h3>
-          {items.map((shortcut) => (
-            <ShortcutRow
-              key={`${shortcut.id}:${shortcutKeycaps(shortcut, command).join("")}`}
-              shortcut={shortcut}
-              command={command}
-            />
-          ))}
+          <GroupHeading first={index === 0}>{group}</GroupHeading>
+          {items.map((shortcut) => {
+            const caps = shortcutKeycaps(shortcut, command);
+            return (
+              <ShortcutRow
+                key={`${shortcut.id}:${caps.join("")}`}
+                description={shortcut.description}
+                caps={caps}
+              />
+            );
+          })}
         </Fragment>
+      ))}
+      <GroupHeading first={groups.length === 0}>Composer</GroupHeading>
+      {COMPOSER_KEYS.map((key) => (
+        <ShortcutRow
+          key={key.id}
+          description={key.description}
+          caps={key.keycaps(command)}
+        />
       ))}
     </div>
   );
@@ -115,7 +139,8 @@ export function ShortcutsDialog({
         <DialogHeader>
           <DialogTitle>Keyboard shortcuts</DialogTitle>
           <DialogDescription>
-            These act on the app frame, so they work from every screen.
+            Most of these work from every screen. The composer keys work while
+            you write a message.
           </DialogDescription>
         </DialogHeader>
         <ShortcutsList mode={mode} />

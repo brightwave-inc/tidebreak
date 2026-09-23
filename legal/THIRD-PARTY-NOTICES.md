@@ -27,7 +27,7 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 854
+- Rust crates: 855
 - Desktop UI production packages: 537
 - Distinct license texts: 591
 - Packages with no declared license: 0
@@ -3871,6 +3871,12 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-b7f455413bfe](#l-b7f455413bfe))
 
 ### tauri-plugin-updater 2.11.0
+
+- License: `Apache-2.0 OR MIT`
+- Repository: https://github.com/tauri-apps/plugins-workspace
+- License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
+
+### tauri-plugin-window-state 2.4.1
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace

@@ -517,6 +517,44 @@ describe("CodeComposer", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it("interrupts the running session on Escape and leaves the draft", async () => {
+    const onInterrupt = vi.fn();
+    renderComposer(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        onSend={vi.fn()}
+        onInterrupt={onInterrupt}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "then add a test" } });
+    fireEvent.keyDown(box, { key: "Escape" });
+
+    await waitFor(() => expect(onInterrupt).toHaveBeenCalledTimes(1));
+    expect(box).toHaveValue("then add a test");
+  });
+
+  it("leaves Escape alone when the session is not running", async () => {
+    const onInterrupt = vi.fn();
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={vi.fn()}
+        onInterrupt={onInterrupt}
+      />,
+    );
+
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), {
+      key: "Escape",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(onInterrupt).not.toHaveBeenCalled();
+  });
+
   it("accepts guidance once a pending submit becomes an active turn", async () => {
     let resolveSend!: () => void;
     const onSend = vi.fn(

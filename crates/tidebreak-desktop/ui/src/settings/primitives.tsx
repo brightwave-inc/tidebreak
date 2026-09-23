@@ -2,6 +2,7 @@ import { cloneElement, isValidElement, useId, type ReactNode } from "react";
 import { CircleAlert, CircleCheck, CircleMinus } from "lucide-react";
 
 import { Card } from "@/components/ui/card";
+import { PaneDragBand } from "@/WindowDragStrip";
 
 /**
  * A whole settings surface: the page title, an optional description, and the
@@ -25,6 +26,7 @@ export function SettingsPanel({
 }) {
   return (
     <div className="settings-panel" aria-busy={busy}>
+      <PaneDragBand />
       <div className="settings-panel-inner">
         <header className="settings-panel-header">
           <h1 className="settings-panel-title" tabIndex={-1}>
