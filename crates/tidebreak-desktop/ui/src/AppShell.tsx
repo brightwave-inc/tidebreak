@@ -45,12 +45,18 @@ import {
   remoteMachineState,
 } from "./remoteMachine";
 import {
+  chatDeletionErrorMessage,
   deletionDescription,
   detachChatFolders,
+  inspectLiveChatWork,
+  liveChatWorkIsBlocking,
   purgeDeletedChatHostAuthority,
   prependReplacementChat,
+  stopLiveChatWork,
+  waitForChatQuiescent,
 } from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
+import { useChatSessionStore } from "./ChatSessionStore";
 import {
   centerTabCount,
   closeFocusedCodeTab,
@@ -878,13 +884,29 @@ export function AppShell() {
     try {
       current = await client.getChat(target.id);
     } catch (err) {
-      chatListActions.setChatsError(`Could not delete work: ${String(err)}`);
+      chatListActions.setChatsError(chatDeletionErrorMessage(err));
       return;
     }
+    let work;
+    try {
+      work = await inspectLiveChatWork({
+        chatId: target.id,
+        openChatId,
+        session: useChatSessionStore.getState(),
+        listAgentRuns: (chatId) => client.listAgentRuns(chatId),
+      });
+    } catch (err) {
+      chatListActions.setChatsError(chatDeletionErrorMessage(err));
+      return;
+    }
+    const stopping = liveChatWorkIsBlocking(work);
     const confirmed = await confirm({
       title: `Delete ${label}?`,
-      description: deletionDescription(current.root_attachments.length),
-      confirmLabel: "Delete work",
+      description: deletionDescription(
+        current.root_attachments.length,
+        stopping,
+      ),
+      confirmLabel: stopping ? "Stop and delete" : "Delete work",
       destructive: true,
     });
     if (!confirmed) return;
@@ -896,6 +918,29 @@ export function AppShell() {
     // by the time the request lands this is no longer the route we are on.
     const deletingOpenChat = openChatId === target.id;
     try {
+      if (stopping) {
+        await stopLiveChatWork({
+          chatId: target.id,
+          work,
+          cancelTurn: (chatId, turnId) => client.cancel(chatId, turnId),
+          cancelAgentRun: (chatId, runId) =>
+            client.cancelAgentRun(chatId, runId).then(() => undefined),
+        });
+        const quiet = await waitForChatQuiescent({
+          inspect: () =>
+            inspectLiveChatWork({
+              chatId: target.id,
+              openChatId,
+              session: useChatSessionStore.getState(),
+              listAgentRuns: (chatId) => client.listAgentRuns(chatId),
+            }),
+        });
+        if (!quiet) {
+          throw new Error(
+            "Could not stop the active work. Finish or cancel it, then try deleting again.",
+          );
+        }
+      }
       await detachChatFolders(current);
       await client.deleteChat(target.id);
       // Chat ids are never reused; residual broker grants for this subject are
@@ -924,7 +969,7 @@ export function AppShell() {
       chatListActions.setChats(refreshed);
       await navigate({ to: "/c/$chatId", params: { chatId: next.id } });
     } catch (err) {
-      chatListActions.setChatsError(`Could not delete work: ${String(err)}`);
+      chatListActions.setChatsError(chatDeletionErrorMessage(err));
     } finally {
       deletionInFlightRef.current = false;
       chatListActions.setDeletingChatId(null);

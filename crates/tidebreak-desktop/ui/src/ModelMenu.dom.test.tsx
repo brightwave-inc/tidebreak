@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import { afterEach, expect, it, vi } from "vitest";
@@ -8,7 +8,7 @@ import { ModelMenu } from "./ModelMenu";
 import { useFirstTaskGuide } from "./FirstTaskWalkthrough";
 import type { ModelInfo } from "./api";
 
-vi.mock("sonner", () => ({ toast: { warning: vi.fn() } }));
+vi.mock("sonner", () => ({ toast: { warning: vi.fn(), error: vi.fn() } }));
 
 afterEach(() => {
   cleanup();
@@ -239,4 +239,31 @@ it("opens when the first-task walkthrough is on the model step", () => {
   expect(
     screen.getByRole("menuitem", { name: "Claude Sonnet 4" }),
   ).toHaveAttribute("data-first-task-target", "model-choice");
+});
+
+it("toasts when changing the model fails", async () => {
+  const onChange = vi.fn().mockRejectedValue(new Error("patch failed"));
+  render(
+    <ModelMenu
+      models={MODELS}
+      value="anthropic::claude-sonnet-4"
+      onSetUpProvider={() => {}}
+      onChange={onChange}
+    />,
+  );
+
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole("button", { name: "Model: Claude Sonnet 4" }),
+  );
+  await user.click(screen.getByRole("menuitem", { name: "Claude Haiku 4" }));
+
+  await waitFor(() =>
+    expect(toast.error).toHaveBeenCalledWith(
+      "Could not update the model. Try again.",
+    ),
+  );
+  expect(
+    screen.getByRole("button", { name: "Model: Claude Sonnet 4" }),
+  ).toBeInTheDocument();
 });
