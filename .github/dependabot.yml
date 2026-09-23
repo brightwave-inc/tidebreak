@@ -91,6 +91,12 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    ignore:
+      # Odd-numbered Node releases never become LTS, and the renderer stage
+      # tracks the Node major of the desktop UI lane in CI. Take digest and
+      # patch updates here, and move the major on purpose.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: deps
       include: scope
