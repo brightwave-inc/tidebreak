@@ -17,12 +17,13 @@ use crate::local_app::{
 use crate::model::{
     AgentRun, AgentRunExecutionLocation, AgentRunInboxEntry, AgentRunProgressEntry, AgentRunResult,
     AgentRunTier, AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement,
-    BlobRetirementStatus, Chat, ClientToolCallRequest, DocumentListCursor, DocumentRecord,
-    DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileRejection,
-    ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord, Message, MessageAttachment,
-    MessageDocumentAttachment, NetworkPolicy, OwnerId, Project, QueuedAgentTurn, ReasoningEffort,
-    RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
-    TurnAdmissionLease, TurnCheckpointProgress, TurnFailureRetry, TurnRun, TurnSteer,
+    BlobRetirementStatus, Chat, ChatListing, ClientToolCallRequest, DocumentListCursor,
+    DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
+    ExecFileRejection, ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord, Message,
+    MessageAttachment, MessageDocumentAttachment, NetworkPolicy, OwnerId, Project, QueuedAgentTurn,
+    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
+    ToolCallResolution, TurnAdmissionLease, TurnCheckpointProgress, TurnFailureRetry, TurnRun,
+    TurnSteer,
 };
 use crate::provider::{RefusalOutcome, StopReason, Usage, VendorWebSearch};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -597,6 +598,87 @@ pub trait Store: Send + Sync {
     ) -> Result<bool> {
         let _ = owner;
         self.set_chat_memory_incognito(id, memory_incognito).await
+    }
+
+    /// `owner`'s conversations as their list of work shows them: pinned
+    /// first, then by latest activity. `archived` picks the archive instead.
+    ///
+    /// The default is a store with no list state: every conversation is
+    /// unpinned and unarchived, and its activity is its creation.
+    async fn list_chat_listings_scoped(
+        &self,
+        owner: &OwnerId,
+        archived: bool,
+    ) -> Result<Vec<ChatListing>> {
+        if archived {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .list_chats_scoped(owner)
+            .await?
+            .into_iter()
+            .map(ChatListing::new)
+            .collect())
+    }
+
+    /// One of `owner`'s conversations as the list shows it, archived or not;
+    /// `None` when it does not exist or belongs to someone else.
+    async fn get_chat_listing_scoped(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+    ) -> Result<Option<ChatListing>> {
+        Ok(self.get_chat_scoped(owner, id).await?.map(ChatListing::new))
+    }
+
+    /// Pin `owner`'s conversation to the top of their list, or unpin it.
+    /// Pinning takes it out of the archive. Returns `false` if the chat does
+    /// not exist or belongs to someone else.
+    async fn set_chat_pinned_scoped(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+        pinned: bool,
+    ) -> Result<bool> {
+        let _ = (owner, id, pinned);
+        Err(AgentError::Store(
+            "pinning conversations is not implemented by this Store".into(),
+        ))
+    }
+
+    /// Archive `owner`'s conversation out of their list, or bring it back.
+    /// Archiving keeps everything and unpins. Returns `false` if the chat
+    /// does not exist or belongs to someone else.
+    async fn set_chat_archived_scoped(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+        archived: bool,
+    ) -> Result<bool> {
+        let _ = (owner, id, archived);
+        Err(AgentError::Store(
+            "archiving conversations is not implemented by this Store".into(),
+        ))
+    }
+
+    /// Record that `owner` has seen what their conversation last did, which
+    /// clears the unread mark a finished turn left. Returns `false` if the
+    /// chat does not exist or belongs to someone else.
+    async fn mark_chat_read_scoped(&self, owner: &OwnerId, id: SessionId) -> Result<bool> {
+        Ok(self.get_chat_scoped(owner, id).await?.is_some())
+    }
+
+    /// Delete, across every owner, the conversations created before
+    /// `created_before` that nothing ever happened in: no turns, no title,
+    /// no pin, not archived, and nothing attached. Returns their ids.
+    ///
+    /// The default prunes nothing.
+    async fn prune_empty_chats(
+        &self,
+        created_before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<SessionId>> {
+        let _ = created_before;
+        Ok(Vec::new())
     }
 
     /// Persist a new project owned by `owner`.

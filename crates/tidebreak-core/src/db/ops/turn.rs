@@ -26,7 +26,7 @@ use super::{
     acquire_chat_write_lock, acquire_turn_write_lock,
     agent_run::find_foreground_agent_run_on,
     conversation::{
-        append_event_on, next_message_seq_on, reserve_message_identity_on,
+        append_event_on, next_message_seq_on, record_started_turn_on, reserve_message_identity_on,
         MESSAGE_IDENTITY_OWNER_MESSAGE,
     },
 };
@@ -705,6 +705,7 @@ where
     .insert(conn)
     .await
     .map_err(store_err)?;
+    record_started_turn_on(conn, chat_id, now).await?;
     message_attachment_ops::insert_on(conn, chat_id, id, input_message_id, images, now).await?;
     let document_context = message_document_attachment_ops::insert_on(
         conn,

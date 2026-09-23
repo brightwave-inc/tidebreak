@@ -16,9 +16,9 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use super::wire::{
-    AgentActivityHistoryItem, AgentRunSnapshot, ApprovalGrantRung, Chat, DeliverablePreview,
-    DeliverablesCatalog, ModelCatalog, OutputRevisionsCatalog, PendingPlanApproval,
-    PendingUserQuestions, ProviderInfo, ProvidersList, ServerVersion,
+    AgentActivityHistoryItem, AgentRunSnapshot, ApprovalGrantRung, Chat, ChatListing,
+    DeliverablePreview, DeliverablesCatalog, ModelCatalog, OutputRevisionsCatalog,
+    PendingPlanApproval, PendingUserQuestions, ProviderInfo, ProvidersList, ServerVersion,
 };
 
 /// The chat event stream once the upgrade completes.
@@ -236,6 +236,37 @@ impl Client {
     /// Every chat, most recently active first (server ordering).
     pub async fn list_chats(&self) -> Result<Vec<Chat>> {
         self.get_json(format!("{}/chats", self.base)).await
+    }
+
+    /// The list of work: pinned chats first, then the rest by latest
+    /// activity. With `archived`, the archive instead, newest first.
+    pub async fn list_chat_listings(&self, archived: bool) -> Result<Vec<ChatListing>> {
+        let query = if archived { "?archived=true" } else { "" };
+        self.get_json(format!("{}/chats{query}", self.base)).await
+    }
+
+    /// Pin, unpin, archive, or unarchive a chat. `placement` is the PATCH
+    /// body: `{"pinned": bool}` or `{"archived": bool}`.
+    pub async fn place_chat(
+        &self,
+        chat: SessionId,
+        placement: &serde_json::Value,
+    ) -> Result<ChatListing> {
+        let response = self
+            .http
+            .patch(format!("{}/chats/{chat}", self.base))
+            .json(placement)
+            .send()
+            .await
+            .map_err(request_error)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(AgentError::msg(format!("chat {chat} not found")));
+        }
+        Self::expect_success(response)
+            .await?
+            .json::<ChatListing>()
+            .await
+            .map_err(request_error)
     }
 
     /// Patch the chat's model selection; `None` clears back to the default.

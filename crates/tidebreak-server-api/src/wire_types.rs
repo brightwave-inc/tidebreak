@@ -473,6 +473,8 @@ mod tests {
         generate::collect_from::<crate::routes::AppGatewayPageResult>(&cfg, &mut out);
         generate::collect_from::<tidebreak_core::Project>(&cfg, &mut out);
         generate::collect_from::<tidebreak_core::Chat>(&cfg, &mut out);
+        // What every chat route answers with: the chat and its place in the list.
+        generate::collect_from::<tidebreak_core::ChatListing>(&cfg, &mut out);
         generate::collect_from::<crate::routes::AgentRunSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::AgentRunCancellationSnapshot>(&cfg, &mut out);
         // A separate endpoint root: the ordered activity history is returned by

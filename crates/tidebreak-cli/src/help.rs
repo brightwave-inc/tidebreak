@@ -177,9 +177,11 @@ usage: tidebreak provider list
                   [--env-from <var>]… [--cwd <dir>] [--bearer-token-env <var>]
                   [--timeout-ms <ms>] [--disabled]
        tidebreak mcp-server remove <name>
-       tidebreak chat list
+       tidebreak chat list [--archived]
        tidebreak chat create
        tidebreak chat delete <chat>
+       tidebreak chat pin|unpin <chat>
+       tidebreak chat archive|unarchive <chat>
        tidebreak chat steer <chat> <turn> <text...>
        tidebreak agent-run list <chat>
        tidebreak agent-run show <chat> <run>

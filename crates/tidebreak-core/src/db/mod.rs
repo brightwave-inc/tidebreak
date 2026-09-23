@@ -36,12 +36,13 @@ use crate::model::Role;
 use crate::model::{
     validate_project_root_projection, AgentRun, AgentRunExecutionLocation, AgentRunInboxEntry,
     AgentRunTier, AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement,
-    BlobRetirementStatus, Chat, DocumentBlob, DocumentListCursor, DocumentRecord, DocumentScope,
-    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
-    MessageDocumentAttachment, NetworkPolicy, OwnerId, Project, QueuedAgentTurn, ReasoningEffort,
-    RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallParkEntry,
-    SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution, TurnAdmissionLease,
-    TurnAdmissionRequest, TurnCheckpointProgress, TurnFailureRetry, TurnRun, MAX_ROOT_ATTACHMENTS,
+    BlobRetirementStatus, Chat, ChatListing, DocumentBlob, DocumentListCursor, DocumentRecord,
+    DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
+    MessageAttachment, MessageDocumentAttachment, NetworkPolicy, OwnerId, Project, QueuedAgentTurn,
+    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall,
+    SandboxToolCallParkEntry, SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution,
+    TurnAdmissionLease, TurnAdmissionRequest, TurnCheckpointProgress, TurnFailureRetry, TurnRun,
+    MAX_ROOT_ATTACHMENTS,
 };
 #[cfg(test)]
 use crate::model::{AgentRunStatus, TurnRunStatus, TurnSteerStatus};
@@ -1302,6 +1303,51 @@ impl Store for DbStore {
 
     async fn list_chats_scoped(&self, owner: &OwnerId) -> Result<Vec<Chat>> {
         ops::conversation::list_chats(self, Some(owner)).await
+    }
+
+    async fn list_chat_listings_scoped(
+        &self,
+        owner: &OwnerId,
+        archived: bool,
+    ) -> Result<Vec<ChatListing>> {
+        ops::conversation::list_chat_listings(self, Some(owner), archived).await
+    }
+
+    async fn get_chat_listing_scoped(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+    ) -> Result<Option<ChatListing>> {
+        ops::conversation::get_chat_listing(self, id, Some(owner)).await
+    }
+
+    async fn set_chat_pinned_scoped(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+        pinned: bool,
+    ) -> Result<bool> {
+        ops::conversation::set_chat_pinned(self, id, pinned, Some(owner)).await
+    }
+
+    async fn set_chat_archived_scoped(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+        archived: bool,
+    ) -> Result<bool> {
+        ops::conversation::set_chat_archived(self, id, archived, Some(owner)).await
+    }
+
+    async fn mark_chat_read_scoped(&self, owner: &OwnerId, id: SessionId) -> Result<bool> {
+        ops::conversation::mark_chat_read(self, id, Some(owner)).await
+    }
+
+    async fn prune_empty_chats(
+        &self,
+        created_before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<SessionId>> {
+        ops::conversation::prune_empty_chats(self, created_before).await
     }
 
     async fn delete_chat(&self, id: SessionId) -> Result<DeleteChatOutcome> {

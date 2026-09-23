@@ -116,6 +116,10 @@ where
         attachment_revision: Set(0),
         memory_incognito: Set(false),
         visibility: Set(session.visibility.as_str().to_owned()),
+        last_activity_at: Set(None),
+        pinned_at: Set(None),
+        archived_at: Set(None),
+        unread_since: Set(None),
     }
     .insert(connection)
     .await

@@ -48,6 +48,48 @@ pub struct Chat {
     pub created_at: DateTime<Utc>,
 }
 
+/// A conversation as its owner's list of work shows it.
+///
+/// The conversation itself, plus where it sits in the list: when something
+/// last happened in it, whether it is pinned or archived, and whether a turn
+/// is running or finished while the owner was elsewhere. The chat routes
+/// answer with this shape, so every client reads the same list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct ChatListing {
+    #[serde(flatten)]
+    pub chat: Chat,
+    /// When a turn last started or ended in this conversation, or it was last
+    /// renamed. Its creation time until then. The list sorts on this.
+    pub last_activity_at: DateTime<Utc>,
+    /// When the owner pinned it to the top of the list, or `None`.
+    pub pinned_at: Option<DateTime<Utc>>,
+    /// When the owner archived it out of the list, or `None`. Archiving keeps
+    /// everything; a new turn brings the conversation back.
+    pub archived_at: Option<DateTime<Utc>>,
+    /// Whether a turn is in flight right now.
+    pub running: bool,
+    /// Whether a turn finished since the owner last opened the conversation.
+    pub unread: bool,
+    /// How many turns the conversation has had. A client hides one with none
+    /// until it is named or pinned: nothing has happened in it yet.
+    pub turn_count: u64,
+}
+
+impl ChatListing {
+    /// A conversation nothing has happened in yet, as creation returns it.
+    pub fn new(chat: Chat) -> Self {
+        Self {
+            last_activity_at: chat.created_at,
+            chat,
+            pinned_at: None,
+            archived_at: None,
+            running: false,
+            unread: false,
+            turn_count: 0,
+        }
+    }
+}
+
 pub(crate) fn validate_project_root_projection(project: &Project) -> Result<(), &'static str> {
     if !(0..=MAX_ATTACHMENT_REVISION).contains(&project.attachment_revision) {
         return Err("project attachment revision is outside the supported range");

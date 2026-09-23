@@ -784,6 +784,92 @@ created_at: string, };
 export type ChatGptSignInStatus = { signed_in: boolean, pending_authorization_url?: string, error?: string, };
 
 /**
+ * A conversation as its owner's list of work shows it.
+ *
+ * The conversation itself, plus where it sits in the list: when something
+ * last happened in it, whether it is pinned or archived, and whether a turn
+ * is running or finished while the owner was elsewhere. The chat routes
+ * answer with this shape, so every client reads the same list.
+ */
+export type ChatListing = {
+/**
+ * When a turn last started or ended in this conversation, or it was last
+ * renamed. Its creation time until then. The list sorts on this.
+ */
+last_activity_at: string,
+/**
+ * When the owner pinned it to the top of the list, or `None`.
+ */
+pinned_at: string | null,
+/**
+ * When the owner archived it out of the list, or `None`. Archiving keeps
+ * everything; a new turn brings the conversation back.
+ */
+archived_at: string | null,
+/**
+ * Whether a turn is in flight right now.
+ */
+running: boolean,
+/**
+ * Whether a turn finished since the owner last opened the conversation.
+ */
+unread: boolean,
+/**
+ * How many turns the conversation has had. A client hides one with none
+ * until it is named or pinned: nothing has happened in it yet.
+ */
+turn_count: number,
+/**
+ * Stable identifier.
+ */
+id: SessionId,
+/**
+ * The project this chat belongs to, or `None` for a loose (projectless) chat.
+ */
+project_id: ProjectId | null,
+/**
+ * Human-facing title; `None` until one is set or derived.
+ */
+title: string | null,
+/**
+ * The model this chat runs against, or `None` to use the configured default.
+ */
+model: string | null,
+/**
+ * Reasoning-effort override for this chat, honored only by models that
+ * expose the control; `None` leaves the provider's default in force.
+ */
+reasoning_effort: ReasoningEffort | null,
+/**
+ * How much this chat lets the agent do between approvals; `None` means
+ * [`PermissionMode::Ask`].
+ */
+permission_mode: PermissionMode | null,
+/**
+ * Outbound network access for code execution in this chat.
+ */
+network_policy: NetworkPolicy,
+/**
+ * CAS revision of this conversation's exact root projection.
+ */
+attachment_revision: number,
+/**
+ * Ordered opaque roots available for future broker-backed operations.
+ * Live broker authorization remains mandatory and may revoke access at any
+ * time, regardless of this projection.
+ */
+root_attachments: Array<ChatRootAttachment>,
+/**
+ * Whether this chat keeps durable memory out entirely: no digest is
+ * injected into its prompts and no post-turn capture runs for it.
+ */
+memory_incognito: boolean,
+/**
+ * When the chat was created.
+ */
+created_at: string, };
+
+/**
  * A renderer-safe durable transcript entry. Internal routing and tool state
  * deliberately remain behind the server boundary.
  */

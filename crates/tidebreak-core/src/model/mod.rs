@@ -41,7 +41,7 @@ pub use runs::{
     AgentRun, AgentRunCancellationReason, AgentRunCancellationSignal, AgentRunCheckInReason,
     AgentRunExecutionLocation, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunProgressEntry,
     AgentRunResult, AgentRunResultPayload, AgentRunStatus, AgentRunSubmittedOutput, AgentRunTier,
-    Chat, DelegatedFileReadClaim, SandboxAgentAdmission, SandboxSpawnCheckpoint,
+    Chat, ChatListing, DelegatedFileReadClaim, SandboxAgentAdmission, SandboxSpawnCheckpoint,
     SandboxSpawnCheckpointRequest, SandboxToolCall, SandboxToolCallParkEntry,
     SandboxToolCallReceipt, SandboxToolCallRequest, SandboxToolCallStatus,
 };
