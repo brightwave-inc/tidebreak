@@ -29,6 +29,35 @@ describe("code block copy", () => {
   });
 });
 
+// Highlighting re-ran over the whole fence on every typewriter tick, and a
+// long fence cost more than a frame. While it streams, an open fence is plain.
+describe("a code fence that is still streaming", () => {
+  const OPEN = "Intro.\n\n```ts\nconst x: number = 1;\n";
+
+  it("renders as plain text until it closes, then highlights", async () => {
+    const user = userEvent.setup();
+    const { container, rerender } = render(
+      <MessageMarkdown streaming>{OPEN}</MessageMarkdown>,
+    );
+    expect(container.querySelector("pre code")?.textContent).toBe(
+      "const x: number = 1;\n",
+    );
+    expect(container.querySelector(".hljs-keyword")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Copy code" }));
+    expect(await window.navigator.clipboard.readText()).toBe(
+      "const x: number = 1;\n",
+    );
+
+    rerender(<MessageMarkdown streaming>{`${OPEN}\`\`\``}</MessageMarkdown>);
+    expect(container.querySelector(".hljs-keyword")).not.toBeNull();
+  });
+
+  it("highlights an open fence once the message stops streaming", () => {
+    const { container } = render(<MessageMarkdown>{OPEN}</MessageMarkdown>);
+    expect(container.querySelector(".hljs-keyword")).not.toBeNull();
+  });
+});
+
 describe("table copy", () => {
   it("copies the rendered cells as tab-separated rows", async () => {
     const user = userEvent.setup();

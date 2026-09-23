@@ -41,7 +41,11 @@ import {
 } from "./components/document/citationMark";
 import { InlineCitation } from "./InlineCitation";
 import { highlightRehypeOptions } from "./highlightLanguages";
-import { splitMarkdownBlocks } from "./markdownBlocks";
+import {
+  openFenceCode,
+  splitMarkdownSource,
+  type MarkdownBlockSplit,
+} from "./markdownBlocks";
 import { escapeLatexText } from "./markdownLatex";
 import { slugify } from "./markdownHeadings";
 import { openInBrowser } from "./openInBrowser";
@@ -719,6 +723,12 @@ interface MessageMarkdownProps {
   /** The rendered Markdown root, for consumers such as rich clipboard copy. */
   containerRef?: Ref<HTMLDivElement>;
   /**
+   * The text is still arriving. A code fence that has not closed yet renders
+   * as plain text until it does: highlighting re-runs over the whole fence on
+   * every tick, and a long fence costs more than a frame.
+   */
+  streaming?: boolean;
+  /**
    * Give every heading a slug id, for a caller that means to scroll to one.
    * Off for transcripts, where headings from separate messages would collide.
    */
@@ -739,15 +749,63 @@ interface MessageMarkdownProps {
   wrapBlock?: WrapMarkdownBlock;
 }
 
+/**
+ * A code fence that is still being typed, drawn as plain text in the same box
+ * the highlighted fence uses, so nothing moves when its colors arrive.
+ */
+const OpenFenceBlock = memo(function OpenFenceBlock({
+  block,
+  language,
+}: {
+  block: string;
+  language: string | null;
+}) {
+  // The same rewrite the parsed path applies, and the same trailing line
+  // break its code element carries, so the text and the copy match what the
+  // highlighted fence shows once it closes.
+  const code = useMemo(() => {
+    const value = openFenceCode(processMarkdownContent(block));
+    return value ? `${value}\n` : "";
+  }, [block]);
+  return (
+    <div className="code-block">
+      {code && (
+        <ClipboardCopyButton
+          value={code}
+          label="Copy code"
+          copiedAnnouncement="Code copied"
+          failedAnnouncement="Copy failed"
+          className="code-block-copy"
+        />
+      )}
+      <pre>
+        <code className={language ? `language-${language}` : undefined}>
+          {code}
+        </code>
+      </pre>
+    </div>
+  );
+});
+
 export const MessageMarkdown = memo(function MessageMarkdown({
   children,
   containerRef,
+  streaming = false,
   headingIds = false,
   highlightRange,
   wrapBlock,
 }: MessageMarkdownProps) {
-  const blocks = useMemo(() => splitMarkdownBlocks(children), [children]);
+  // The previous split, so a longer version of the same text re-parses only
+  // its last block. A cache, not state: a stale entry only costs a full split.
+  const splitCache = useRef<MarkdownBlockSplit | null>(null);
+  const split = useMemo(() => {
+    const next = splitMarkdownSource(children, splitCache.current);
+    splitCache.current = next;
+    return next;
+  }, [children]);
+  const blocks = split.blocks;
   const blockStarts = useMemo(() => pieceStartOffsets(blocks), [blocks]);
+  const lastIndex = blocks.length - 1;
 
   return (
     <div className="message-markdown" ref={containerRef}>
@@ -755,6 +813,21 @@ export const MessageMarkdown = memo(function MessageMarkdown({
         const inBlock = highlightRange
           ? rangeWithinPiece(highlightRange, blockStarts[index]!, block.length)
           : null;
+        if (
+          streaming &&
+          index === lastIndex &&
+          split.openFence &&
+          !wrapBlock &&
+          !inBlock
+        ) {
+          return (
+            <OpenFenceBlock
+              key={index}
+              block={block}
+              language={split.openFence.language}
+            />
+          );
+        }
         return (
           // Blocks are append-only while streaming: the prefix is immutable and
           // only the tail grows, so the array index is a stable identity that
