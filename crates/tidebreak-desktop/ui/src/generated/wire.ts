@@ -2223,6 +2223,20 @@ method: ConsentMethodSnapshot, granted_at: string, };
 export type ConsentVerb = { "kind": "tool", action: RendererToolName, approval: ToolApprovalKind, } | { "kind": "capability", capability: HostCapability, };
 
 /**
+ * The two shapes a conversation export takes.
+ */
+export type ConversationExportFormat = "markdown" | "json";
+
+/**
+ * Body of `POST /data/export`.
+ */
+export type ConversationExportRequest = { format: ConversationExportFormat,
+/**
+ * The conversations to export. Absent exports every one.
+ */
+chat_ids?: Array<SessionId>, };
+
+/**
  * Arm a trigger on a repository.
  */
 export type CreateCodeTriggerBody = { condition: CodeTriggerCondition, action: CodeTriggerAction, };
@@ -2312,6 +2326,46 @@ reasoning_efforts: Array<ReasoningEffort>,
  * field existed, and is left out of the JSON while on.
  */
 supports_tools?: boolean, };
+
+/**
+ * The parts of a data directory the settings page names.
+ */
+export type DataCategory = "database" | "attachments" | "outputs" | "logs" | "engine_tools" | "backups" | "other";
+
+/**
+ * What `GET /data` answers: where the profile lives and what it holds.
+ */
+export type DataOverview = {
+/**
+ * The profile's data directory, on the machine the server runs on.
+ */
+data_dir: string,
+/**
+ * Which database holds conversations.
+ */
+storage: DataStorage,
+/**
+ * Disk use by category, in a fixed order, zero-byte categories included.
+ */
+usage: Array<DataUsage>,
+/**
+ * The sum of every category.
+ */
+total_bytes: number,
+/**
+ * Why `POST /data/backup` cannot run on this server. Absent when it can.
+ */
+backup_unavailable?: string, };
+
+/**
+ * The database a profile keeps its conversations in.
+ */
+export type DataStorage = "sqlite" | "postgres";
+
+/**
+ * How much disk one category uses.
+ */
+export type DataUsage = { category: DataCategory, bytes: number, };
 
 /**
  * Wire mirror of the admission gate's typed denial reasons
@@ -3931,6 +3985,15 @@ export type MemoryCapLevel = "supported" | "unsupported" | "unknown";
  * backend states a value.
  */
 export type MemoryCaps = { extraction: MemoryCapLevel, lexical_search: MemoryCapLevel, semantic_search: MemoryCapLevel, consolidation: MemoryCapLevel, context_assembly: MemoryCapLevel, revision_history: MemoryCapLevel, verified_delete: MemoryCapLevel, asynchronous_writes: MemoryCapLevel, agent_editable_surfaces: MemoryCapLevel, };
+
+/**
+ * Answer of `DELETE /memory/records`.
+ */
+export type MemoryDeleteAllResult = {
+/**
+ * How many records were deleted, forgotten ones included.
+ */
+deleted: number, };
 
 /**
  * One deterministic active-record digest for a scope.

@@ -430,6 +430,11 @@ mod tests {
         generate::collect_from::<crate::routes::UpdateMemoryRecordBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::MemoryStatusBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::MemoryIngestBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::MemoryDeleteAllResult>(&cfg, &mut out);
+        // Data and privacy: where the profile lives and its disk use, and the
+        // conversation export request the settings page sends.
+        generate::collect_from::<crate::profile_data::DataOverview>(&cfg, &mut out);
+        generate::collect_from::<crate::profile_data::ConversationExportRequest>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ChatTranscript>(&cfg, &mut out);
         // Rerun and branch a chat: the request bodies and the answer.
         generate::collect_from::<crate::routes::RetryTurnBody>(&cfg, &mut out);

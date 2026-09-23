@@ -118,7 +118,9 @@ async fn read_workspace(
         .map_err(|error| CodeWorktreeOpenError::detailed(REASON_WORKSPACE_UNAVAILABLE, error))
 }
 
-fn open_directory(path: PathBuf) -> Result<CodeWorktreeOpenResult, CodeWorktreeOpenError> {
+pub(crate) fn open_directory(
+    path: PathBuf,
+) -> Result<CodeWorktreeOpenResult, CodeWorktreeOpenError> {
     validate_directory(&path)?;
     let plan = launcher_plan(current_platform(), &path)
         .ok_or_else(|| CodeWorktreeOpenError::new(REASON_LAUNCHER_UNAVAILABLE))?;

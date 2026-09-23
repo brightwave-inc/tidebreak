@@ -666,7 +666,7 @@ pub(crate) fn local_client() -> reqwest::Client {
         .expect("fixed local HTTP client configuration is valid")
 }
 
-fn streaming_local_client() -> reqwest::Client {
+pub(crate) fn streaming_local_client() -> reqwest::Client {
     reqwest::Client::builder()
         // Imports run only over loopback, but can reasonably outlive the
         // short request deadline appropriate for catalog/search calls.
