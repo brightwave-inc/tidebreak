@@ -147,6 +147,9 @@ export function useConfirm(): {
             {pending.alternativeLabel && (
               <AlertDialogAction
                 variant="outline"
+                // Stacked on a narrow window, the buttons get their spacing
+                // from their own top margin, the way Cancel does.
+                className="mt-2 sm:mt-0"
                 onClick={() => {
                   buttonResultRef.current = "alternative";
                 }}

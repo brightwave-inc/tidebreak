@@ -66,10 +66,12 @@ export function WorkArchivePage() {
           className="shrink-0 border-b border-border-subtle px-5 py-4"
           {...paneHeaderDragRegion()}
         >
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-baseline gap-x-2">
             <h1 className="text-xl font-semibold tracking-tight">Archive</h1>
-            {loaded && (
-              <span className="text-xs text-muted-foreground">
+            {/* The empty state says "none" already; a zero count beside the
+                title would say it twice. */}
+            {loaded && archived.length > 0 && (
+              <span className="whitespace-nowrap text-xs text-muted-foreground">
                 {archived.length} conversation{archived.length === 1 ? "" : "s"}
               </span>
             )}
@@ -154,10 +156,10 @@ function ArchivedRow({ chat }: { chat: Chat }) {
     .join(" · ");
 
   return (
-    <li className="flex items-center gap-3 border-b border-border-subtle px-5 py-2.5">
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border-subtle px-5 py-2.5">
       <button
         type="button"
-        className="min-w-0 flex-1 cursor-pointer rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="min-w-0 flex-1 basis-40 cursor-pointer rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         onClick={() =>
           void navigate({ to: "/c/$chatId", params: { chatId: chat.id } })
         }
