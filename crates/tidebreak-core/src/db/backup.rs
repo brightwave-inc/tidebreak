@@ -142,7 +142,13 @@ fn prune_copies(backups: &Path, newest: &Path, kept: usize) {
             Some((stamp, path))
         })
         .collect();
-    older.sort_by(|left, right| right.cmp(left));
+    // Newest first by timestamp. The path only breaks a tie between two copies
+    // from the same second, so `0.9.0` never outranks a later `0.10.0`.
+    older.sort_by(|(left_stamp, left_path), (right_stamp, right_path)| {
+        right_stamp
+            .cmp(left_stamp)
+            .then_with(|| right_path.cmp(left_path))
+    });
     for (_, path) in older.into_iter().skip(kept.saturating_sub(1)) {
         if let Err(error) = std::fs::remove_file(&path) {
             tracing::warn!(
@@ -187,5 +193,24 @@ mod tests {
         );
         assert_eq!(copy_timestamp("pre-migration-0.114.0-yesterday.db"), None);
         assert_eq!(copy_timestamp("tidebreak.db"), None);
+    }
+
+    /// As text, `0.9.0` sorts above `0.10.0`. A prune that ranked copies by
+    /// name would keep the stale 0.9.0 copy and drop the newer one.
+    #[test]
+    fn pruning_keeps_the_newer_copy_by_timestamp_not_by_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let just_taken = dir.path().join("pre-migration-0.11.0-20260103T000000Z.db");
+        let older = dir.path().join("pre-migration-0.9.0-20260101T000000Z.db");
+        let newer = dir.path().join("pre-migration-0.10.0-20260102T000000Z.db");
+        for path in [&just_taken, &older, &newer] {
+            std::fs::write(path, b"copy").unwrap();
+        }
+
+        prune_copies(dir.path(), &just_taken, PRE_MIGRATION_COPIES_KEPT);
+
+        assert!(just_taken.exists());
+        assert!(newer.exists(), "the newer 0.10.0 copy must survive");
+        assert!(!older.exists(), "the older 0.9.0 copy must be pruned");
     }
 }

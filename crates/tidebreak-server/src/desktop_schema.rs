@@ -287,12 +287,16 @@ fn classify_recorded(recorded: &[String], chain: &[String]) -> Recorded {
     }
 }
 
-/// The migration names a database recorded, read without changing it.
+/// The migration names a database recorded.
+///
+/// Opens the file read-write, the way the connect that follows does, so
+/// SQLite can recover a WAL or roll back a hot journal that an unclean
+/// shutdown left behind. That recovery keeps every committed transaction. The
+/// open never creates the file, so a missing database still fails.
 async fn read_recorded_migrations(database: &Path) -> std::result::Result<Vec<String>, String> {
-    // Read-only, so the read can never create or migrate the file. One
-    // connection, closed before anything moves the file: Windows refuses to
-    // rename a file a handle still holds.
-    let mut options = ConnectOptions::new(format!("sqlite://{}?mode=ro", database.display()));
+    // One connection, closed before anything moves the file: Windows refuses
+    // to rename a file a handle still holds.
+    let mut options = ConnectOptions::new(format!("sqlite://{}?mode=rw", database.display()));
     options.max_connections(1).min_connections(0);
     let connection = Database::connect(options)
         .await
@@ -704,12 +708,72 @@ mod tests {
         assert!(set_aside_folders(dir.path()).is_empty());
     }
 
+    /// An unclean shutdown leaves committed transactions in the WAL, not yet
+    /// checkpointed into the database file. Reading the migration record has
+    /// to see them the way the connect that follows does, or a healthy
+    /// profile reads as unrecognizable and is set aside.
+    #[tokio::test]
+    async fn a_database_without_a_marker_keeps_the_commits_only_its_wal_holds() {
+        let writer_dir = tempfile::tempdir().unwrap();
+        let written = writer_dir.path().join(DATABASE_FILE);
+        let mut options = ConnectOptions::new(format!("sqlite://{}?mode=rwc", written.display()));
+        options.max_connections(1).min_connections(1);
+        let writer = Database::connect(options).await.unwrap();
+        writer
+            .execute_unprepared("PRAGMA journal_mode=WAL")
+            .await
+            .unwrap();
+        // One connection that never checkpoints: every migration and the row
+        // below stay in the WAL, and the database file holds only its header.
+        writer
+            .execute_unprepared("PRAGMA wal_autocheckpoint=0")
+            .await
+            .unwrap();
+        db::migrate_for_tests(&writer).await.unwrap();
+        writer
+            .execute_unprepared(
+                "INSERT INTO setting (key, value_json) VALUES ('wal_probe', '\"kept\"')",
+            )
+            .await
+            .unwrap();
+        // The files a crash leaves behind: the database and its WAL, with no
+        // usable index. Copied while the writer is open, so nothing closing it
+        // can checkpoint them first.
+        let crashed = tempfile::tempdir().unwrap();
+        for file in sqlite_files(&written).iter().take(2) {
+            std::fs::copy(file, crashed.path().join(file.file_name().unwrap())).unwrap();
+        }
+        writer.close().await.unwrap();
+        let crashed_files = sqlite_files(&crashed.path().join(DATABASE_FILE));
+        assert!(
+            std::fs::metadata(&crashed_files[0]).unwrap().len() <= 4096,
+            "the database file must hold no more than its header page"
+        );
+        assert!(
+            std::fs::metadata(&crashed_files[1]).unwrap().len() > 4096,
+            "the WAL must hold the committed migrations"
+        );
+
+        let kept = connect(&Config::desktop(crashed.path())).await.unwrap();
+
+        assert_eq!(
+            kept.get_setting("wal_probe").await.unwrap(),
+            Some(serde_json::json!("kept"))
+        );
+        assert!(set_aside_folders(crashed.path()).is_empty());
+        assert_eq!(saved_marker(crashed.path()), Some(SchemaMarker::current()));
+    }
+
     #[tokio::test]
     async fn a_database_without_a_marker_that_this_build_cannot_read_is_moved_aside() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::desktop(dir.path());
         let database = dir.path().join(DATABASE_FILE);
         std::fs::write(&database, b"not a sqlite database").unwrap();
+        // Junk journals too. Reading the migration record opens the database
+        // read-write, and SQLite discards a journal or WAL it finds invalid,
+        // so these must not stop a fresh profile from opening. Only the files
+        // SQLite leaves alone are checked below.
         for sidecar in sqlite_files(&database).into_iter().skip(1) {
             std::fs::write(sidecar, b"stale sqlite state").unwrap();
         }
@@ -733,12 +797,6 @@ mod tests {
             std::fs::read(folders[0].join(DATABASE_FILE)).unwrap(),
             b"not a sqlite database"
         );
-        for sidecar in sqlite_files(&database).into_iter().skip(1) {
-            assert_eq!(
-                std::fs::read(folders[0].join(sidecar.file_name().unwrap())).unwrap(),
-                b"stale sqlite state"
-            );
-        }
         for name in HOST_BROKER_DURABLE_FILES {
             assert_eq!(
                 std::fs::read(folders[0].join(name)).unwrap(),

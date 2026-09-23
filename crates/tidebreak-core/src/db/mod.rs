@@ -398,6 +398,14 @@ pub async fn migrate_sqlite_partially_for_tests(url: &str, steps: u32) -> Result
     conn.close().await.map_err(store_err)
 }
 
+/// Apply every migration through `conn`, so a test controls the connection
+/// the chain runs on, such as one that never checkpoints its WAL.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub async fn migrate_for_tests(conn: &DatabaseConnection) -> Result<()> {
+    migration::Migrator::up(conn, None).await.map_err(store_err)
+}
+
 /// Return one migrated SQLite template shared by every nextest process.
 ///
 /// A Tokio `OnceCell` only caches within one process, while nextest starts a
