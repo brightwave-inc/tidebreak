@@ -100,10 +100,7 @@ describe("WebSearchPanel", () => {
 
     await waitFor(() =>
       expect(putWebSearchConfig).toHaveBeenCalledWith({
-        mode: "automatic",
-        provider: "exa",
         timeout_ms: 30_000,
-        searxng_base_url: null,
       }),
     );
   });
@@ -156,9 +153,6 @@ describe("WebSearchPanel", () => {
 
     await waitFor(() =>
       expect(putWebSearchConfig).toHaveBeenCalledWith({
-        mode: "automatic",
-        provider: "searxng",
-        timeout_ms: 20_000,
         searxng_base_url: "http://localhost:8888",
       }),
     );
@@ -194,9 +188,6 @@ describe("WebSearchPanel", () => {
     await waitFor(() =>
       expect(putWebSearchConfig).toHaveBeenCalledWith({
         mode: "vendor",
-        provider: "exa",
-        timeout_ms: 20_000,
-        searxng_base_url: null,
       }),
     );
   });
@@ -293,5 +284,34 @@ describe("WebSearchPanel", () => {
       ),
     ).toBeTruthy();
     expect(putWebSearchConfig).not.toHaveBeenCalled();
+  });
+
+  it("keeps SearXNG selected and search on when the instance URL is cleared", async () => {
+    const { client, putWebSearchConfig } = clientFor({
+      provider: "searxng",
+      has_credential: false,
+      available: true,
+      timeout_ms: 20_000,
+      mode: "host",
+      searxng_base_url: "http://localhost:8888",
+    });
+
+    render(<WebSearchPanel client={client} />);
+
+    const urlField = await screen.findByLabelText(/SearXNG instance URL/);
+    fireEvent.change(urlField, { target: { value: "" } });
+    fireEvent.blur(urlField);
+
+    expect(
+      await screen.findByText(/SearXNG needs an instance URL/),
+    ).toBeTruthy();
+    expect(putWebSearchConfig).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("combobox", { name: "Provider" }),
+    ).toHaveTextContent("SearXNG");
+    expect(
+      screen.getByRole("combobox", { name: "Search mode" }),
+    ).toHaveTextContent("Configured provider");
+    expect(urlField).toHaveValue("http://localhost:8888");
   });
 });

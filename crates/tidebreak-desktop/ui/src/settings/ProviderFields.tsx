@@ -175,6 +175,7 @@ export function ProviderCredentialField({
         <div className="flex flex-wrap items-center gap-2">
           <Input
             type="password"
+            className="min-w-0 w-auto grow basis-52"
             placeholder={
               hasCredential
                 ? "Saved — leave blank to keep it"
@@ -189,6 +190,7 @@ export function ProviderCredentialField({
           <Button
             type="button"
             size="sm"
+            className="shrink-0"
             disabled={disabled || !canSaveKey}
             onClick={onSave}
           >

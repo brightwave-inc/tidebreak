@@ -11,6 +11,7 @@ import {
   webSearchNoProvider,
   webSearchOff,
   webSearchReady,
+  webSearchSearxngReady,
   webSearchVendorOnly,
 } from "./fixtures";
 
@@ -99,4 +100,22 @@ export const HostOnlyWithoutAKey: Story = {
 /** Search turned off outright: the tool is never offered. */
 export const Off: Story = {
   args: { client: stubClient(webSearchOff) },
+};
+
+/** SearXNG selected with an instance URL. Save key sits beside each key field. */
+export const SearxngConfigured: Story = {
+  args: { client: stubClient(webSearchSearxngReady) },
+};
+
+/** The same providers column at 440 px, where Save key wraps under its input. */
+export const ProvidersNarrow: Story = {
+  args: { client: stubClient(webSearchReady) },
+  globals: { viewport: { value: "compact", isRotated: false } },
+  decorators: [
+    (Story) => (
+      <div className="mx-auto w-[440px] max-w-full pt-8">
+        <Story />
+      </div>
+    ),
+  ],
 };

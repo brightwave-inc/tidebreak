@@ -2415,6 +2415,15 @@ export const webSearchOff: WebSearchConfigInfo = {
   mode: "off",
 };
 
+export const webSearchSearxngReady: WebSearchConfigInfo = {
+  mode: "host",
+  provider: "searxng",
+  timeout_ms: 20000,
+  has_credential: false,
+  available: true,
+  searxng_base_url: "http://localhost:8888",
+};
+
 export const webSearchCredentials: WebSearchCredentialReadiness[] = [
   { provider: "exa", has_credential: false },
   { provider: "tavily", has_credential: false },
