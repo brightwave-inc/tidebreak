@@ -22,6 +22,7 @@ pub enum Family {
     Setup,
     Plugins,
     Diagnostics,
+    Data,
     Folder,
     Code,
     AgentTools,
@@ -37,6 +38,7 @@ impl Family {
             Self::Setup => SETUP_USAGE,
             Self::Plugins => PLUGINS_USAGE,
             Self::Diagnostics => DIAGNOSTICS_USAGE,
+            Self::Data => DATA_USAGE,
             Self::Folder => FOLDER_USAGE,
             Self::Code => CODE_USAGE,
             Self::AgentTools => agent_tools_text(),
@@ -52,6 +54,7 @@ impl Family {
             Self::Setup => "Setup",
             Self::Plugins => "Plugins",
             Self::Diagnostics => "Diagnostics",
+            Self::Data => "Data and privacy",
             Self::Folder => "Folders",
             Self::Code => "Code",
             Self::AgentTools => "Agent tools (run inside a Tidebreak session)",
@@ -113,6 +116,7 @@ fn family_from_command(command: Option<&OsStr>) -> Family {
         }
         Some("plugins") => Family::Plugins,
         Some("diagnostics") => Family::Diagnostics,
+        Some("data") => Family::Data,
         Some("folder") => Family::Folder,
         Some("code") => Family::Code,
         Some("browser" | "browser-mcp" | "computer" | "computer-mcp" | "agent-mcp") => {
@@ -222,6 +226,21 @@ full commit SHA and imports it as an instruction-only plugin. A moving
 branch is refused. The plugin's files run with the agent's permissions.
 --json prints one object stamped with schema_version. These commands take
 --server <url> [--server-token-env <var>], --attach, or --embed.";
+
+const DATA_USAGE: &str = "\
+usage: tidebreak data show [--output-format text|json]
+       tidebreak data backup <path> [--output-format text|json]
+       tidebreak data export <path> [--format markdown|json] [--chat <id>]…
+                  [--output-format text|json]
+
+show prints where the profile lives and how much disk each part uses. backup
+writes the database, the files attached to conversations, and the files
+Tidebreak made, as one .tar.gz. It copies the database with SQLite's own
+VACUUM INTO while Tidebreak keeps running, and it never holds keys. A server
+on PostgreSQL refuses it; back that database up with its own tools. export
+writes your conversations as a .zip of Markdown files, or as one JSON file
+with --format json; --chat limits it to the conversations you name.
+These commands take --server <url> [--server-token-env <var>] or --attach.";
 
 const FOLDER_USAGE: &str = "\
 usage: tidebreak folder connect <path> --chat <id> [--output-format text|json]
@@ -340,14 +359,14 @@ A key is read from stdin, or from the environment variable named by
 can read.
 
 Which data the CLI uses: with TIDEBREAK_DATA_DIR unset, every command works on
-the Tidebreak app's own data. -p, output, attach, diagnostics, agent-mcp,
-plugins, the setup commands, and the code family connect to the app while it
-runs, and stop with what to do next when it does not. --embed runs a server in
-this process over the app's data instead. Set TIDEBREAK_DATA_DIR to work on a
-separate profile in that folder: commands then run their own server over it,
-except agent-mcp, which needs --attach, --server, or --embed. A separate
-profile keeps its credentials apart from the app's. Nothing uses the current
-directory.
+the Tidebreak app's own data. -p, output, attach, diagnostics, data,
+agent-mcp, plugins, the setup commands, and the code family connect to the app
+while it runs, and stop with what to do next when it does not. --embed runs a
+server in this process over the app's data instead. Set TIDEBREAK_DATA_DIR to
+work on a separate profile in that folder: commands then run their own server
+over it, except agent-mcp, which needs --attach, --server, or --embed. A
+separate profile keeps its credentials apart from the app's. Nothing uses the
+current directory.
 
 --server <url> [--server-token-env <var>] talks to a server that is already
 running instead. --attach reads {TIDEBREAK_DATA_DIR}/listen.json (written by
@@ -425,6 +444,13 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         )],
     ),
     (
+        "Data and privacy",
+        &[(
+            "data show|backup|export",
+            "Show where data lives, back it up, or export conversations",
+        )],
+    ),
+    (
         "Folders",
         &[(
             "folder connect|list|disconnect",
@@ -466,6 +492,7 @@ const FAMILY_SYNTAX: &[&str] = &[
     SETUP_USAGE,
     PLUGINS_USAGE,
     DIAGNOSTICS_USAGE,
+    DATA_USAGE,
     FOLDER_USAGE,
     CODE_USAGE,
     BROWSER_USAGE,

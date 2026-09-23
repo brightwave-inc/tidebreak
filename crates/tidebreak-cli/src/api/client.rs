@@ -24,6 +24,14 @@ use crate::connect::ListenSource;
 /// The chat event stream once the upgrade completes.
 pub type EventSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// A file a route streamed to disk: how long it is, and the count the route
+/// reported beside it (files in a backup, conversations in an export).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadedFile {
+    pub bytes: u64,
+    pub count: Option<u64>,
+}
+
 /// Bearer-authed client for one bound server. Cheap to clone: the reqwest
 /// client and the credentials are shared.
 #[derive(Clone)]
@@ -897,6 +905,32 @@ impl Client {
             .await
             .map_err(request_error)?
             .to_vec())
+    }
+
+    /// POST `body` and stream the answer into `destination`, reading the
+    /// count the route reports in `count_header` beside it.
+    pub(crate) async fn download(
+        &self,
+        url: String,
+        body: &serde_json::Value,
+        destination: &std::path::Path,
+        count_header: &str,
+    ) -> Result<DownloadedFile> {
+        let response = self
+            .http
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(request_error)?;
+        let response = Self::expect_success(response).await?;
+        let count = response
+            .headers()
+            .get(count_header)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok());
+        let bytes = crate::data::write_download(destination, response).await?;
+        Ok(DownloadedFile { bytes, count })
     }
 
     // ------------------------------------------------------------------

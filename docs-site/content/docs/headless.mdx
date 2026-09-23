@@ -135,6 +135,10 @@ tidebreak diagnostics snapshot
 tidebreak diagnostics metrics
 tidebreak diagnostics export <path>
 
+tidebreak data show
+tidebreak data backup <path>
+tidebreak data export <path> [--format markdown|json] [--chat <id>]…
+
 tidebreak folder connect <path> --chat <id>
 tidebreak folder list [--chat <id>]
 tidebreak folder disconnect <path-or-root-id> --chat <id>
@@ -176,7 +180,7 @@ tidebreak code watch [--once] [--timeout <secs>]
 Run `tidebreak` with no arguments, or `tidebreak --help`, to print this list.
 To start the server, run `tidebreak serve`.
 
-`-p`, `output`, `attach`, `agent-mcp`, `plugins`, the setup commands, and the
+`-p`, `output`, `attach`, `data`, `agent-mcp`, `plugins`, the setup commands, and the
 code family additionally take `--server <url>` / `--server-token-env <var>`,
 `--attach`, or `--embed` — see
 [Which data does the CLI use?](#which-data-does-the-cli-use) and
@@ -510,6 +514,35 @@ prints on stdout is what a later turn references.
 ```sh
 cargo run -p tidebreak-cli -- attach <chat-uuid> ./contract.pdf
 ```
+
+### `data`
+
+The same backup and export the desktop's **Settings → Data and privacy** page
+offers, through the same routes.
+
+```sh
+cargo run -p tidebreak-cli -- data show
+cargo run -p tidebreak-cli -- data backup ./tidebreak-backup.tar.gz
+cargo run -p tidebreak-cli -- data export ./conversations.zip
+cargo run -p tidebreak-cli -- data export ./chat.json --format json --chat <chat-uuid>
+```
+
+`show` prints the data folder and how much disk its database, attachments,
+outputs, logs, engine tools, and backups use.
+
+`backup` writes one `.tar.gz` with the database, the files attached to
+conversations, and the files Tidebreak made. It copies the database with
+SQLite's own `VACUUM INTO` while the server keeps running, so the copy is
+consistent without stopping anything. Keys stay in the keychain and are never
+in the archive. To restore, quit Tidebreak, move the data folder aside, and
+extract the archive into an empty folder of the same name. A server on
+PostgreSQL refuses `backup`: back that database up with its own tools, as
+[Self-hosting](#self-hosting) describes.
+
+`export` writes your conversations: a `.zip` with one Markdown file per
+conversation, or one JSON document with `--format json`. Each `--chat` limits
+the export to that conversation. Both write the file in full before they
+replace anything at the path.
 
 ### `mcp`
 
