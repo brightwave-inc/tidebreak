@@ -113,6 +113,12 @@ export function ProviderModelsSection({
     }
   }
 
+  // One line under the heading: what to do about an empty list, and why
+  // Find models cannot run yet.
+  const status = [info.models.length === 0 ? emptyHint(info) : null, blocker]
+    .filter(Boolean)
+    .join(" ");
+
   const takenIds = new Set(
     info.models
       .filter((_, index) => form?.mode !== "edit" || index !== form.index)
@@ -120,7 +126,10 @@ export function ProviderModelsSection({
   );
 
   return (
-    <section aria-labelledby={headingId} className="flex flex-col gap-3">
+    <section
+      aria-labelledby={headingId}
+      className="flex flex-col gap-3 border-t border-border-subtle pt-4"
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 id={headingId} className="text-sm font-semibold">
           Models
@@ -145,15 +154,15 @@ export function ProviderModelsSection({
           </Button>
         </div>
       </div>
-      {builtInNames.length > 0 && (
-        <p className="text-xs text-muted-foreground">
-          Built in: {builtInNames.join(", ")}
-        </p>
+      {(builtInNames.length > 0 || status) && (
+        <div className="flex flex-col gap-1 text-xs text-muted-foreground">
+          {builtInNames.length > 0 && (
+            <p>Built in: {builtInNames.join(", ")}</p>
+          )}
+          {status && <p>{status}</p>}
+        </div>
       )}
-      {blocker && <p className="text-xs text-muted-foreground">{blocker}</p>}
-      {info.models.length === 0 ? (
-        <p className="text-xs text-muted-foreground">{emptyHint(info)}</p>
-      ) : (
+      {info.models.length > 0 && (
         <ul
           aria-label={`${name} custom models`}
           className="rounded-md border border-border"
@@ -195,6 +204,7 @@ export function ProviderModelsSection({
         onOpenChange={setDiscovering}
         kind={info.kind}
         providerName={name}
+        usesSavedKey={info.has_credential}
         client={client}
         acceptedEfforts={accepted}
         existingCount={info.models.length}
@@ -232,13 +242,13 @@ export function discoveryBlocker(info: ProviderInfo): string | null {
 function emptyHint(info: ProviderInfo): string {
   switch (info.kind) {
     case "ollama":
-      return "Add each model you have pulled in Ollama, or find them. qwen3:0.6b is a small tool-calling model for a first test.";
+      return "No custom models yet. Add the models you have pulled, such as qwen3:0.6b for a first test.";
     case "openrouter":
-      return "Add each OpenRouter model you want by its ID, such as anthropic/claude-sonnet-5, or find them.";
+      return "No custom models yet. Add one by its OpenRouter ID, such as anthropic/claude-sonnet-5.";
     case "openai_compatible":
-      return "Add each model this endpoint serves, or find them.";
+      return "No custom models yet. Add each model this endpoint serves.";
     default:
-      return "No custom models yet. Add one when the provider ships a model Tidebreak does not list.";
+      return "No custom models yet. Add one the provider ships before Tidebreak lists it.";
   }
 }
 

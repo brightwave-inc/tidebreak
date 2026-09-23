@@ -86,7 +86,7 @@ describe("custom model drafts", () => {
     expect(draft).toEqual({
       id: "vendor/model",
       displayName: "",
-      contextWindow: "131072",
+      contextWindow: "131,072",
       // Not reported, so the form's default applies.
       maxOutputTokens: "",
       imageInput: false,

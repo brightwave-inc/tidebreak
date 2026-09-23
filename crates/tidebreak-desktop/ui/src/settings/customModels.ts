@@ -5,7 +5,6 @@ import type {
   ProviderInfo,
   ReasoningEffort,
 } from "../api";
-import { formatTokenCount } from "../ContextUsage";
 import { reasoningEffortOptions } from "../ModelMenu";
 
 /**
@@ -64,12 +63,17 @@ export function emptyDraft(): ModelDraft {
   };
 }
 
+/** A token count as the form shows it, with thousands separators. */
+function tokenText(tokens: number): string {
+  return tokens.toLocaleString("en-US");
+}
+
 export function draftFromConfig(model: CustomModelConfig): ModelDraft {
   return {
     id: model.id,
     displayName: model.display_name ?? "",
-    contextWindow: String(model.context_window),
-    maxOutputTokens: String(model.max_output_tokens),
+    contextWindow: tokenText(model.context_window),
+    maxOutputTokens: tokenText(model.max_output_tokens),
     imageInput: model.input_modalities.includes("image"),
     supportsReasoning: model.supports_reasoning,
     reasoningEfforts: [...model.reasoning_efforts],
@@ -90,11 +94,11 @@ export function draftFromDiscovered(
     id: model.id,
     displayName: model.display_name ?? "",
     contextWindow:
-      model.context_window === undefined ? "" : String(model.context_window),
+      model.context_window === undefined ? "" : tokenText(model.context_window),
     maxOutputTokens:
       model.max_output_tokens === undefined
         ? ""
-        : String(model.max_output_tokens),
+        : tokenText(model.max_output_tokens),
     imageInput: model.image_input === true,
     supportsReasoning,
     reasoningEfforts: supportsReasoning
@@ -233,16 +237,26 @@ type ModelFactsInput = {
 };
 
 /**
+ * A limit at a glance: "128k", or "1M" for any window that rounds to a whole
+ * million, so a 1,048,576-token window reads the way providers name it.
+ */
+export function compactTokens(tokens: number): string {
+  if (tokens >= 1_000_000) return `${Math.round(tokens / 100_000) / 10}M`;
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
+  return `${tokens}`;
+}
+
+/**
  * The one-line summary under a model's name. Unknown facts are left out
  * rather than guessed.
  */
 export function modelFacts(input: ModelFactsInput): string[] {
   const facts: string[] = [];
   if (input.contextWindow !== undefined) {
-    facts.push(`${formatTokenCount(input.contextWindow)} context`);
+    facts.push(`${compactTokens(input.contextWindow)} context`);
   }
   if (input.maxOutputTokens !== undefined) {
-    facts.push(`${formatTokenCount(input.maxOutputTokens)} output`);
+    facts.push(`${compactTokens(input.maxOutputTokens)} output`);
   }
   if (input.imageInput) facts.push("Images");
   if (input.supportsReasoning) {

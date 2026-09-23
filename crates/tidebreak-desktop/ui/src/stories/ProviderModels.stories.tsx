@@ -196,6 +196,7 @@ function DiscoverStory(props: DiscoverStoryProps) {
       onOpenChange={setOpen}
       kind={props.kind}
       providerName={props.providerName}
+      usesSavedKey={props.kind !== "ollama"}
       client={client}
       acceptedEfforts={customReasoningEfforts[props.kind]}
       existingCount={1}

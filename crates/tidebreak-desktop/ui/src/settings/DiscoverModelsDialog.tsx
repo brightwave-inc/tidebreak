@@ -51,6 +51,7 @@ export function DiscoverModelsDialog({
   onOpenChange,
   kind,
   providerName,
+  usesSavedKey,
   client,
   acceptedEfforts,
   existingCount,
@@ -60,6 +61,8 @@ export function DiscoverModelsDialog({
   onOpenChange: (open: boolean) => void;
   kind: ProviderKind;
   providerName: string;
+  /** False for a local endpoint listed without a key, such as Ollama. */
+  usesSavedKey: boolean;
   client: Pick<ApiClient, "discoverProviderModels">;
   acceptedEfforts: readonly ReasoningEffort[];
   /** How many custom models this provider already keeps. */
@@ -79,6 +82,7 @@ export function DiscoverModelsDialog({
   // Only the latest request may settle the listing: closing the dialog or
   // asking again drops whatever is still in flight.
   const request = useRef(0);
+  const content = useRef<HTMLDivElement>(null);
   const load = useCallback(() => {
     const current = ++request.current;
     setListing({ state: "loading" });
@@ -116,15 +120,24 @@ export function DiscoverModelsDialog({
   }, [open, load]);
 
   const models = listing.state === "ready" ? listing.models : [];
+  // The models the reader can still add come first; the ones Tidebreak
+  // already knows follow, each group in the provider's order.
   const shown = useMemo(() => {
     const needle = filter.trim().toLowerCase();
-    if (!needle) return models;
-    return models.filter(
-      (model) =>
-        model.id.toLowerCase().includes(needle) ||
-        (model.display_name ?? "").toLowerCase().includes(needle),
-    );
+    const matching = needle
+      ? models.filter(
+          (model) =>
+            model.id.toLowerCase().includes(needle) ||
+            (model.display_name ?? "").toLowerCase().includes(needle),
+        )
+      : models;
+    const known = (model: DiscoveredModel) => model.built_in || model.added;
+    return [
+      ...matching.filter((model) => !known(model)),
+      ...matching.filter(known),
+    ];
   }, [filter, models]);
+  const hasResults = listing.state === "ready" && models.length > 0;
   const room = Math.max(0, MAX_CUSTOM_MODELS - existingCount);
 
   const draftErrors = drafts.map((draft, index) =>
@@ -189,9 +202,17 @@ export function DiscoverModelsDialog({
   return (
     <Dialog open={open} onOpenChange={requestClose}>
       <DialogContent
+        ref={content}
         className="flex max-h-[calc(100dvh-2rem)] max-w-xl flex-col gap-4 p-5 sm:rounded-xl"
         aria-busy={listing.state === "loading" || saving}
         withCloseButton={!saving}
+        // The listing arrives after the dialog opens, so its first control is
+        // not there yet. Start on the dialog itself rather than on Cancel;
+        // the filter takes focus when it appears.
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          content.current?.focus();
+        }}
       >
         <DialogHeader className="gap-1 pr-6">
           <DialogTitle className="text-base">
@@ -201,7 +222,7 @@ export function DiscoverModelsDialog({
           </DialogTitle>
           <DialogDescription className="text-xs leading-relaxed">
             {step === "pick"
-              ? `The chat models ${providerName} lists for your saved key. Pick the ones to add; nothing is added until you confirm.`
+              ? `The chat models ${providerName} lists${usesSavedKey ? " for your saved key" : ""}. Pick the ones to add; nothing is added until you confirm.`
               : "These limits come from the provider's listing. Fill in what it did not report, or leave a limit blank to use the default."}
           </DialogDescription>
         </DialogHeader>
@@ -217,11 +238,12 @@ export function DiscoverModelsDialog({
         )}
 
         {step === "pick" && listing.state === "failed" && (
-          <div className="flex flex-col items-start gap-3 py-2">
-            <div className="notice-surface notice-critical w-full" role="alert">
-              <p className="text-sm">{listing.message}</p>
-            </div>
-            <Button type="button" variant="outline" size="sm" onClick={load}>
+          <div
+            className="notice-surface notice-critical flex flex-col items-start gap-2 rounded-md border px-3 py-2"
+            role="alert"
+          >
+            <p className="text-sm">{listing.message}</p>
+            <Button type="button" variant="outline" size="xs" onClick={load}>
               Try again
             </Button>
           </div>
@@ -231,13 +253,15 @@ export function DiscoverModelsDialog({
           listing.state === "ready" &&
           (models.length === 0 ? (
             <p className="py-6 text-sm text-muted-foreground">
-              {providerName} listed no chat models for this key.
+              {providerName} listed no chat models
+              {usesSavedKey ? " for this key" : ""}.
             </p>
           ) : (
             <div className="flex min-h-0 flex-1 flex-col gap-3">
               {models.length > FILTER_THRESHOLD && (
                 <Input
                   type="search"
+                  autoFocus
                   placeholder="Filter by name or ID"
                   aria-label="Filter models"
                   value={filter}
@@ -286,7 +310,7 @@ export function DiscoverModelsDialog({
                   draft={draft}
                   errors={submitted ? draftErrors[index] : {}}
                   acceptedEfforts={acceptedEfforts}
-                  idLocked
+                  compact
                   disabled={saving}
                   onChange={(next) =>
                     setDrafts((current) =>
@@ -303,14 +327,21 @@ export function DiscoverModelsDialog({
 
         {error && <SettingsError>{error}</SettingsError>}
 
-        <DialogFooter className="items-center gap-2 sm:justify-between">
+        <DialogFooter className="flex-row items-center justify-between gap-3 sm:justify-between">
           <span className="text-xs text-muted-foreground" aria-live="polite">
-            {step === "pick" && listing.state === "ready" && models.length > 0
-              ? `${selected.length} selected`
-              : ""}
+            {step === "pick" && hasResults ? `${selected.length} selected` : ""}
           </span>
-          <div className="flex flex-col-reverse gap-2 sm:flex-row">
-            {step === "pick" ? (
+          <div className="flex shrink-0 gap-2">
+            {step === "pick" && !hasResults ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => requestClose(false)}
+              >
+                Close
+              </Button>
+            ) : step === "pick" ? (
               <>
                 <Button
                   type="button"
@@ -377,7 +408,7 @@ function DiscoveredRow({
     <li className="border-b border-border-subtle last:border-b-0">
       <Label
         className={cn(
-          "flex items-start gap-3 px-3 py-2.5 font-normal leading-normal",
+          "flex items-start gap-3 px-3 py-2 font-normal leading-normal",
           !(known || blocked) && "cursor-pointer hover:bg-muted/50",
         )}
       >

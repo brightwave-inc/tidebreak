@@ -357,11 +357,9 @@ describe("ProviderModelsSection", () => {
     // The review step starts from what the provider reported, and stays
     // editable.
     await within(dialog).findByText("Check 1 model before adding");
-    expect(within(dialog).getByLabelText("Model ID")).toHaveValue(
-      "claude-haiku-5-5",
-    );
+    expect(within(dialog).getByText("claude-haiku-5-5")).toBeInTheDocument();
     expect(within(dialog).getByLabelText("Context window")).toHaveValue(
-      "400000",
+      "400,000",
     );
     fireEvent.change(within(dialog).getByLabelText("Max output"), {
       target: { value: "32000" },

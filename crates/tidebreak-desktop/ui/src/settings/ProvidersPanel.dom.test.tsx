@@ -229,7 +229,7 @@ describe("ProvidersPanel", () => {
     expect(find[1]).toBeEnabled();
     expect(
       screen.getByText(
-        "Save an API key to find the models this provider serves.",
+        /Save an API key to find the models this provider serves\./,
       ),
     ).toBeInTheDocument();
   });
@@ -413,7 +413,7 @@ describe("ProvidersPanel", () => {
     expect(screen.getByRole("button", { name: "Find models" })).toBeDisabled();
     expect(
       screen.getByText(
-        "Finding models needs an OpenAI API key. ChatGPT sign-in cannot list models.",
+        /Finding models needs an OpenAI API key\. ChatGPT sign-in cannot list models\./,
       ),
     ).toBeInTheDocument();
   });
