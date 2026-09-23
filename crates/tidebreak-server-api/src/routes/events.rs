@@ -83,13 +83,20 @@ pub async fn chat_events(
     } else {
         upgrade
     };
-    Ok(upgrade.on_upgrade(move |socket| stream_events(socket, state, id, query.after, auth_lease)))
+    Ok(upgrade
+        .on_upgrade(move |socket| stream_events(socket, state, store, id, query.after, auth_lease)))
 }
 
 /// Serve one client's event stream for `chat`: replay from the journal, then live.
+///
+/// The client on the other end is the owner looking at the conversation, so a
+/// turn's end that reaches it has been seen: the stream marks the conversation
+/// read before it sends one, and the list never shows an open conversation as
+/// unread.
 async fn stream_events(
     mut socket: WebSocket,
     state: AppState,
+    reader: ScopedStore,
     chat: SessionId,
     after: i64,
     auth_lease: Option<GatewayAuthLease>,
@@ -134,6 +141,7 @@ async fn stream_events(
     if replay_after(
         &mut socket,
         &*state.store,
+        &reader,
         chat,
         &mut last_seq,
         &mut turn_models,
@@ -186,6 +194,7 @@ async fn stream_events(
                         if replay_after(
                             &mut socket,
                             &*state.store,
+                            &reader,
                             chat,
                             &mut last_seq,
                             &mut turn_models,
@@ -201,6 +210,9 @@ async fn stream_events(
                     if turn_models.needs_live_refresh(&event.event) {
                         let _ = turn_models.refresh(&*state.store, chat).await;
                     }
+                    if is_turn_end(&event.event) {
+                        mark_seen(&reader, chat).await;
+                    }
                     if send_event(&mut socket, &event, turn_models.active_model(), false).await.is_err() {
                         break;
                     }
@@ -213,6 +225,7 @@ async fn stream_events(
                     if replay_after(
                         &mut socket,
                         &*state.store,
+                        &reader,
                         chat,
                         &mut last_seq,
                         &mut turn_models,
@@ -234,6 +247,7 @@ async fn stream_events(
 async fn replay_after(
     socket: &mut WebSocket,
     store: &dyn Store,
+    reader: &ScopedStore,
     chat: SessionId,
     last_seq: &mut i64,
     turn_models: &mut TurnModelCache,
@@ -241,6 +255,9 @@ async fn replay_after(
     let events = store.list_events(chat, *last_seq).await.map_err(|_| ())?;
     if turn_models.is_empty() {
         turn_models.refresh(store, chat).await?;
+    }
+    if events.iter().any(|event| is_turn_end(&event.event)) {
+        mark_seen(reader, chat).await;
     }
     let mut active_turn_id = None;
     for event in events {
@@ -309,6 +326,27 @@ impl TurnModelCache {
                 .map(|turn| (turn.id, turn.model, turn.status.is_terminal())),
         );
         Ok(())
+    }
+}
+
+/// The events that end a turn, each of which marks the conversation unread
+/// until its owner sees it.
+fn is_turn_end(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::TurnCompleted { .. }
+            | AgentEvent::TurnRefused { .. }
+            | AgentEvent::TurnFailed { .. }
+            | AgentEvent::TurnCancelled { .. }
+    )
+}
+
+/// Clear the unread mark a turn's end left, on behalf of the owner watching
+/// the stream. The mark only decorates the list, so a failure here costs a
+/// dot the next open clears, not the stream.
+async fn mark_seen(reader: &ScopedStore, chat: SessionId) {
+    if let Err(error) = reader.mark_chat_read(chat).await {
+        tracing::debug!(%chat, %error, "could not mark the watched conversation read");
     }
 }
 

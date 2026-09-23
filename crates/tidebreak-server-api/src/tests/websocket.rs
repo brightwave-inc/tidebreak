@@ -440,6 +440,42 @@ async fn ws_replays_one_turn_then_streams_the_next_live() {
     );
 }
 
+/// A turn that ends while its owner watches the conversation leaves it read.
+/// Only a conversation nobody has open goes unread in the list of work.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_a_turn_that_ends_while_watched_stays_read() {
+    let (addr, token, store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
+    let client = reqwest::Client::new();
+    let unread = |chat: SessionId| {
+        let request = client
+            .get(format!("http://{addr}/chats/{chat}"))
+            .bearer_auth(&*token);
+        async move {
+            let listing: serde_json::Value = request.send().await.unwrap().json().await.unwrap();
+            listing["unread"].as_bool().expect("the listing says")
+        }
+    };
+
+    let unwatched = make_chat_http(&client, addr, &token).await;
+    send_message_http(&client, addr, &token, unwatched.id).await;
+    wait_for_turn(&store, unwatched.id).await;
+    assert!(unread(unwatched.id).await, "nobody saw this turn end");
+
+    let watched = make_chat_http(&client, addr, &token).await;
+    let reader = {
+        let token = token.clone();
+        tokio::spawn(async move { read_until_turn_end(addr, &token, watched.id, 0).await })
+    };
+    // Let the reader connect and subscribe before the turn starts.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    send_message_http(&client, addr, &token, watched.id).await;
+    reader.await.unwrap();
+    assert!(
+        !unread(watched.id).await,
+        "the open stream saw this turn end"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ws_bad_after_cursor_is_a_json_400() {
     let (addr, token, _store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
