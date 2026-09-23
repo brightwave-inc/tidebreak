@@ -228,11 +228,22 @@ jobs:
           fetch-depth: 0
       # Run gitleaks via its Docker image to avoid the org-license requirement
       # of gitleaks-action. Keep the multi-architecture image pinned by digest.
+      # A pull request scans only its own commits, so a leak on some other
+      # branch cannot fail every open pull request. A push scans the history
+      # it builds. The weekly and manual runs scan every branch.
       - name: gitleaks
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
+          case "$EVENT_NAME" in
+            pull_request) log_opts=("--log-opts=origin/${BASE_REF}..HEAD") ;;
+            push) log_opts=("--log-opts=HEAD") ;;
+            *) log_opts=() ;;
+          esac
           docker run --rm -v "$PWD:/repo" \
             ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
-            detect --source=/repo --redact --verbose
+            detect --source=/repo --redact --verbose "${log_opts[@]}"
 
   e2b-cli:
     name: E2B publication tooling
