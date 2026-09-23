@@ -123,6 +123,37 @@ describe("PullRequestDetailSheet", () => {
     expect(await screen.findByText(/No text diff/)).toBeInTheDocument();
   });
 
+  it("colors a deleted SQL comment that git prints as --- keep", async () => {
+    const detail = {
+      ...deliveryPullRequestDetails[2251]!,
+      files: [
+        {
+          path: "q.sql",
+          status: "modified" as const,
+          additions: 0,
+          deletions: 1,
+          patch: "@@ -1,2 +1,1 @@\n--- keep\n SELECT 1\n",
+        },
+      ],
+    };
+    render(
+      <PullRequestDetailSheet
+        client={client({
+          getCodeDeliveryPullRequestDetail: async () => detail,
+        })}
+        summary={summaryFor(2251)}
+        initialDetail={detail}
+        onClose={vi.fn()}
+        onChanged={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    await userEvent.click(screen.getByRole("tab", { name: /Files/ }));
+    await userEvent.click(screen.getByTitle("q.sql"));
+    const deleted = await screen.findByText(/-- keep/);
+    expect(deleted.closest("code")).toHaveClass("bg-critical/10");
+  });
+
   it("lists every check, failures first", async () => {
     await renderPanel(2251);
     const checksTab = screen.getByRole("tab", { name: /Checks/ });
