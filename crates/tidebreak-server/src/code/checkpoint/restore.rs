@@ -1,25 +1,28 @@
 //! Put a workspace's worktree back to an earlier checkpoint.
 //!
 //! A restore makes every file the checkpoint snapshot sees — tracked changes
-//! and untracked files alike — match the target checkpoint's tree. Ignored
-//! files stay where they are, because no checkpoint records them. `HEAD`, the
+//! and untracked files alike — match the target checkpoint's tree. `HEAD`, the
 //! branch, and the user's index are untouched: the files go back, and whatever
 //! the branch committed since then shows as uncommitted changes that undo it.
 //!
 //! Before any file changes, the state being replaced is committed to a hidden
 //! ref of its own, so a restore can itself be undone by restoring that state.
-//! The checkout itself runs through a private index, so the user's staging
-//! area never moves and no checkout hook fires.
+//! A restore never touches what that state does not hold: an ignored file, or
+//! a folder holding one, that stands where the target puts a file refuses the
+//! restore instead, naming it (see [`super::worktree`]).
+//!
+//! A restore runs in two steps, so the caller can journal it in between:
+//! [`prepare_restore`] checks and saves, and [`PreparedRestore::apply`] moves
+//! the files. When the checkout stops partway, the files it wrote go back.
 
-use std::path::{Path, PathBuf};
-
-use tokio::time::Instant;
+use std::path::Path;
 
 use tidebreak_core::{CodeRestoreId, SessionId, WorkspaceId};
 
+use super::worktree::{blocked, find_blockers, tree_of, PrivateIndex, Switch, SwitchFailure};
 use super::{
-    checkpoint_index_path_before, collect_changes, git_text, git_text_env, snapshot_tree,
-    BoundedFiles, CheckpointError, DiffBounds, GIT_SNAPSHOT_TIMEOUT, GIT_TIMEOUT, REF_PREFIX,
+    checkpoint_ref, collect_changes, git_text, snapshot_tree, BoundedFiles, CheckpointError,
+    DiffBounds, GitPath, BASELINE_ORDINAL, GIT_TIMEOUT, REF_PREFIX,
 };
 
 /// Hidden ref that holds the worktree as it stood just before one restore.
@@ -40,6 +43,7 @@ pub fn restore_point_ref(
 ///
 /// Without it, the next turn's diff would start at turn `ordinal`'s own
 /// checkpoint and credit the turn with undoing everything the restore undid.
+/// The next turn also reads it to tell the engine what moved under it.
 pub fn chain_resume_ref(workspace_id: WorkspaceId, session_id: SessionId, ordinal: i64) -> String {
     format!("{REF_PREFIX}/{workspace_id}/{session_id}/after/{ordinal}")
 }
@@ -77,6 +81,20 @@ pub async fn find_restore_point(
     Ok(None)
 }
 
+/// When a checkpoint commit was written, in seconds since the epoch.
+pub async fn commit_time(worktree: &Path, commit: &str) -> Result<i64, CheckpointError> {
+    let raw = git_text(
+        worktree,
+        &["show", "-s", "--format=%ct", commit, "--"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    raw.trim()
+        .parse()
+        .map_err(|_| CheckpointError::internal(format!("unreadable commit time {raw:?}")))
+}
+
 /// What a restore would change, read before anything moves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestorePreview {
@@ -86,6 +104,9 @@ pub struct RestorePreview {
     /// Everything that changed since the target state. The restore undoes all
     /// of it, whoever made it.
     pub files: BoundedFiles,
+    /// Files the restore would overwrite or remove although no snapshot holds
+    /// them, ignored files mostly. While any are listed, the restore refuses.
+    pub blocked: Vec<GitPath>,
 }
 
 /// Read what restoring `target` would undo, without changing anything.
@@ -97,9 +118,11 @@ pub async fn preview_restore(
     let target_tree = tree_of(worktree, target).await?;
     let files =
         collect_changes(worktree, &target_tree, &current_tree, DiffBounds::default()).await?;
+    let blocked = find_blockers(worktree, &current_tree, &target_tree).await?;
     Ok(RestorePreview {
         current_tree,
         files,
+        blocked,
     })
 }
 
@@ -114,19 +137,46 @@ pub struct AppliedRestore {
     pub files: BoundedFiles,
 }
 
-/// Make the worktree match `target`'s tree, after saving what it replaces.
+/// A restore that has been checked and saved, and has changed no file yet.
+pub struct PreparedRestore {
+    index: PrivateIndex,
+    current_tree: String,
+    /// The tree the worktree will match.
+    pub restored_tree: String,
+    /// What the restore changes, from the replaced state to the restored one.
+    pub files: BoundedFiles,
+    /// The commit that holds the state the restore replaces.
+    pub saved_oid: String,
+}
+
+/// Why a prepared restore did not land.
+#[derive(Debug)]
+pub enum RestoreApplyError {
+    /// No file moved. The error says why, most often that the worktree
+    /// changed after the snapshot.
+    Unchanged(CheckpointError),
+    /// Git stopped partway, and every file it wrote went back.
+    RolledBack(String),
+    /// Git stopped partway, and some files it wrote could not go back. The
+    /// saved state holds everything the restore replaced.
+    Partial(String),
+}
+
+/// Check that restoring `target` is safe, and save what it will replace.
 ///
 /// `expected_current` is the `current_tree` a preview returned. When it is
 /// given and the worktree no longer snapshots to it, nothing changes: the
-/// person confirmed a list of losses that is no longer the whole list.
-/// The saved state lands on `saved_ref`, which must not exist yet.
-pub async fn restore_worktree(
+/// person confirmed a list of losses that is no longer the whole list. The
+/// restore also refuses while anything it would overwrite or remove is not in
+/// the snapshot. The saved state lands on `saved_ref`, which must not exist
+/// yet.
+pub async fn prepare_restore(
     worktree: &Path,
     target: &str,
     expected_current: Option<&str>,
     saved_ref: &str,
     saved_message: &str,
-) -> Result<AppliedRestore, CheckpointError> {
+) -> Result<PreparedRestore, CheckpointError> {
     let index = PrivateIndex::new(worktree).await?;
     let current_tree = index.snapshot(worktree).await?;
     if expected_current.is_some_and(|expected| expected != current_tree) {
@@ -141,6 +191,10 @@ pub async fn restore_worktree(
             "nothing_to_restore",
             "The workspace already matches that checkpoint.",
         ));
+    }
+    let in_the_way = find_blockers(worktree, &current_tree, &restored_tree).await?;
+    if !in_the_way.is_empty() {
+        return Err(blocked("restore_blocked", "The restore", &in_the_way));
     }
     let files = collect_changes(
         worktree,
@@ -162,11 +216,104 @@ pub async fn restore_worktree(
     )
     .await
     .map_err(CheckpointError::internal)?;
-    index.check_out(worktree, &restored_tree).await?;
-    Ok(AppliedRestore {
-        saved_oid,
+    Ok(PreparedRestore {
+        index,
+        current_tree,
         restored_tree,
         files,
+        saved_oid,
+    })
+}
+
+impl PreparedRestore {
+    /// Move the files. When git stops partway, the files it wrote go back.
+    pub async fn apply(self, worktree: &Path) -> Result<AppliedRestore, RestoreApplyError> {
+        let switched = Switch {
+            index: &self.index,
+            from: &self.current_tree,
+            to: &self.restored_tree,
+        }
+        .run(worktree)
+        .await;
+        match switched {
+            Ok(()) => Ok(AppliedRestore {
+                saved_oid: self.saved_oid,
+                restored_tree: self.restored_tree,
+                files: self.files,
+            }),
+            Err(SwitchFailure::Unchanged) => {
+                Err(RestoreApplyError::Unchanged(CheckpointError::conflict(
+                    "worktree_changed",
+                    "The workspace changed while Tidebreak was restoring it, so nothing changed. \
+                     Review the restore again.",
+                )))
+            }
+            Err(SwitchFailure::RolledBack(reason)) => Err(RestoreApplyError::RolledBack(reason)),
+            Err(SwitchFailure::Partial(reason)) => Err(RestoreApplyError::Partial(reason)),
+        }
+    }
+}
+
+/// Prepare and apply in one step, for a caller with nothing to journal.
+pub async fn restore_worktree(
+    worktree: &Path,
+    target: &str,
+    expected_current: Option<&str>,
+    saved_ref: &str,
+    saved_message: &str,
+) -> Result<AppliedRestore, CheckpointError> {
+    prepare_restore(worktree, target, expected_current, saved_ref, saved_message)
+        .await?
+        .apply(worktree)
+        .await
+        .map_err(|err| match err {
+            RestoreApplyError::Unchanged(err) => err,
+            RestoreApplyError::RolledBack(reason) => CheckpointError::conflict(
+                "restore_failed",
+                format!("The restore failed, and the workspace is as it was. {reason}"),
+            ),
+            RestoreApplyError::Partial(reason) => CheckpointError::internal(reason),
+        })
+}
+
+/// Where a restore put the worktree, as its chain commit records it for the
+/// next turn's note to the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoredTo {
+    /// Before turn `ordinal` of `session_id`.
+    BeforeTurn { session_id: SessionId, ordinal: i64 },
+    /// Back to where an earlier restore started.
+    BeforeRestore,
+}
+
+const RESTORED_TO_TRAILER: &str = "Tidebreak-Restored-To:";
+
+/// The message of the commit a restore leaves on each session's chain.
+pub fn chain_commit_message(restore_id: CodeRestoreId, to: RestoredTo) -> String {
+    let target = match to {
+        RestoredTo::BeforeTurn {
+            session_id,
+            ordinal,
+        } => format!("before-turn {ordinal} {session_id}"),
+        RestoredTo::BeforeRestore => "before-restore".to_owned(),
+    };
+    format!("restore {restore_id}\n\n{RESTORED_TO_TRAILER} {target}\n")
+}
+
+fn parse_restored_to(message: &str) -> Option<RestoredTo> {
+    let value = message
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(RESTORED_TO_TRAILER))?
+        .trim();
+    if value == "before-restore" {
+        return Some(RestoredTo::BeforeRestore);
+    }
+    let mut parts = value.strip_prefix("before-turn ")?.split(' ');
+    let ordinal = parts.next()?.parse().ok()?;
+    let session_id = parts.next()?.parse().ok()?;
+    Some(RestoredTo::BeforeTurn {
+        session_id,
+        ordinal,
     })
 }
 
@@ -203,18 +350,94 @@ pub async fn continue_chains_after_restore(
     Ok(())
 }
 
-/// The tree a checkpoint commit holds.
-async fn tree_of(worktree: &Path, commit: &str) -> Result<String, CheckpointError> {
-    let spec = format!("{commit}^{{tree}}");
-    git_text(
+/// How many changed files the note to the engine names.
+const NOTED_FILES: usize = 20;
+
+/// What to tell a session's engine before its turn `ordinal`, when a restore
+/// moved the worktree after its previous turn.
+///
+/// The engine still remembers the turns the restore undid, so without this
+/// it would keep working from files that are gone. `None` when no restore ran
+/// since that turn, or it left this session's files as the engine last saw
+/// them.
+pub async fn restore_note(
+    worktree: &Path,
+    workspace_id: WorkspaceId,
+    session_id: SessionId,
+    ordinal: i64,
+) -> Result<Option<String>, CheckpointError> {
+    let previous = ordinal - 1;
+    if previous <= BASELINE_ORDINAL {
+        // A first turn starts from the files as they are.
+        return Ok(None);
+    }
+    let resume = chain_resume_ref(workspace_id, session_id, previous);
+    let Ok(resumed) = git_text(worktree, &["rev-parse", "--verify", &resume], GIT_TIMEOUT).await
+    else {
+        return Ok(None);
+    };
+    let last_seen = checkpoint_ref(workspace_id, session_id, previous);
+    let Ok(last_seen) = git_text(
         worktree,
-        &["rev-parse", "--verify", "--quiet", &spec],
+        &["rev-parse", "--verify", &last_seen],
         GIT_TIMEOUT,
     )
     .await
-    .ok()
-    .filter(|tree| !tree.is_empty())
-    .ok_or_else(|| CheckpointError::not_found("That checkpoint is no longer in the repository."))
+    else {
+        return Ok(None);
+    };
+    let files = collect_changes(
+        worktree,
+        &last_seen,
+        &resumed,
+        DiffBounds {
+            max_files: NOTED_FILES,
+            ..DiffBounds::default()
+        },
+    )
+    .await?;
+    if files.files.is_empty() {
+        return Ok(None);
+    }
+    let message = git_text(
+        worktree,
+        &["show", "-s", "--format=%B", &resumed, "--"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .unwrap_or_default();
+    let point = match parse_restored_to(&message) {
+        Some(RestoredTo::BeforeTurn {
+            session_id: target,
+            ordinal,
+        }) if target == session_id => format!("to how they were before your turn {ordinal}"),
+        Some(RestoredTo::BeforeTurn { ordinal, .. }) => {
+            format!("to how they were before turn {ordinal} of another agent in this workspace")
+        }
+        Some(RestoredTo::BeforeRestore) => "to how they were before an earlier restore".to_owned(),
+        None => "to an earlier checkpoint".to_owned(),
+    };
+    let mut listed: Vec<String> = files
+        .files
+        .iter()
+        .map(|file| match file.kind {
+            tidebreak_core::FileChangeKind::Added => format!("- {} (back)", file.path.to_wire()),
+            tidebreak_core::FileChangeKind::Deleted => {
+                format!("- {} (gone)", file.path.to_wire())
+            }
+            _ => format!("- {}", file.path.to_wire()),
+        })
+        .collect();
+    let total = usize::try_from(files.stat.files).unwrap_or(usize::MAX);
+    if total > listed.len() {
+        listed.push(format!("- and {} more", total - listed.len()));
+    }
+    Ok(Some(format!(
+        "Note from Tidebreak: since your last turn, the person restored this workspace's files \
+         {point}. These files no longer match what you last saw, so any edits you remember \
+         making to them may be gone. Read a file again before you rely on it.\n{}",
+        listed.join("\n")
+    )))
 }
 
 async fn commit_tree(
@@ -232,108 +455,12 @@ async fn commit_tree(
     .map_err(CheckpointError::internal)
 }
 
-/// An index file of the restore's own, deleted when it drops.
-///
-/// It starts as a copy of the reusable checkpoint index when there is one, so
-/// the snapshot re-hashes only what changed since the last checkpoint. The copy
-/// is safe to take while another snapshot writes the original: git replaces an
-/// index by renaming a finished file over it, and it marks an entry it could
-/// not trust by its stat data, so a copied entry is re-read, never believed.
-struct PrivateIndex {
-    path: PathBuf,
-}
-
-impl PrivateIndex {
-    async fn new(worktree: &Path) -> Result<Self, CheckpointError> {
-        let temp = tempfile::NamedTempFile::new().map_err(|err| {
-            CheckpointError::internal(format!("could not create a temporary index: {err}"))
-        })?;
-        let index = Self {
-            path: temp.path().to_path_buf(),
-        };
-        // Git wants to create the index itself; an empty file reads as corrupt.
-        drop(temp);
-        let _ = tokio::fs::remove_file(&index.path).await;
-        if let Ok(Some(reusable)) =
-            checkpoint_index_path_before(worktree, Instant::now() + GIT_TIMEOUT).await
-        {
-            if tokio::fs::copy(&reusable, &index.path).await.is_err() {
-                let _ = tokio::fs::remove_file(&index.path).await;
-            }
-        }
-        Ok(index)
-    }
-
-    /// Snapshot the worktree into this index and return the tree.
-    async fn snapshot(&self, worktree: &Path) -> Result<String, CheckpointError> {
-        match self.try_snapshot(worktree).await {
-            Ok(tree) => Ok(tree),
-            // A seed git cannot read costs only its stat cache. Start cold.
-            Err(_) if self.path.exists() => {
-                let _ = tokio::fs::remove_file(&self.path).await;
-                self.try_snapshot(worktree).await
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    async fn try_snapshot(&self, worktree: &Path) -> Result<String, CheckpointError> {
-        let index = self.path.to_string_lossy();
-        let env = [("GIT_INDEX_FILE", index.as_ref())];
-        if !self.path.exists() {
-            git_text_env(worktree, &["read-tree", "HEAD"], &env, GIT_TIMEOUT)
-                .await
-                .map_err(CheckpointError::internal)?;
-        }
-        git_text_env(worktree, &["add", "-A"], &env, GIT_SNAPSHOT_TIMEOUT)
-            .await
-            .map_err(CheckpointError::internal)?;
-        git_text_env(worktree, &["write-tree"], &env, GIT_TIMEOUT)
-            .await
-            .map_err(CheckpointError::internal)
-    }
-
-    /// Make the worktree match `tree`, starting from the snapshot this index
-    /// holds.
-    ///
-    /// A one-tree reset writes each file whose content differs, removes each
-    /// file the target lacks, and leaves an unchanged file alone, stat data and
-    /// all, so a watcher sees only the files that really moved. Git checks
-    /// every path before it writes one, and refuses rather than overwrite an
-    /// untracked file that appeared after the snapshot.
-    async fn check_out(&self, worktree: &Path, tree: &str) -> Result<(), CheckpointError> {
-        let index = self.path.to_string_lossy();
-        git_text_env(
-            worktree,
-            &["read-tree", "--reset", "-u", tree],
-            &[("GIT_INDEX_FILE", index.as_ref())],
-            GIT_SNAPSHOT_TIMEOUT,
-        )
-        .await
-        .map(|_| ())
-        .map_err(|err| {
-            CheckpointError::conflict(
-                "restore_blocked",
-                format!("Git could not restore the worktree: {err}"),
-            )
-        })
-    }
-}
-
-impl Drop for PrivateIndex {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-        let mut lock = self.path.clone().into_os_string();
-        lock.push(".lock");
-        let _ = std::fs::remove_file(PathBuf::from(lock));
-    }
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::super::testing::{add_worktree, git_stdout, init_repo, run};
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
 
     fn ws() -> WorkspaceId {
         WorkspaceId::new()
@@ -359,6 +486,20 @@ mod tests {
 
     fn read(path: &Path) -> Option<String> {
         std::fs::read_to_string(path).ok()
+    }
+
+    fn saved_ref() -> String {
+        format!("{REF_PREFIX}/test/saved")
+    }
+
+    fn ref_exists(worktree: &Path, r#ref: &str) -> bool {
+        std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", r#ref])
+            .current_dir(worktree)
+            .output()
+            .unwrap()
+            .status
+            .success()
     }
 
     #[tokio::test]
@@ -390,6 +531,7 @@ mod tests {
 
         let preview = preview_restore(&tree, &before).await.unwrap();
         assert_eq!(preview.current_tree, replaced_tree);
+        assert!(preview.blocked.is_empty());
         let mut listed: Vec<String> = preview
             .files
             .files
@@ -409,12 +551,11 @@ mod tests {
             "the preview names every change the restore undoes"
         );
 
-        let saved_ref = format!("{REF_PREFIX}/test/saved");
         let applied = restore_worktree(
             &tree,
             &before,
             Some(&preview.current_tree),
-            &saved_ref,
+            &saved_ref(),
             "state before restore",
         )
         .await
@@ -451,7 +592,7 @@ mod tests {
 
         // The replaced state is saved, and restoring it undoes the restore.
         assert_eq!(
-            git_stdout(&tree, &["rev-parse", &format!("{saved_ref}^{{tree}}")]),
+            git_stdout(&tree, &["rev-parse", &format!("{}^{{tree}}", saved_ref())]),
             replaced_tree
         );
         let undo_ref = format!("{REF_PREFIX}/test/undo");
@@ -489,15 +630,9 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        restore_worktree(
-            &tree,
-            &before,
-            None,
-            &format!("{REF_PREFIX}/test/saved"),
-            "state before restore",
-        )
-        .await
-        .unwrap();
+        restore_worktree(&tree, &before, None, &saved_ref(), "state before restore")
+            .await
+            .unwrap();
 
         assert_eq!(read(&tree.join("README.md")).as_deref(), Some("hello\n"));
         assert_eq!(
@@ -519,12 +654,11 @@ mod tests {
         let preview = preview_restore(&tree, &before).await.unwrap();
         std::fs::write(tree.join("README.md"), "edited after the review\n").unwrap();
 
-        let saved_ref = format!("{REF_PREFIX}/test/saved");
         let err = restore_worktree(
             &tree,
             &before,
             Some(&preview.current_tree),
-            &saved_ref,
+            &saved_ref(),
             "state before restore",
         )
         .await
@@ -545,13 +679,7 @@ mod tests {
             Some("edited after the review\n")
         );
         assert!(
-            git_text(
-                &tree,
-                &["rev-parse", "--verify", "--quiet", &saved_ref],
-                GIT_TIMEOUT
-            )
-            .await
-            .is_err(),
+            !ref_exists(&tree, &saved_ref()),
             "a refused restore saves nothing"
         );
     }
@@ -561,15 +689,9 @@ mod tests {
         let (_dir, repo) = init_repo();
         let tree = add_worktree(&repo, "same");
         let before = checkpoint(&tree, "before").await;
-        let err = restore_worktree(
-            &tree,
-            &before,
-            None,
-            &format!("{REF_PREFIX}/test/saved"),
-            "state before restore",
-        )
-        .await
-        .unwrap_err();
+        let err = restore_worktree(&tree, &before, None, &saved_ref(), "state before restore")
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -579,6 +701,134 @@ mod tests {
                 }
             ),
             "{err:?}"
+        );
+    }
+
+    /// An ignored `.env` that was an untracked file when the checkpoint was
+    /// taken, and an ignored file inside a folder that the checkpoint holds as
+    /// a file: no snapshot holds either, so the restore refuses and names
+    /// them, and both stay exactly as they are.
+    #[tokio::test]
+    async fn a_restore_refuses_to_overwrite_or_remove_ignored_files() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "ignored");
+        std::fs::write(tree.join(".env"), "PLACEHOLDER=1\n").unwrap();
+        std::fs::write(tree.join("utils"), "a file once\n").unwrap();
+        let before = checkpoint(&tree, "before").await;
+        // Start the next snapshot cold, the way a fresh machine or a rebuilt
+        // index does: an ignored file is then in no snapshot at all.
+        let reusable = git_stdout(
+            &tree,
+            &["rev-parse", "--git-path", "tidebreak-checkpoint-index"],
+        );
+        let _ = std::fs::remove_file(tree.join(reusable));
+
+        // The turn ignores `.env` and turns `utils` into a folder that holds
+        // an ignored file of the person's own.
+        std::fs::write(tree.join(".gitignore"), ".env\n*.local\n").unwrap();
+        std::fs::write(tree.join(".env"), "the real value\n").unwrap();
+        std::fs::remove_file(tree.join("utils")).unwrap();
+        std::fs::create_dir_all(tree.join("utils")).unwrap();
+        std::fs::write(tree.join("utils/helpers.rs"), "pub fn help() {}\n").unwrap();
+        std::fs::write(tree.join("utils/settings.local"), "mine\n").unwrap();
+
+        let preview = preview_restore(&tree, &before).await.unwrap();
+        let named: Vec<String> = preview.blocked.iter().map(GitPath::to_wire).collect();
+        assert_eq!(named, [".env", "utils/settings.local"]);
+
+        let err = restore_worktree(
+            &tree,
+            &before,
+            Some(&preview.current_tree),
+            &saved_ref(),
+            "state before restore",
+        )
+        .await
+        .unwrap_err();
+        let CheckpointError::Conflict {
+            kind: "restore_blocked",
+            message,
+        } = err
+        else {
+            panic!("{err:?}");
+        };
+        assert!(
+            message.contains(".env") && message.contains("utils/settings.local"),
+            "{message}"
+        );
+        assert_eq!(
+            read(&tree.join(".env")).as_deref(),
+            Some("the real value\n")
+        );
+        assert_eq!(
+            read(&tree.join("utils/settings.local")).as_deref(),
+            Some("mine\n")
+        );
+        assert_eq!(
+            read(&tree.join("utils/helpers.rs")).as_deref(),
+            Some("pub fn help() {}\n")
+        );
+        assert!(!ref_exists(&tree, &saved_ref()));
+    }
+
+    /// A file that appears after the restore checked the worktree, where the
+    /// target puts a file of its own, is never overwritten.
+    #[tokio::test]
+    async fn a_file_that_appears_after_the_check_is_not_overwritten() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "race");
+        std::fs::write(tree.join("draft.md"), "the checkpoint's draft\n").unwrap();
+        let before = checkpoint(&tree, "before").await;
+        std::fs::remove_file(tree.join("draft.md")).unwrap();
+        std::fs::write(tree.join("README.md"), "later\n").unwrap();
+
+        let prepared = prepare_restore(&tree, &before, None, &saved_ref(), "state before restore")
+            .await
+            .unwrap();
+        std::fs::write(tree.join("draft.md"), "typed a moment later\n").unwrap();
+        let err = prepared.apply(&tree).await.unwrap_err();
+
+        assert!(matches!(err, RestoreApplyError::Unchanged(_)), "{err:?}");
+        assert_eq!(
+            read(&tree.join("draft.md")).as_deref(),
+            Some("typed a moment later\n")
+        );
+        assert_eq!(read(&tree.join("README.md")).as_deref(), Some("later\n"));
+    }
+
+    /// Git stops partway through the checkout: the file it already wrote goes
+    /// back, so the worktree is as it was and nothing is half-restored.
+    #[tokio::test]
+    async fn a_restore_that_stops_partway_is_rolled_back() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "partway");
+        std::fs::create_dir_all(tree.join("locked")).unwrap();
+        std::fs::write(tree.join("locked/kept.txt"), "kept\n").unwrap();
+        std::fs::write(tree.join("README.md"), "the checkpoint's readme\n").unwrap();
+        std::fs::write(tree.join("locked/later.txt"), "the checkpoint's file\n").unwrap();
+        let before = checkpoint(&tree, "before").await;
+        std::fs::write(tree.join("README.md"), "current readme\n").unwrap();
+        std::fs::remove_file(tree.join("locked/later.txt")).unwrap();
+
+        let prepared = prepare_restore(&tree, &before, None, &saved_ref(), "state before restore")
+            .await
+            .unwrap();
+        // Git can rewrite README.md, but cannot create a file in `locked/`.
+        std::fs::set_permissions(tree.join("locked"), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+        let err = prepared.apply(&tree).await.unwrap_err();
+        std::fs::set_permissions(tree.join("locked"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        assert!(matches!(err, RestoreApplyError::RolledBack(_)), "{err:?}");
+        assert_eq!(
+            read(&tree.join("README.md")).as_deref(),
+            Some("current readme\n")
+        );
+        assert!(!tree.join("locked/later.txt").exists());
+        assert!(
+            ref_exists(&tree, &saved_ref()),
+            "the saved state stays, so the restore can still be undone"
         );
     }
 
@@ -624,6 +874,63 @@ mod tests {
             find_restore_point(&tree, ws(), restore).await.unwrap(),
             None,
             "a restore belongs to its own workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_next_turn_hears_which_files_a_restore_moved() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "note");
+        let workspace = ws();
+        let session = SessionId::new();
+        let first = checkpoint(&tree, "first").await;
+        std::fs::write(tree.join("README.md"), "turn two wrote this\n").unwrap();
+        std::fs::write(tree.join("added.rs"), "fn added() {}\n").unwrap();
+        let second = checkpoint(&tree, "second").await;
+        run(
+            &tree,
+            &[
+                "git",
+                "update-ref",
+                &checkpoint_ref(workspace, session, 2),
+                &second,
+            ],
+        );
+        assert_eq!(
+            restore_note(&tree, workspace, session, 3).await.unwrap(),
+            None,
+            "no restore, no note"
+        );
+
+        let applied = restore_worktree(&tree, &first, None, &saved_ref(), "saved")
+            .await
+            .unwrap();
+        continue_chains_after_restore(
+            &tree,
+            &applied,
+            &chain_commit_message(
+                CodeRestoreId::new(),
+                RestoredTo::BeforeTurn {
+                    session_id: session,
+                    ordinal: 2,
+                },
+            ),
+            &[chain_resume_ref(workspace, session, 2)],
+        )
+        .await
+        .unwrap();
+
+        let note = restore_note(&tree, workspace, session, 3)
+            .await
+            .unwrap()
+            .expect("the engine is told");
+        assert!(note.contains("before your turn 2"), "{note}");
+        assert!(note.contains("- README.md\n"), "{note}");
+        assert!(note.contains("- added.rs (gone)"), "{note}");
+        assert_eq!(
+            restore_note(&tree, workspace, session, 4).await.unwrap(),
+            None,
+            "only the turn right after the restore hears about it"
         );
     }
 

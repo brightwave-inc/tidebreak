@@ -1,10 +1,11 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { type ReactNode, useEffect } from "react";
+import { type ReactNode, useEffect, useMemo } from "react";
 import { expect, fn, userEvent, within } from "storybook/test";
 
 import { HttpError } from "@/api/client";
 import type { CodeCheckpointRestorePreview } from "@/api/types";
 import { useConfirm, type ConfirmOptions } from "@/components/ConfirmDialog";
+import { Toaster } from "@/components/ui/sonner";
 import { CommitBox } from "@/code/CommitBox";
 import { CodeTranscript } from "@/code/CodeTranscript";
 import type { CodeTranscriptItem } from "@/code/CodeSessionReducer";
@@ -12,11 +13,15 @@ import { DiffOverviewContent } from "@/code/DiffOverview";
 import { DiffPanel } from "@/code/DiffPanel";
 import {
   discardConfirmation,
+  restoreBlockedNotice,
   restoreConfirmation,
   revertHunkConfirmation,
   TURN_RUNNING_REASON,
+  useWorktreeUndo,
+  type WorktreeUndoClient,
 } from "@/code/worktreeUndo";
 import { diffHunks, groupUnifiedDiff } from "@/code/unifiedDiff";
+import type { CheckpointRestoreStatus } from "@/generated/wire";
 
 /**
  * Undo in the worktree, and Source control's commit box: every state a
@@ -164,6 +169,8 @@ const RESTORE_PREVIEW: CodeCheckpointRestorePreview = {
   truncated: false,
   stat: { files: 9, insertions: 197, deletions: 108, truncated: false },
   current_tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+  blocked: [],
+  affected_turns: [],
 };
 
 /** Opens one confirmation on mount, the way the page's shared dialog does. */
@@ -198,6 +205,8 @@ const restoredItems: CodeTranscriptItem[] = [
     target: { kind: "before_turn", turn_id: "turn-2" },
     turnOrdinal: 2,
     diffstat: { files: 9, insertions: 108, deletions: 197, truncated: false },
+    status: "completed",
+    error: null,
   },
 ];
 
@@ -456,6 +465,251 @@ export const RevertHunkConfirm: Story = {
   play: async () => {
     await expect(
       await within(document.body).findByRole("alertdialog"),
+    ).toBeVisible();
+  },
+};
+
+/** Another agent's turns in the same workspace are undone too, by name. */
+export const RestoreConfirmOtherAgents: Story = {
+  render: () => (
+    <OpenConfirmation
+      options={restoreConfirmation(
+        {
+          ...RESTORE_PREVIEW,
+          affected_turns: [
+            {
+              session_id: "session-2",
+              turn_id: "turn-9",
+              ordinal: 4,
+              harness_kind: "codex",
+            },
+            {
+              session_id: "session-3",
+              turn_id: "turn-12",
+              ordinal: 1,
+              harness_kind: "grok",
+            },
+          ],
+        },
+        { turnOrdinal: 2 },
+      )}
+    />
+  ),
+  play: async () => {
+    await expect(
+      await within(document.body).findByRole("alertdialog"),
+    ).toBeVisible();
+  },
+};
+
+/**
+ * Files no checkpoint holds stand where the restore would write, ignored
+ * ones mostly. The restore names them and waits instead of losing them.
+ */
+export const RestoreBlocked: Story = {
+  render: () => (
+    <OpenConfirmation
+      options={restoreBlockedNotice({
+        blocked: [".env", "utils/settings.local"],
+      })}
+    />
+  ),
+  play: async () => {
+    await expect(
+      await within(document.body).findByRole("alertdialog"),
+    ).toBeVisible();
+  },
+};
+
+function restoreRow(
+  status: CheckpointRestoreStatus,
+  error: string | null,
+): CodeTranscriptItem {
+  return {
+    kind: "restore",
+    id: `restore:${status}`,
+    restoreId: "restore-1",
+    target: { kind: "before_turn", turn_id: "turn-2" },
+    turnOrdinal: 2,
+    diffstat: { files: 9, insertions: 108, deletions: 197, truncated: false },
+    status,
+    error,
+  };
+}
+
+/** Git stopped partway: the row keeps the way back to every replaced file. */
+export const RestoreStoppedPartway: Story = {
+  render: () => (
+    <TranscriptFrame>
+      <CodeTranscript
+        items={[
+          ...turnTwo,
+          restoreRow(
+            "partial",
+            "Git could not write src/lexer.rs: No space left on device.",
+          ),
+        ]}
+        onForkFromTurn={fn()}
+        onRestoreBeforeTurn={fn()}
+        onUndoRestore={fn()}
+      />
+    </TranscriptFrame>
+  ),
+};
+
+/** A restore that did not run changed nothing, so it offers no undo. */
+export const RestoreFailed: Story = {
+  render: () => (
+    <TranscriptFrame>
+      <CodeTranscript
+        items={[
+          ...turnTwo,
+          restoreRow(
+            "failed",
+            "The workspace changed while Tidebreak was restoring it.",
+          ),
+        ]}
+        onForkFromTurn={fn()}
+        onRestoreBeforeTurn={fn()}
+        onUndoRestore={fn()}
+      />
+    </TranscriptFrame>
+  ),
+};
+
+/** A client whose every undo call fails the way the server refuses it. */
+function refusingClient(refusal: HttpError): WorktreeUndoClient {
+  return {
+    previewCodeCheckpointRestore: async () => RESTORE_PREVIEW,
+    restoreCodeCheckpoint: async () => {
+      throw refusal;
+    },
+    revertCodeWorkspaceChange: async () => {
+      throw refusal;
+    },
+    discardCodeWorkspaceChanges: async () => {
+      throw refusal;
+    },
+  } as unknown as WorktreeUndoClient;
+}
+
+/** A turn's diff wired to the real revert flow, and the toast it raises. */
+function RevertFlow({ refusal }: { refusal: HttpError }) {
+  const client = useMemo(() => refusingClient(refusal), [refusal]);
+  const undo = useWorktreeUndo({ client, workspaceId: "workspace-storybook" });
+  return (
+    <>
+      <div className="flex h-[420px] w-full max-w-3xl flex-col overflow-hidden rounded-lg border bg-background">
+        <DiffPanel
+          client={hunkClient}
+          workspaceId="workspace-storybook"
+          turnId="turn-2"
+          turnLabel="Turn 2"
+          revert={{
+            onRevertFile: undo.revertFile,
+            onRevertHunk: undo.revertHunk,
+          }}
+        />
+      </div>
+      {undo.dialog}
+      <Toaster richColors duration={Number.POSITIVE_INFINITY} />
+    </>
+  );
+}
+
+async function revertTheSecondHunk(canvasElement: HTMLElement) {
+  await userEvent.click(
+    await within(canvasElement).findByRole("button", {
+      name: "Revert the change at lines 41 to 44 of src/parser.rs",
+    }),
+  );
+  const dialog = await within(document.body).findByRole("alertdialog");
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "Revert change" }),
+  );
+}
+
+const REVERT_CONFLICT = new HttpError(
+  409,
+  "409: This change no longer matches the file, so nothing was reverted. The file changed after the diff you reviewed.",
+  "revert_conflict",
+);
+
+/** A later edit overlaps the turn's change, so nothing is reverted. */
+export const RevertConflict: Story = {
+  render: () => <RevertFlow refusal={REVERT_CONFLICT} />,
+  play: async ({ canvasElement }) => {
+    await revertTheSecondHunk(canvasElement);
+    await expect(
+      await within(document.body).findByText(/nothing was reverted/),
+    ).toBeVisible();
+  },
+};
+
+const DIFF_CHANGED = new HttpError(
+  409,
+  "409: This change is no longer in the diff. Review the diff again.",
+  "diff_changed",
+);
+
+/** The hunk on screen is no longer the file's, so the revert asks for a fresh look. */
+export const DiffChanged: Story = {
+  render: () => <RevertFlow refusal={DIFF_CHANGED} />,
+  play: async ({ canvasElement }) => {
+    await revertTheSecondHunk(canvasElement);
+    await expect(
+      await within(document.body).findByText(/The diff changed since/),
+    ).toBeVisible();
+  },
+};
+
+const WORKTREE_CHANGED = new HttpError(
+  409,
+  "409: The workspace changed after you reviewed this restore. Review it again.",
+  "worktree_changed",
+);
+
+/** The workspace moved after the person confirmed, so nothing moved. */
+function RestoreFlow() {
+  const client = useMemo(() => refusingClient(WORKTREE_CHANGED), []);
+  const undo = useWorktreeUndo({ client, workspaceId: "workspace-storybook" });
+  return (
+    <>
+      <TranscriptFrame>
+        <CodeTranscript
+          items={turnTwo}
+          onForkFromTurn={fn()}
+          onRestoreBeforeTurn={(turnId) =>
+            void undo.restore(
+              { kind: "before_turn", turn_id: turnId },
+              { turnOrdinal: 2 },
+            )
+          }
+        />
+      </TranscriptFrame>
+      {undo.dialog}
+      <Toaster richColors duration={Number.POSITIVE_INFINITY} />
+    </>
+  );
+}
+
+export const WorktreeChanged: Story = {
+  render: () => <RestoreFlow />,
+  play: async ({ canvasElement }) => {
+    await openTurnMenu(canvasElement);
+    await userEvent.click(
+      within(document.body).getByRole("menuitem", {
+        name: "Restore to before this turn",
+      }),
+    );
+    const dialog = await within(document.body).findByRole("alertdialog");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Restore" }),
+    );
+    await expect(
+      await within(document.body).findByText(
+        "The workspace changed while you were reviewing the restore.",
+      ),
     ).toBeVisible();
   },
 };

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useId } from "react";
 import { useRouter } from "@tanstack/react-router";
 import {
   Check,
@@ -279,11 +279,14 @@ function SeamRow({
   label,
   tone,
   recap,
+  detail,
   children,
 }: {
   label: string;
   tone: "quiet" | "warning";
   recap?: string;
+  /** One plain sentence under the row, such as why something stopped. */
+  detail?: string;
   children: ReactNode;
 }) {
   return (
@@ -296,6 +299,7 @@ function SeamRow({
       )}
     >
       <div className="flex flex-wrap items-center gap-1.5">{children}</div>
+      {detail && <p className="mt-1 break-words">{detail}</p>}
       {recap && <TurnRecap text={recap} />}
     </div>
   );
@@ -336,6 +340,8 @@ function TurnActionsMenu({
   onRestoreBeforeTurn?: (turnId: string) => void;
   undoUnavailableReason?: string;
 }) {
+  const reasonId = useId();
+  const unavailable = undoUnavailableReason !== undefined;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -364,15 +370,30 @@ function TurnActionsMenu({
         )}
         {onRestoreBeforeTurn && (
           <>
+            {/*
+              A turned-off item stays focusable, so a keyboard or screen
+              reader user reaches it and hears why it is off.
+            */}
             <DropdownMenuItem
-              disabled={undoUnavailableReason !== undefined}
-              onSelect={() => onRestoreBeforeTurn(turnId)}
+              aria-disabled={unavailable || undefined}
+              aria-describedby={unavailable ? reasonId : undefined}
+              className={cn(unavailable && "cursor-not-allowed opacity-60")}
+              onSelect={(event) => {
+                if (unavailable) {
+                  event.preventDefault();
+                  return;
+                }
+                onRestoreBeforeTurn(turnId);
+              }}
             >
               <History />
               Restore to before this turn
             </DropdownMenuItem>
             {undoUnavailableReason && (
-              <p className="text-muted-foreground px-2 pb-1.5 pl-10 text-xs">
+              <p
+                id={reasonId}
+                className="text-muted-foreground px-2 pb-1.5 pl-10 text-xs"
+              >
                 {undoUnavailableReason}
               </p>
             )}
@@ -388,7 +409,11 @@ function TurnActionsMenu({
  * to, what changed, and the way back.
  *
  * A restore runs between turns, so it reads as one of the quiet seams rather
- * than as a card. Undo is a restore too, and it asks first, like this one did.
+ * than as a card. It lands as started before any file moves and changes in
+ * place when the restore ends. Undo is a restore too, and it asks first, like
+ * this one did. A restore that failed changed nothing, so it has nothing to
+ * undo; one that stopped partway keeps its Undo, which puts back every file
+ * it replaced.
  */
 export function CheckpointRestoreRow({
   restore,
@@ -400,20 +425,29 @@ export function CheckpointRestoreRow({
   onUndo?: (restoreId: string) => void;
   undoUnavailableReason?: string;
 }) {
-  const label =
-    restore.target.kind === "before_restore"
-      ? "Undid a restore"
-      : restore.turnOrdinal !== null
-        ? `Restored to before turn ${restore.turnOrdinal}`
-        : "Restored to before a turn";
+  const undoing = restore.target.kind === "before_restore";
+  const label = restoreLabel(restore);
+  const offerUndo = onUndo && restore.status !== "failed";
   return (
-    <SeamRow label={label} tone="quiet">
-      <History size={13} aria-hidden="true" />
+    <SeamRow
+      label={label}
+      tone={
+        restore.status === "failed" || restore.status === "partial"
+          ? "warning"
+          : "quiet"
+      }
+      detail={restore.error ?? undefined}
+    >
+      {restore.status === "failed" || restore.status === "partial" ? (
+        <TriangleAlert size={13} aria-hidden="true" />
+      ) : (
+        <History size={13} aria-hidden="true" />
+      )}
       <span>{label}</span>
-      {hasFileChanges(restore.diffstat) && (
+      {restore.status !== "failed" && hasFileChanges(restore.diffstat) && (
         <DiffstatBadge stat={restore.diffstat} />
       )}
-      {onUndo && (
+      {offerUndo && (
         <button
           type="button"
           className={cn(
@@ -424,9 +458,11 @@ export function CheckpointRestoreRow({
           disabled={undoUnavailableReason !== undefined}
           title={undoUnavailableReason}
           aria-label={
-            restore.target.kind === "before_restore"
-              ? "Redo the restore"
-              : "Undo the restore"
+            restore.status === "partial"
+              ? "Put back the files the restore replaced"
+              : undoing
+                ? "Redo the restore"
+                : "Undo the restore"
           }
           onClick={() => onUndo(restore.restoreId)}
         >
@@ -435,6 +471,33 @@ export function CheckpointRestoreRow({
       )}
     </SeamRow>
   );
+}
+
+/** What a restore row says, by how far the restore got. */
+function restoreLabel(
+  restore: Extract<CodeTranscriptItem, { kind: "restore" }>,
+): string {
+  const undoing = restore.target.kind === "before_restore";
+  const where =
+    restore.turnOrdinal !== null
+      ? `before turn ${restore.turnOrdinal}`
+      : "before a turn";
+  switch (restore.status) {
+    case "started":
+      return undoing
+        ? "Started undoing a restore"
+        : `Started restoring to ${where}`;
+    case "failed":
+      return undoing
+        ? "Could not undo the restore. Nothing changed."
+        : "Could not restore. Nothing changed.";
+    case "partial":
+      return undoing
+        ? "The undo stopped partway"
+        : "The restore stopped partway";
+    case "completed":
+      return undoing ? "Undid a restore" : `Restored to ${where}`;
+  }
 }
 
 /** A recorded zero-stat is still a diffstat; the seam only shows real changes. */

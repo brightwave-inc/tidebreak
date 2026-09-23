@@ -106,7 +106,7 @@ mod sweeps;
 mod trust;
 mod turns;
 mod undo;
-pub use undo::{CheckpointRestoreOutcome, CheckpointRestorePreview};
+pub use undo::{AffectedTurn, CheckpointRestoreOutcome, CheckpointRestorePreview};
 mod workers;
 mod workspace_delivery;
 mod workspaces;
@@ -1131,6 +1131,9 @@ fn map_gh(err: GhError) -> ServerError {
         GhError::CommitRejected(output) => {
             ServerError::conflict_kind("commit_rejected", commit_rejected_message(&output))
         }
+        GhError::CommitTimedOut(limit) => {
+            ServerError::conflict_kind("commit_timed_out", commit_timed_out_message(limit))
+        }
         GhError::AuthFailed(message) => ServerError::conflict_kind("git_auth_failed", message),
         GhError::PushFailed(message) => ServerError::conflict_kind("git_push_failed", message),
         GhError::GhAbsent { instructions } => ServerError::conflict_kind("gh_absent", instructions),
@@ -1151,6 +1154,15 @@ fn map_gh(err: GhError) -> ServerError {
         }
         GhError::Internal(message) => ServerError::internal(message),
     }
+}
+
+/// What a commit stopped at its limit tells the person.
+pub(crate) fn commit_timed_out_message(limit: std::time::Duration) -> String {
+    format!(
+        "The commit was still running after {} minutes, so Tidebreak stopped it. A commit hook or \
+         a signing prompt may be waiting for input. Nothing was committed.",
+        limit.as_secs().div_ceil(60)
+    )
 }
 
 /// What a refused commit tells the person: that git refused it, then what git

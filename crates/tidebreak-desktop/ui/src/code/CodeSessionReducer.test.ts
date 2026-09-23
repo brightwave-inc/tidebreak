@@ -594,6 +594,7 @@ describe("hydrate then replay", () => {
       restore_id: "r-1",
       target: { kind: "before_turn", turn_id: "t1" },
       diffstat: { files: 2, insertions: 1, deletions: 9, truncated: false },
+      status: "completed",
     };
     let state = hydrated;
     const replay: CodeEvent[] = [
@@ -630,6 +631,27 @@ describe("hydrate then replay", () => {
       again.state.items.filter((item) => item.kind === "restore"),
     ).toHaveLength(1);
     expect(again.state.contentRevision).toBe(state.contentRevision);
+  });
+
+  it("updates a restore row in place when the restore ends", () => {
+    const started: CodeEvent = {
+      type: "checkpoint_restored",
+      restore_id: "r-2",
+      target: { kind: "before_turn", turn_id: "t1" },
+      diffstat: { files: 1, insertions: 0, deletions: 3, truncated: false },
+      status: "started",
+    };
+    let state = hydrateCodeTurns(initialCodeSessionState(), [SNAPSHOT_TURN]);
+    state = reduceCodeSessionEvent(state, framed(1, started), deps()).state;
+    state = reduceCodeSessionEvent(
+      state,
+      framed(2, { ...started, status: "partial", error: "disk full" }),
+      deps(),
+    ).state;
+
+    const rows = state.items.filter((item) => item.kind === "restore");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "partial", error: "disk full" });
   });
 
   it("carries a trigger's structured event onto the user item", () => {

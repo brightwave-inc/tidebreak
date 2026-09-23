@@ -191,10 +191,15 @@ for `run` and `watch`). `code session start` takes `--reasoning <level>` and
 `--fast` on the CLI; they are not HTTP-only.
 
 `code restore` puts a workspace's files back to how they stood before a turn,
-and undoes every change made since, including your own. `--turn N` names the
-turn the way `code diff` does. Run it with `--dry-run` first to list what it
-would undo. It refuses while a turn runs. A restore prints its id; pass it to
-`--undo` to put back what the restore replaced.
+and undoes every change made since, including your own and other agents'.
+`--turn N` names the turn the way `code diff` does. Run it with `--dry-run`
+first to list what it would undo, including other agents' turns. It refuses
+while a turn runs, and while an ignored file or anything else no checkpoint
+holds is in the way; the refusal names those files. A restore prints its id;
+pass it to `--undo` to put back what the restore replaced.
+
+`code git commit` refuses at once while a turn runs or a message waits in the
+workspace's queue, so it never commits a turn's work under your message.
 
 The code family is a thin client of the server API, not a second product
 surface. These server capabilities stay HTTP-only on purpose — they are

@@ -170,47 +170,77 @@ passes recovery tests by killing the decoy; the never-signaled assertion
 The restore path this record deferred ships for 1.0. Reverting a file or one
 hunk from a diff, and discarding a file's uncommitted changes, ship beside it
 and share its rules; [`docs/code-mode.md`](../code-mode.md#undo-in-the-worktree)
-carries the mechanics.
+carries the mechanics. One invariant governs all three: an undo never
+overwrites or removes anything the person did not pick, and everything a
+restore replaces can be brought back by its Undo.
 
 **What a restore targets.** "Before a turn" is the `from` of that turn's own
 diff: the previous checkpoint in the session's chain, the start baseline for
 turn 1, or where the chain resumed after an earlier restore. A turn with no
 such checkpoint is refused. The merge base the diff falls back to knows
 nothing of the untracked files that stood in the worktree then, so restoring
-to it would delete them.
+to it would delete them. In a workspace several sessions share, that state
+predates other sessions' later turns too; the confirmation names those turns
+rather than let "before this turn" hide them.
 
 **What a restore changes.** Every file the checkpoint snapshot sees goes back:
-tracked and untracked, added, modified, deleted, and renamed. Ignored files
-stay, because no checkpoint records them. `HEAD`, the branch, the reflog, and
-the user's index are untouched. A turn that committed leaves its commit on
-the branch, and the restore shows as uncommitted changes that undo it.
-Rewriting the branch was rejected above for the same reason it was rejected
-here: history mutation is the change that destroys trust when it goes wrong.
-The checkout runs `git read-tree --reset -u` through a private index, so no
-checkout hook fires and a file whose content matches keeps its stat data.
+tracked and untracked, added, modified, deleted, and renamed. `HEAD`, the
+branch, the reflog, and the user's index are untouched. A turn that committed
+leaves its commit on the branch, and the restore shows as uncommitted changes
+that undo it. Rewriting the branch was rejected above for the same reason it
+was rejected here: history mutation is the change that destroys trust when it
+goes wrong. The checkout runs a two-tree `git read-tree -m -u` from a fresh
+snapshot through a private index. Git checks every path first and refuses
+rather than overwrite a file that changed after the snapshot, or remove one
+the snapshot does not hold. No checkout hook fires, and a file whose content
+matches keeps its stat data.
+
+**What a restore refuses.** Ignored files are in no snapshot, so no Undo could
+bring one back. A restore that would overwrite or remove one, or a folder
+holding one, or any other file no snapshot holds, refuses and names it. The
+preview names the same files, so the person can move them first.
 
 **A restore can be undone.** Before any file moves, the state being replaced
 is committed to its own hidden ref,
-`refs/tidebreak/checkpoints/<workspace>/<session>/restore/<id>`. Undo is a
-restore whose target is that state, and it saves its own. The confirmation
-lists every change since the target, whoever made it, and the restore takes
-the preview's snapshot tree back as `expected_tree`: a worktree that moved
-since the person confirmed is left alone.
+`refs/tidebreak/checkpoints/<workspace>/<session>/restore/<id>`, and the
+restore is journaled as started. Undo is a restore whose target is that
+state, and it saves its own. The confirmation lists every change since the
+target, whoever made it, and the restore takes the preview's snapshot tree
+back as `expected_tree`: a worktree that moved since the person confirmed is
+left alone. When the checkout stops partway, the files it wrote go back and
+the restore is journaled as failed. When they cannot all go back, it is
+journaled as partial, and its Undo, reachable from the transcript and by id,
+puts back everything it replaced. The route runs the restore on a task of its
+own, so a client that disconnects cannot stop it halfway.
 
 **The chain continues from the restore.** For every open session in the
 workspace, `…/<session>/after/<n>` points at the restored state, where `n` is
 that session's newest turn. The next turn diffs from it. Without that, the
 next turn's diff would start at its own previous checkpoint and claim the
-restore's reversal as the turn's work.
+restore's reversal as the turn's work. The same ref tells the engine, ahead of
+the next message, which files moved since its last turn. Its own memory of
+the undone turns stays, and [`docs/deferred.md`](../deferred.md) carries
+rewinding it.
 
 **It runs between turns only.** The worktree turn lock is tried, not waited
 for, and a held lock is a refusal (`turn_running`). A session fenced for an
 engine that may still be alive in the checkout refuses it too (record 55).
-A sandbox workspace refuses it (`workspace_remote`).
+A sandbox workspace refuses it (`workspace_remote`). A commit follows the
+same rule now: it refuses at once while a turn runs or a message waits in the
+queue, and it carries only the tree the person reviewed, so it never commits
+a turn's work under the person's message.
+
+**Reverts are exact.** Diffs pair a renamed file with its old path, so a
+rename never reads as an added file. A hunk is undone at exactly the lines it
+names on the file the diff shows, then carried onto the current file with a
+three-way merge; an overlapping later edit refuses the revert instead of
+landing somewhere that reads the same. A discard never removes a folder
+nobody named.
 
 **It is journaled.** `CheckpointRestored` lands in the transcript of the
-session that owns the target, naming the restore, its target, and what it
-changed. A restore belongs to no turn and writes no turn row.
+session that owns the target, naming the restore, its target, what it
+changes, and how far it got. A restore belongs to no turn and writes no turn
+row.
 
 **It is reachable headless.** `POST /code/workspaces/{id}/checkpoints/restore`
 serves the desktop and `tidebreak code restore` alike (record 7). The restore
@@ -221,13 +251,21 @@ Still excluded: rewinding the engine's own conversation with the files, which
 [`docs/deferred.md`](../deferred.md) carries, and restoring a sandbox
 workspace from the desktop.
 
-Validation: `crates/tidebreak-server/src/code/checkpoint/restore.rs` and
-`revert.rs` run against throwaway repositories: a restore brings back
-tracked and untracked files, removes added ones, leaves ignored files, `HEAD`,
-and the index byte-identical, rewrites no unchanged file, refuses a worktree
-that moved after its preview, and is undone by restoring its saved state.
+Validation: `crates/tidebreak-server/src/code/checkpoint/restore.rs`,
+`revert.rs`, and `worktree.rs` run against throwaway repositories. A restore
+brings back tracked and untracked files, removes added ones, leaves ignored
+files, `HEAD`, and the index byte-identical, rewrites no unchanged file, and
+is undone by restoring its saved state. It refuses a worktree that moved
+after its preview, an ignored file or folder in its way, and a file that
+appears between its check and its checkout, and a checkout that stops
+partway is rolled back. A hunk of a renamed file reverts under the new name,
+a stale hunk refuses rather than land on an identical block, and a discard
+refuses a folder in its way and restores a renamed file's committed name.
 `a_turn_after_a_restore_diffs_from_the_restored_state` in `checkpoint.rs`
 pins the chain. `tests/code_undo.rs` in `tidebreak-server-api` drives the
-routes end to end, including the refusal while a turn is parked. A plausible
-wrong implementation restores tracked files only and passes every
-tracked-edit case; the untracked file that must come back fails it.
+routes end to end: the journal rows, the note to the engine, the refusals
+while a turn is parked, commit included, and a commit over unreviewed
+changes. A plausible wrong implementation restores tracked files only and
+passes every tracked-edit case; the untracked file that must come back fails
+it. Another checks out with `--reset` and passes every case without ignored
+files; the ignored `.env` that must survive fails it.

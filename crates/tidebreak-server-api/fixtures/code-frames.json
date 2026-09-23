@@ -468,13 +468,25 @@
         "insertions": 14,
         "truncated": false
       },
-      "truncated": false
+      "truncated": false,
+      "worktree_tree": "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
     }
   },
   {
     "kind": "checkpoint_restore_preview",
     "name": "checkpoint restore preview",
     "value": {
+      "affected_turns": [
+        {
+          "harness_kind": "codex",
+          "ordinal": 4,
+          "session_id": "00000000-0000-0000-0000-000000000032",
+          "turn_id": "00000000-0000-0000-0000-000000000033"
+        }
+      ],
+      "blocked": [
+        ".env"
+      ],
       "current_tree": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
       "files": [
         {
@@ -1335,6 +1347,7 @@
           "truncated": false
         },
         "restore_id": "00000000-0000-0000-0000-000000000030",
+        "status": "completed",
         "target": {
           "kind": "before_turn",
           "turn_id": "00000000-0000-0000-0000-000000000004"

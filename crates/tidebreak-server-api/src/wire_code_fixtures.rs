@@ -14,11 +14,11 @@ use crate::wire::{
     ApprovalSnapshot, CodeActionSnapshot, CodeCheckpointRestorePreview,
     CodeCheckpointRestoreResult, CodeCommitSnapshot, CodeFileChange, CodeProjectConfigEffect,
     CodeProjectConfigEffectKind, CodeProjectConfigFile, CodePushSnapshot, CodeRepoSnapshot,
-    CodeRepoTrust, CodeRepoTrustSnapshot, CodeWatchSnapshot, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspaceGitState, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode,
-    HarnessDoctorEntry, HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, SequencedEventFrame,
-    SessionDigest, SessionExternalOrigin, SessionSnapshot, TurnRewriteState, TurnSnapshot,
-    UpdateNotice,
+    CodeRepoTrust, CodeRepoTrustSnapshot, CodeRestoreAffectedTurn, CodeWatchSnapshot,
+    CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspaceGitState, CodeWorkspacePrSnapshot,
+    CodeWorkspaceSnapshot, HarnessAuthMode, HarnessDoctorEntry, HarnessDoctorReport, QueuedTurn,
+    QueuedTurnsSnapshot, SequencedEventFrame, SessionDigest, SessionExternalOrigin,
+    SessionSnapshot, TurnRewriteState, TurnSnapshot, UpdateNotice,
 };
 use crate::wire_types::generate;
 use tidebreak_core::{
@@ -581,6 +581,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                 revision: None,
                 revision_ref: None,
                 revision_saved_at: None,
+                worktree_tree: None,
             },
         ),
         fixture(
@@ -611,6 +612,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                 revision: None,
                 revision_ref: None,
                 revision_saved_at: None,
+                worktree_tree: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned()),
             },
         ),
         fixture(
@@ -640,6 +642,13 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                 truncated: false,
                 stat: diffstat(),
                 current_tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned(),
+                blocked: vec![".env".to_owned()],
+                affected_turns: vec![CodeRestoreAffectedTurn {
+                    session_id: SessionId(id(0x32)),
+                    turn_id: TurnId(id(0x33)),
+                    ordinal: 4,
+                    harness_kind: HarnessKind::Codex,
+                }],
             },
         ),
         fixture(
@@ -1115,6 +1124,8 @@ fn event_frames() -> Vec<Fixture> {
                     target: CheckpointRestoreTarget::BeforeTurn { turn_id: turn_id() },
                     diffstat: diffstat(),
                     actor: None,
+                    status: tidebreak_core::CheckpointRestoreStatus::Completed,
+                    error: None,
                 },
             ),
         ),

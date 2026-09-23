@@ -206,7 +206,7 @@ pub use client_tools::{
 pub use code::{
     bound_subagents, classify_trigger_condition, merge_pull_request_read, ActsAs, Approval,
     ApprovalDecisionKind, ApprovalKind, ApprovalState, BoundedError, CapLevel, CheckpointHint,
-    CheckpointRestoreTarget, CodeBindingId, CodeChannelRepositoryConfirm,
+    CheckpointRestoreStatus, CheckpointRestoreTarget, CodeBindingId, CodeChannelRepositoryConfirm,
     CodeChannelRepositoryState, CodeConnectHandshake, CodeConnectState, CodeExternalBinding,
     CodeExternalGrant, CodeGrantId, CodeGrantKind, CodeGrantProfile, CodeHandshakeId,
     CodeIncarnationId, CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact,

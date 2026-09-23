@@ -267,6 +267,10 @@ fn map_gh_error(error: gh::GhError) -> DeliveryError {
             "commit_rejected",
             crate::code::runtime::commit_rejected_message(&output),
         ),
+        gh::GhError::CommitTimedOut(limit) => DeliveryError::conflict_kind(
+            "commit_timed_out",
+            crate::code::runtime::commit_timed_out_message(limit),
+        ),
         gh::GhError::User(message) => {
             if let Some(message) = message.strip_prefix(gh::GH_UNAVAILABLE_PREFIX) {
                 DeliveryError::conflict_kind("gh_unavailable", message)

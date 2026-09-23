@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
 
 import {
   ChevronRight,
@@ -35,8 +35,11 @@ import { FILE_KIND, type RevertRequest } from "./worktreeUndo";
  */
 export type ChangeRowActions = {
   onRevertFile: (request: RevertRequest) => unknown;
-  /** Offered only on files with uncommitted changes. */
-  onDiscard?: (file: CodeFileChange) => unknown;
+  /**
+   * Offered only on files with uncommitted changes. `expectedTree` is the
+   * list's `worktree_tree`, so the server refuses a file that changed since.
+   */
+  onDiscard?: (file: CodeFileChange, expectedTree?: string) => unknown;
   /**
    * Why nothing can change the worktree right now, such as a running turn.
    * The actions stay in the menu, turned off, with this sentence under them.
@@ -152,7 +155,9 @@ export function DiffOverviewContent({
     () => buildChangeTree(payload?.files ?? []),
     [payload?.files],
   );
-  const rowActions = actions ? { ...actions, turnId } : undefined;
+  const rowActions = actions
+    ? { ...actions, turnId, worktreeTree: payload?.worktree_tree }
+    : undefined;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -221,7 +226,11 @@ export function DiffOverviewContent({
   );
 }
 
-type RowActions = ChangeRowActions & { turnId?: string };
+type RowActions = ChangeRowActions & {
+  turnId?: string;
+  /** The snapshot the list was read from, for a discard to check against. */
+  worktreeTree?: string;
+};
 
 type ChangeTreeNode = ChangeDirectoryNode | ChangeFileNode;
 
@@ -466,6 +475,7 @@ function ChangeFileMenu({
   actions: RowActions;
 }) {
   const unavailable = actions.unavailableReason !== undefined;
+  const reasonId = useId();
   const request: RevertRequest = {
     path: file.path,
     turnId: actions.turnId,
@@ -473,6 +483,15 @@ function ChangeFileMenu({
     previousPath: file.previous_path,
   };
   const discard = actions.onDiscard && file.uncommitted && !actions.turnId;
+  // A turned-off item stays focusable, so a keyboard or screen reader user
+  // reaches it and hears why it is off.
+  const unavailableItem = unavailable
+    ? {
+        "aria-disabled": true,
+        "aria-describedby": reasonId,
+        className: "opacity-60 cursor-not-allowed",
+      }
+    : {};
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -494,8 +513,14 @@ function ChangeFileMenu({
         className="w-max max-w-80"
       >
         <DropdownMenuItem
-          disabled={unavailable}
-          onSelect={() => void actions.onRevertFile(request)}
+          {...unavailableItem}
+          onSelect={(event) => {
+            if (unavailable) {
+              event.preventDefault();
+              return;
+            }
+            void actions.onRevertFile(request);
+          }}
         >
           <Undo2 />
           {actions.turnId
@@ -504,15 +529,24 @@ function ChangeFileMenu({
         </DropdownMenuItem>
         {discard && (
           <DropdownMenuItem
-            disabled={unavailable}
-            onSelect={() => void actions.onDiscard?.(file)}
+            {...unavailableItem}
+            onSelect={(event) => {
+              if (unavailable) {
+                event.preventDefault();
+                return;
+              }
+              void actions.onDiscard?.(file, actions.worktreeTree);
+            }}
           >
             <Trash2 />
             Discard uncommitted changes
           </DropdownMenuItem>
         )}
         {actions.unavailableReason && (
-          <p className="text-muted-foreground px-2 pb-1.5 pl-10 text-xs">
+          <p
+            id={reasonId}
+            className="text-muted-foreground px-2 pb-1.5 pl-10 text-xs"
+          >
             {actions.unavailableReason}
           </p>
         )}

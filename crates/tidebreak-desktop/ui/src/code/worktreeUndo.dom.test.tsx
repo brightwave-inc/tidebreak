@@ -9,7 +9,12 @@ import { CommitBox, commitFailure } from "./CommitBox";
 import { DiffOverviewContent } from "./DiffOverview";
 import { DiffPanel } from "./DiffPanel";
 import { CheckpointRestoreRow, TurnReviewCard } from "./TurnReviewCard";
-import { restoreConfirmation } from "./worktreeUndo";
+import {
+  restoreConfirmation,
+  revertFileConfirmation,
+  useWorktreeUndo,
+  type WorktreeUndoClient,
+} from "./worktreeUndo";
 
 afterEach(cleanup);
 
@@ -61,7 +66,7 @@ describe("reverting from the diff", () => {
     );
 
     expect(onRevertHunk).toHaveBeenCalledWith(
-      { path: "src/lib.rs", turnId: undefined },
+      { path: "src/lib.rs", turnId: undefined, kind: "modified" },
       expect.objectContaining({
         index: 1,
         newStart: 20,
@@ -113,6 +118,7 @@ describe("reverting from the diff", () => {
     expect(onRevertHunk.mock.calls[0]?.[0]).toEqual({
       path: "src/lib.rs",
       turnId: "turn-2",
+      kind: "modified",
     });
     expect(await screen.findByText("Reverted")).toBeVisible();
     expect(
@@ -161,6 +167,7 @@ describe("the changed-file actions", () => {
     ],
     truncated: false,
     stat: { files: 2, insertions: 4, deletions: 1, truncated: false },
+    worktree_tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
   };
 
   it("offers discard only where there is something uncommitted to lose", async () => {
@@ -202,7 +209,7 @@ describe("the changed-file actions", () => {
         name: "Discard uncommitted changes",
       }),
     );
-    expect(onDiscard).toHaveBeenCalledWith(files.files[0]);
+    expect(onDiscard).toHaveBeenCalledWith(files.files[0], files.worktree_tree);
   });
 
   it("puts the commit box above the workspace's list, never a turn's", () => {
@@ -265,7 +272,27 @@ describe("restoring from the transcript", () => {
       name: "Restore to before this turn",
     });
     expect(item).toHaveAttribute("aria-disabled", "true");
+    expect(item).toHaveAccessibleDescription("Wait for the turn to finish.");
     expect(screen.getByText("Wait for the turn to finish.")).toBeVisible();
+  });
+
+  it("lets a keyboard reach the turned-off restore and does nothing on it", async () => {
+    const onRestoreBeforeTurn = vi.fn();
+    render(
+      <TurnReviewCard
+        turn={turn}
+        onRestoreBeforeTurn={onRestoreBeforeTurn}
+        undoUnavailableReason="Wait for the turn to finish."
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Turn actions" }));
+    const item = await screen.findByRole("menuitem", {
+      name: "Restore to before this turn",
+    });
+    await userEvent.keyboard("{ArrowDown}");
+    expect(item).toHaveFocus();
+    await userEvent.keyboard("{Enter}");
+    expect(onRestoreBeforeTurn).not.toHaveBeenCalled();
   });
 
   it("offers to undo a restore from its row", async () => {
@@ -284,6 +311,8 @@ describe("restoring from the transcript", () => {
             deletions: 40,
             truncated: false,
           },
+          status: "completed",
+          error: null,
         }}
         onUndo={onUndo}
       />,
@@ -308,6 +337,8 @@ describe("restoring from the transcript", () => {
       truncated: false,
       stat: { files: 8, insertions: 8, deletions: 8, truncated: false },
       current_tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      blocked: [],
+      affected_turns: [],
     };
     const options = restoreConfirmation(preview, { turnOrdinal: 2 });
     expect(options.title).toBe("Restore to before turn 2?");
@@ -373,5 +404,212 @@ describe("the commit box", () => {
       title:
         "Git refused the commit. A hook may have stopped it without saying why.",
     });
+  });
+});
+
+/** Runs one undo flow from a button, with the dialog the page renders. */
+function UndoHarness({
+  client,
+  run,
+}: {
+  client: WorktreeUndoClient;
+  run: (undo: ReturnType<typeof useWorktreeUndo>) => unknown;
+}) {
+  const undo = useWorktreeUndo({ client, workspaceId: "ws-1" });
+  return (
+    <>
+      <button type="button" onClick={() => void run(undo)}>
+        Go
+      </button>
+      {undo.dialog}
+    </>
+  );
+}
+
+function undoClient(overrides: Partial<WorktreeUndoClient> = {}) {
+  return {
+    previewCodeCheckpointRestore: vi.fn(),
+    restoreCodeCheckpoint: vi.fn(),
+    revertCodeWorkspaceChange: vi.fn(),
+    discardCodeWorkspaceChanges: vi.fn().mockResolvedValue({ paths: [] }),
+    ...overrides,
+  } as unknown as WorktreeUndoClient & {
+    discardCodeWorkspaceChanges: ReturnType<typeof vi.fn>;
+    restoreCodeCheckpoint: ReturnType<typeof vi.fn>;
+  };
+}
+
+const PREVIEW: CodeCheckpointRestorePreview = {
+  target: { kind: "before_turn", turn_id: "turn-2" },
+  session_id: "session-1",
+  files: [
+    { path: "src/lib.rs", kind: "modified", insertions: 1, deletions: 1 },
+  ],
+  truncated: false,
+  stat: { files: 1, insertions: 1, deletions: 1, truncated: false },
+  current_tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+  blocked: [],
+  affected_turns: [],
+};
+
+describe("the undo flows", () => {
+  it("discards a renamed file by the path the list shows", async () => {
+    // The list names the file by its new path. Its old path may be a
+    // committed rename, which has nothing uncommitted to discard.
+    const client = undoClient();
+    render(
+      <UndoHarness
+        client={client}
+        run={(undo) =>
+          undo.discard(
+            {
+              path: "notes.md",
+              kind: "renamed",
+              previous_path: "notes.txt",
+            },
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+          )
+        }
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Go" }));
+    await userEvent.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", {
+        name: "Discard",
+      }),
+    );
+    expect(client.discardCodeWorkspaceChanges).toHaveBeenCalledWith(
+      "ws-1",
+      ["notes.md"],
+      "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    );
+  });
+
+  it("names the files in the way and never restores over them", async () => {
+    const client = undoClient({
+      previewCodeCheckpointRestore: vi
+        .fn()
+        .mockResolvedValue({ ...PREVIEW, blocked: [".env"] }),
+    });
+    render(
+      <UndoHarness
+        client={client}
+        run={(undo) => undo.restore({ kind: "before_turn", turn_id: "turn-2" })}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Go" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(".env")).toBeVisible();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Close" }),
+    );
+    expect(client.restoreCodeCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it("names other agents' turns and says the agent still remembers", () => {
+    const options = restoreConfirmation(
+      {
+        ...PREVIEW,
+        affected_turns: [
+          {
+            session_id: "session-2",
+            turn_id: "turn-9",
+            ordinal: 4,
+            harness_kind: "codex",
+          },
+        ],
+      },
+      { turnOrdinal: 2 },
+    );
+    render(<p>{options.description}</p>);
+    expect(
+      screen.getByText(/It also undoes a turn by other agents/),
+    ).toBeVisible();
+    expect(screen.getByText("Codex CLI, turn 4")).toBeVisible();
+    expect(
+      screen.getByText(/The agent still remembers the turns this undoes/),
+    ).toBeVisible();
+  });
+});
+
+describe("a restore row", () => {
+  const row = {
+    kind: "restore" as const,
+    id: "restore:r-1",
+    restoreId: "r-1",
+    target: { kind: "before_turn" as const, turn_id: "turn-2" },
+    turnOrdinal: 2,
+    diffstat: { files: 3, insertions: 4, deletions: 40, truncated: false },
+    error: null,
+  };
+
+  it("offers no undo for a restore that changed nothing", () => {
+    render(
+      <CheckpointRestoreRow
+        restore={{ ...row, status: "failed", error: "git refused" }}
+        onUndo={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText("Could not restore. Nothing changed."),
+    ).toBeVisible();
+    expect(screen.getByText("git refused")).toBeVisible();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("keeps the way back for a restore that stopped partway", async () => {
+    const onUndo = vi.fn();
+    render(
+      <CheckpointRestoreRow
+        restore={{ ...row, status: "partial", error: "disk full" }}
+        onUndo={onUndo}
+      />,
+    );
+    expect(screen.getByText("The restore stopped partway")).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Put back the files the restore replaced",
+      }),
+    );
+    expect(onUndo).toHaveBeenCalledWith("r-1");
+  });
+});
+
+describe("reverting a whole file from the diff", () => {
+  it("says an added file is deleted, because the diff says it is new", async () => {
+    const onRevertFile = vi.fn().mockResolvedValue(true);
+    const added = [
+      "diff --git a/src/new.rs b/src/new.rs",
+      "new file mode 100644",
+      "index 0000000..2222222",
+      "--- /dev/null",
+      "+++ b/src/new.rs",
+      "@@ -0,0 +1 @@",
+      "+fn new() {}",
+      "",
+    ].join("\n");
+    render(
+      <DiffPanel
+        client={diffClient(added)}
+        workspaceId="ws-1"
+        file="src/new.rs"
+        revert={{ onRevertFile, onRevertHunk: vi.fn() }}
+      />,
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Revert src/new.rs" }),
+    );
+    expect(onRevertFile).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "src/new.rs", kind: "added" }),
+    );
+    render(
+      <p>
+        {
+          revertFileConfirmation({ path: "src/new.rs", kind: "added" })
+            .description
+        }
+      </p>,
+    );
+    expect(screen.getByText(/so reverting it deletes it/)).toBeVisible();
   });
 });

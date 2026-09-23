@@ -1092,6 +1092,11 @@ impl CodeRuntime {
         .map_err(map_worktree)
     }
 
+    /// The changed files, in the workspace against its base or in one turn.
+    ///
+    /// The last element is the snapshot tree the workspace list was read
+    /// from. A commit or a discard that names it refuses to run over a
+    /// worktree that changed after the person reviewed the list.
     pub async fn workspace_files(
         &self,
         owner: &OwnerId,
@@ -1104,6 +1109,7 @@ impl CodeRuntime {
             Diffstat,
             Option<TurnId>,
             Option<crate::code::sandbox_checkout::WorkspaceContentSource>,
+            Option<String>,
         ),
         ServerError,
     > {
@@ -1115,7 +1121,7 @@ impl CodeRuntime {
             let checkout = self.remote_checkout(owner, &workspace).await?;
             let (files, truncated, stat) =
                 crate::code::sandbox_checkout::list_checkout_files(&checkout).await?;
-            return Ok((files, truncated, stat, None, Some(checkout.source)));
+            return Ok((files, truncated, stat, None, Some(checkout.source), None));
         }
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
@@ -1144,7 +1150,14 @@ impl CodeRuntime {
                 ),
             }
         }
-        Ok((listed.files, listed.truncated, listed.stat, turn, None))
+        Ok((
+            listed.files,
+            listed.truncated,
+            listed.stat,
+            turn,
+            None,
+            turn.is_none().then_some(to),
+        ))
     }
 
     pub async fn workspace_blob(

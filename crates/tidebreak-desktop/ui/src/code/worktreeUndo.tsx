@@ -8,9 +8,11 @@ import type {
   CodeFileChange,
   FileChangeKind,
 } from "../api/types";
+import type { CodeRestoreAffectedTurn } from "../generated/wire";
 import { type ConfirmOptions, useConfirm } from "@/components/ConfirmDialog";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { noteWorkspaceFilesChanged } from "./CodeUpdatesStore";
+import { HARNESS_LABELS } from "./labels";
 import { STATUS_TEXT } from "./statusTone";
 import type { DiffHunk } from "./unifiedDiff";
 
@@ -69,6 +71,7 @@ export function fileName(path: string): string {
  *
  * `preview.files` is everything that changed since the target state: the
  * turn's own work, later turns, other agents, and edits made by hand.
+ * `preview.affected_turns` names the other agents' turns it undoes.
  */
 export function restoreConfirmation(
   preview: CodeCheckpointRestorePreview,
@@ -94,7 +97,12 @@ export function restoreConfirmation(
           files={preview.files}
           total={Math.max(preview.stat.files, preview.files.length)}
         />
+        {preview.affected_turns.length > 0 && (
+          <AffectedTurnList turns={preview.affected_turns} undo={undo} />
+        )}
         <span className="mt-3 block">
+          The agent still remembers the turns this undoes. Tidebreak tells it
+          which files changed when you send your next message.{" "}
           {undo
             ? "The restore you undo stays in the conversation."
             : "You can undo the restore from the conversation."}
@@ -106,17 +114,64 @@ export function restoreConfirmation(
   };
 }
 
+/**
+ * Why a restore cannot run yet: files no snapshot holds, most often ignored
+ * ones, stand where it would write. Confirming checks again.
+ */
+export function restoreBlockedNotice(
+  preview: Pick<CodeCheckpointRestorePreview, "blocked">,
+): ConfirmOptions {
+  return {
+    title: "Move these files first",
+    description: (
+      <>
+        The restore would overwrite or remove these files, and no undo could
+        bring them back. Your <FilePath path=".gitignore" /> keeps most such
+        files out of every checkpoint.
+        <PathList paths={preview.blocked} />
+        <span className="mt-3 block">
+          Move them out of the workspace, then check again.
+        </span>
+      </>
+    ),
+    confirmLabel: "Check again",
+    cancelLabel: "Close",
+  };
+}
+
 /** The question before a whole-file revert. */
 export function revertFileConfirmation(request: RevertRequest): ConfirmOptions {
   const name = fileName(request.path);
   if (request.turnId) {
+    const consequence =
+      request.kind === "added" ? (
+        <>
+          <FilePath path={request.path} /> is new in this turn, so reverting it
+          deletes it. If it changed after the turn, Tidebreak leaves it alone.
+        </>
+      ) : request.kind === "deleted" ? (
+        <>
+          <FilePath path={request.path} /> comes back as it was before this
+          turn.
+        </>
+      ) : request.kind === "renamed" && request.previousPath ? (
+        <>
+          <FilePath path={request.path} /> goes back to its old name,{" "}
+          <FilePath path={request.previousPath} />, without this turn&apos;s
+          changes. Changes made after the turn stay.
+        </>
+      ) : (
+        <>
+          Tidebreak undoes what this turn changed in{" "}
+          <FilePath path={request.path} />. Changes made after the turn stay.
+        </>
+      );
     return {
       title: `Revert this turn's changes to ${name}?`,
       description: (
         <>
-          Tidebreak undoes what this turn changed in{" "}
-          <FilePath path={request.path} />. Changes made after the turn stay,
-          unless they touch the same lines. This cannot be undone.
+          {consequence} If a later change touches the same lines, nothing is
+          reverted. This cannot be undone.
         </>
       ),
       confirmLabel: "Revert file",
@@ -128,6 +183,10 @@ export function revertFileConfirmation(request: RevertRequest): ConfirmOptions {
       <>
         <FilePath path={request.path} /> is new in this workspace, so reverting
         it deletes it.
+      </>
+    ) : request.kind === "deleted" ? (
+      <>
+        <FilePath path={request.path} /> comes back as it is on the base branch.
       </>
     ) : request.kind === "renamed" && request.previousPath ? (
       <>
@@ -159,6 +218,31 @@ export function revertHunkConfirmation(
   request: RevertRequest,
   hunk: DiffHunk,
 ): ConfirmOptions {
+  const since = request.turnId ? "this turn" : "the base branch";
+  if (request.kind === "added" || request.kind === "deleted") {
+    return {
+      title: "Revert this change?",
+      description: (
+        <>
+          This change is the whole file.{" "}
+          {request.kind === "added" ? (
+            <>
+              <FilePath path={request.path} /> is new since {since}, so
+              reverting it deletes the file.
+            </>
+          ) : (
+            <>
+              <FilePath path={request.path} /> comes back as it was before{" "}
+              {since}.
+            </>
+          )}{" "}
+          This cannot be undone.
+        </>
+      ),
+      confirmLabel: request.kind === "added" ? "Delete file" : "Revert change",
+      destructive: true,
+    };
+  }
   const where =
     hunk.newCount > 0
       ? hunk.newCount === 1
@@ -172,8 +256,8 @@ export function revertHunkConfirmation(
         {where} of <FilePath path={request.path} />{" "}
         {hunk.newCount === 0 ? "come back" : "go back"} to how{" "}
         {hunk.newCount === 1 ? "it was" : "they were"}{" "}
-        {request.turnId ? "before this turn" : "on the base branch"}. This
-        cannot be undone.
+        {request.turnId ? "before this turn" : "on the base branch"}. Nothing
+        else in the file changes. This cannot be undone.
       </>
     ),
     confirmLabel: "Revert change",
@@ -196,9 +280,15 @@ export function discardConfirmation(
         </>
       ) : (
         <>
-          <FilePath path={file.path} /> goes back to its last commit.
-          Uncommitted changes to it are lost, including edits you made by hand.
-          This cannot be undone.
+          <FilePath path={file.path} /> goes back to its last commit
+          {file.kind === "renamed" && file.previous_path ? (
+            <>
+              , under <FilePath path={file.previous_path} /> if the rename is
+              not committed yet
+            </>
+          ) : null}
+          . Uncommitted changes to it are lost, including edits you made by
+          hand. This cannot be undone.
         </>
       ),
     confirmLabel: "Discard",
@@ -234,6 +324,7 @@ export function useWorktreeUndo({
   revertHunk: (request: RevertRequest, hunk: DiffHunk) => Promise<boolean>;
   discard: (
     file: Pick<CodeFileChange, "path" | "kind" | "previous_path">,
+    expectedTree?: string,
   ) => Promise<boolean>;
   dialog: ReactElement;
 } {
@@ -261,6 +352,12 @@ export function useWorktreeUndo({
       }
       if (preview.files.length === 0) {
         toast.message("The workspace already matches that state.");
+        return;
+      }
+      if (preview.blocked.length > 0) {
+        if (await confirm(restoreBlockedNotice(preview))) {
+          await restore(target, options);
+        }
         return;
       }
       if (!(await confirm(restoreConfirmation(preview, options)))) return;
@@ -294,6 +391,10 @@ export function useWorktreeUndo({
             },
           );
           return;
+        }
+        if (error instanceof HttpError && error.kind === "restore_failed") {
+          // The conversation shows how it ended, with its Undo.
+          noteWorkspaceFilesChanged(workspaceId);
         }
         toast.error(friendlyErrorMessage(error, "Could not restore"));
       }
@@ -343,13 +444,18 @@ export function useWorktreeUndo({
   const discard = useCallback(
     async (
       file: Pick<CodeFileChange, "path" | "kind" | "previous_path">,
+      expectedTree?: string,
     ): Promise<boolean> => {
       if (!(await confirm(discardConfirmation(file)))) return false;
-      const paths = file.previous_path
-        ? [file.path, file.previous_path]
-        : [file.path];
       try {
-        await client.discardCodeWorkspaceChanges(workspaceId, paths);
+        // The file as the list names it. The server puts a renamed file
+        // back under its committed name, whether or not the rename itself
+        // was committed.
+        await client.discardCodeWorkspaceChanges(
+          workspaceId,
+          [file.path],
+          expectedTree,
+        );
       } catch (error) {
         toast.error(undoFailureMessage(error, "Could not discard the changes"));
         return false;
@@ -402,6 +508,60 @@ function ChangedFileList({
           </span>
         );
       })}
+      {more > 0 && (
+        <span className="block text-xs">
+          and {more} more {more === 1 ? "file" : "files"}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Other agents' turns a restore undoes too, named by engine and number. */
+function AffectedTurnList({
+  turns,
+  undo,
+}: {
+  turns: readonly CodeRestoreAffectedTurn[];
+  undo: boolean;
+}) {
+  const shown = turns.slice(0, LISTED_FILES);
+  const more = turns.length - shown.length;
+  return (
+    <span className="mt-3 block text-left">
+      {undo
+        ? `It also undoes ${turns.length === 1 ? "the turn" : `the ${turns.length} turns`} made since the restore:`
+        : `It also undoes ${turns.length === 1 ? "a turn" : `${turns.length} turns`} by other agents in this workspace:`}
+      <span className="mt-1 block space-y-1">
+        {shown.map((turn) => (
+          <span key={turn.turn_id} className="text-foreground block text-xs">
+            {HARNESS_LABELS[turn.harness_kind]}, turn {turn.ordinal}
+          </span>
+        ))}
+        {more > 0 && (
+          <span className="block text-xs">
+            and {more} more {more === 1 ? "turn" : "turns"}
+          </span>
+        )}
+      </span>
+    </span>
+  );
+}
+
+/** A bounded list of paths, one per line. */
+function PathList({ paths }: { paths: readonly string[] }) {
+  const shown = paths.slice(0, LISTED_FILES);
+  const more = paths.length - shown.length;
+  return (
+    <span className="mt-3 block max-h-48 space-y-1 overflow-y-auto text-left">
+      {shown.map((path) => (
+        <span
+          key={path}
+          className="text-foreground block break-all font-mono text-xs"
+        >
+          {path}
+        </span>
+      ))}
       {more > 0 && (
         <span className="block text-xs">
           and {more} more {more === 1 ? "file" : "files"}

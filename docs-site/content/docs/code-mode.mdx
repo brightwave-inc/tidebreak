@@ -94,33 +94,46 @@ what an agent did, open the turn's menu on its review card and choose
 
 - A restore puts every file back to how it was before the turn started,
   including new files the turn created and files it deleted. Files your
-  `.gitignore` covers stay as they are.
+  `.gitignore` covers stay as they are. If one stands where the restore would
+  write, Tidebreak names it and waits for you to move it, because no
+  checkpoint holds it and no undo could bring it back.
 - Everything changed since then is lost: that turn, later turns, other agents
   in the workspace, and edits you made by hand. The confirmation lists those
-  files before anything changes.
+  files, and names the other agents' turns, before anything changes.
 - Tidebreak saves the state it replaces. The conversation shows the restore
-  with an **Undo** that puts that state back.
+  with an **Undo** that puts that state back. If a restore stops partway,
+  Tidebreak puts back the files it had changed; when it cannot, the **Undo**
+  on the restore puts back everything the restore replaced.
 - Your commits and your branch stay as they are. If a turn committed, the
   restore shows up as uncommitted changes that undo the commit.
+- The agent still remembers the turns a restore undid. When you send your next
+  message, Tidebreak tells it which files changed.
 
 To undo less, use the diff. **Revert** in a file's header puts that file back,
-and **Revert** beside a hunk puts back just those lines. In the workspace diff
-a revert goes back to the base branch. In a turn's diff it undoes what that
-turn changed and keeps later edits. If a later edit changed the same lines,
-Tidebreak refuses the revert rather than overwrite it.
+and **Revert** beside a hunk puts back just those lines, at exactly the place
+the diff shows. In the workspace diff a revert goes back to the base branch.
+In a turn's diff it undoes what that turn changed and keeps later edits. If a
+later edit changed the same lines, Tidebreak refuses the revert rather than
+overwrite it. A renamed file's diff shows the rename, and a hunk revert
+changes only those lines under the new name.
 
 **Source control** holds the commit box. Write a message and choose
 **Commit**, or press **⌘Enter** (**Ctrl+Enter** on Windows and Linux). The
-commit carries every change in the worktree; leave the message empty to use
-the suggested one. If Git refuses the commit, for example because a hook
-failed, the box shows what the hook printed. To throw away a file's
-uncommitted changes, open its menu in the list and choose **Discard
-uncommitted changes**. Discard puts the file back to its last commit and
-cannot be undone.
+commit carries exactly the changes in the list you reviewed; if the files
+changed since, Tidebreak refuses and reads the list again. Leave the message
+empty to use the suggested one. If Git refuses the commit, for example because
+a hook failed, the box shows what the hook printed. A hook or a signing prompt
+gets ten minutes before Tidebreak stops the commit and says so. To throw away
+a file's uncommitted changes, open its menu in the list and choose **Discard
+uncommitted changes**. Discard puts the file back to its last commit, under its
+old name if you renamed it and have not committed the rename. It refuses when
+a folder you did not pick stands where the file goes, and it cannot be undone.
 
-Restore, revert, discard, and commit wait for a running turn to finish, so an
-agent never has its files changed under it. A sandbox workspace keeps its
-files in the sandbox, so you ask the agent there instead.
+Restore, revert, discard, and commit refuse while a turn runs, and commit also
+refuses while a message waits in the queue, so an agent never has its files
+changed under it and a commit never carries a turn's work you did not review.
+A sandbox workspace keeps its files in the sandbox, so you ask the agent there
+instead.
 
 ## Editing files
 
@@ -191,7 +204,8 @@ out of scope for now:
 - The file viewer edits one existing text file at a time. It does not create,
   rename, or delete files, and it does not replace the editor you write in.
 - A restore puts files back, not the conversation. The agent still remembers
-  the turns you undid, so tell it what changed when you continue.
+  the turns you undid. Tidebreak tells it which files changed, but it does not
+  forget what it did in them.
 
 Harnesses run on the machine that owns the session. On a laptop that is your
 computer. On a hosted machine (signed in through Model Gateway) the engine

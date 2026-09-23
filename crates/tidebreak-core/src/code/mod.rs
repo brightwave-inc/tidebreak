@@ -18,11 +18,11 @@ pub use remote_task::RemoteWorkspaceTask;
 
 pub use caps::{CapLevel, HarnessCaps, HarnessCommand, HarnessTier};
 pub use event::{
-    ApprovalDecisionKind, BoundedError, CheckpointHint, CheckpointRestoreTarget,
-    CredentialRefusalReason, Diffstat, Event, FileChangeKind, HarnessNoticeLevel,
-    InternalApprovalRequest, SequencedEvent, SessionTreeChild, SessionTreeChildStatus,
-    SessionTreeWait, ToolDetail, ToolOutcome, TurnUsage, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS,
-    MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
+    ApprovalDecisionKind, BoundedError, CheckpointHint, CheckpointRestoreStatus,
+    CheckpointRestoreTarget, CredentialRefusalReason, Diffstat, Event, FileChangeKind,
+    HarnessNoticeLevel, InternalApprovalRequest, SequencedEvent, SessionTreeChild,
+    SessionTreeChildStatus, SessionTreeWait, ToolDetail, ToolOutcome, TurnUsage,
+    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 
 mod external_input;

@@ -222,13 +222,13 @@ purpose:
   real need to run a newer or custom binary than the pin.
 - **Rewinding the conversation with a checkpoint restore.** A restore puts a
   workspace's files back to before a turn and can itself be undone
-  ([record 32](decisions/0032-code-workspaces-worktrees-checkpoints.md#amended-2026-09-23-checkpoint-restore)),
-  but the engine keeps its own memory of the turns it undid, and the
-  transcript keeps them too. Rewinding an engine's conversation needs each
-  engine's own resume or fork semantics. A sandbox workspace keeps its files
-  in the sandbox and does not restore from the desktop. Reconsider when a
-  restore should also make the agent forget, or when the engines offer a
-  rewind of their own.
+  ([record 32](decisions/0032-code-workspaces-worktrees-checkpoints.md#amended-2026-09-23-checkpoint-restore)).
+  The engine's next turn hears which files moved, but the engine keeps its own
+  memory of the turns it undid, and the transcript keeps them too. Rewinding
+  an engine's conversation needs each engine's own resume or fork semantics.
+  A sandbox workspace keeps its files in the sandbox and does not restore from
+  the desktop. Reconsider when a restore should also make the agent forget, or
+  when the engines offer a rewind of their own.
 - **Parallel turns in one worktree.** Several agents may share a workspace
   ([record 55](decisions/0055-multiple-sessions-per-workspace.md)), but their
   turns are serialized on the checkout: two harnesses editing one tree is

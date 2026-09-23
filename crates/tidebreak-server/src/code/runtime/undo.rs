@@ -6,13 +6,31 @@
 //! to undo the worktree as they see it now. A session fenced for an engine
 //! that may still be alive in the checkout also refuses them, as it refuses
 //! turns (record 55). A sandbox workspace has no checkout here to change.
+//!
+//! The routes run each of them on a task of its own, so a client that goes
+//! away mid-request cannot stop git halfway through the worktree.
 
 use super::*;
 
 use tidebreak_core::db::code::get_turn;
-use tidebreak_core::{CheckpointRestoreTarget, CodeRestoreId, TurnStatus};
+use tidebreak_core::{
+    CheckpointRestoreStatus, CheckpointRestoreTarget, CodeRestoreId, HarnessKind, TurnStatus,
+};
 
-use crate::code::checkpoint::{self, BoundedFiles, HunkSelector, RestorePreview, RevertedChange};
+use crate::code::checkpoint::{
+    self, BoundedFiles, HunkSelector, RestoreApplyError, RestorePreview, RestoredTo, RevertedChange,
+};
+
+/// A turn a restore undoes that its confirmation would not otherwise name: a
+/// turn of another agent in the workspace, or any turn since the restore an
+/// undo reverses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffectedTurn {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub ordinal: i64,
+    pub harness_kind: HarnessKind,
+}
 
 /// What a restore would undo, read before anything moves.
 #[derive(Debug, Clone)]
@@ -21,6 +39,7 @@ pub struct CheckpointRestorePreview {
     /// The session whose transcript records the restore.
     pub session_id: SessionId,
     pub preview: RestorePreview,
+    pub affected_turns: Vec<AffectedTurn>,
 }
 
 /// A restore that landed.
@@ -38,6 +57,8 @@ pub struct CheckpointRestoreOutcome {
 struct ResolvedRestoreTarget {
     session_id: SessionId,
     commit: String,
+    /// The target turn's ordinal, for a restore to before a turn.
+    ordinal: Option<i64>,
 }
 
 /// The locks one worktree change holds until it drops.
@@ -46,6 +67,9 @@ struct WorktreeClaim {
     _write: tokio::sync::OwnedMutexGuard<()>,
     _turn: tokio::sync::OwnedMutexGuard<()>,
 }
+
+/// The longest failure reason a restore row carries.
+const MAX_RESTORE_ERROR_CHARS: usize = 600;
 
 impl CodeRuntime {
     /// Read what restoring `target` would undo.
@@ -66,10 +90,14 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_checkpoint)?;
+        let affected_turns = self
+            .affected_turns(owner, &workspace, target, &resolved)
+            .await?;
         Ok(CheckpointRestorePreview {
             target,
             session_id: resolved.session_id,
             preview,
+            affected_turns,
         })
     }
 
@@ -78,7 +106,9 @@ impl CodeRuntime {
     ///
     /// `expected_tree` is the `current_tree` the preview showed. A worktree
     /// that moved since is left alone, so the person never loses a change
-    /// the confirmation did not list.
+    /// the confirmation did not list. The restore is journaled as started
+    /// before any file moves, and again with how it ended, so its Undo is
+    /// reachable even when it stops partway.
     pub(crate) async fn restore_checkpoint(
         &self,
         owner: &OwnerId,
@@ -94,7 +124,7 @@ impl CodeRuntime {
             .await?;
         let worktree = std::path::PathBuf::from(&claim.workspace.worktree_path);
         let restore_id = CodeRestoreId::new();
-        let applied = checkpoint::restore_worktree(
+        let prepared = checkpoint::prepare_restore(
             &worktree,
             &resolved.commit,
             expected_tree,
@@ -103,6 +133,77 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_checkpoint)?;
+        let actor = (caller != owner).then(|| TurnActor::principal(caller));
+        let diffstat = prepared.files.stat.clone();
+        let row =
+            |status: CheckpointRestoreStatus, error: Option<String>| Event::CheckpointRestored {
+                restore_id,
+                target,
+                diffstat: diffstat.clone(),
+                actor: actor.clone(),
+                status,
+                error,
+            };
+        // Before any file moves, so the Undo is reachable whatever happens
+        // next, a crash included.
+        self.journal_restore(
+            owner,
+            resolved.session_id,
+            row(CheckpointRestoreStatus::Started, None),
+        )
+        .await
+        .map_err(|error| {
+            ServerError::internal(format!(
+                "the restore could not be recorded, so it did not run: {error}"
+            ))
+        })?;
+
+        let applied = match prepared.apply(&worktree).await {
+            Ok(applied) => applied,
+            Err(failure) => {
+                drop(claim);
+                let (status, reason, reply) = match failure {
+                    RestoreApplyError::Unchanged(error) => (
+                        CheckpointRestoreStatus::Failed,
+                        error.to_string(),
+                        map_checkpoint(error),
+                    ),
+                    RestoreApplyError::RolledBack(reason) => (
+                        CheckpointRestoreStatus::Failed,
+                        reason,
+                        ServerError::conflict_kind(
+                            "restore_failed",
+                            "Git could not finish the restore, so Tidebreak put back the files \
+                             it had changed. Nothing changed.",
+                        ),
+                    ),
+                    RestoreApplyError::Partial(reason) => (
+                        CheckpointRestoreStatus::Partial,
+                        reason,
+                        ServerError::conflict_kind(
+                            "restore_failed",
+                            format!(
+                                "The restore stopped partway. To put back every file it \
+                                 replaced, undo it from the conversation, or run `tidebreak \
+                                 code restore --ws {workspace_id} --undo {restore_id}`."
+                            ),
+                        ),
+                    ),
+                };
+                if let Err(error) = self
+                    .journal_restore(
+                        owner,
+                        resolved.session_id,
+                        row(status, Some(bounded_reason(&reason))),
+                    )
+                    .await
+                {
+                    tracing::warn!(%restore_id, %error, "how the restore ended was not journaled");
+                }
+                self.announce_files_changed(owner, caller, workspace_id);
+                return Err(reply);
+            }
+        };
 
         // Every session's next turn diffs from the restored state, not from
         // its own last checkpoint, so no turn is credited with the restore.
@@ -123,10 +224,17 @@ impl CodeRuntime {
                 newest,
             ));
         }
+        let restored_to = match resolved.ordinal {
+            Some(ordinal) => RestoredTo::BeforeTurn {
+                session_id: resolved.session_id,
+                ordinal,
+            },
+            None => RestoredTo::BeforeRestore,
+        };
         if let Err(error) = checkpoint::continue_chains_after_restore(
             &worktree,
             &applied,
-            &format!("restore {restore_id}"),
+            &checkpoint::chain_commit_message(restore_id, restored_to),
             &resume_refs,
         )
         .await
@@ -139,18 +247,16 @@ impl CodeRuntime {
         }
         drop(claim);
 
-        let actor = (caller != owner).then(|| TurnActor::principal(caller));
-        self.journal_restore(
-            owner,
-            resolved.session_id,
-            Event::CheckpointRestored {
-                restore_id,
-                target,
-                diffstat: applied.files.stat.clone(),
-                actor,
-            },
-        )
-        .await;
+        if let Err(error) = self
+            .journal_restore(
+                owner,
+                resolved.session_id,
+                row(CheckpointRestoreStatus::Completed, None),
+            )
+            .await
+        {
+            tracing::warn!(%restore_id, %error, "the finished restore was not journaled");
+        }
         self.announce_files_changed(owner, caller, workspace_id);
         Ok(CheckpointRestoreOutcome {
             restore_id,
@@ -187,19 +293,26 @@ impl CodeRuntime {
     }
 
     /// Put files back to the last commit, dropping their uncommitted changes.
+    ///
+    /// `expected_tree` is the `worktree_tree` of the file list the person
+    /// reviewed; a named file that changed since is left alone.
     pub(crate) async fn discard_workspace_changes(
         &self,
         owner: &OwnerId,
         caller: &OwnerId,
         workspace_id: WorkspaceId,
         paths: &[String],
+        expected_tree: Option<&str>,
     ) -> Result<RevertedChange, ServerError> {
         refuse_sandbox(&self.get_workspace(owner, workspace_id).await?)?;
         let claim = self.claim_worktree(owner, workspace_id).await?;
-        let discarded =
-            checkpoint::discard_paths(std::path::Path::new(&claim.workspace.worktree_path), paths)
-                .await
-                .map_err(map_checkpoint)?;
+        let discarded = checkpoint::discard_paths(
+            std::path::Path::new(&claim.workspace.worktree_path),
+            paths,
+            expected_tree,
+        )
+        .await
+        .map_err(map_checkpoint)?;
         drop(claim);
         self.announce_files_changed(owner, caller, workspace_id);
         Ok(discarded)
@@ -282,6 +395,7 @@ impl CodeRuntime {
                 Ok(ResolvedRestoreTarget {
                     session_id: session.id,
                     commit,
+                    ordinal: Some(turn.ordinal),
                 })
             }
             CheckpointRestoreTarget::BeforeRestore { restore_id } => {
@@ -295,19 +409,99 @@ impl CodeRuntime {
                 .ok_or_else(|| {
                     ServerError::not_found("that restore is no longer in this workspace")
                 })?;
-                Ok(ResolvedRestoreTarget { session_id, commit })
+                Ok(ResolvedRestoreTarget {
+                    session_id,
+                    commit,
+                    ordinal: None,
+                })
             }
         }
     }
 
-    /// Journal a restore where its transcript shows it. The restore already
-    /// happened, so a session that cannot take the row costs only the row.
-    async fn journal_restore(&self, owner: &OwnerId, session_id: SessionId, event: Event) {
-        let Ok(Some(session)) = get_session(&self.db, owner, session_id).await else {
-            tracing::warn!(session = %session_id, "the restore was not journaled");
-            return;
+    /// The turns a restore undoes beyond what its confirmation already says.
+    ///
+    /// A restore to before a turn obviously undoes that turn and the later
+    /// turns of the same agent. In a workspace several agents share, it also
+    /// undoes their turns that ran since, which the confirmation must name.
+    /// An undo reverses every turn that ran since its restore.
+    async fn affected_turns(
+        &self,
+        owner: &OwnerId,
+        workspace: &CodeWorkspace,
+        target: CheckpointRestoreTarget,
+        resolved: &ResolvedRestoreTarget,
+    ) -> Result<Vec<AffectedTurn>, ServerError> {
+        let sessions = list_sessions_for_workspace(&self.db, owner, workspace.id).await?;
+        // When the target state was taken: the end of the turn before the
+        // target turn, the session's start for its first turn, and for an
+        // undo, when the restore saved it.
+        let since = match resolved.ordinal {
+            Some(ordinal) => {
+                let previous = list_turns(&self.db, owner, resolved.session_id)
+                    .await?
+                    .into_iter()
+                    .find(|turn| turn.ordinal == ordinal - 1);
+                match previous {
+                    Some(turn) => turn.ended_at.unwrap_or(turn.started_at),
+                    None => sessions
+                        .iter()
+                        .find(|session| session.id == resolved.session_id)
+                        .map(|session| session.created_at)
+                        .unwrap_or_default(),
+                }
+            }
+            None => {
+                let seconds = checkpoint::commit_time(
+                    std::path::Path::new(&workspace.worktree_path),
+                    &resolved.commit,
+                )
+                .await
+                .map_err(map_checkpoint)?;
+                chrono::DateTime::from_timestamp(seconds, 0).unwrap_or_default()
+            }
         };
-        match tidebreak_core::db::code::append_event(
+        let mut affected = Vec::new();
+        for session in &sessions {
+            for turn in list_turns(&self.db, owner, session.id).await? {
+                let implied = matches!(target, CheckpointRestoreTarget::BeforeTurn { .. })
+                    && session.id == resolved.session_id;
+                let ended = matches!(
+                    turn.status,
+                    TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
+                );
+                let changed_nothing = turn.diffstat.as_ref().is_some_and(|stat| {
+                    stat.files == 0 && stat.insertions == 0 && stat.deletions == 0
+                });
+                if implied || !ended || changed_nothing || turn.started_at <= since {
+                    continue;
+                }
+                affected.push((
+                    turn.started_at,
+                    AffectedTurn {
+                        session_id: session.id,
+                        turn_id: turn.id,
+                        ordinal: turn.ordinal,
+                        harness_kind: session.harness_kind,
+                    },
+                ));
+            }
+        }
+        affected.sort_by_key(|(started_at, _)| *started_at);
+        Ok(affected.into_iter().map(|(_, turn)| turn).collect())
+    }
+
+    /// Journal a restore row where its transcript shows it.
+    async fn journal_restore(
+        &self,
+        owner: &OwnerId,
+        session_id: SessionId,
+        event: Event,
+    ) -> Result<(), String> {
+        let session = get_session(&self.db, owner, session_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "the session is gone".to_owned())?;
+        let seq = tidebreak_core::db::code::append_event(
             &self.db,
             &session.owner,
             session.id,
@@ -315,16 +509,10 @@ impl CodeRuntime {
             &event,
         )
         .await
-        {
-            Ok(seq) => self
-                .bus
-                .publish(session.id, tidebreak_core::SequencedEvent { seq, event }),
-            Err(error) => tracing::warn!(
-                session = %session.id,
-                %error,
-                "the restore was not journaled"
-            ),
-        }
+        .map_err(|error| error.to_string())?;
+        self.bus
+            .publish(session.id, tidebreak_core::SequencedEvent { seq, event });
+        Ok(())
     }
 
     /// Tell every view of the worktree to read it again, the way a save does.
@@ -342,7 +530,12 @@ impl CodeRuntime {
     }
 }
 
-fn turn_running() -> ServerError {
+fn bounded_reason(reason: &str) -> String {
+    reason.chars().take(MAX_RESTORE_ERROR_CHARS).collect()
+}
+
+/// The refusal while a turn holds the worktree.
+pub(super) fn turn_running() -> ServerError {
     ServerError::conflict_kind(
         "turn_running",
         "A turn is running in this workspace. Wait for it to finish, or stop it, then try again.",

@@ -1,30 +1,33 @@
 //! Undo one change in the live worktree: a file's change, one hunk of it, or
 //! a file's uncommitted edits.
 //!
-//! A revert rebuilds the patch from the range the diff view shows and applies
-//! it in reverse with `git apply`, so it lands only where the worktree still
-//! holds that change, and it never touches the user's index. A discard puts
-//! files back to the last commit through git's own checkout and clean. Neither
-//! runs a hook, and neither writes text a client sent.
+//! Each works out the tree the worktree should hold next and moves the
+//! worktree there through [`super::worktree`], so nothing outside the change
+//! moves, nothing the snapshot does not hold is overwritten, and no hook runs.
+//!
+//! A revert carries the change backwards the way a merge would. The file as
+//! the diff left it is the base, the file with the change undone is theirs,
+//! and the file as it stands now is ours. A hunk is undone at exactly the
+//! lines the diff names, never at another place that happens to read the
+//! same. When a later edit overlaps the change, the revert refuses rather
+//! than guess.
 
 use std::collections::HashSet;
-use std::io::Write as _;
 use std::path::Path;
 
 use tidebreak_harness::OutputBudget;
-use tracing::warn;
 
+use super::worktree::{
+    blocked, find_blockers, merge_blobs, name_paths, read_blob, tree_entry, tree_paths_under,
+    tree_with_changes, unsaved_under, write_blob, PrivateIndex, Switch, SwitchFailure, TreeEntry,
+    MAX_BLOB_BYTES,
+};
 use super::{
     complete_nul_terminated_records, git_bytes_bounded, git_bytes_with_literal_paths_bounded,
-    git_command, parse_name_status, review_diff_args, review_name_status_args, run_git_command,
-    snapshot_tree, ChangedFile, CheckpointError, GitPath, GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES,
-    GIT_SNAPSHOT_TIMEOUT, GIT_TIMEOUT, REVIEW_DIFF_FLAGS,
+    parse_name_status, review_diff_args, review_name_status_args, ChangedFile, CheckpointError,
+    GitPath, GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES, GIT_SNAPSHOT_TIMEOUT, GIT_TIMEOUT,
+    REVIEW_DIFF_FLAGS,
 };
-
-/// The largest patch a revert builds. A whole-file revert of a binary file
-/// carries the file itself, base85-encoded, so this bounds the file too.
-const MAX_PATCH_BYTES: usize = 32 * 1024 * 1024;
-const MAX_PATCH_LINES: usize = 2_000_000;
 
 /// Which hunk of a file's diff to revert, as the diff view showed it.
 #[derive(Debug, Clone, Copy)]
@@ -47,10 +50,10 @@ pub struct RevertedChange {
 /// of it.
 ///
 /// For the workspace diff, `to` is a fresh snapshot of the worktree, so a
-/// whole-file revert always lands: the file goes back to its version at
-/// `from`. For a turn's diff, `from` and `to` are the turn's checkpoints, and
-/// the revert lands only where the worktree still holds the turn's change. A
-/// renamed file goes back to its old name.
+/// whole-file revert puts the file back to its version at `from`. For a
+/// turn's diff, `from` and `to` are the turn's checkpoints, and the revert
+/// keeps later edits unless they overlap the turn's change. A renamed file
+/// goes back to its old name; one hunk of it changes only those lines.
 pub async fn revert_change(
     worktree: &Path,
     from: &str,
@@ -64,31 +67,325 @@ pub async fn revert_change(
         .ok_or_else(|| {
             CheckpointError::conflict("no_change", "This file has no change to revert.")
         })?;
-    let (patch, paths) = match hunk {
-        None => {
-            let mut paths = vec![change.path.clone()];
-            paths.extend(change.previous_path.clone());
-            (whole_file_patch(worktree, from, to, &paths).await?, paths)
+    let old = change
+        .previous_path
+        .clone()
+        .unwrap_or_else(|| change.path.clone());
+    let before = file_entry(worktree, from, &old).await?;
+    let after = file_entry(worktree, to, &change.path).await?;
+    let index = PrivateIndex::new(worktree).await?;
+    let current = index.snapshot(worktree).await?;
+    let ours = file_entry(worktree, &current, &change.path).await?;
+    if [&before, &after, &ours]
+        .into_iter()
+        .flatten()
+        .any(TreeEntry::is_submodule)
+    {
+        return Err(CheckpointError::conflict(
+            "revert_unsupported",
+            "Tidebreak cannot revert a submodule change. Revert it in a terminal.",
+        ));
+    }
+    let edits = match hunk {
+        Some(hunk) => {
+            let section = file_section(worktree, from, to, &change).await?;
+            let lines = section.hunk_matching(hunk)?;
+            match (before, after) {
+                (Some(_), Some(after)) => {
+                    hunk_edits(worktree, &change.path, &lines, after, ours).await?
+                }
+                // A new or deleted file is one hunk: it goes whole.
+                (before, after) => {
+                    whole_file_edits(worktree, &change, &old, before, after, ours, &current).await?
+                }
+            }
         }
-        Some(hunk) => (
-            hunk_patch(worktree, from, to, &change.path, hunk).await?,
-            vec![change.path.clone()],
-        ),
+        None => whole_file_edits(worktree, &change, &old, before, after, ours, &current).await?,
     };
-    apply_in_reverse(worktree, &patch).await?;
-    Ok(RevertedChange { paths })
+    let target = tree_with_changes(worktree, &current, &edits).await?;
+    if target == current {
+        return Err(CheckpointError::conflict(
+            "no_change",
+            "This change is already undone.",
+        ));
+    }
+    let in_the_way = find_blockers(worktree, &current, &target).await?;
+    if !in_the_way.is_empty() {
+        return Err(blocked(
+            "revert_blocked",
+            "Reverting this change",
+            &in_the_way,
+        ));
+    }
+    Switch {
+        index: &index,
+        from: &current,
+        to: &target,
+    }
+    .run(worktree)
+    .await
+    .map_err(SwitchFailure::into_error)?;
+    Ok(RevertedChange {
+        paths: edits.into_iter().map(|(path, _)| path).collect(),
+    })
 }
 
-/// Put each path back to the last commit: its content and mode when `HEAD`
+/// The file `path` names in `tree`: a file, a symlink, or a submodule, never
+/// a folder.
+async fn file_entry(
+    worktree: &Path,
+    tree: &str,
+    path: &GitPath,
+) -> Result<Option<TreeEntry>, CheckpointError> {
+    Ok(tree_entry(worktree, tree, path)
+        .await?
+        .filter(|entry| !entry.is_folder()))
+}
+
+fn changed_since() -> CheckpointError {
+    CheckpointError::conflict(
+        "revert_conflict",
+        "This change no longer matches the file, so nothing was reverted. The file changed \
+         after the diff you reviewed.",
+    )
+}
+
+fn diff_changed() -> CheckpointError {
+    CheckpointError::conflict(
+        "diff_changed",
+        "This change is no longer in the diff. Review the diff again.",
+    )
+}
+
+/// Undo one hunk of a file both sides hold.
+async fn hunk_edits(
+    worktree: &Path,
+    path: &GitPath,
+    lines: &[&[u8]],
+    after: TreeEntry,
+    ours: Option<TreeEntry>,
+) -> Result<Vec<(GitPath, Option<TreeEntry>)>, CheckpointError> {
+    let ours = ours.ok_or_else(changed_since)?;
+    if !after.is_regular_file() || !ours.is_regular_file() {
+        return Err(CheckpointError::conflict(
+            "revert_unsupported",
+            "This is not a text file, so only the whole file can be reverted.",
+        ));
+    }
+    let after_bytes = read_blob(worktree, &after.oid).await?;
+    let reverted = reverse_hunk(lines, &after_bytes)?;
+    let result = if ours.oid == after.oid {
+        reverted
+    } else {
+        let ours_bytes = read_blob(worktree, &ours.oid).await?;
+        merge_blobs(worktree, &ours_bytes, &after_bytes, &reverted)
+            .await?
+            .ok_or_else(changed_since)?
+    };
+    let oid = write_blob(worktree, &result).await?;
+    Ok(vec![(
+        path.clone(),
+        Some(TreeEntry {
+            mode: ours.mode,
+            oid,
+        }),
+    )])
+}
+
+/// Undo a file's whole change: put back what `from` held, carried onto any
+/// later edits, under the file's old name.
+async fn whole_file_edits(
+    worktree: &Path,
+    change: &ChangedFile,
+    old: &GitPath,
+    before: Option<TreeEntry>,
+    after: Option<TreeEntry>,
+    ours: Option<TreeEntry>,
+    current: &str,
+) -> Result<Vec<(GitPath, Option<TreeEntry>)>, CheckpointError> {
+    let restored = match (before, after) {
+        // The change added the file, so reverting it removes it. Only as the
+        // change left it: later edits to it would go too.
+        (None, after) => {
+            if ours.is_none() {
+                return Err(CheckpointError::conflict(
+                    "no_change",
+                    "This change is already undone.",
+                ));
+            }
+            if ours != after {
+                return Err(CheckpointError::conflict(
+                    "revert_conflict",
+                    format!(
+                        "{} changed after this change was made. Reverting it would delete those \
+                         edits too, so nothing was reverted.",
+                        change.path.to_wire()
+                    ),
+                ));
+            }
+            None
+        }
+        // The change deleted the file, so it comes back, unless something
+        // else stands there now.
+        (Some(before), None) => {
+            if ours.is_some() {
+                return Err(CheckpointError::conflict(
+                    "revert_conflict",
+                    format!(
+                        "A file stands at {} again, so nothing was reverted. Move it, then try \
+                         again.",
+                        change.path.to_wire()
+                    ),
+                ));
+            }
+            Some(before)
+        }
+        (Some(before), Some(after)) => {
+            let ours = ours.ok_or_else(changed_since)?;
+            if ours == after {
+                Some(before)
+            } else if before.is_regular_file() && after.is_regular_file() && ours.is_regular_file()
+            {
+                let ours_bytes = read_blob(worktree, &ours.oid).await?;
+                let after_bytes = read_blob(worktree, &after.oid).await?;
+                let before_bytes = read_blob(worktree, &before.oid).await?;
+                let merged = merge_blobs(worktree, &ours_bytes, &after_bytes, &before_bytes)
+                    .await?
+                    .ok_or_else(changed_since)?;
+                let mode = if ours.mode == after.mode {
+                    before.mode
+                } else {
+                    ours.mode
+                };
+                Some(TreeEntry {
+                    mode,
+                    oid: write_blob(worktree, &merged).await?,
+                })
+            } else {
+                return Err(changed_since());
+            }
+        }
+    };
+    if change.previous_path.is_none() {
+        return Ok(vec![(change.path.clone(), restored)]);
+    }
+    // The file goes back to its old name, unless a different file took it.
+    let standing = file_entry(worktree, current, old).await?;
+    if standing.is_some() && standing != restored {
+        return Err(CheckpointError::conflict(
+            "revert_conflict",
+            format!(
+                "A file stands at {} again, so nothing was reverted. Move it, then try again.",
+                old.to_wire()
+            ),
+        ));
+    }
+    Ok(vec![(change.path.clone(), None), (old.clone(), restored)])
+}
+
+/// `after` with one hunk of its diff put back, at exactly the lines the hunk
+/// names. Anything else there means the diff moved on.
+fn reverse_hunk(lines: &[&[u8]], after: &[u8]) -> Result<Vec<u8>, CheckpointError> {
+    let (header, body) = lines.split_first().ok_or_else(diff_changed)?;
+    let ((_, old_count), (new_start, new_count)) =
+        parse_hunk_header(header).ok_or_else(diff_changed)?;
+    let mut old_side: Vec<Vec<u8>> = Vec::new();
+    let mut new_side: Vec<Vec<u8>> = Vec::new();
+    let mut last = None;
+    for line in body {
+        let Some((&marker, content)) = line.split_first() else {
+            return Err(diff_changed());
+        };
+        let mut owned = content.to_vec();
+        owned.push(b'\n');
+        match marker {
+            b' ' => {
+                old_side.push(owned.clone());
+                new_side.push(owned);
+            }
+            b'-' => old_side.push(owned),
+            b'+' => new_side.push(owned),
+            // "\ No newline at end of file" belongs to the line before it.
+            b'\\' => {
+                let strip = |side: &mut Vec<Vec<u8>>| {
+                    if let Some(line) = side.last_mut() {
+                        line.pop();
+                    }
+                };
+                match last {
+                    Some(b' ') => {
+                        strip(&mut old_side);
+                        strip(&mut new_side);
+                    }
+                    Some(b'-') => strip(&mut old_side),
+                    Some(b'+') => strip(&mut new_side),
+                    _ => return Err(diff_changed()),
+                }
+                continue;
+            }
+            _ => return Err(diff_changed()),
+        }
+        last = Some(marker);
+    }
+    if old_side.len() != old_count || new_side.len() != new_count {
+        return Err(diff_changed());
+    }
+    let file_lines: Vec<&[u8]> = after.split_inclusive(|byte| *byte == b'\n').collect();
+    // `+c,0` names the gap after line `c`; any other range starts at line `c`.
+    let start = if new_count == 0 {
+        new_start
+    } else {
+        new_start.checked_sub(1).ok_or_else(diff_changed)?
+    };
+    let end = start + new_count;
+    let placed = file_lines
+        .get(start..end)
+        .is_some_and(|found| found.iter().copied().eq(new_side.iter().map(Vec::as_slice)));
+    if !placed {
+        return Err(diff_changed());
+    }
+    let mut out = Vec::with_capacity(after.len());
+    for line in &file_lines[..start] {
+        out.extend_from_slice(line);
+    }
+    for line in &old_side {
+        out.extend_from_slice(line);
+    }
+    for line in &file_lines[end..] {
+        out.extend_from_slice(line);
+    }
+    Ok(out)
+}
+
+/// The two ranges of an `@@ -a,b +c,d @@` line, counts defaulting to 1.
+fn parse_hunk_header(line: &[u8]) -> Option<((usize, usize), (usize, usize))> {
+    let text = std::str::from_utf8(line).ok()?;
+    let rest = text.strip_prefix("@@ -")?;
+    let (old, rest) = rest.split_once(" +")?;
+    let (new, _) = rest.split_once(" @@")?;
+    let range = |value: &str| -> Option<(usize, usize)> {
+        match value.split_once(',') {
+            Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
+            None => Some((value.parse().ok()?, 1)),
+        }
+    };
+    Some((range(old)?, range(new)?))
+}
+
+/// Put each file back to the last commit: its content and mode when `HEAD`
 /// holds it, gone when it does not. The user's index follows, so a discarded
 /// change is not left staged for the next commit.
 ///
-/// Every path must be one git reports as changed since `HEAD`. That keeps a
-/// discard to the files the person saw, and never lets a directory name
-/// sweep up the untracked files inside it.
+/// Each path names a file with an uncommitted change, as the Changes list
+/// shows it. A file renamed since the last commit goes back to its old name.
+/// A discard never touches a file nobody named: when a folder, or a file
+/// that is not part of the change, stands where the committed file goes, the
+/// discard refuses and names it. `expected_tree` is the snapshot the person
+/// reviewed; a named file that changed since is left alone.
 pub async fn discard_paths(
     worktree: &Path,
     paths: &[String],
+    expected_tree: Option<&str>,
 ) -> Result<RevertedChange, CheckpointError> {
     let mut wanted: Vec<GitPath> = Vec::new();
     for path in paths {
@@ -100,45 +397,126 @@ pub async fn discard_paths(
     if wanted.is_empty() {
         return Err(CheckpointError::user("name at least one file to discard"));
     }
-    let snapshot = snapshot_tree(worktree).await?;
-    let changed = uncommitted_paths(worktree, &snapshot).await?;
-    if let Some(unchanged) = wanted.iter().find(|path| !changed.contains(path)) {
+    let index = PrivateIndex::new(worktree).await?;
+    let current = index.snapshot(worktree).await?;
+    let changes = uncommitted_changes(worktree, &current).await?;
+    let mut picked: Vec<GitPath> = Vec::new();
+    for path in &wanted {
+        let Some(change) = changes
+            .iter()
+            .find(|change| &change.path == path || change.previous_path.as_ref() == Some(path))
+        else {
+            return Err(CheckpointError::conflict(
+                "no_change",
+                format!("{} has no uncommitted change to discard.", path.to_wire()),
+            ));
+        };
+        for path in std::iter::once(&change.path).chain(change.previous_path.iter()) {
+            if !picked.contains(path) {
+                picked.push(path.clone());
+            }
+        }
+    }
+    if let Some(expected) = expected_tree {
+        for path in &picked {
+            if tree_entry(worktree, expected, path).await?
+                != tree_entry(worktree, &current, path).await?
+            {
+                return Err(CheckpointError::conflict(
+                    "worktree_changed",
+                    format!(
+                        "{} changed after you reviewed it, so nothing was discarded. Review the \
+                         changes again.",
+                        path.to_wire()
+                    ),
+                ));
+            }
+        }
+    }
+
+    let mut edits = Vec::new();
+    for path in &picked {
+        let committed = file_entry(worktree, "HEAD", path).await?;
+        let now = file_entry(worktree, &current, path).await?;
+        if committed
+            .iter()
+            .chain(now.iter())
+            .any(TreeEntry::is_submodule)
+        {
+            return Err(CheckpointError::conflict(
+                "revert_unsupported",
+                "Tidebreak cannot discard a submodule change. Discard it in a terminal.",
+            ));
+        }
+        if committed.is_some() {
+            refuse_folder_in_the_way(worktree, &current, path, &picked).await?;
+        }
+        edits.push((path.clone(), committed));
+    }
+    let target = tree_with_changes(worktree, &current, &edits).await?;
+    let in_the_way = find_blockers(worktree, &current, &target).await?;
+    if !in_the_way.is_empty() {
+        return Err(blocked(
+            "discard_blocked",
+            "Discarding these changes",
+            &in_the_way,
+        ));
+    }
+    Switch {
+        index: &index,
+        from: &current,
+        to: &target,
+    }
+    .run(worktree)
+    .await
+    .map_err(SwitchFailure::into_error)?;
+    run_on_paths(worktree, &["reset", "-q", "HEAD", "--"], &picked).await?;
+    Ok(RevertedChange { paths: picked })
+}
+
+/// Refuse to put a committed file back where a folder now stands with files
+/// in it that nobody named, or where a file stands in place of one of its
+/// folders.
+async fn refuse_folder_in_the_way(
+    worktree: &Path,
+    current: &str,
+    path: &GitPath,
+    picked: &[GitPath],
+) -> Result<(), CheckpointError> {
+    let held: Vec<GitPath> = tree_paths_under(worktree, current, path).await?;
+    let saved: HashSet<GitPath> = held.iter().cloned().collect();
+    let mut in_the_way: Vec<GitPath> = held
+        .into_iter()
+        .filter(|inside| !picked.contains(inside))
+        .collect();
+    in_the_way.extend(unsaved_under(worktree, path, &saved)?);
+    if !in_the_way.is_empty() {
+        in_the_way.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         return Err(CheckpointError::conflict(
-            "no_change",
+            "discard_blocked",
             format!(
-                "{} has no uncommitted change to discard.",
-                unchanged.to_wire()
+                "A folder now stands where {} was committed, and it holds files you did not \
+                 pick: {}. Move or discard them first, then try again.",
+                path.to_wire(),
+                name_paths(&in_the_way)
             ),
         ));
     }
-
-    let (listed, _) = git_bytes_with_literal_paths_bounded(
-        worktree,
-        &["ls-tree", "-z", "--name-only", "--full-tree", "HEAD", "--"],
-        &wanted,
-        GIT_TIMEOUT,
-        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
-    )
-    .await
-    .map_err(CheckpointError::internal)?;
-    let committed: HashSet<GitPath> = listed
-        .split(|byte| *byte == 0)
-        .filter(|name| !name.is_empty())
-        .map(GitPath::from_bytes)
-        .collect();
-    let (restore, remove): (Vec<GitPath>, Vec<GitPath>) = wanted
-        .iter()
-        .cloned()
-        .partition(|path| committed.contains(path));
-
-    run_on_paths(worktree, &["reset", "-q", "HEAD", "--"], &wanted).await?;
-    if !restore.is_empty() {
-        run_on_paths(worktree, &["checkout-index", "-f", "-q", "--"], &restore).await?;
+    for folder in path.ancestors() {
+        let standing = file_entry(worktree, current, &folder).await?;
+        if standing.is_some() && !picked.contains(&folder) {
+            return Err(CheckpointError::conflict(
+                "discard_blocked",
+                format!(
+                    "A file now stands at {}, where {} needs a folder. Move or discard it first, \
+                     then try again.",
+                    folder.to_wire(),
+                    path.to_wire()
+                ),
+            ));
+        }
     }
-    if !remove.is_empty() {
-        run_on_paths(worktree, &["clean", "-f", "-q", "--"], &remove).await?;
-    }
-    Ok(RevertedChange { paths: wanted })
+    Ok(())
 }
 
 /// Every path that differs between `HEAD` and `snapshot`, which is what a
@@ -165,8 +543,27 @@ pub async fn uncommitted_paths(
         .collect())
 }
 
+/// What a commit of `snapshot` would carry, renames paired.
+async fn uncommitted_changes(
+    worktree: &Path,
+    snapshot: &str,
+) -> Result<Vec<ChangedFile>, CheckpointError> {
+    let args = review_name_status_args("HEAD", snapshot);
+    let (raw, truncated) = git_bytes_bounded(
+        worktree,
+        &args[..args.len() - 1],
+        GIT_TIMEOUT,
+        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    Ok(parse_name_status(complete_nul_terminated_records(
+        &raw, truncated,
+    )))
+}
+
 /// The change the diff lists for `path`, by its new name or its old one.
-async fn find_change(
+pub(super) async fn find_change(
     worktree: &Path,
     from: &str,
     to: &str,
@@ -188,90 +585,22 @@ async fn find_change(
     )
 }
 
-/// The file's whole change, binary content and renames included, so the
-/// reverse puts back exactly what `from` held.
-async fn whole_file_patch(
+/// The file's section of the diff, with both of a renamed file's paths, so
+/// git pairs them the way the diff view does.
+async fn file_section(
     worktree: &Path,
     from: &str,
     to: &str,
-    paths: &[GitPath],
-) -> Result<Vec<u8>, CheckpointError> {
-    let mut args = vec!["diff"];
-    args.extend_from_slice(REVIEW_DIFF_FLAGS);
-    args.extend_from_slice(&["--binary", "--full-index", "--find-renames", from, to, "--"]);
-    let patch = bounded_patch(worktree, &args, paths).await?;
-    if patch.is_empty() {
-        return Err(CheckpointError::conflict(
-            "no_change",
-            "This file has no change to revert.",
-        ));
-    }
-    Ok(patch)
-}
-
-/// One hunk of the file's diff, rebuilt with the flags the diff view uses so
-/// it can be checked against the hunk the person saw.
-async fn hunk_patch(
-    worktree: &Path,
-    from: &str,
-    to: &str,
-    path: &GitPath,
-    hunk: HunkSelector<'_>,
-) -> Result<Vec<u8>, CheckpointError> {
-    let raw = bounded_patch(
-        worktree,
-        &review_diff_args(from, to),
-        std::slice::from_ref(path),
-    )
-    .await?;
-    let section = FileSection::parse(&raw);
-    let shown = hunk.text.strip_suffix('\n').unwrap_or(hunk.text);
-    let Some(lines) = section
-        .hunks
-        .get(hunk.index)
-        .filter(|lines| String::from_utf8_lossy(&lines.join(&b'\n')) == shown)
-    else {
-        return Err(CheckpointError::conflict(
-            "diff_changed",
-            "This change is no longer in the diff. Review the diff again.",
-        ));
-    };
-    // A new or deleted file is a single hunk: revert it whole, file mode and
-    // all. Anything else keeps only the lines `git apply` needs to place the
-    // hunk, so a rename or a mode change on the same file stays.
-    let whole_file = section
-        .header
-        .iter()
-        .any(|line| line.starts_with(b"new file mode") || line.starts_with(b"deleted file mode"));
-    let mut patch = Vec::new();
-    for line in &section.header {
-        if whole_file
-            || line.starts_with(b"diff --git ")
-            || line.starts_with(b"--- ")
-            || line.starts_with(b"+++ ")
-        {
-            patch.extend_from_slice(line);
-            patch.push(b'\n');
-        }
-    }
-    for line in lines {
-        patch.extend_from_slice(line);
-        patch.push(b'\n');
-    }
-    Ok(patch)
-}
-
-async fn bounded_patch(
-    worktree: &Path,
-    args: &[&str],
-    paths: &[GitPath],
-) -> Result<Vec<u8>, CheckpointError> {
+    change: &ChangedFile,
+) -> Result<OwnedSection, CheckpointError> {
+    let mut paths = vec![change.path.clone()];
+    paths.extend(change.previous_path.clone());
     let (raw, truncated) = git_bytes_with_literal_paths_bounded(
         worktree,
-        args,
-        paths,
+        &review_diff_args(from, to),
+        &paths,
         GIT_SNAPSHOT_TIMEOUT,
-        OutputBudget::head(MAX_PATCH_BYTES, MAX_PATCH_LINES),
+        OutputBudget::head(MAX_BLOB_BYTES * 2, usize::MAX),
     )
     .await
     .map_err(CheckpointError::internal)?;
@@ -281,33 +610,26 @@ async fn bounded_patch(
             "This change is too large to revert here. Revert it in a terminal.",
         ));
     }
-    Ok(raw)
+    Ok(OwnedSection { raw })
 }
 
-/// Apply `patch` in reverse to the worktree only. `git apply` checks every
-/// hunk before it writes a file, so a patch that no longer fits changes
-/// nothing.
-async fn apply_in_reverse(worktree: &Path, patch: &[u8]) -> Result<(), CheckpointError> {
-    let mut file = tempfile::NamedTempFile::new()
-        .map_err(|err| CheckpointError::internal(format!("could not stage the revert: {err}")))?;
-    file.write_all(patch)
-        .and_then(|()| file.flush())
-        .map_err(|err| CheckpointError::internal(format!("could not stage the revert: {err}")))?;
-    let mut command = git_command(worktree);
-    command
-        .args(["apply", "-R", "--whitespace=nowarn"])
-        .arg(file.path());
-    run_git_command(command, "apply -R".to_owned(), GIT_TIMEOUT)
-        .await
-        .map(|_| ())
-        .map_err(|err| {
-            warn!(error = %err, "a revert did not apply");
-            CheckpointError::conflict(
-                "revert_conflict",
-                "This change no longer matches the file, so nothing was reverted. The file \
-                 changed after the diff you reviewed.",
-            )
-        })
+struct OwnedSection {
+    raw: Vec<u8>,
+}
+
+impl OwnedSection {
+    /// The lines of hunk `hunk.index`, when they read exactly as the person
+    /// saw them.
+    fn hunk_matching(&self, hunk: HunkSelector<'_>) -> Result<Vec<&[u8]>, CheckpointError> {
+        let section = FileSection::parse(&self.raw);
+        let shown = hunk.text.strip_suffix('\n').unwrap_or(hunk.text);
+        section
+            .hunks
+            .into_iter()
+            .nth(hunk.index)
+            .filter(|lines| String::from_utf8_lossy(&lines.join(&b'\n')) == shown)
+            .ok_or_else(diff_changed)
+    }
 }
 
 async fn run_on_paths(
@@ -332,6 +654,7 @@ async fn run_on_paths(
 /// A hunk's own lines start with a space, `+`, `-`, or `\`, so a line that
 /// starts with `@@ ` always opens the next hunk.
 struct FileSection<'a> {
+    #[cfg_attr(not(test), allow(dead_code))]
     header: Vec<&'a [u8]>,
     hunks: Vec<Vec<&'a [u8]>>,
 }
@@ -360,7 +683,7 @@ impl<'a> FileSection<'a> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::super::testing::{add_worktree, git_stdout, init_repo, run};
-    use super::super::{merge_base, produce_diff, DiffBounds};
+    use super::super::{merge_base, produce_diff, snapshot_tree, DiffBounds};
     use super::*;
 
     /// Hunk `index` of `path` exactly as the diff view receives it.
@@ -385,6 +708,13 @@ mod tests {
 
     fn lines(count: usize, label: &str) -> String {
         (1..=count).map(|n| format!("{label} {n}\n")).collect()
+    }
+
+    fn conflict_kind(err: &CheckpointError) -> &'static str {
+        match err {
+            CheckpointError::Conflict { kind, .. } => kind,
+            _ => "not a conflict",
+        }
     }
 
     #[tokio::test]
@@ -506,16 +836,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(
-            matches!(
-                err,
-                CheckpointError::Conflict {
-                    kind: "diff_changed",
-                    ..
-                }
-            ),
-            "{err:?}"
-        );
+        assert_eq!(conflict_kind(&err), "diff_changed", "{err:?}");
         assert_eq!(
             read(&tree.join("README.md")).as_deref(),
             Some("then someone typed this\n")
@@ -556,19 +877,133 @@ mod tests {
         let err = revert_change(&tree, &before_turn, &after_turn, "long.txt", None)
             .await
             .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                CheckpointError::Conflict {
-                    kind: "revert_conflict",
-                    ..
-                }
-            ),
-            "{err:?}"
-        );
+        assert_eq!(conflict_kind(&err), "revert_conflict", "{err:?}");
         assert!(read(&tree.join("long.txt"))
             .unwrap()
             .contains("and then I changed it\n"));
+    }
+
+    /// A renamed file with two edited lines: the diff pairs the rename, so
+    /// reverting one hunk undoes those lines under the new name, and the file
+    /// is neither deleted nor added under the old name.
+    #[tokio::test]
+    async fn a_hunk_of_a_renamed_file_reverts_only_its_lines() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "revert-renamed");
+        std::fs::write(tree.join("config.yml"), lines(40, "setting")).unwrap();
+        run(&tree, &["git", "add", "config.yml"]);
+        run(&tree, &["git", "commit", "-q", "-m", "config"]);
+        let from = snapshot_tree(&tree).await.unwrap();
+        std::fs::remove_file(tree.join("config.yml")).unwrap();
+        let renamed = lines(40, "setting")
+            .replace("setting 2\n", "setting two\n")
+            .replace("setting 30\n", "setting thirty\n");
+        std::fs::write(tree.join("config.yaml"), &renamed).unwrap();
+        let to = snapshot_tree(&tree).await.unwrap();
+
+        let diff = produce_diff(
+            &tree,
+            &from,
+            &to,
+            Some("config.yaml"),
+            DiffBounds::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            diff.diff.contains("rename from config.yml"),
+            "the diff pairs the rename: {}",
+            diff.diff
+        );
+        let first = shown_hunk(&tree, &from, &to, "config.yaml", 0).await;
+        assert!(first.contains("+setting two"), "{first}");
+        assert!(!first.contains("+setting thirty"), "{first}");
+
+        let reverted = revert_change(
+            &tree,
+            &from,
+            &to,
+            "config.yaml",
+            Some(HunkSelector {
+                index: 0,
+                text: &first,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            reverted
+                .paths
+                .iter()
+                .map(GitPath::to_wire)
+                .collect::<Vec<_>>(),
+            ["config.yaml"]
+        );
+        assert_eq!(
+            read(&tree.join("config.yaml")),
+            Some(renamed.replace("setting two\n", "setting 2\n")),
+            "only the chosen lines go back, under the new name"
+        );
+        assert!(!tree.join("config.yml").exists());
+    }
+
+    /// A turn changed the first of two identical blocks. After a later edit
+    /// to that block, the turn's hunk no longer fits where it was, and the
+    /// revert refuses instead of undoing the second block, which reads the
+    /// same.
+    #[tokio::test]
+    async fn a_stale_turn_hunk_never_lands_on_another_identical_block() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "revert-identical");
+        let block = |middle: &str| format!("fn run() {{\n    {middle}\n}}\n");
+        // Both blocks are followed by the same lines, so the turn's hunk,
+        // context and all, reads the same at the second block.
+        let file = |first: &str, second: &str| {
+            format!(
+                "{}{}{}{}{}",
+                block(first),
+                lines(3, "// gap"),
+                lines(6, "// middle"),
+                block(second),
+                lines(3, "// gap")
+            )
+        };
+        std::fs::write(tree.join("blocks.rs"), file("step();", "step_twice();")).unwrap();
+        let before_turn = snapshot_tree(&tree).await.unwrap();
+        std::fs::write(
+            tree.join("blocks.rs"),
+            file("step_twice();", "step_twice();"),
+        )
+        .unwrap();
+        let after_turn = snapshot_tree(&tree).await.unwrap();
+        let hunk = shown_hunk(&tree, &before_turn, &after_turn, "blocks.rs", 0).await;
+        // Later, someone rewrote the block the turn had changed.
+        std::fs::write(
+            tree.join("blocks.rs"),
+            file("step_three_times();", "step_twice();"),
+        )
+        .unwrap();
+
+        let err = revert_change(
+            &tree,
+            &before_turn,
+            &after_turn,
+            "blocks.rs",
+            Some(HunkSelector {
+                index: 0,
+                text: &hunk,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(conflict_kind(&err), "revert_conflict", "{err:?}");
+        assert_eq!(
+            read(&tree.join("blocks.rs")),
+            Some(file("step_three_times();", "step_twice();")),
+            "the second block, which the turn never touched, stays"
+        );
     }
 
     #[tokio::test]
@@ -597,6 +1032,7 @@ mod tests {
                 "scratch/untracked.txt".to_owned(),
                 "keep.txt".to_owned(),
             ],
+            None,
         )
         .await
         .unwrap();
@@ -635,22 +1071,117 @@ mod tests {
         std::fs::create_dir_all(tree.join("scratch")).unwrap();
         std::fs::write(tree.join("scratch/a.txt"), "a\n").unwrap();
         for path in ["README.md", "scratch", "missing.txt"] {
-            let err = discard_paths(&tree, &[path.to_owned()]).await.unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    CheckpointError::Conflict {
-                        kind: "no_change",
-                        ..
-                    }
-                ),
-                "{path}: {err:?}"
-            );
+            let err = discard_paths(&tree, &[path.to_owned()], None)
+                .await
+                .unwrap_err();
+            assert_eq!(conflict_kind(&err), "no_change", "{path}: {err:?}");
         }
         assert_eq!(
             read(&tree.join("scratch/a.txt")).as_deref(),
             Some("a\n"),
             "a directory name never sweeps up the files inside it"
+        );
+    }
+
+    /// A committed file `config` was replaced by a folder holding a new file
+    /// and an ignored one. Discarding `config` would delete that folder, so
+    /// it refuses and names what is inside.
+    #[tokio::test]
+    async fn discard_refuses_when_a_folder_stands_where_the_file_was() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "discard-folder");
+        std::fs::write(tree.join(".gitignore"), "*.local\n").unwrap();
+        std::fs::write(tree.join("config"), "committed config\n").unwrap();
+        run(&tree, &["git", "add", ".gitignore", "config"]);
+        run(&tree, &["git", "commit", "-q", "-m", "config"]);
+        std::fs::remove_file(tree.join("config")).unwrap();
+        std::fs::create_dir_all(tree.join("config")).unwrap();
+        std::fs::write(tree.join("config/app.py"), "print('new')\n").unwrap();
+        std::fs::write(tree.join("config/dev.local"), "mine\n").unwrap();
+
+        let err = discard_paths(&tree, &["config".to_owned()], None)
+            .await
+            .unwrap_err();
+
+        let CheckpointError::Conflict {
+            kind: "discard_blocked",
+            message,
+        } = &err
+        else {
+            panic!("{err:?}");
+        };
+        assert!(
+            message.contains("config/app.py") && message.contains("config/dev.local"),
+            "{message}"
+        );
+        assert_eq!(
+            read(&tree.join("config/app.py")).as_deref(),
+            Some("print('new')\n")
+        );
+        assert_eq!(
+            read(&tree.join("config/dev.local")).as_deref(),
+            Some("mine\n")
+        );
+    }
+
+    /// The Changes list names a renamed file by its new path. Discarding it
+    /// puts the file back under its committed name; when the rename itself
+    /// was committed, only the later edit goes.
+    #[tokio::test]
+    async fn discarding_a_renamed_file_by_its_new_path_restores_the_committed_name() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "discard-renamed");
+        let notes = lines(20, "note");
+        std::fs::write(tree.join("notes.txt"), &notes).unwrap();
+        run(&tree, &["git", "add", "notes.txt"]);
+        run(&tree, &["git", "commit", "-q", "-m", "notes"]);
+        // An uncommitted rename with an edit.
+        std::fs::remove_file(tree.join("notes.txt")).unwrap();
+        std::fs::write(tree.join("notes.md"), format!("{notes}and more\n")).unwrap();
+        let discarded = discard_paths(&tree, &["notes.md".to_owned()], None)
+            .await
+            .unwrap();
+        let mut named: Vec<String> = discarded.paths.iter().map(GitPath::to_wire).collect();
+        named.sort();
+        assert_eq!(named, ["notes.md", "notes.txt"]);
+        assert_eq!(read(&tree.join("notes.txt")), Some(notes.clone()));
+        assert!(!tree.join("notes.md").exists());
+
+        // A rename committed on the branch, then edited.
+        run(&tree, &["git", "mv", "notes.txt", "notes.md"]);
+        run(&tree, &["git", "commit", "-q", "-m", "rename"]);
+        std::fs::write(tree.join("notes.md"), format!("{notes}edited after\n")).unwrap();
+        let discarded = discard_paths(&tree, &["notes.md".to_owned()], None)
+            .await
+            .unwrap();
+        assert_eq!(
+            discarded
+                .paths
+                .iter()
+                .map(GitPath::to_wire)
+                .collect::<Vec<_>>(),
+            ["notes.md"]
+        );
+        assert_eq!(read(&tree.join("notes.md")), Some(notes));
+        assert!(!tree.join("notes.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn discard_leaves_a_file_that_changed_after_the_review() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "discard-reviewed");
+        std::fs::write(tree.join("README.md"), "reviewed\n").unwrap();
+        let reviewed = snapshot_tree(&tree).await.unwrap();
+        std::fs::write(tree.join("README.md"), "changed after the review\n").unwrap();
+
+        let err = discard_paths(&tree, &["README.md".to_owned()], Some(&reviewed))
+            .await
+            .unwrap_err();
+
+        assert_eq!(conflict_kind(&err), "worktree_changed", "{err:?}");
+        assert_eq!(
+            read(&tree.join("README.md")).as_deref(),
+            Some("changed after the review\n")
         );
     }
 
@@ -683,5 +1214,29 @@ mod tests {
         assert_eq!(section.header.len(), 3);
         assert_eq!(section.hunks.len(), 2);
         assert_eq!(section.hunks[0].len(), 3);
+    }
+
+    #[test]
+    fn a_hunk_reverses_at_its_own_lines_with_or_without_a_final_newline() {
+        let hunk: Vec<&[u8]> = vec![
+            b"@@ -2,2 +2,2 @@",
+            b" b",
+            b"-c",
+            b"\\ No newline at end of file",
+            b"+C",
+        ];
+        assert_eq!(reverse_hunk(&hunk, b"a\nb\nC\n").unwrap(), b"a\nb\nc");
+        // The same text one line lower is not the hunk's place.
+        assert_eq!(
+            conflict_kind(&reverse_hunk(&hunk, b"x\na\nb\nC\n").unwrap_err()),
+            "diff_changed"
+        );
+        let insertion: Vec<&[u8]> = vec![b"@@ -1,0 +2 @@", b"+inserted"];
+        assert_eq!(
+            reverse_hunk(&insertion, b"a\ninserted\nb\n").unwrap(),
+            b"a\nb\n"
+        );
+        let removal: Vec<&[u8]> = vec![b"@@ -2 +1,0 @@", b"-gone"];
+        assert_eq!(reverse_hunk(&removal, b"a\nb\n").unwrap(), b"a\ngone\nb\n");
     }
 }

@@ -93,7 +93,8 @@ fn read(path: std::path::PathBuf) -> Option<String> {
 
 #[tokio::test]
 async fn a_restore_goes_back_to_before_a_turn_journals_itself_and_can_be_undone() {
-    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let adapter = ScriptedAdapter::new(plain_text_script());
+    let (router, token, runtime, dir) = code_app_with(adapter.clone()).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let repo = init_git_repo(dir.path());
@@ -166,29 +167,53 @@ async fn a_restore_goes_back_to_before_a_turn_journals_itself_and_can_be_undone(
     assert!(announced, "every view of the worktree re-reads it");
     let session_id: SessionId = session.parse().unwrap();
     let journaled = journaled_events(&runtime.db, session_id).await;
-    let Some(Event::CheckpointRestored {
+    let rows: Vec<Event> = journaled
+        .iter()
+        .map(|framed| framed.event.clone())
+        .filter(|event| matches!(event, Event::CheckpointRestored { .. }))
+        .collect();
+    let [Event::CheckpointRestored {
+        status: started, ..
+    }, Event::CheckpointRestored {
         restore_id: journaled_id,
         target,
         diffstat,
         actor,
-    }) = journaled.last().map(|framed| framed.event.clone())
+        status,
+        error,
+    }] = rows.as_slice()
     else {
-        panic!("the transcript shows the restore: {journaled:?}");
+        panic!("the transcript shows the restore start and finish: {rows:?}");
     };
+    assert_eq!(
+        *started,
+        tidebreak_core::CheckpointRestoreStatus::Started,
+        "the restore is journaled before any file moves"
+    );
+    assert_eq!(*status, tidebreak_core::CheckpointRestoreStatus::Completed);
+    assert_eq!(*error, None);
     assert_eq!(journaled_id.to_string(), restore_id);
     assert_eq!(
-        target,
+        *target,
         tidebreak_core::CheckpointRestoreTarget::BeforeTurn {
             turn_id: json_id(&second).parse().unwrap()
         }
     );
     assert_eq!(diffstat.files, 3);
-    assert_eq!(actor, None, "the owner restored it");
+    assert_eq!(*actor, None, "the owner restored it");
 
-    // The next turn diffs from the restored state, not from turn 2.
+    // The next turn diffs from the restored state, not from turn 2, and the
+    // engine hears which files moved under it.
     std::fs::write(worktree.join("plan.md"), "step one\nstep 2b\n").unwrap();
     let third = run_turn(&client, addr, &token, &session, "try again").await;
     assert_eq!(third["diffstat"]["files"], 1, "{third}");
+    let told = adapter.turn_inputs().last().unwrap().text.clone();
+    assert!(
+        told.contains("restored this workspace's files to how they were before your turn 2")
+            && told.contains("- module.rs (gone)")
+            && told.ends_with("try again"),
+        "{told}"
+    );
 
     // Undo: the state from just before the restore comes back whole, and the
     // turn made since then is what the confirmation lists.
@@ -271,9 +296,9 @@ async fn a_restore_the_worktree_outgrew_is_refused_and_changes_nothing() {
     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
-/// Restore, revert, and discard all change the checkout a running turn is
-/// changing, so each one is refused until the turn ends, and none of them
-/// touches a file.
+/// Restore, revert, discard, and commit all touch the checkout a running
+/// turn is changing, so each one is refused at once until the turn ends, and
+/// none of them touches a file.
 #[tokio::test]
 async fn undo_is_refused_while_a_turn_runs() {
     let adapter = ScriptedAdapter::new(approval_script())
@@ -337,8 +362,19 @@ async fn undo_is_refused_while_a_turn_runs() {
             format!("/code/workspaces/{workspace_id}/discard"),
             serde_json::json!({ "paths": ["README.md"] }),
         ),
+        // A commit that waited for the turn would commit the turn's
+        // unreviewed changes under the person's message.
+        (
+            format!("/code/workspaces/{workspace_id}/git/commit"),
+            serde_json::json!({ "message": "what I reviewed" }),
+        ),
     ] {
-        let response = post(&client, addr, &token, &path, body).await;
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            post(&client, addr, &token, &path, body),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{path} waited for the turn instead of refusing"));
         assert_eq!(response.status(), reqwest::StatusCode::CONFLICT, "{path}");
         let refused: serde_json::Value = response.json().await.unwrap();
         assert_eq!(refused["kind"], "turn_running", "{path}: {refused}");
@@ -464,4 +500,77 @@ async fn revert_and_discard_change_only_what_the_person_picked() {
     assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["kind"], "no_change");
+}
+
+fn head_of(worktree: &std::path::Path) -> String {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worktree)
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+async fn worktree_tree(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    workspace: &str,
+) -> String {
+    let files: serde_json::Value = client
+        .get(format!("http://{addr}/code/workspaces/{workspace}/files"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    files["worktree_tree"]
+        .as_str()
+        .expect("the workspace list names the tree it read")
+        .to_owned()
+}
+
+/// A commit carries what the person reviewed. A file that appeared after
+/// the list was read refuses the commit, and nothing is committed.
+#[tokio::test]
+async fn a_commit_refuses_changes_the_person_did_not_review() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let workspace_id = json_id(&workspace).to_owned();
+    let worktree = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    std::fs::write(worktree.join("reviewed.txt"), "reviewed\n").unwrap();
+    let reviewed = worktree_tree(&client, addr, &token, &workspace_id).await;
+    std::fs::write(worktree.join("unreviewed.txt"), "slipped in\n").unwrap();
+    let head = head_of(&worktree);
+
+    let response = post(
+        &client,
+        addr,
+        &token,
+        &format!("/code/workspaces/{workspace_id}/git/commit"),
+        serde_json::json!({ "message": "reviewed work", "expected_tree": reviewed }),
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let refused: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(refused["kind"], "worktree_changed", "{refused}");
+    assert_eq!(head_of(&worktree), head, "nothing was committed");
+
+    // Committing what the list shows now works.
+    let reviewed = worktree_tree(&client, addr, &token, &workspace_id).await;
+    let response = post(
+        &client,
+        addr,
+        &token,
+        &format!("/code/workspaces/{workspace_id}/git/commit"),
+        serde_json::json!({ "message": "reviewed work", "expected_tree": reviewed }),
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_ne!(head_of(&worktree), head);
 }

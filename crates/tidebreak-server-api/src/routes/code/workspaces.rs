@@ -356,7 +356,8 @@ pub async fn list_workspace_files(
     Path(id): Path<WorkspaceId>,
     Query(query): Query<WorkspaceFilesQuery>,
 ) -> Result<Json<CodeWorkspaceFiles>, ServerError> {
-    let (files, truncated, stat, turn_id, source) = code.workspace_files(id, query.turn).await?;
+    let (files, truncated, stat, turn_id, source, worktree_tree) =
+        code.workspace_files(id, query.turn).await?;
     Ok(Json(CodeWorkspaceFiles {
         files: super::undo::file_changes(files),
         truncated,
@@ -365,6 +366,7 @@ pub async fn list_workspace_files(
         revision: source.as_ref().map(|source| source.revision),
         revision_saved_at: source.as_ref().and_then(|source| source.saved_at),
         revision_ref: source.and_then(|source| source.revision_ref),
+        worktree_tree,
     }))
 }
 

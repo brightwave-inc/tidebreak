@@ -82,22 +82,60 @@ pub(super) async fn forge_lending_target(
 }
 
 impl CodeRuntime {
+    /// Commit every change in the worktree.
+    ///
+    /// The person commits what they reviewed, so the commit never waits for a
+    /// turn: a running or waiting turn refuses it at once, and a click that
+    /// raced one would otherwise commit that turn's unreviewed changes under
+    /// the person's message. `expected_tree` is the `worktree_tree` of the
+    /// file list the person reviewed; a worktree that moved since refuses.
     pub async fn commit_workspace(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
         message: Option<String>,
+        expected_tree: Option<&str>,
     ) -> Result<CommitOutcome, ServerError> {
-        let turn = self.worktree_turn_lock(id);
-        let _turn_guard = turn.lock().await;
+        let _turn_guard = self
+            .worktree_turn_lock(id)
+            .try_lock_owned()
+            .map_err(|_| super::undo::turn_running())?;
         let workspace = self.require_live_workspace(owner, id).await?;
-        gh::commit_all(
-            std::path::Path::new(&workspace.worktree_path),
-            &workspace.title,
-            message.as_deref(),
-        )
-        .await
-        .map_err(map_gh)
+        for session in list_sessions_for_workspace(&self.db, owner, id).await? {
+            if session.lifecycle == SessionLifecycle::Running
+                || get_open_turn(&self.db, owner, session.id).await?.is_some()
+            {
+                return Err(super::undo::turn_running());
+            }
+            let queued = !tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
+                .await?
+                .is_empty();
+            if queued
+                && !tidebreak_core::db::code::queue_paused(&self.db, owner, session.id).await?
+            {
+                return Err(ServerError::conflict_kind(
+                    "turn_queued",
+                    "A message is waiting to run in this workspace. Commit after its turn \
+                     finishes, or clear the queue first.",
+                ));
+            }
+        }
+        let worktree = std::path::Path::new(&workspace.worktree_path);
+        if let Some(expected) = expected_tree {
+            let now = crate::code::checkpoint::snapshot_tree(worktree)
+                .await
+                .map_err(map_checkpoint)?;
+            if now != expected {
+                return Err(ServerError::conflict_kind(
+                    "worktree_changed",
+                    "The files changed after you reviewed them, so nothing was committed. Review \
+                     the changes again, then commit.",
+                ));
+            }
+        }
+        gh::commit_all(worktree, &workspace.title, message.as_deref())
+            .await
+            .map_err(map_gh)
     }
 
     pub async fn push_workspace(

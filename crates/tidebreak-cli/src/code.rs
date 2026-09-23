@@ -739,6 +739,26 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
                     preview.stat.files, preview.stat.insertions, preview.stat.deletions
                 );
                 print_file_changes(&preview.files, preview.truncated);
+                if !preview.affected_turns.is_empty() {
+                    eprintln!("tidebreak: it also undoes these turns of other agents:");
+                    for turn in &preview.affected_turns {
+                        eprintln!(
+                            "  {} turn {}  (session {})",
+                            turn.harness_kind.as_str(),
+                            turn.ordinal,
+                            turn.session_id
+                        );
+                    }
+                }
+                if !preview.blocked.is_empty() {
+                    eprintln!(
+                        "tidebreak: the restore would overwrite or remove files no undo can bring \
+                         back, so it refuses until they are moved:"
+                    );
+                    for path in &preview.blocked {
+                        eprintln!("  {path}");
+                    }
+                }
                 return Ok(0);
             }
             let restored = client.restore_checkpoint(workspace, target, None).await?;

@@ -2068,6 +2068,15 @@ describe("code workspace git flow", () => {
       truncated: false,
       stat: { files: 1, insertions: 3, deletions: 1, truncated: false },
       current_tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      blocked: [".env"],
+      affected_turns: [
+        {
+          session_id: "session-2",
+          turn_id: "turn-9",
+          ordinal: 4,
+          harness_kind: "codex",
+        },
+      ],
     };
     const restored = {
       restore_id: "restore-1",
@@ -2110,7 +2119,11 @@ describe("code workspace git flow", () => {
       }),
     ).resolves.toEqual(changed);
     await expect(
-      client.discardCodeWorkspaceChanges("ws-1", ["src/lib.rs"]),
+      client.discardCodeWorkspaceChanges(
+        "ws-1",
+        ["src/lib.rs"],
+        preview.current_tree,
+      ),
     ).resolves.toEqual(changed);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
@@ -2128,6 +2141,7 @@ describe("code workspace git flow", () => {
     );
     expect(JSON.parse(fetchMock.mock.calls[3]?.[1]?.body as string)).toEqual({
       paths: ["src/lib.rs"],
+      expected_tree: preview.current_tree,
     });
   });
 
@@ -2162,13 +2176,22 @@ describe("code workspace git flow", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
     await expect(
-      client.commitCodeWorkspace("ws-1", "first change"),
+      client.commitCodeWorkspace(
+        "ws-1",
+        "first change",
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      ),
     ).resolves.toEqual(commit);
     await expect(client.pushCodeWorkspace("ws-1")).resolves.toEqual(push);
     await expect(client.getCodeWorkspacePr("ws-1")).resolves.toEqual(digest);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "http://127.0.0.1/code/workspaces/ws-1/git/commit",
     );
+    // The commit carries the tree the person reviewed.
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({
+      message: "first change",
+      expected_tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    });
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       "http://127.0.0.1/code/workspaces/ws-1/git/push",
     );

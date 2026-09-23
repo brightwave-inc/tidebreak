@@ -191,6 +191,8 @@
       "insertions": 4,
       "deletions": 40,
       "truncated": false
-    }
+    },
+    "status": "partial",
+    "error": "git stopped partway"
   }
 ]

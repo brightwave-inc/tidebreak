@@ -1,3 +1,5 @@
+import type { FileChangeKind } from "../api/types";
+
 export type DiffLineKind = "add" | "del" | "context" | "hunk" | "meta";
 
 export type DiffLine = {
@@ -171,6 +173,30 @@ export type DiffHunk = {
    */
   complete: boolean;
 };
+
+/**
+ * What kind of change one file's section is, read from git's own header
+ * lines, so a revert can say what reverting it does: an added file is
+ * deleted, a renamed one goes back to its old name.
+ */
+export function fileChangeOf(group: DiffFileGroup): {
+  kind: FileChangeKind;
+  previousPath?: string;
+} {
+  let kind: FileChangeKind = "modified";
+  let previousPath: string | undefined;
+  for (const line of group.lines) {
+    if (line.kind === "hunk") break;
+    if (line.kind !== "meta") continue;
+    if (line.text.startsWith("new file mode")) kind = "added";
+    else if (line.text.startsWith("deleted file mode")) kind = "deleted";
+    else if (line.text.startsWith("rename from ")) {
+      kind = "renamed";
+      previousPath = line.text.slice("rename from ".length);
+    }
+  }
+  return previousPath === undefined ? { kind } : { kind, previousPath };
+}
 
 /**
  * Split one file's lines into its hunks.

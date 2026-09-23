@@ -12,7 +12,7 @@ import { DiffstatBadge } from "./TurnReviewCard";
 import { useLiveResource } from "./useLiveContent";
 import { HEADER_CAPTION, WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
 import type { DiffFileGroup, DiffHunk, DiffLine } from "./unifiedDiff";
-import { diffHunks, groupUnifiedDiff } from "./unifiedDiff";
+import { diffHunks, fileChangeOf, groupUnifiedDiff } from "./unifiedDiff";
 import type { RevertRequest } from "./worktreeUndo";
 
 /** Files longer than this start collapsed behind "Show diff". */
@@ -120,6 +120,7 @@ export function DiffPanel({
           {payload && <DiffstatBadge stat={payload.stat} />}
           {file && reverts && groups.length > 0 && (
             <RevertFileButton
+              group={groups[0]}
               path={file}
               reverts={reverts}
               placement="header"
@@ -235,10 +236,13 @@ function revertKey(path: string, hunk?: number): string {
  * beside it; in a file's own row it is one quiet word, like "Open".
  */
 function RevertFileButton({
+  group,
   path,
   reverts,
   placement,
 }: {
+  /** The file's section of the diff, which says what kind of change it is. */
+  group: DiffFileGroup;
   path: string;
   reverts: RevertTracker;
   placement: "header" | "row";
@@ -251,7 +255,11 @@ function RevertFileButton({
   const unavailableReason = reverts.actions.unavailableReason;
   const onClick = () =>
     reverts.run(key, () =>
-      reverts.actions.onRevertFile({ path, turnId: reverts.turnId }),
+      reverts.actions.onRevertFile({
+        path,
+        turnId: reverts.turnId,
+        ...fileChangeOf(group),
+      }),
     );
   if (placement === "header") {
     return (
@@ -391,6 +399,7 @@ function FileDiffSection({
         </h3>
         {reverts && (
           <RevertFileButton
+            group={group}
             path={group.path}
             reverts={reverts}
             placement="row"
@@ -480,7 +489,7 @@ function DiffBody({
             action={
               hunk && reverts ? (
                 <HunkRevert
-                  path={group.path}
+                  group={group}
                   hunk={hunk}
                   reverts={reverts}
                   fileReverted={fileReverted}
@@ -495,16 +504,17 @@ function DiffBody({
 }
 
 function HunkRevert({
-  path,
+  group,
   hunk,
   reverts,
   fileReverted,
 }: {
-  path: string;
+  group: DiffFileGroup;
   hunk: DiffHunk;
   reverts: RevertTracker;
   fileReverted: boolean;
 }) {
+  const path = group.path;
   const key = revertKey(path, hunk.index);
   if (reverts.turnId && (fileReverted || reverts.reverted.has(key))) {
     return <RevertedLabel />;
@@ -521,7 +531,10 @@ function HunkRevert({
       unavailableReason={reverts.actions.unavailableReason}
       onClick={() =>
         reverts.run(key, () =>
-          reverts.actions.onRevertHunk({ path, turnId: reverts.turnId }, hunk),
+          reverts.actions.onRevertHunk(
+            { path, turnId: reverts.turnId, ...fileChangeOf(group) },
+            hunk,
+          ),
         )
       }
     />

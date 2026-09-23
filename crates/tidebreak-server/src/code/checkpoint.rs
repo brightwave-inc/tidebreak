@@ -28,16 +28,20 @@
 //! [`restore`] puts the worktree back to an earlier checkpoint, and
 //! [`revert`] undoes one file's change, one hunk of it, or a file's
 //! uncommitted edits. Both change files only through git, never by writing
-//! text a client sent.
+//! text a client sent, and only through [`worktree`], which refuses to
+//! overwrite or remove anything the snapshot it starts from does not hold.
 
 mod restore;
 mod revert;
 #[cfg(all(test, unix))]
 mod testing;
+mod worktree;
 
 pub use restore::{
-    chain_resume_ref, continue_chains_after_restore, find_restore_point, preview_restore,
-    restore_point_ref, restore_worktree, AppliedRestore, RestorePreview,
+    chain_commit_message, chain_resume_ref, commit_time, continue_chains_after_restore,
+    find_restore_point, prepare_restore, preview_restore, restore_note, restore_point_ref,
+    restore_worktree, AppliedRestore, PreparedRestore, RestoreApplyError, RestorePreview,
+    RestoredTo,
 };
 pub use revert::{discard_paths, revert_change, uncommitted_paths, HunkSelector, RevertedChange};
 
@@ -154,6 +158,43 @@ impl GitPath {
                 .map(OsString::from)
                 .map_err(|_| "Git returned a path that this platform cannot represent".to_owned())
         }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// The folders that lead to this path, outermost first: `a` and `a/b`
+    /// for `a/b/c`.
+    fn ancestors(&self) -> Vec<GitPath> {
+        self.0
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte == b'/')
+            .map(|(at, _)| Self(self.0[..at].to_vec()))
+            .collect()
+    }
+
+    /// This path as a folder prefix, with its trailing slash.
+    fn child_prefix(&self) -> Vec<u8> {
+        let mut prefix = self.0.clone();
+        prefix.push(b'/');
+        prefix
+    }
+
+    /// The entry `name` inside this folder.
+    fn join_name(&self, name: &std::ffi::OsStr) -> GitPath {
+        let mut path = self.child_prefix();
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            path.extend_from_slice(name.as_bytes());
+        }
+        #[cfg(not(unix))]
+        {
+            path.extend_from_slice(name.to_string_lossy().as_bytes());
+        }
+        Self(path)
     }
 }
 
@@ -573,7 +614,16 @@ pub async fn produce_diff(
 ) -> Result<BoundedDiff, CheckpointError> {
     if let Some(path) = file {
         let path = GitPath::from_wire(path)?;
-        let paths = std::slice::from_ref(&path);
+        // A renamed file is diffed with its old path too, so git pairs the
+        // two instead of reading the new one as added.
+        let mut paths = vec![path.clone()];
+        if let Some(previous) = revert::find_change(worktree, from, to, &path)
+            .await?
+            .and_then(|change| change.previous_path)
+        {
+            paths.push(previous);
+        }
+        let paths = paths.as_slice();
         let (raw, read_truncated) = git_bytes_with_literal_paths_bounded(
             worktree,
             &review_diff_args(from, to),
@@ -619,7 +669,7 @@ pub async fn produce_diff(
     let paths: Vec<_> = listed
         .files
         .iter()
-        .map(|entry| entry.path.clone())
+        .flat_map(|entry| std::iter::once(entry.path.clone()).chain(entry.previous_path.clone()))
         .collect();
     let (raw, read_truncated) = git_bytes_with_literal_paths_bounded(
         worktree,

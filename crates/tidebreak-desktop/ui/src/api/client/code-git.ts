@@ -152,9 +152,16 @@ export function withCodeGitApi<TBase extends Constructor<HttpCore>>(
       Pick<CodeWorkspaceMergeRequest, "target" | "expected_head_sha">
     >();
 
+    /**
+     * Commit every change in the worktree. `expectedTree` is the
+     * `worktree_tree` of the file list the person reviewed: when the worktree
+     * moved since, the server answers `409 worktree_changed` and commits
+     * nothing.
+     */
     async commitCodeWorkspace(
       workspaceId: string,
       message?: string,
+      expectedTree?: string,
     ): Promise<CodeCommitSnapshot> {
       return requireParsed(
         parseCodeCommit(
@@ -163,7 +170,10 @@ export function withCodeGitApi<TBase extends Constructor<HttpCore>>(
             {
               method: "POST",
               headers: this.headers(true),
-              body: JSON.stringify(message ? { message } : {}),
+              body: JSON.stringify({
+                ...(message ? { message } : {}),
+                ...(expectedTree ? { expected_tree: expectedTree } : {}),
+              }),
             },
           ),
         ),
@@ -573,9 +583,15 @@ export function withCodeGitApi<TBase extends Constructor<HttpCore>>(
     }
 
     /** Put files back to the last commit, dropping uncommitted changes. */
+    /**
+     * Put files back to their last commit. Name each file by the path the
+     * Changes list shows; the server puts a renamed file back under its
+     * committed name. `expectedTree` is the list's `worktree_tree`.
+     */
     async discardCodeWorkspaceChanges(
       workspaceId: string,
       paths: string[],
+      expectedTree?: string,
     ): Promise<CodeWorktreeChange> {
       return requireParsed(
         parseCodeWorktreeChange(
@@ -584,7 +600,10 @@ export function withCodeGitApi<TBase extends Constructor<HttpCore>>(
             {
               method: "POST",
               headers: this.headers(true),
-              body: JSON.stringify({ paths }),
+              body: JSON.stringify({
+                paths,
+                ...(expectedTree ? { expected_tree: expectedTree } : {}),
+              }),
             },
           ),
         ),
