@@ -175,7 +175,7 @@ export function WorkspaceSessionStartingState({
           className="rounded-xl border border-border bg-background px-3 py-3"
           aria-hidden
         >
-          <p className="text-sm text-muted-foreground/70">
+          <p className="text-sm text-muted-foreground">
             {startup.hasFirstMessage
               ? "Your first message is queued."
               : "The composer is almost ready."}
@@ -223,9 +223,7 @@ function StartupStep({
         <span
           className={cn(
             "text-sm",
-            state === "complete"
-              ? "text-foreground"
-              : "text-muted-foreground/65",
+            state === "complete" ? "text-foreground" : "text-muted-foreground",
           )}
         >
           {label}

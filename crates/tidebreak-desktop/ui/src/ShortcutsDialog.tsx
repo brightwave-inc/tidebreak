@@ -20,7 +20,7 @@ import {
 
 function Keycap({ children }: { children: string }) {
   return (
-    <kbd className="inline-flex h-6 min-w-6 items-center justify-center rounded border bg-muted/60 px-1.5 font-sans text-2xs leading-none font-medium text-foreground/80">
+    <kbd className="inline-flex h-6 min-w-6 items-center justify-center rounded border bg-muted/60 px-1.5 font-sans text-2xs leading-none font-medium text-foreground">
       {children}
     </kbd>
   );

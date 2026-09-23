@@ -31,13 +31,55 @@ const RAW_PALETTE =
 /** An arbitrary font size, e.g. `text-[13px]` — the scale is pinned. */
 const ARBITRARY_TEXT_SIZE = /\btext-\[[0-9]/;
 
+/**
+ * Text dimmed with an alpha below 90%, e.g. `text-muted-foreground/70`. The
+ * alpha took secondary text to 2.5–3.8:1. Every text token already clears
+ * 4.5:1 (colorContrast.test.ts), so dimmer text is a token, not an alpha.
+ * Size rungs such as `text-sm/6` are line heights, not alpha.
+ */
+const DIMMED_TEXT =
+  /\btext-(?!(?:2xs|xs|sm|md|base|lg|[2-9]?xl)\/)[a-z][\w-]*\/(?:[0-8]?\d(?!\d)|\[)/;
+
+/** Class lists that dim ink on purpose, outside the app's own text. */
+const DIMMED_TEXT_ALLOWLIST = new Set([
+  // Syntax punctuation in the JSON and XML document viewers.
+  "components/document/json-viewer.tsx",
+  "components/document/xml-viewer.tsx",
+  // A mock third-party web page drawn inside the embedded browser story.
+  "stories/Browser.stories.tsx",
+]);
+
+/**
+ * The class list a match sits in: the quoted string around it. A list that
+ * sizes a glyph with `size-*` is an icon. Icons are marks, not text; the
+ * contrast test holds the mark tokens to 3:1.
+ */
+function isIconClassList(line: string, index: number): boolean {
+  let start = 0;
+  let end = line.length;
+  for (const quote of line.matchAll(/["'`]/g)) {
+    const at = quote.index ?? 0;
+    if (at < index) start = at + 1;
+    else {
+      end = at;
+      break;
+    }
+  }
+  return /(?:^|\s)size-/.test(line.slice(start, end));
+}
+
 function sourceFiles(): string[] {
   return readdirSync(SRC, { recursive: true, encoding: "utf8" })
     .filter((path) => /\.(ts|tsx)$/.test(path) && !path.includes("generated/"))
     .map((path) => path.replaceAll("\\", "/"));
 }
 
-function offenders(pattern: RegExp, skip?: ReadonlySet<string>): string[] {
+function offenders(
+  pattern: RegExp,
+  skip?: ReadonlySet<string>,
+  exempt?: (line: string, index: number) => boolean,
+): string[] {
+  const everywhere = new RegExp(pattern.source, `${pattern.flags}g`);
   const hits: string[] = [];
   for (const file of sourceFiles()) {
     if (skip?.has(file)) continue;
@@ -46,7 +88,9 @@ function offenders(pattern: RegExp, skip?: ReadonlySet<string>): string[] {
     }
     const lines = readFileSync(join(SRC, file), "utf8").split("\n");
     lines.forEach((line, index) => {
-      const match = pattern.exec(line);
+      const match = [...line.matchAll(everywhere)].find(
+        (candidate) => !exempt?.(line, candidate.index ?? 0),
+      );
       if (match) hits.push(`${file}:${index + 1}  ${match[0]}`);
     });
   }
@@ -82,6 +126,14 @@ describe("styles contract (see DESIGN.md)", () => {
       "Color state through the status tones (statusTone.ts, Badge) and " +
         "identity through --icon-*. See DESIGN.md; allowlist a genuine " +
         "document-viewer convention here with a reason.",
+    ).toEqual([]);
+  });
+
+  it("dims text with a token, not an alpha below 90%", () => {
+    expect(
+      offenders(DIMMED_TEXT, DIMMED_TEXT_ALLOWLIST, isIconClassList),
+      "Text that states something takes a text token at full strength: " +
+        "text-muted-foreground, or a status -foreground rung. See DESIGN.md.",
     ).toEqual([]);
   });
 

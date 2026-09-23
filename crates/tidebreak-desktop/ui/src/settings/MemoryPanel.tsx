@@ -197,14 +197,14 @@ export function MemoryPanel({
         <>
           {!settings.enabled ? (
             <SettingsStatus
-              tone="disabled"
+              tone="neutral"
               label="Memory is off"
               description="Nothing is saved or used while it is off. Anything already learned is kept."
             />
           ) : !settings.capture_ready ? (
             <div className="flex flex-col items-stretch gap-2">
               <SettingsStatus
-                tone="not-configured"
+                tone="warning"
                 label="Memory saves only during conversations"
                 description="The end-of-turn review needs a small utility model, and no configured provider serves one. Add a provider, and Tidebreak also reviews each turn for anything worth keeping."
               />
@@ -222,7 +222,7 @@ export function MemoryPanel({
             </div>
           ) : nearlyFull ? (
             <SettingsStatus
-              tone="not-configured"
+              tone="warning"
               label="Memory is nearly full"
               description="Tidebreak merges overlapping entries on its own. Forgetting what no longer matters helps."
             />

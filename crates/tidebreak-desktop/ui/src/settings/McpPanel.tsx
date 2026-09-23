@@ -24,6 +24,7 @@ import {
   SettingsField,
   SettingsSection,
   SettingsStatus,
+  type SettingsStatusTone,
 } from "./primitives";
 import {
   parseMcpImportText,
@@ -207,9 +208,7 @@ export function McpOAuthControl({
             {busy ? "Connecting…" : "Reconnect"}
           </Button>
           {error ? (
-            <span className="text-xs text-critical-foreground break-words">
-              {error}
-            </span>
+            <span className="text-xs text-critical break-words">{error}</span>
           ) : null}
         </span>
       );
@@ -232,9 +231,7 @@ export function McpOAuthControl({
             {busy ? "Connecting…" : "Try again"}
           </Button>
           {error ? (
-            <span className="text-xs text-critical-foreground break-words">
-              {error}
-            </span>
+            <span className="text-xs text-critical break-words">{error}</span>
           ) : null}
         </span>
       );
@@ -1758,10 +1755,18 @@ function healthLabel(health: McpServerInfo["health"]): string {
   }
 }
 
-function healthTone(
-  health: McpServerInfo["health"],
-): "ready" | "not-configured" | "disabled" {
-  if (health === "healthy") return "ready";
-  if (health === "disabled") return "disabled";
-  return "not-configured";
+/** A server that failed is critical; one still connecting or never verified
+ * is not an error yet. */
+function healthTone(health: McpServerInfo["health"]): SettingsStatusTone {
+  switch (health) {
+    case "healthy":
+      return "ready";
+    case "degraded":
+      return "critical";
+    case "reconnecting":
+      return "warning";
+    case "initializing":
+    case "disabled":
+      return "neutral";
+  }
 }

@@ -139,28 +139,46 @@ export function SettingsSection({
 }
 
 /**
+ * What a settings verdict means, in the status vocabulary from DESIGN.md:
+ * `ready` works, `neutral` is off or not set up, `warning` needs a look, and
+ * `critical` is a real failure. An optional feature nobody has set up is
+ * neutral, not an error.
+ */
+export type SettingsStatusTone = "ready" | "neutral" | "warning" | "critical";
+
+const STATUS_NOTICE: Record<SettingsStatusTone, string> = {
+  ready: "notice-success",
+  neutral: "",
+  warning: "notice-warning",
+  critical: "notice-critical",
+};
+
+/**
  * The readiness line a settings surface leads with: a short verdict and the one
- * sentence that says what to do about it. The tone carries the only colour —
- * green for ready, red for something the user still has to supply — so a panel
- * never has to reach for the class itself.
+ * sentence that says what to do about it. It reads as a notice: a neutral
+ * surface with the tone on its leading edge and icon, so a panel never has to
+ * reach for the class itself.
  */
 export function SettingsStatus({
   tone,
   label,
   description,
 }: {
-  tone: "ready" | "not-configured" | "disabled";
+  tone: SettingsStatusTone;
   label: string;
   description: ReactNode;
 }) {
   const Icon =
     tone === "ready"
       ? CircleCheck
-      : tone === "not-configured"
-        ? CircleAlert
-        : CircleMinus;
+      : tone === "neutral"
+        ? CircleMinus
+        : CircleAlert;
   return (
-    <div className={`settings-status is-${tone}`} role="status">
+    <div
+      className={`settings-status ${STATUS_NOTICE[tone]}`.trim()}
+      role="status"
+    >
       <Icon className="settings-status-icon" aria-hidden="true" />
       <span className="settings-status-copy">
         <strong>{label}</strong>
@@ -170,12 +188,22 @@ export function SettingsStatus({
   );
 }
 
+/**
+ * An error line on a settings surface, in the critical ink that reads as text
+ * on the page in both themes. `String(err)` puts the error's class name in
+ * front of the message ("Error: …", "HttpError: …"); the reader needs only
+ * the message.
+ */
 export function SettingsError({ children }: { children: ReactNode }) {
   return (
-    <p className="text-sm text-critical-foreground break-words" role="alert">
-      {children}
+    <p className="text-sm text-critical break-words" role="alert">
+      {typeof children === "string" ? withoutErrorName(children) : children}
     </p>
   );
+}
+
+function withoutErrorName(message: string): string {
+  return message.replace(/^(?:[A-Z][A-Za-z]*)?Error:\s*/, "") || message;
 }
 
 /**

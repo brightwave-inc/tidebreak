@@ -3,8 +3,10 @@
 The tokens live in `src/styles.css` (`:root`, `.dark`, `@theme inline`); this
 file says what they mean and the rules that keep the app coherent. The rules
 that can be checked mechanically are checked: `src/stylesContract.test.ts`
-fails the build on arbitrary font sizes and raw palette classes, so the
-vocabulary below is the whole vocabulary.
+fails the build on arbitrary font sizes, raw palette classes, and text dimmed
+with an alpha, and `src/colorContrast.test.ts` fails it on any color pair
+below WCAG contrast in either theme, so the vocabulary below is the whole
+vocabulary.
 
 Storybook shows the system: `Foundations/Palette`, `Foundations/Typography`,
 `Foundations/Surfaces`, and `Foundations/Controls and status`. Run
@@ -49,6 +51,33 @@ quad (`--x`, `--x-foreground`, `--x-foreground-muted`, `--x-background`,
 | `info` | in flight but waiting on something external |
 | `merged` | settled outcome distinct from success (GitHub's purple) |
 | `live` | an agent is doing work right now |
+
+Each member of the quad has one job, and `src/colorContrast.test.ts` holds
+every pair to WCAG contrast in both themes:
+
+| Rung | Job | Floor |
+| --- | --- | --- |
+| `--x` | the mark: a glyph, dot, or fill that carries the state alone | 3:1 on every surface and row |
+| `--x-foreground` | the text rung: labels, and icons sitting beside them | 4.5:1 on every surface, row, and its own tint |
+| `--x-foreground-muted` | the text rung at 90%, for chips | 4.5:1 on the same grounds |
+| `--x-background` | a quiet tint just off the canvas | chroma 0.06 or less |
+| `--x-border` | the tone's outline | — |
+
+The dark quads are derived, not the light quads swapped. Dark text sits at
+L 0.80 with enough chroma to keep its hue, the tint sits at L 0.28 just above
+the canvas, and the outline is the mark at 60%. A swapped quad turned dark
+text near-white and dark tints into saturated slabs.
+
+The critical mark doubles as error ink: it clears 4.5:1 as text on every
+surface and row, so `text-critical` can carry an error message on the page.
+`destructive` is shadcn's name for the same red, so `text-destructive` does
+too. No other mark reads as text; put text in its `-foreground` rung.
+
+Dim text with a token, never an alpha. `text-muted-foreground` at full
+strength is the secondary ink, and `stylesContract.test.ts` rejects a text
+color below 90% alpha. Icons are marks, not text, and are exempt. An
+`opacity-*` utility on text that says something is the same mistake, even
+though no test catches it.
 
 In code mode, never pick rungs by hand: `src/code/statusTone.ts` is the one
 place a state becomes a color, and its maps (`STATUS_TEXT`, `STATUS_MARK`,
@@ -116,8 +145,9 @@ whole radius vocabulary. Status chips and badges are pills; cards are
 
 Controls sit on the two pinned heights, `h-control` (32px) and
 `h-control-sm` (28px). The primary button is neutral (near-black in light,
-near-white in dark); `destructive` is the only chromatic button. Focus is
-the `ring` token, darker than stock so it survives hovered rows.
+near-white in dark); `destructive` is the only chromatic button: critical ink
+on the critical tint. Every button, destructive included, focuses with the
+`ring` token, which is darker than stock so it survives hovered rows.
 
 ## Don't
 
@@ -126,14 +156,17 @@ the `ring` token, darker than stock so it survives hovered rows.
 - Don't put drop shadows on resting cards.
 - Don't use raw palette classes or arbitrary font sizes; the contract test
   fails both.
+- Don't dim text with an alpha or an opacity; use a text token.
 - Don't exceed weight 600.
 - Don't hand-pick status rungs in code mode; go through `statusTone.ts`.
+- Don't paint a feature nobody has set up as critical.
 
 ## Extending the system
 
 A new status tone is a five-member quad in both themes in `styles.css`, an
 entry in each `@source inline(...)` line, a row in the `statusTone.ts` maps,
-a `Badge` variant, and a swatch row in `Foundations/Palette`. A new scale
+a `Badge` variant, a swatch row in `Foundations/Palette`, and an entry in the
+tone list of `colorContrast.test.ts`. A new scale
 rung is a `--text-*` pair in `styles.css` plus its row here and in
 `Foundations/Typography`. If a rule in this file and the code disagree, fix
 one of them in the same change.
@@ -179,6 +212,21 @@ Save each field when its value changes. Do not add Save or Cancel buttons.
 Use a `Switch` for binary toggles and a `Select` for short lists. Use an
 async validation pattern for text that must be checked, such as a workspace
 URL.
+
+`SettingsStatus` is the verdict a settings surface leads with. It renders as a
+notice, a neutral surface with the tone on its leading edge and icon, and it
+speaks the status vocabulary:
+
+| Tone | Means | Icon |
+| --- | --- | --- |
+| `ready` | set up and working | `CircleCheck`, success |
+| `neutral` | off, or not set up yet | `CircleMinus`, muted |
+| `warning` | needs a look: half working, nearly full, missing a key | `CircleAlert`, warning |
+| `critical` | a real failure | `CircleAlert`, critical |
+
+An optional feature nobody has set up is `neutral`, never red. `SettingsError`
+prints an error in critical ink and drops the `Error:` prefix `String(err)`
+adds.
 
 ### Cards and rows
 

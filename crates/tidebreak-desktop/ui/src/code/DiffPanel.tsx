@@ -312,13 +312,13 @@ function DiffLineRow({ line }: { line: DiffLine }) {
       )}
     >
       <span
-        className="text-muted-foreground/80 bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
+        className="text-muted-foreground bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
         data-diff-gutter="old"
       >
         {line.oldNo ?? ""}
       </span>
       <span
-        className="text-muted-foreground/80 bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
+        className="text-muted-foreground bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
         data-diff-gutter="new"
       >
         {line.newNo ?? ""}

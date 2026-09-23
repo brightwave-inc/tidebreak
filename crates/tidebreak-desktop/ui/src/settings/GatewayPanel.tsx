@@ -480,7 +480,7 @@ function ManagedGatewayPanel({
         ) : (
           <>
             <SettingsStatus
-              tone="not-configured"
+              tone="neutral"
               label="Not signed in"
               description={
                 origin === null
@@ -760,7 +760,7 @@ function MachineSections({
           />
         ) : (
           <SettingsStatus
-            tone="disabled"
+            tone="neutral"
             label="Working on this computer"
             description="Your conversations and agents run inside this app, and stop when it does."
           />

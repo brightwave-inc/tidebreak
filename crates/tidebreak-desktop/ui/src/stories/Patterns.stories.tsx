@@ -24,7 +24,12 @@ import {
 import { ToolCardShell } from "@/ToolCardShell";
 import { ApprovalCard } from "@/ApprovalCard";
 import { ChatStatusChip } from "@/ChatStatusChip";
-import { SettingsSection, SettingsField } from "@/settings/primitives";
+import {
+  SettingsError,
+  SettingsField,
+  SettingsSection,
+  SettingsStatus,
+} from "@/settings/primitives";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { execPreview } from "./fixtures";
@@ -77,6 +82,37 @@ function SettingsComposition() {
   );
 }
 
+/** One verdict in each tone, then an error as `String(err)` hands it over. */
+function SettingsVerdicts() {
+  return (
+    <>
+      <SettingsStatus
+        tone="ready"
+        label="Ready"
+        description="The selected voice input model is ready to transcribe recordings."
+      />
+      <SettingsStatus
+        tone="neutral"
+        label="Not signed in"
+        description="Sign in to a model gateway to use the models your team shares."
+      />
+      <SettingsStatus
+        tone="warning"
+        label="Memory is nearly full"
+        description="Tidebreak merges overlapping entries on its own. Forgetting what no longer matters helps."
+      />
+      <SettingsStatus
+        tone="critical"
+        label="Needs attention"
+        description="The server exited before it answered: command not found."
+      />
+      <SettingsError>
+        {String(new Error("The gateway refused the sign-in link."))}
+      </SettingsError>
+    </>
+  );
+}
+
 function PatternsShowcase() {
   return (
     <div className="mx-auto grid w-full max-w-5xl gap-12 p-8">
@@ -95,6 +131,23 @@ function PatternsShowcase() {
         </div>
         <div className="max-w-2xl">
           <SettingsComposition />
+        </div>
+      </section>
+
+      <section className="grid gap-4">
+        <div className="max-w-xl">
+          <h2 className="text-base font-semibold tracking-tight">
+            Settings verdicts
+          </h2>
+          <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+            A settings surface leads with one verdict. Ready is set up and
+            working; neutral is off or not set up yet; warning needs a look;
+            critical is a real failure. An optional feature nobody has set up is
+            neutral, never red. Errors print in critical ink.
+          </p>
+        </div>
+        <div className="grid max-w-2xl gap-3">
+          <SettingsVerdicts />
         </div>
       </section>
 
@@ -399,3 +452,12 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const CanonicalPatterns: Story = {};
+
+/** The four settings verdicts and an error line, on their own. */
+export const SettingsStatuses: Story = {
+  render: () => (
+    <div className="mx-auto grid w-full max-w-2xl gap-3 p-8">
+      <SettingsVerdicts />
+    </div>
+  ),
+};

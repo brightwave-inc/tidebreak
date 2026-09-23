@@ -129,7 +129,7 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
     >
       <SettingsSection>
         <SettingsStatus
-          tone={ready ? "ready" : "not-configured"}
+          tone={ready ? "ready" : "neutral"}
           label={ready ? "Ready" : "Setup required"}
           description={
             ready
@@ -232,7 +232,7 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
 
         {selectedLocal?.state === "unavailable" && (
           <SettingsStatus
-            tone="disabled"
+            tone="neutral"
             label="Not available here"
             description={localModelsUnavailableCopy()}
           />
@@ -242,7 +242,7 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
       {info && !info.openai_ready && !info.gemini_ready && (
         <SettingsSection title="Cloud models">
           <SettingsStatus
-            tone="not-configured"
+            tone="neutral"
             label="No cloud voice model configured"
             description="OpenAI gpt-4o-transcribe and Google Gemini appear in the picker once their provider is enabled and credentialed."
           />

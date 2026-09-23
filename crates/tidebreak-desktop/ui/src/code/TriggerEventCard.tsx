@@ -128,7 +128,7 @@ export function TriggerEventCard({
         )}
         <div>
           <p className="text-muted-foreground mb-0.5">Delivered to the agent</p>
-          <p className="text-foreground/80 break-words whitespace-pre-wrap">
+          <p className="text-foreground break-words whitespace-pre-wrap">
             {message}
           </p>
         </div>
