@@ -76,14 +76,14 @@ updates and Debian installs receive `.deb` updates.
 ## Build from source
 
 You need the Rust toolchain pinned in `rust-toolchain.toml` (rustup picks it
-up automatically), [pnpm](https://pnpm.io), the Tauri CLI, and CMake.
+up automatically), [pnpm](https://pnpm.io), and the Tauri CLI. Local voice
+transcription runs in a separately published `tidebreak-whisper` helper the
+desktop downloads on first use, so building the desktop app does not require
+CMake.
 
 ```sh
 cargo install tauri-cli --version "^2"
 ```
-
-CMake is required because the desktop app compiles a local speech-to-text
-engine (`brew install cmake` on macOS; the `cmake` package on Linux).
 
 Then, from a clone of the repository:
 
@@ -112,18 +112,53 @@ Inside it:
 | Item | What it holds |
 | --- | --- |
 | `tidebreak.db` | The SQLite database: chats, messages, turns, event history, document metadata, and canonical text |
+| `tidebreak-schema.json` | Which schema pin this profile holds |
+| `orphaned-code-worktrees.json` | Code worktrees a reset left on disk |
 | `blobs/` | The original bytes of every document you attached |
+| `logs/` | `tidebreak.log` and the structured diagnostics log |
+| `listen.json` | Loopback URL and bearer for `--attach` while the server is running |
+| `tools/` | On-demand installs: whisper helper, Node, LibreOffice, coding engines |
 | `tidebreak.lock` | Proof that one process owns this directory |
 
-Provider API keys are **not** in that directory. They go to your OS credential
-store — Login Keychain on macOS, Credential Manager on Windows, or Secret
-Service on Linux — under the service name `tidebreak`.
+Code worktrees live outside that directory, by default under
+`~/Tidebreak/workspaces`. You can change the root in settings; existing
+workspaces stay where they are.
+
+Provider API keys are **not** in the application data directory. They go to
+your OS credential store — Login Keychain on macOS, Credential Manager on
+Windows, or Secret Service on Linux — under the service name `tidebreak`.
 
 <Callout type="warn">
-While Tidebreak is pre-1.0, opening a database written by an older build can
-rebuild it from scratch rather than migrate it. Do not treat this directory as
-durable storage for anything you cannot lose. Export what you care about.
+Desktop upgrades from v0.61.0 onward keep local data. Opening a database from
+v0.60.0 or earlier still rebuilds the SQLite profile once. Export what you
+cannot lose until you are on a post-pin build.
 </Callout>
+
+## Uninstall
+
+Delete the app, then the data Tidebreak left behind.
+
+On macOS:
+
+1. Drag `/Applications/Tidebreak.app` to the Trash.
+2. Delete `~/Library/Application Support/io.brightwave.tidebreak`.
+3. Delete `~/Tidebreak/workspaces` if you used code mode and do not need those
+   worktrees.
+4. Remove keychain items for the service `tidebreak`. In Keychain Access,
+   search for `tidebreak`, or list them with
+   `security find-generic-password -s tidebreak`.
+
+On Windows, remove the app from **Settings → Apps**, then delete
+`%APPDATA%\io.brightwave.tidebreak` and any worktrees you created. Credentials
+live in Credential Manager under `tidebreak`.
+
+On Linux, remove the AppImage or Debian package, then delete
+`~/.local/share/io.brightwave.tidebreak` and any worktrees. Credentials live
+in Secret Service under `tidebreak`.
+
+A debug build uses `io.brightwave.tidebreak.dev` instead of
+`io.brightwave.tidebreak`. Do not delete a release profile if you only meant
+to wipe a development run.
 
 ## Running it headless
 
