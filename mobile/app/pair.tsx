@@ -4,6 +4,7 @@ import * as WebBrowser from "expo-web-browser";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
+import { useThemeColors } from "../src/useThemeColors";
 import { Button } from "../src/components/Controls";
 import { Screen, Body, ErrorText } from "../src/components/Screen";
 import { attachFailureParams, autoAttach } from "../src/lib/autoAttach";
@@ -62,6 +63,7 @@ type Phase = "idle" | "authorizing" | "approving" | "attaching";
  * because there is no per-path difference left to express by then.
  */
 export default function PairScreen() {
+  const colors = useThemeColors();
   const router = useRouter();
   const params = useLocalSearchParams<{ gateway?: string; session?: string }>();
   const incomingUrl = Linking.useURL();
@@ -281,7 +283,7 @@ export default function PairScreen() {
         autoCorrect={false}
         keyboardType="url"
         placeholder="https://gateway.example"
-        placeholderTextColor="#6b7280"
+        placeholderTextColor={colors.mutedForeground}
         value={url}
         onChangeText={setUrl}
         className="rounded-lg border border-border bg-background px-3 py-3 text-base text-foreground"

@@ -23,6 +23,7 @@ import {
 import { fetchIdentity } from "../src/lib/gateway";
 import { RESOURCE_CONTROL } from "../src/lib/resource";
 import { consoleSectionsFor, sectionsFor } from "../src/lib/sections";
+import { useThemeColors } from "../src/useThemeColors";
 import { attentionSessionCount } from "../src/lib/updates";
 import { connections } from "../src/session/runtime";
 import {
@@ -102,6 +103,7 @@ function SectionRow({
 }
 
 export default function HomeScreen() {
+  const colors = useThemeColors();
   const router = useRouter();
   const isFocused = useIsFocused();
   const connection = useActiveConnection();
@@ -287,7 +289,7 @@ export default function HomeScreen() {
               {machineHost} · {live ? "Live" : "Reconnecting…"}
             </Text>
           </View>
-          <Feather name="settings" size={18} color="#697386" />
+          <Feather name="settings" size={18} color={colors.mutedForeground} />
         </Pressable>
 
         <View className="flex-row gap-3">

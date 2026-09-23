@@ -21,14 +21,15 @@ export default function WelcomeScreen() {
   return (
     <Screen title="Tidebreak">
       <Body>
-        Pair this phone once with a Model Gateway deployment. The app then
-        attaches to the hosted Tidebreak machine that deployment advertises,
-        using the same HTTP wire as desktop.
+        This is a preview. Use it to watch sessions, answer approvals, and
+        steer runs on a Model Gateway deployment or a Tidebreak machine you
+        host yourself. A local-only desktop install has nothing this phone can
+        reach.
       </Body>
       <Body>
-        Tokens stay in the device secure store, one credential per connection.
-        Refresh tokens rotate, and this client only asks for the resources the
-        gateway says it may hold.
+        You need either a gateway URL you can sign in to, or a machine URL and
+        token from a self-hosted Tidebreak. Pair once; the phone keeps the
+        connection on this device.
       </Body>
       <Pressable
         className="rounded-lg bg-primary px-4 py-3"
@@ -36,6 +37,14 @@ export default function WelcomeScreen() {
       >
         <Text className="text-center text-base font-medium text-primary-foreground">
           Pair a gateway
+        </Text>
+      </Pressable>
+      <Pressable
+        className="rounded-lg border border-border bg-background px-4 py-3"
+        onPress={() => router.push("/attach-machine")}
+      >
+        <Text className="text-center text-base font-medium text-foreground">
+          Connect your own machine
         </Text>
       </Pressable>
       <View />

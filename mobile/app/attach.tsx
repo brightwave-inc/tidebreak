@@ -10,11 +10,13 @@ import {
   type AttachStage,
 } from "../src/lib/autoAttach";
 import { connections } from "../src/session/runtime";
+import { useThemeColors } from "../src/useThemeColors";
 import { useActiveGatewayConnection } from "../src/session/store";
 
 type Stage = "idle" | AttachStage;
 
 export default function AttachScreen() {
+  const colors = useThemeColors();
   const router = useRouter();
   const params = useLocalSearchParams<{
     failure?: string | string[];
@@ -76,7 +78,7 @@ export default function AttachScreen() {
         autoCorrect={false}
         keyboardType="url"
         placeholder="https://tidebreak.example"
-        placeholderTextColor="#6b7280"
+        placeholderTextColor={colors.mutedForeground}
         value={url}
         onChangeText={setUrl}
         className="rounded-lg border border-border bg-background px-3 py-3 text-base text-foreground"

@@ -22,6 +22,7 @@ import {
   ChatUserQuestionsCard,
 } from "../../src/components/ChatPromptCards";
 import { Button, LoadingState } from "../../src/components/Controls";
+import { useThemeColors } from "../../src/useThemeColors";
 import { ErrorText } from "../../src/components/Screen";
 import {
   addOptimisticMobileChatQueuedTurn,
@@ -49,6 +50,7 @@ import { useActiveMachine } from "../../src/session/store";
 import { useMachineClient } from "../../src/session/useMachineClient";
 
 export default function ChatDetailScreen() {
+  const colors = useThemeColors();
   const router = useRouter();
   const isFocused = useIsFocused();
   const params = useLocalSearchParams<{ id?: string; title?: string }>();
@@ -445,7 +447,7 @@ export default function ChatDetailScreen() {
                 editable={!sending}
                 accessibilityLabel="Message"
                 placeholder="Message this chat"
-                placeholderTextColor="#697386"
+                placeholderTextColor={colors.mutedForeground}
                 textAlignVertical="top"
                 className="max-h-40 min-h-20 rounded-xl border border-border bg-page-background px-3 py-3 text-base text-foreground"
                 onChangeText={(next) => {
