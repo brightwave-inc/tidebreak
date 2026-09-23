@@ -8,9 +8,16 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 
+import type {
+  AnswerVersions,
+  LatestTurnSideEffects,
+} from "@/ChatTranscriptPresentation";
+import type { TurnActions } from "@/MessageActions";
 import {
   MessageList,
   TRANSCRIPT_TURNS_SHOWN,
+  TURN_CANCELLED_NOTICE,
+  type BranchOrigin,
   type ChatMessage,
   type RetryableTurn,
 } from "@/MessageList";
@@ -29,6 +36,10 @@ type ConversationTranscriptProps = {
   onRetryTurn?: (turn: RetryableTurn) => void;
   hasEarlierMessages?: boolean;
   onLoadEarlierMessages?: () => Promise<void>;
+  turnActions?: TurnActions;
+  answerVersions?: AnswerVersions;
+  latestSideEffects?: LatestTurnSideEffects | null;
+  branchOrigin?: BranchOrigin;
 };
 
 function withRouter(children: ReactNode) {
@@ -50,6 +61,10 @@ function ConversationTranscript({
   onRetryTurn,
   hasEarlierMessages,
   onLoadEarlierMessages,
+  turnActions,
+  answerVersions,
+  latestSideEffects,
+  branchOrigin,
 }: ConversationTranscriptProps) {
   const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(
     null,
@@ -103,6 +118,10 @@ function ConversationTranscript({
           onRetryTurn={onRetryTurn}
           hasEarlierMessages={hasEarlierMessages}
           onLoadEarlierMessages={onLoadEarlierMessages}
+          turnActions={turnActions}
+          answerVersions={answerVersions}
+          latestSideEffects={latestSideEffects}
+          branchOrigin={branchOrigin}
         />
         <TranscriptNavigation
           entries={navigationEntries}
@@ -650,4 +669,310 @@ export const EarlierPageFailed: Story = {
       await within(canvasElement).findByRole("alert"),
     ).toHaveTextContent("Could not load earlier messages");
   },
+};
+
+/**
+ * A settled two-turn exchange, the shape every message action works on. Each
+ * message names its turn, which is what an action sends back.
+ */
+const actionMessages: ChatMessage[] = [
+  {
+    id: "actions-user-1",
+    role: "user",
+    turnId: "actions-turn-1",
+    text: "Draft a two-day coastal walk from Porthleven to Mousehole.",
+    createdAt: "2026-09-20T09:30:00.000Z",
+  },
+  {
+    id: "actions-assistant-1",
+    role: "assistant",
+    turnId: "actions-turn-1",
+    text: "**Day one** runs from Porthleven to Marazion along the cliffs, about 12 miles. **Day two** crosses to Penzance and follows the bay to Mousehole, about 8 miles.",
+    sources: [],
+    createdAt: "2026-09-20T09:30:14.000Z",
+  },
+  {
+    id: "actions-user-2",
+    role: "user",
+    turnId: "actions-turn-2",
+    text: "Make day two shorter and end somewhere with a café.",
+    createdAt: "2026-09-20T09:31:00.000Z",
+  },
+  {
+    id: "actions-assistant-2",
+    role: "assistant",
+    turnId: "actions-turn-2",
+    text: "Day two now stops at Newlyn after 5 miles. The harbor has two cafés that open early, and the bus back to Penzance leaves every half hour.",
+    sources: [],
+    createdAt: "2026-09-20T09:31:12.000Z",
+  },
+];
+
+const storyTurnActions: TurnActions = {
+  onRegenerate: fn(),
+  onEdit: fn(),
+  onBranch: fn(),
+  retryModels: [
+    {
+      label: "Anthropic",
+      models: [
+        { key: "anthropic::claude-opus-5", label: "Claude Opus 5" },
+        { key: "anthropic::claude-sonnet-5", label: "Claude Sonnet 5" },
+      ],
+    },
+    {
+      label: "OpenAI",
+      models: [{ key: "openai::gpt-5.6", label: "GPT-5.6" }],
+    },
+  ],
+  currentModelKey: "anthropic::claude-opus-5",
+  pending: false,
+};
+
+/** Two earlier answers to the latest message, oldest first. */
+const earlierAnswers: AnswerVersions = {
+  "actions-turn-2": [
+    {
+      turnId: "actions-turn-2a",
+      messages: [
+        {
+          id: "actions-version-a",
+          role: "assistant",
+          turnId: "actions-turn-2a",
+          text: "Day two now ends in Penzance after 4 miles, at the promenade café.",
+          sources: [],
+          createdAt: "2026-09-20T09:30:40.000Z",
+        },
+      ],
+    },
+    {
+      turnId: "actions-turn-2b",
+      messages: [
+        {
+          id: "actions-version-b",
+          role: "assistant",
+          turnId: "actions-turn-2b",
+          text: "Day two stops at Newlyn fish market; the café there serves lunch from 11.",
+          sources: [],
+          createdAt: "2026-09-20T09:30:55.000Z",
+        },
+      ],
+    },
+  ],
+};
+
+/**
+ * The latest answer keeps its actions in view: Copy, Regenerate with Retry
+ * with model beside it, Branch from here. Older messages show theirs on hover
+ * and keyboard focus.
+ */
+export const MessageActions: Story = {
+  args: { messages: actionMessages, turnActions: storyTurnActions },
+};
+
+/** Keyboard focus reveals an older answer's actions, and the question's. */
+export const MessageActionsOnFocus: Story = {
+  args: { messages: actionMessages, turnActions: storyTurnActions },
+  play: async ({ canvasElement }) => {
+    const branches = await within(canvasElement).findAllByRole("button", {
+      name: "Branch from here",
+    });
+    branches[0].focus();
+    await expect(branches[0]).toHaveFocus();
+  },
+};
+
+/** Edit opens the latest message in place of its bubble. */
+export const EditingMessage: Story = {
+  args: { messages: actionMessages, turnActions: storyTurnActions },
+  play: async ({ canvasElement }) => {
+    await userEvent.click(
+      await within(canvasElement).findByRole("button", { name: "Edit" }),
+    );
+    const field = within(canvasElement).getByRole("textbox", {
+      name: "Message",
+    });
+    await userEvent.clear(field);
+    await userEvent.type(
+      field,
+      "Make day two shorter, end somewhere with a café, and keep the walk on the coast path the whole way.",
+    );
+  },
+};
+
+/**
+ * The answer being replaced wrote files and used a connected app, so the edit
+ * says before sending that it starts a new chat.
+ */
+export const EditThatStartsNewChat: Story = {
+  args: {
+    messages: actionMessages,
+    turnActions: storyTurnActions,
+    latestSideEffects: {
+      turnId: "actions-turn-2",
+      effects: ["files_written", "connected_apps_called"],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    await userEvent.click(
+      await within(canvasElement).findByRole("button", { name: "Edit" }),
+    );
+    await userEvent.type(
+      within(canvasElement).getByRole("textbox", { name: "Message" }),
+      " Leave the files as they are.",
+    );
+  },
+};
+
+/** A regenerated answer pages back through the answers before it. */
+export const RegeneratedAnswerVersions: Story = {
+  args: {
+    messages: actionMessages,
+    turnActions: storyTurnActions,
+    answerVersions: earlierAnswers,
+  },
+};
+
+/** Paging back shows an earlier answer in place; the question stays. */
+export const EarlierAnswerVersion: Story = {
+  args: {
+    messages: actionMessages,
+    turnActions: storyTurnActions,
+    answerVersions: earlierAnswers,
+  },
+  play: async ({ canvasElement }) => {
+    await userEvent.click(
+      await within(canvasElement).findByRole("button", {
+        name: "Previous version",
+      }),
+    );
+    await expect(within(canvasElement).getByText("2 of 3")).toBeInTheDocument();
+  },
+};
+
+/** "Retry with model" lists the models the chat can run. */
+export const RetryWithModel: Story = {
+  args: { messages: actionMessages, turnActions: storyTurnActions },
+  play: async ({ canvasElement }) => {
+    await userEvent.click(
+      await within(canvasElement).findByRole("button", {
+        name: "Retry with model…",
+      }),
+    );
+  },
+};
+
+/** A branch's copied history ends at a rule that links back to its original. */
+export const BranchNotice: Story = {
+  args: {
+    messages: [
+      ...actionMessages.slice(0, 2),
+      {
+        id: "branch-user",
+        role: "user",
+        turnId: "branch-turn",
+        text: "Try the north coast instead: St Ives to Zennor.",
+        createdAt: "2026-09-21T08:00:00.000Z",
+      },
+      {
+        id: "branch-assistant",
+        role: "assistant",
+        turnId: "branch-turn",
+        text: "St Ives to Zennor is about 6 miles of rough path. Start early; the café in Zennor closes at 4.",
+        sources: [],
+        createdAt: "2026-09-21T08:00:15.000Z",
+      },
+    ],
+    turnActions: storyTurnActions,
+    branchOrigin: {
+      title: "Coastal walk planning",
+      branchedAt: "2026-09-21T07:59:00.000Z",
+      onOpen: fn(),
+    },
+  },
+};
+
+/** A branch whose original was deleted still says where it came from. */
+export const BranchOfDeletedChat: Story = {
+  args: {
+    messages: actionMessages.slice(0, 2),
+    turnActions: storyTurnActions,
+    branchOrigin: {
+      title: null,
+      branchedAt: "2026-09-21T07:59:00.000Z",
+    },
+  },
+};
+
+/** A stopped answer offers to answer again, in place. */
+export const RetryAfterCancel: Story = {
+  args: {
+    messages: [
+      ...actionMessages.slice(0, 3),
+      {
+        id: "cancel-partial",
+        role: "assistant",
+        turnId: "actions-turn-2",
+        text: "Day two now stops at Newlyn after 5 miles. The harbor",
+        sources: [],
+        createdAt: "2026-09-20T09:31:06.000Z",
+      },
+      {
+        id: "cancel-notice",
+        role: "system",
+        turnId: "actions-turn-2",
+        text: TURN_CANCELLED_NOTICE,
+      },
+    ],
+    turnActions: storyTurnActions,
+  },
+};
+
+/**
+ * A rejected key points at provider settings, with Try again beside it for
+ * after the fix. The retry answers the same turn; nothing stacks.
+ */
+export const RetryAfterProviderError: Story = {
+  args: {
+    messages: [
+      ...actionMessages.slice(0, 3),
+      {
+        id: "auth-failure",
+        role: "turn_failure",
+        turnId: "actions-turn-2",
+        category: "auth",
+        detail: "invalid x-api-key",
+        model: { id: "claude-opus-5", provider: "anthropic" },
+      },
+    ],
+    turnActions: storyTurnActions,
+  },
+};
+
+/** Account access denied: the same pair of recoveries. */
+export const RetryAfterProviderAccessDenied: Story = {
+  args: {
+    messages: [
+      ...actionMessages.slice(0, 3),
+      {
+        id: "access-failure",
+        role: "turn_failure",
+        turnId: "actions-turn-2",
+        category: "provider_access",
+        detail: "Your credit balance is too low to access the API.",
+        model: { id: "gpt-5.6", provider: "openai" },
+      },
+    ],
+    turnActions: storyTurnActions,
+  },
+};
+
+/** The same actions and pager at the compact pane width. */
+export const MessageActionsCompact: Story = {
+  args: {
+    messages: actionMessages,
+    turnActions: storyTurnActions,
+    answerVersions: earlierAnswers,
+  },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };

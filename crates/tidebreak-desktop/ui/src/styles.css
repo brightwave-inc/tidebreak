@@ -1101,12 +1101,15 @@ body {
     align-items: center;
   }
 
-  /* Editing the latest message, in the bubble's place and shape. */
+  /* Editing the latest message, in the bubble's place and shape. The bottom
+   margin stands in for the footer the bubble shows, so the answer below keeps
+   its distance. */
   .message-user-editor {
     display: flex;
     width: min(36rem, 100%);
     flex-direction: column;
     gap: 0.5rem;
+    margin-bottom: 1.7rem;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 0.625rem 0.75rem;
