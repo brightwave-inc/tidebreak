@@ -84,8 +84,9 @@ organize and direct:
   paths.
 - Let a reusable plugin provide an output template as well as a prompt or
   skill, once there is a settled way to deliver a template into a turn.
-- Install instruction-only plugins from pinned Git sources or public skill
-  indexes, with explicit updates and no background auto-update.
+- Install instruction-only plugins from public skill indexes, with explicit
+  updates and no background auto-update. Pinned Git install is in the
+  Plugins page and `tidebreak plugins install`.
 - Eventually admit capability-bearing plugin components packaged as MCPB
   bundles, only with component-level consent, keychain-backed configuration,
   and enforced tool-schema validation.

@@ -19,6 +19,8 @@ export type PluginsApis = {
   instructions(name: string): Promise<SkillInstructions>;
   /** One prompt's insertable text, fetched when the user picks it. */
   promptBody(name: string): Promise<PromptBody>;
+  /** Pin a public HTTPS Git source as an instruction-only plugin. */
+  installFromGit(url: string, revision: string): Promise<unknown>;
 };
 
 export function pluginsApisFromClient(client: ApiClient): PluginsApis {
@@ -27,5 +29,6 @@ export function pluginsApisFromClient(client: ApiClient): PluginsApis {
     setEnabled: (update) => client.setPluginsEnabled(update),
     instructions: (name) => client.getSkillInstructions(name),
     promptBody: (name) => client.getPromptBody(name),
+    installFromGit: (url, revision) => client.installPlugin(url, revision),
   };
 }
