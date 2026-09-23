@@ -113,6 +113,8 @@ describe("StartSessionPrompt", () => {
       wrap(
         <StartSessionPrompt
           workspaceId="workspace-1"
+          workspaceTitle="acme/api"
+          workspaceBranch="main"
           harnesses={[entry("internal", {})]}
           starting={false}
           selectedMode={null}
@@ -123,6 +125,13 @@ describe("StartSessionPrompt", () => {
     );
 
     expect(screen.queryByText("Tidebreak")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "acme/api" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("main")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Start a session on this workspace."),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Engine" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
     expect(onStart).not.toHaveBeenCalled();
@@ -182,9 +191,8 @@ describe("StartSessionPrompt", () => {
         "This engine's permission system is off; every action runs without asking",
       ),
     ).toBeNull();
-    expect(
-      screen.getByRole("combobox", { name: "Engine" }).closest("form"),
-    ).toHaveClass("chat-composer");
+    expect(screen.getByRole("combobox", { name: "Engine" })).toBeInTheDocument();
+    expect(document.querySelector("form.chat-composer")).toBeInTheDocument();
     const field = screen.getByRole("textbox", { name: "Message" });
     await user.type(field, "list the files");
     await user.keyboard("{Meta>}{Enter}{/Meta}");

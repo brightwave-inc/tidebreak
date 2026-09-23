@@ -44,6 +44,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { STATUS_CHIP, STATUS_DOT, STATUS_TEXT } from "../statusTone";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "../interactive";
 import {
   type BrowserAgentAccess,
@@ -359,10 +360,7 @@ export function BrowserToolbar({
                     ? "Hide inspect highlights"
                     : "Inspect page elements"
                 }
-                className={cn(
-                  inspectEnabled &&
-                    "bg-info-background/55 text-info-foreground hover:bg-info-background hover:text-info-foreground",
-                )}
+                className={cn(inspectEnabled && STATUS_CHIP.pending)}
               >
                 <ScanEye />
                 <span className="sr-only">
@@ -609,7 +607,10 @@ function BrowserAgentAccessControl({
   if (access.paused) {
     return (
       <div
-        className="flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-md border border-warning-border/70 bg-warning-background/72 px-1.5 text-2xs font-medium text-warning-foreground"
+        className={cn(
+          "flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-md border border-warning-border/70 px-1.5 text-2xs font-medium",
+          STATUS_CHIP.warning,
+        )}
         aria-label={`Agent paused before ${access.origin}`}
       >
         <Pause className="size-3 shrink-0" />
@@ -657,7 +658,10 @@ function BrowserAgentAccessControl({
     const textOnly = !access.canCaptureScreens;
     return (
       <div
-        className="flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-md bg-success-background/65 px-1.5 text-2xs font-medium text-success-foreground"
+        className={cn(
+          "flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-md px-1.5 text-2xs font-medium",
+          STATUS_CHIP.ready,
+        )}
         aria-label={
           textOnly
             ? `Shared with agent without screenshots: ${access.origin}`
@@ -676,7 +680,7 @@ function BrowserAgentAccessControl({
             type="button"
             variant="ghost"
             size="2xs"
-            className="text-success-foreground hover:bg-success/10 hover:text-success-foreground"
+            className={STATUS_TEXT.ready}
             onClick={onShare}
           >
             Allow screenshots
@@ -687,7 +691,7 @@ function BrowserAgentAccessControl({
             type="button"
             variant="ghost"
             size="2xs"
-            className="text-success-foreground hover:bg-success/10 hover:text-success-foreground"
+            className={STATUS_TEXT.ready}
             onClick={onRevoke}
           >
             Stop sharing
@@ -753,8 +757,8 @@ function CompactAgentAccessControl({
               className={cn(
                 "size-7",
                 paused
-                  ? "border border-warning-border/70 bg-warning-background/72 text-warning-foreground hover:bg-warning-background hover:text-warning-foreground"
-                  : "bg-success-background/65 text-success-foreground hover:bg-success-background hover:text-success-foreground",
+                  ? cn("border border-warning-border/70", STATUS_CHIP.warning)
+                  : STATUS_CHIP.ready,
               )}
               aria-label={statusLabel}
             >
@@ -834,21 +838,26 @@ export function BrowserAgentControlRow({
       className={cn(
         "flex min-h-9 items-center gap-2 border-t px-3 py-1.5 text-xs",
         takeoverRequired
-          ? "border-warning-border bg-warning-background text-warning-foreground"
+          ? "notice-surface notice-warning border-warning-border"
           : halted
             ? "border-border-subtle bg-muted/55 text-muted-foreground"
-            : "border-info-border/55 bg-info-background/55 text-info-foreground",
+            : cn("border-live-border/55", STATUS_CHIP.running),
       )}
       role="status"
     >
-      <span className="relative grid size-5 shrink-0 place-items-center rounded-md bg-background/60">
+      <span className="relative shrink-0">
         {takeoverRequired ? (
           <Hand className="size-3.5" />
         ) : (
           <Bot className="size-3.5" />
         )}
         {!halted && !takeoverRequired && (
-          <span className="absolute -right-0.5 -top-0.5 size-1.5 rounded-full bg-info ring-2 ring-info-background" />
+          <span
+            className={cn(
+              "absolute -right-0.5 -top-0.5 size-1.5 rounded-full ring-2 ring-background",
+              STATUS_DOT.running,
+            )}
+          />
         )}
       </span>
       <span className="min-w-0 flex-1">

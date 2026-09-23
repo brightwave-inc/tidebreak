@@ -1,6 +1,7 @@
 import type { CodeWorkspacePrSnapshot } from "../api/types";
 import type { WorkspaceWorkflowModel } from "./workspaceWorkflow";
 import { checkSummaryText, prStateChips } from "./prState";
+import { cn } from "@/lib/utils";
 import { STATUS_TEXT } from "./statusTone";
 
 export function workspaceStatusLabel(model: WorkspaceWorkflowModel): string {
@@ -32,7 +33,7 @@ export function WorkspaceStatusDetails({
     >
       <p className="text-muted-foreground leading-5">{model.detail}</p>
       {error && (
-        <p role="alert" className="text-critical-foreground leading-5">
+        <p role="alert" className={cn(STATUS_TEXT.critical, "leading-5")}>
           {error} Previous status may be out of date.
         </p>
       )}

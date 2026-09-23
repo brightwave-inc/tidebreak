@@ -44,6 +44,7 @@ import {
   useFirstTurnRecovery,
 } from "./firstTurnRecovery";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { STATUS_TEXT } from "../statusTone";
 import {
   codeModelsFromHarnessListing,
   useCodeCatalogStore,
@@ -583,7 +584,10 @@ export function CodeSessionPane({
         {connectionState === "reconnecting" && (
           <p
             role="status"
-            className="text-info-foreground pointer-events-none absolute inset-x-0 top-2 z-[1] text-center text-xs [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none"
+            className={cn(
+              STATUS_TEXT.pending,
+              "pointer-events-none absolute inset-x-0 top-2 z-[1] text-center text-xs [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none",
+            )}
           >
             Reconnecting to the session…
           </p>
@@ -749,7 +753,7 @@ export function CodeSessionPane({
                 className={cn(
                   "mx-auto w-full max-w-3xl px-2 pt-1 text-xs",
                   firstTurnRecovery.status === "failed"
-                    ? "text-critical-foreground"
+                    ? STATUS_TEXT.critical
                     : "text-muted-foreground",
                 )}
               >

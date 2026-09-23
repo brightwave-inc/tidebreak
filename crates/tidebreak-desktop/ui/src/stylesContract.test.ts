@@ -144,4 +144,41 @@ describe("styles contract (see DESIGN.md)", () => {
         "Lucide RefreshCw, RotateCw, Loader2, and LoaderCircle orbit under animate-spin. See DESIGN.md.",
     ).toEqual([]);
   });
+
+  it("paints code-mode status through statusTone.ts, Badge, or the diff tints", () => {
+    expect(
+      codeStatusRungLiterals(),
+      "In src/code, pick a tone and paint with STATUS_TEXT, STATUS_CHIP, " +
+        "STATUS_MARK, or Badge. Do not write bg-*-background or " +
+        "text-*-foreground by hand. DiffPanel may keep add and delete tints.",
+    ).toEqual([]);
+  });
 });
+
+/**
+ * Status-rung literals in code mode. StatusTone maps and Badge own the
+ * vocabulary; DiffPanel keeps add/delete tints as document-like markup.
+ */
+const CODE_STATUS_RUNG =
+  /\b(?:bg|text)-(?:success|warning|critical|info|merged|live)-(?:background|foreground(?:-muted)?)\b/;
+
+const CODE_STATUS_RUNG_ALLOWLIST = new Set([
+  "code/statusTone.ts",
+  "code/DiffPanel.tsx",
+]);
+
+function codeStatusRungLiterals(): string[] {
+  const everywhere = new RegExp(CODE_STATUS_RUNG.source, "g");
+  const hits: string[] = [];
+  for (const file of sourceFiles()) {
+    if (!file.startsWith("code/")) continue;
+    if (CODE_STATUS_RUNG_ALLOWLIST.has(file)) continue;
+    if (/\.test\.(ts|tsx)$/.test(file)) continue;
+    const lines = readFileSync(join(SRC, file), "utf8").split("\n");
+    lines.forEach((line, index) => {
+      const match = line.match(everywhere);
+      if (match) hits.push(`${file}:${index + 1}  ${match[0]}`);
+    });
+  }
+  return hits;
+}

@@ -1,5 +1,6 @@
 import type { PendingFolderAccessRequest } from "./api";
 import type { FolderAccessDecision } from "./host";
+import { ApprovalChoiceRows } from "./ApprovalCard";
 import { AttentionCard } from "./AttentionCard";
 import { Button } from "@/components/ui/button";
 
@@ -76,23 +77,14 @@ export function FolderAccessCard({
           Finish the current folder request first.
         </p>
       ) : (
-        <div className="flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            disabled={!actionable}
-            onClick={() => onDecision("allow")}
-          >
-            Allow
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!actionable}
-            onClick={() => onDecision("decline")}
-          >
-            Decline
-          </Button>
-        </div>
+        <ApprovalChoiceRows
+          disabled={!actionable}
+          onChoose={(key) => onDecision(key as FolderAccessDecision)}
+          options={[
+            { key: "allow", label: "Allow this folder" },
+            { key: "decline", label: "Decline", muted: true },
+          ]}
+        />
       )}
     </AttentionCard>
   );

@@ -6,6 +6,7 @@ import { MessageMarkdown } from "@/MessageMarkdown";
 import { cn } from "@/lib/utils";
 import { GithubAvatar } from "./GithubAvatar";
 import { expandGithubEmojiShortcodes } from "./pullRequestPresentation";
+import { STATUS_TEXT } from "./statusTone";
 
 /**
  * One pull-request comment, drawn the way GitHub draws it: avatar, author,
@@ -67,7 +68,12 @@ export function PrCommentCard({
               </span>
             )}
             {resolved && (
-              <span className="text-success-foreground flex shrink-0 items-center gap-1 text-2xs font-medium">
+              <span
+                className={cn(
+                  STATUS_TEXT.ready,
+                  "flex shrink-0 items-center gap-1 text-2xs font-medium",
+                )}
+              >
                 <CircleCheck className="size-3" />
                 Resolved here
               </span>

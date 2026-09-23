@@ -262,7 +262,10 @@ export function WorkspaceCard({
       className={cn(
         "group/workspace relative rounded-xl border border-transparent transition-[background-color,border-color,box-shadow,opacity] duration-150",
         creating &&
-          "workspace-creation-card border-live-border/35 bg-live-background/25",
+          cn(
+            "workspace-creation-card border-live-border/35",
+            STATUS_CHIP.running,
+          ),
         selected && "border-border bg-muted/60",
         active &&
           "shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_6%,transparent)]",

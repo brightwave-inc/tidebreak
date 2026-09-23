@@ -41,6 +41,7 @@ import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
+import { STATUS_TEXT } from "./statusTone";
 import { TriggerEventCard } from "./TriggerEventCard";
 import {
   formatElapsedDuration,
@@ -1196,18 +1197,21 @@ function StatusGlyph({
     case "succeeded":
       return (
         <Check
-          className="text-success-foreground size-3.5"
+          className={cn(STATUS_TEXT.ready, "size-3.5")}
           aria-hidden="true"
         />
       );
     case "failed":
       return (
-        <X className="text-critical-foreground size-3.5" aria-hidden="true" />
+        <X
+          className={cn(STATUS_TEXT.critical, "size-3.5")}
+          aria-hidden="true"
+        />
       );
     case "denied":
       return (
         <CircleSlash
-          className="text-warning-foreground size-3.5"
+          className={cn(STATUS_TEXT.warning, "size-3.5")}
           aria-hidden="true"
         />
       );
@@ -1278,10 +1282,10 @@ function FileActivityRow({
           white page these numerals land near 3:1, which reads as greyed-out
           rather than green in the light theme while looking fine in the dark.
         */}
-        <span className="text-success-foreground tabular-nums">
+        <span className={cn(STATUS_TEXT.ready, "tabular-nums")}>
           +{insertions}
         </span>{" "}
-        <span className="text-critical-foreground tabular-nums">
+        <span className={cn(STATUS_TEXT.critical, "tabular-nums")}>
           −{deletions}
         </span>
       </button>
@@ -1302,10 +1306,10 @@ function FileActivityRow({
               <span
                 className={cn(
                   "w-3 shrink-0 font-mono",
-                  file.kind === "added" && "text-success-foreground",
-                  file.kind === "modified" && "text-info-foreground",
-                  file.kind === "deleted" && "text-critical-foreground",
-                  file.kind === "renamed" && "text-warning-foreground",
+                  file.kind === "added" && STATUS_TEXT.ready,
+                  file.kind === "modified" && STATUS_TEXT.pending,
+                  file.kind === "deleted" && STATUS_TEXT.critical,
+                  file.kind === "renamed" && STATUS_TEXT.warning,
                 )}
                 aria-hidden
               >

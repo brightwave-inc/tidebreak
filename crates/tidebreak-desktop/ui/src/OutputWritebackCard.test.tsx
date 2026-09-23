@@ -24,6 +24,7 @@ describe("OutputWritebackCard", () => {
     );
 
     expect(html).toContain("Replace an existing file?");
+    expect(html).toContain("1.");
     expect(html).toContain("Allow replacement");
     expect(html).not.toContain("output_id");
     expect(html).not.toContain("root_id");

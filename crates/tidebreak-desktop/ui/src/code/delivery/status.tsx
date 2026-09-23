@@ -1,3 +1,4 @@
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { CircleAlert, GitBranch, RefreshCw } from "lucide-react";
@@ -17,7 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { humanize, runTone } from "./helpers";
 import { relativeTime } from "../PullRequestDetail";
-import { STATUS_CHIP, STATUS_TEXT } from "../statusTone";
+import { STATUS_TEXT } from "../statusTone";
 import { createContext, useContext } from "react";
 
 export const DeliveryRetryContext = createContext<(() => void) | null>(null);
@@ -230,15 +231,24 @@ export function DetailStat({
 export function RunStatusBadge({ item }: { item: CodeDeliveryRunSummary }) {
   const value = item.conclusion ?? item.status;
   const tone = runTone(value);
+  const variant =
+    tone === "running"
+      ? "live"
+      : tone === "ready"
+        ? "success"
+        : tone === "pending"
+          ? "info"
+          : tone === "warning"
+            ? "warning"
+            : tone === "critical"
+              ? "critical"
+              : tone === "merged"
+                ? "merged"
+                : "outline";
   return (
-    <span
-      className={cn(
-        "rounded-md px-2 py-1 text-xs font-medium",
-        STATUS_CHIP[tone],
-      )}
-    >
+    <Badge variant={variant} size="sm">
       {humanize(value)}
-    </span>
+    </Badge>
   );
 }
 

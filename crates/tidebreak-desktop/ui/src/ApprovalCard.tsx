@@ -192,7 +192,7 @@ export function ApprovalCard({
 
   return (
     <section
-      className="bg-background flex max-w-prose flex-col gap-3 rounded-lg border p-4"
+      className="bg-background flex w-full min-w-0 flex-col gap-3 rounded-lg border p-4"
       aria-label="Approval needed"
       aria-busy={deciding}
       onKeyDown={onCardKeyDown}
@@ -510,4 +510,48 @@ function bounded(spoken: string): string {
  */
 export function placeSegments(path: string): string[] {
   return path.split("/").filter((segment) => segment !== "" && segment !== ".");
+}
+
+/** Numbered choice rows used by ApprovalCard and other consent cards. */
+export function ApprovalChoiceRows({
+  options,
+  disabled,
+  onChoose,
+}: {
+  options: { key: string; label: string; muted?: boolean }[];
+  disabled?: boolean;
+  onChoose: (key: string) => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="Approval choices"
+      className="flex flex-col gap-0.5"
+    >
+      {options.map((option, index) => (
+        <button
+          type="button"
+          key={option.key}
+          disabled={disabled}
+          onClick={() => onChoose(option.key)}
+          className={cn(
+            "focus-visible:ring-ring flex cursor-pointer items-baseline gap-2.5 rounded-md px-3 py-2.5 text-left text-sm outline-hidden hover:bg-muted/60 focus-visible:ring-2",
+            disabled && "opacity-60",
+          )}
+        >
+          <span className="text-muted-foreground w-4 shrink-0 text-xs tabular-nums">
+            {index + 1}.
+          </span>
+          <span
+            className={cn(
+              "flex-1 text-left",
+              option.muted && "text-muted-foreground",
+            )}
+          >
+            {option.label}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
 }

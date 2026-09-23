@@ -63,6 +63,7 @@ import {
   SESSION_PERMISSION_MODE_LOCKED,
 } from "./labels";
 import { HARNESS_ICONS } from "./HarnessPicker";
+import { STATUS_TEXT } from "./statusTone";
 
 const MODES: PermissionMode[] = ["plan", "ask", "auto", "allow"];
 
@@ -1269,7 +1270,7 @@ export function CodeComposer({
       {notice && (
         <p
           role="alert"
-          className="text-critical-foreground mx-auto max-w-3xl pt-1 text-xs"
+          className={cn(STATUS_TEXT.critical, "mx-auto max-w-3xl pt-1 text-xs")}
         >
           {notice.text}
         </p>
