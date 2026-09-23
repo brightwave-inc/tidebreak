@@ -39,9 +39,9 @@ import { PaneDragBand } from "@/WindowDragStrip";
  * badges, and its member skills with their own switches.
  *
  * Laid out as a scannable instrument shelf: a centered title and search, then
- * a two-column grid of tiles. The origin split is the catalog's own: bundles
- * first, then the skills no bundle claims, with anything the user wrote
- * themselves called out as theirs.
+ * full-width rows. The origin split is the catalog's own: bundles first, then
+ * the skills no bundle claims, with anything the user wrote themselves called
+ * out as theirs.
  */
 export function PluginsView({
   state,
@@ -119,7 +119,7 @@ export function PluginsView({
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 pt-10 pb-12">
           <header className="flex flex-col items-center gap-4 text-center">
             <div className="flex flex-col gap-1.5">
-              <h1 className="text-2xl font-semibold tracking-tight">Plugins</h1>
+              <h1 className="settings-panel-title">Plugins</h1>
               <p className="text-muted-foreground max-w-md text-sm text-pretty">
                 Skills the agent can use when you turn them on.
               </p>
@@ -424,10 +424,7 @@ function PluginGrid({
   setEnabled: PluginCatalogState["setEnabled"];
 }) {
   return (
-    <ul
-      className="grid grid-cols-1 gap-1 sm:grid-cols-2 sm:gap-x-3 sm:gap-y-1"
-      aria-label={label}
-    >
+    <ul className="flex flex-col gap-1" aria-label={label}>
       {plugins.map((plugin) => (
         <li key={plugin.name}>
           <PluginRow
@@ -478,7 +475,10 @@ function PluginRow({
           <span className="truncate text-sm font-medium">
             {plugin.display_name}
           </span>
-          <span className="text-muted-foreground line-clamp-1 text-xs leading-snug">
+          <span
+            className="text-muted-foreground line-clamp-2 text-xs leading-snug"
+            title={plugin.description}
+          >
             {plugin.description}
           </span>
         </span>
@@ -504,10 +504,7 @@ function SkillGrid({
   onOpenSkill: (skill: PluginSkillInfo) => void;
 }) {
   return (
-    <ul
-      className="grid grid-cols-1 gap-1 sm:grid-cols-2 sm:gap-x-3 sm:gap-y-1"
-      aria-label={label}
-    >
+    <ul className="flex flex-col gap-1" aria-label={label}>
       {skills.map((skill) => (
         <li
           key={skill.name}
@@ -524,7 +521,10 @@ function SkillGrid({
             <SkillGlyph size="md" />
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
               <span className="truncate text-sm font-medium">{skill.name}</span>
-              <span className="text-muted-foreground line-clamp-1 text-xs leading-snug">
+              <span
+                className="text-muted-foreground line-clamp-2 text-xs leading-snug"
+                title={skill.description}
+              >
                 {skill.description}
               </span>
             </span>

@@ -117,6 +117,20 @@ afterEach(() => {
 });
 
 describe("Plugins library", () => {
+  it("shows each plugin as a full-width row with its full description on hover", async () => {
+    const apis = apisWith();
+    render(<ListHarness apis={apis} />);
+
+    const description = await screen.findByText(
+      "Write and revise Word documents.",
+    );
+    expect(description).toHaveAttribute(
+      "title",
+      "Write and revise Word documents.",
+    );
+    expect(description.className).toMatch(/line-clamp-2/);
+  });
+
   it("gates a disabled plugin's member switches without clearing their own flags", async () => {
     const apis = apisWith();
     render(<DetailHarness apis={apis} />);

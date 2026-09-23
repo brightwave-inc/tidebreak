@@ -40,6 +40,7 @@ export function TimeoutSecondsField({
   value,
   disabled,
   onChange,
+  onBlur,
 }: {
   label: string;
   minSeconds: number;
@@ -47,6 +48,7 @@ export function TimeoutSecondsField({
   value: string;
   disabled?: boolean;
   onChange: (value: string) => void;
+  onBlur?: () => void;
 }) {
   return (
     <SettingsField
@@ -62,6 +64,7 @@ export function TimeoutSecondsField({
         value={value}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
+        onBlur={onBlur}
       />
     </SettingsField>
   );
@@ -143,7 +146,9 @@ export function ProviderCredentialField({
   value,
   disabled,
   removing,
+  savingKey,
   onChange,
+  onSave,
   onRemove,
 }: {
   provider: string;
@@ -151,9 +156,12 @@ export function ProviderCredentialField({
   value: string;
   disabled?: boolean;
   removing?: boolean;
+  savingKey?: boolean;
   onChange: (value: string) => void;
+  onSave: () => void;
   onRemove: () => void;
 }) {
+  const canSaveKey = value.trim().length > 0;
   return (
     <div className="flex flex-col gap-1.5">
       <SettingsField
@@ -164,19 +172,31 @@ export function ProviderCredentialField({
             : undefined
         }
       >
-        <Input
-          type="password"
-          placeholder={
-            hasCredential
-              ? "Saved — leave blank to keep it"
-              : `Paste your ${provider} API key`
-          }
-          value={value}
-          maxLength={MAX_CREDENTIAL_LENGTH}
-          autoComplete="new-password"
-          disabled={disabled}
-          onChange={(event) => onChange(event.target.value)}
-        />
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            type="password"
+            className="min-w-0 w-auto grow basis-52"
+            placeholder={
+              hasCredential
+                ? "Saved — leave blank to keep it"
+                : `Paste your ${provider} API key`
+            }
+            value={value}
+            maxLength={MAX_CREDENTIAL_LENGTH}
+            autoComplete="new-password"
+            disabled={disabled}
+            onChange={(event) => onChange(event.target.value)}
+          />
+          <Button
+            type="button"
+            size="sm"
+            className="shrink-0"
+            disabled={disabled || !canSaveKey}
+            onClick={onSave}
+          >
+            {savingKey ? "Saving…" : "Save key"}
+          </Button>
+        </div>
       </SettingsField>
       {hasCredential && (
         <Button

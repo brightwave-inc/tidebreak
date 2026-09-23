@@ -33,6 +33,9 @@
   --border: oklch(0.921 0.005 240);
   --border-subtle: oklch(0.944 0.004 240);
   --input: oklch(0.921 0.005 240);
+  /* Unchecked switch track. `--input` sits too close to the page and card
+     in light mode; this mark clears 3:1 on those grounds in both themes. */
+  --switch-track: oklch(0.62 0.012 240);
   /* Darker than the prototype's neutral ring so focus remains clear against
      both the white canvas and a hovered muted row. */
   --ring: oklch(0.52 0.015 240);
@@ -213,6 +216,7 @@
   --border: oklch(1 0 0 / 10%);
   --border-subtle: oklch(1 0 0 / 6%);
   --input: oklch(1 0 0 / 15%);
+  --switch-track: oklch(0.58 0.012 240);
   --ring: oklch(0.68 0.012 240);
 
   --primary: oklch(0.922 0.005 240);
@@ -329,6 +333,7 @@
   --color-border: var(--border);
   --color-border-subtle: var(--border-subtle);
   --color-input: var(--input);
+  --color-switch-track: var(--switch-track);
   --color-ring: var(--ring);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -1949,10 +1954,10 @@ body {
   .settings-panel-title {
     margin: 0;
     color: var(--foreground);
-    font-size: 1.625rem;
-    font-weight: 650;
+    font-size: var(--text-3xl);
+    font-weight: 600;
     letter-spacing: -0.035em;
-    line-height: 1.15;
+    line-height: var(--text-3xl--line-height);
     text-wrap: balance;
   }
 
@@ -2062,7 +2067,8 @@ body {
     }
 
     .settings-panel-title {
-      font-size: 1.4rem;
+      font-size: var(--text-2xl);
+      line-height: var(--text-2xl--line-height);
     }
 
     .settings-panel-content {

@@ -4,6 +4,7 @@ import { expect, userEvent, within } from "storybook/test";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 
 function Foundations() {
   return (
@@ -60,6 +61,8 @@ function Foundations() {
           <Button size="sm">Small</Button>
           <Button size="xs">Extra small</Button>
           <Button size="2xs">Dense</Button>
+          <Switch aria-label="On" defaultChecked />
+          <Switch aria-label="Off" />
         </div>
       </section>
     </div>

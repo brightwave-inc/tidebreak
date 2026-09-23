@@ -66,7 +66,7 @@ export function InstructionsPanel({ client }: { client: InstructionsClient }) {
           </div>
         )
       ) : (
-        <SettingsSection>
+        <SettingsSection title="Personal instructions">
           <InstructionsField
             label="Personal instructions"
             hint="Applies to every conversation, starting with your next message. Changes save when you leave the field. Other coding engines, such as Claude Code and Codex, read their own instruction files."

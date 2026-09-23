@@ -61,7 +61,7 @@ function SettingsComposition() {
             </p>
           </div>
           <Button
-            variant="destructive"
+            variant="ghost-destructive"
             size="sm"
             onClick={() =>
               void confirm({

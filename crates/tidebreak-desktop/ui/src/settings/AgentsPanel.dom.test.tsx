@@ -80,7 +80,8 @@ describe("AgentsPanel", () => {
     fireEvent.change(limit, { target: { value: "8" } });
     fireEvent.change(steps, { target: { value: "250" } });
     fireEvent.change(errors, { target: { value: "3" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    fireEvent.blur(errors);
+    expect(screen.queryByRole("button", { name: "Save settings" })).toBeNull();
     await waitFor(() =>
       expect(putSettings).toHaveBeenCalledWith({
         max_active_background_agents: 8,

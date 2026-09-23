@@ -376,8 +376,7 @@ function ManagedModelRoleRow({
     gatewayServed && selected ? selected.key : deadPin ? "" : AUTOMATIC;
 
   return (
-    <SettingsSection title={title}>
-      <p className="text-sm text-muted-foreground">{hint}</p>
+    <SettingsSection title={title} description={hint}>
       {keptByokPin && (
         <p className="text-sm text-muted-foreground">
           {`Your previous ${providerLabel(selected.provider)} selection is kept and restored if this device leaves managed mode — picking a model here replaces it.`}
@@ -498,8 +497,7 @@ function ModelRoleRow({
     (info.selection?.startsWith("model_gateway::") ?? false);
 
   return (
-    <SettingsSection title={title}>
-      <p className="text-sm text-muted-foreground">{hint}</p>
+    <SettingsSection title={title} description={hint}>
       <SettingsField label="Provider">
         <Select
           value={provider ?? ""}

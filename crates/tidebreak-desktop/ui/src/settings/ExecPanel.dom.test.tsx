@@ -8,6 +8,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
 import type {
   ApiClient,
   ExecConfigInfo,
@@ -120,7 +121,9 @@ function clientFor(
 afterEach(cleanup);
 
 describe("ExecPanel", () => {
-  it("saves a key per managed provider before the active selection", async () => {
+  it("saves each key beside its field and the timeout on blur", async () => {
+    const e2bKey = ["e2b", "key"].join("-");
+    const daytonaKey = ["daytona", "key"].join("-");
     const { client, putExecConfig, putExecCredential } = clientFor({
       provider: "e2b",
       timeout_ms: 20_000,
@@ -133,27 +136,30 @@ describe("ExecPanel", () => {
     render(<ExecPanel client={client} />);
 
     fireEvent.change(await screen.findByLabelText(/E2B API key/), {
-      target: { value: "  e2b-secret  " },
+      target: { value: `  ${e2bKey}  ` },
     });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save key" })[0]);
+    await waitFor(() =>
+      expect(putExecCredential).toHaveBeenCalledWith("e2b", e2bKey),
+    );
+
     fireEvent.change(screen.getByLabelText(/Daytona API key/), {
-      target: { value: "daytona-secret" },
+      target: { value: daytonaKey },
     });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save key" })[1]);
+    await waitFor(() =>
+      expect(putExecCredential).toHaveBeenCalledWith("daytona", daytonaKey),
+    );
+
     fireEvent.change(screen.getByLabelText(/Execution timeout/), {
       target: { value: "30" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    fireEvent.blur(screen.getByLabelText(/Execution timeout/));
 
     await waitFor(() =>
-      expect(putExecCredential).toHaveBeenCalledWith("e2b", "e2b-secret"),
-    );
-    expect(putExecCredential).toHaveBeenCalledWith("daytona", "daytona-secret");
-    expect(putExecConfig).toHaveBeenCalledWith({
-      provider: "e2b",
-      timeout_ms: 30_000,
-    });
-    // A provider must not go active in a pass that failed to store its key.
-    expect(putExecCredential.mock.invocationCallOrder[0]).toBeLessThan(
-      putExecConfig.mock.invocationCallOrder[0],
+      expect(putExecConfig).toHaveBeenCalledWith({
+        timeout_ms: 30_000,
+      }),
     );
     expect(
       screen.queryByText(/Files staged for a run leave this computer/i),
@@ -245,7 +251,7 @@ describe("ExecPanel", () => {
     fireEvent.change(await screen.findByLabelText(/Execution timeout/), {
       target: { value: "500" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    fireEvent.blur(screen.getByLabelText(/Execution timeout/));
 
     await screen.findByRole("alert");
     expect(putExecConfig).not.toHaveBeenCalled();
@@ -293,5 +299,82 @@ describe("ExecPanel", () => {
     ).toBeInTheDocument();
     expect(screen.getAllByText(/Add an API key above/i)).toHaveLength(2);
     expect(screen.queryByText(/missing_credential/)).toBeNull();
+  });
+
+  it("keeps the chosen provider after a later timeout save and never sends provider null", async () => {
+    const user = userEvent.setup();
+    let resolveProvider: (value: ExecConfigInfo) => void = () => {};
+    const providerSaved = new Promise<ExecConfigInfo>((resolve) => {
+      resolveProvider = resolve;
+    });
+    const localConfig: ExecConfigInfo = {
+      provider: "local",
+      timeout_ms: 20_000,
+      available: true,
+      has_credential: false,
+      providers: ALL_PROVIDERS_AVAILABLE,
+      egress: OPEN_EGRESS,
+      detached_admission: NO_DETACHED,
+    };
+    const putExecConfig = vi.fn().mockImplementation((body: unknown) => {
+      if (
+        typeof body === "object" &&
+        body !== null &&
+        "provider" in body &&
+        (body as { provider?: unknown }).provider === "local"
+      ) {
+        return providerSaved;
+      }
+      return Promise.resolve({ ...localConfig, timeout_ms: 30_000 });
+    });
+    const client = {
+      getExecConfig: vi.fn().mockResolvedValue({
+        provider: undefined,
+        timeout_ms: 20_000,
+        available: false,
+        has_credential: false,
+        providers: ALL_PROVIDERS_AVAILABLE,
+        egress: OPEN_EGRESS,
+        detached_admission: NO_DETACHED,
+      }),
+      listExecCredentials: vi.fn().mockResolvedValue({
+        credentials: [
+          { provider: "e2b", has_credential: false },
+          { provider: "daytona", has_credential: false },
+        ],
+      }),
+      putExecConfig,
+      putExecCredential: vi.fn(),
+      deleteExecCredential: vi.fn(),
+    } as unknown as ApiClient;
+
+    render(<ExecPanel client={client} />);
+
+    const providerSelect = await screen.findByRole("combobox", {
+      name: "Provider",
+    });
+    await user.click(providerSelect);
+    await user.click(
+      screen.getByRole("option", { name: "Local native sandbox" }),
+    );
+
+    fireEvent.change(screen.getByLabelText(/Execution timeout/), {
+      target: { value: "30" },
+    });
+    fireEvent.blur(screen.getByLabelText(/Execution timeout/));
+
+    await waitFor(() => expect(putExecConfig).toHaveBeenCalledTimes(2));
+    resolveProvider(localConfig);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", { name: "Provider" }),
+      ).toHaveTextContent("Local native sandbox"),
+    );
+    expect(
+      putExecConfig.mock.calls.every((call) => {
+        const body = call[0] as { provider?: unknown };
+        return body.provider !== null;
+      }),
+    ).toBe(true);
   });
 });

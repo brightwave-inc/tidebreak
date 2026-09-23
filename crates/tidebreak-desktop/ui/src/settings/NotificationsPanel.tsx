@@ -22,7 +22,7 @@ export function NotificationsPanel() {
       title="Notifications"
       description="Choose when Tidebreak tells you about agent work. It stays quiet about the conversation you are looking at."
     >
-      <SettingsSection>
+      <SettingsSection title="Desktop notifications">
         <SettingsField
           label="When an agent needs you"
           hint="Tell you when an agent stops for your approval, an answer, or a plan review. While Tidebreak is in the background, you get a desktop notification and the Dock icon bounces until you come back."

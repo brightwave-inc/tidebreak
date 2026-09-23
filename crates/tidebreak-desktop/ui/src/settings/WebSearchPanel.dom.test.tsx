@@ -52,7 +52,10 @@ function clientFor(
 afterEach(cleanup);
 
 describe("WebSearchPanel", () => {
-  it("saves a key per provider and the active selection in one pass, in seconds", async () => {
+  it("saves each key beside its field and the timeout on blur", async () => {
+    const exaKey = ["exa", "key"].join("-");
+    const tavilyKey = ["tavily", "key"].join("-");
+    const firecrawlKey = ["firecrawl", "key"].join("-");
     const { client, putWebSearchConfig, putWebSearchCredential } = clientFor({
       provider: "exa",
       has_credential: false,
@@ -64,39 +67,41 @@ describe("WebSearchPanel", () => {
     render(<WebSearchPanel client={client} />);
 
     fireEvent.change(await screen.findByLabelText(/Exa API key/), {
-      target: { value: "  exa-secret  " },
+      target: { value: `  ${exaKey}  ` },
     });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save key" })[0]);
+    await waitFor(() =>
+      expect(putWebSearchCredential).toHaveBeenCalledWith("exa", exaKey),
+    );
+
     fireEvent.change(screen.getByLabelText(/Tavily API key/), {
-      target: { value: "tavily-secret" },
+      target: { value: tavilyKey },
     });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save key" })[1]);
+    await waitFor(() =>
+      expect(putWebSearchCredential).toHaveBeenCalledWith("tavily", tavilyKey),
+    );
+
     fireEvent.change(screen.getByLabelText(/Firecrawl API key/), {
-      target: { value: "firecrawl-secret" },
+      target: { value: firecrawlKey },
     });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save key" })[2]);
+    await waitFor(() =>
+      expect(putWebSearchCredential).toHaveBeenCalledWith(
+        "firecrawl",
+        firecrawlKey,
+      ),
+    );
+
     fireEvent.change(screen.getByLabelText(/Request timeout/), {
       target: { value: "30" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    fireEvent.blur(screen.getByLabelText(/Request timeout/));
 
     await waitFor(() =>
-      expect(putWebSearchCredential).toHaveBeenCalledWith("exa", "exa-secret"),
-    );
-    expect(putWebSearchCredential).toHaveBeenCalledWith(
-      "tavily",
-      "tavily-secret",
-    );
-    expect(putWebSearchCredential).toHaveBeenCalledWith(
-      "firecrawl",
-      "firecrawl-secret",
-    );
-    expect(putWebSearchConfig).toHaveBeenCalledWith({
-      mode: "automatic",
-      provider: "exa",
-      timeout_ms: 30_000,
-      searxng_base_url: null,
-    });
-    // A provider must not go active in a pass that failed to store its key.
-    expect(putWebSearchCredential.mock.invocationCallOrder[0]).toBeLessThan(
-      putWebSearchConfig.mock.invocationCallOrder[0],
+      expect(putWebSearchConfig).toHaveBeenCalledWith({
+        timeout_ms: 30_000,
+      }),
     );
   });
 
@@ -144,13 +149,10 @@ describe("WebSearchPanel", () => {
     fireEvent.change(await screen.findByLabelText(/SearXNG instance URL/), {
       target: { value: "  http://localhost:8888  " },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    fireEvent.blur(screen.getByLabelText(/SearXNG instance URL/));
 
     await waitFor(() =>
       expect(putWebSearchConfig).toHaveBeenCalledWith({
-        mode: "automatic",
-        provider: "searxng",
-        timeout_ms: 20_000,
         searxng_base_url: "http://localhost:8888",
       }),
     );
@@ -182,14 +184,10 @@ describe("WebSearchPanel", () => {
     await user.click(
       screen.getByRole("option", { name: "Model provider (built-in)" }),
     );
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
 
     await waitFor(() =>
       expect(putWebSearchConfig).toHaveBeenCalledWith({
         mode: "vendor",
-        provider: "exa",
-        timeout_ms: 20_000,
-        searxng_base_url: null,
       }),
     );
   });
@@ -208,7 +206,7 @@ describe("WebSearchPanel", () => {
     fireEvent.change(await screen.findByLabelText(/Request timeout/), {
       target: { value: "90" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    fireEvent.blur(screen.getByLabelText(/Request timeout/));
 
     await screen.findByRole("alert");
     expect(putWebSearchConfig).not.toHaveBeenCalled();
@@ -254,5 +252,66 @@ describe("WebSearchPanel", () => {
 
     expect(await screen.findByText(/Not configured/)).toBeTruthy();
     expect(screen.getByText(/needs an API key/)).toBeTruthy();
+  });
+
+  it("refuses to activate a provider that still has no saved key", async () => {
+    const user = userEvent.setup();
+    const { client, putWebSearchConfig } = clientFor(
+      {
+        provider: "exa",
+        has_credential: true,
+        available: true,
+        timeout_ms: 20_000,
+        mode: "host",
+      },
+      [
+        { provider: "exa", has_credential: true },
+        { provider: "tavily", has_credential: false },
+      ],
+    );
+
+    render(<WebSearchPanel client={client} />);
+
+    const providerSelect = await screen.findByRole("combobox", {
+      name: "Provider",
+    });
+    await user.click(providerSelect);
+    await user.click(screen.getByRole("option", { name: "Tavily" }));
+
+    expect(
+      await screen.findByText(
+        /Tavily needs an API key before you can make it active/,
+      ),
+    ).toBeTruthy();
+    expect(putWebSearchConfig).not.toHaveBeenCalled();
+  });
+
+  it("keeps SearXNG selected and search on when the instance URL is cleared", async () => {
+    const { client, putWebSearchConfig } = clientFor({
+      provider: "searxng",
+      has_credential: false,
+      available: true,
+      timeout_ms: 20_000,
+      mode: "host",
+      searxng_base_url: "http://localhost:8888",
+    });
+
+    render(<WebSearchPanel client={client} />);
+
+    const urlField = await screen.findByLabelText(/SearXNG instance URL/);
+    fireEvent.change(urlField, { target: { value: "" } });
+    fireEvent.blur(urlField);
+
+    expect(
+      await screen.findByText(/SearXNG needs an instance URL/),
+    ).toBeTruthy();
+    expect(putWebSearchConfig).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("combobox", { name: "Provider" }),
+    ).toHaveTextContent("SearXNG");
+    expect(
+      screen.getByRole("combobox", { name: "Search mode" }),
+    ).toHaveTextContent("Configured provider");
+    expect(urlField).toHaveValue("http://localhost:8888");
   });
 });
