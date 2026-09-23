@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import type { ApiClient } from "../api";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
@@ -63,7 +62,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
     };
   }, [client]);
 
-  async function save() {
+  async function saveNumbers() {
     const parsedLimit = Number(limit);
     if (
       !Number.isInteger(parsedLimit) ||
@@ -196,7 +195,10 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
           />
         </SettingsField>
       </SettingsSection>
-      <SettingsSection>
+      <SettingsSection
+        title="Background agents"
+        description="How many delegated agents can run at once, and when they report back."
+      >
         <SettingsField
           label="Active background agents per work"
           hint="A spawn beyond this limit fails immediately. Wait for a running agent to finish, then try again."
@@ -210,6 +212,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
             value={limit}
             disabled={loading || saving}
             onChange={(event) => setLimit(event.target.value)}
+            onBlur={() => void saveNumbers()}
           />
         </SettingsField>
         <SettingsField
@@ -225,6 +228,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
             value={checkinSteps}
             disabled={loading || saving}
             onChange={(event) => setCheckinSteps(event.target.value)}
+            onBlur={() => void saveNumbers()}
           />
         </SettingsField>
         <SettingsField
@@ -240,15 +244,9 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
             value={errorCheckin}
             disabled={loading || saving}
             onChange={(event) => setErrorCheckin(event.target.value)}
+            onBlur={() => void saveNumbers()}
           />
         </SettingsField>
-        <Button
-          type="button"
-          disabled={loading || saving}
-          onClick={() => void save()}
-        >
-          {saving ? "Saving…" : "Save settings"}
-        </Button>
       </SettingsSection>
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>

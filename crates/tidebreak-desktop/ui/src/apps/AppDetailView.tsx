@@ -315,7 +315,7 @@ export function AppDetailView({
           <ChevronLeft className="size-4" />
           <span className="sr-only">Back to apps</span>
         </Button>
-        <h1 className="min-w-0 truncate text-lg font-medium">
+        <h1 className="settings-panel-title min-w-0 truncate">
           {detail?.name ?? "App"}
         </h1>
       </PanelSecondaryHeader>

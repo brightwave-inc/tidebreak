@@ -213,7 +213,7 @@ export function ChannelsPanel({
             {group.live > 0 && (
               <Button
                 type="button"
-                variant="outline"
+                variant="ghost-destructive"
                 size="sm"
                 className="self-start"
                 disabled={disabled}

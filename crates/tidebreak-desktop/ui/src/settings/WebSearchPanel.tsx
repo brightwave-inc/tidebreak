@@ -7,7 +7,6 @@ import type {
   WebSearchMode,
   WebSearchProviderKind,
 } from "../api";
-import { Button } from "@/components/ui/button";
 import {
   ActiveProviderField,
   ProviderCredentialField,
@@ -66,6 +65,9 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
   >({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingKey, setSavingKey] = useState<WebSearchProviderKind | null>(
+    null,
+  );
   const [removing, setRemoving] = useState<WebSearchProviderKind | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -97,51 +99,113 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
     };
   }, [client]);
 
-  const working = saving || removing !== null;
+  const working = saving || savingKey !== null || removing !== null;
   const state = webSearchState(config);
 
-  async function save() {
+  async function refreshAfterWrite() {
+    const nextCredentials = await client.listWebSearchCredentials();
+    setCredentials(nextCredentials.credentials);
+  }
+
+  async function saveCredential(target: WebSearchProviderKind) {
+    const key = apiKeys[target]?.trim();
+    if (!key) return;
+    setSavingKey(target);
+    setError(null);
+    try {
+      await client.putWebSearchCredential(target, key);
+      setApiKeys((current) => ({ ...current, [target]: "" }));
+      await refreshAfterWrite();
+      toast.success(`Saved the ${providerLabel(target)} API key`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSavingKey(null);
+    }
+  }
+
+  function providerNeedsKey(kind: WebSearchProviderKind): boolean {
+    return kind !== SEARXNG_PROVIDER;
+  }
+
+  async function persistConfig(next: {
+    mode: WebSearchMode;
+    provider: WebSearchProviderKind | "";
+    timeoutSeconds: string;
+    searxngBaseUrl: string;
+  }) {
     const timeout = timeoutMsFromSeconds(
-      timeoutSeconds,
+      next.timeoutSeconds,
       MIN_WEB_SEARCH_TIMEOUT_SECONDS,
       MAX_WEB_SEARCH_TIMEOUT_SECONDS,
     );
     if ("error" in timeout) {
       setError(timeout.error);
-      return;
+      return false;
     }
-
     setSaving(true);
     setError(null);
     try {
-      // Keys go first so the newly active provider never lands
-      // selected-but-unusable when the caller supplied both in one pass.
-      for (const credential of credentials) {
-        const key = apiKeys[credential.provider]?.trim();
-        if (!key) continue;
-        await client.putWebSearchCredential(credential.provider, key);
-        setApiKeys((current) => ({ ...current, [credential.provider]: "" }));
-      }
       const nextConfig = await client.putWebSearchConfig({
-        mode,
-        provider: provider || null,
+        mode: next.mode,
+        provider: next.provider || null,
         timeout_ms: timeout.timeoutMs,
-        // An empty field clears the stored address rather than leaving a
-        // stale one behind an emptied box.
-        searxng_base_url: searxngBaseUrl.trim() || null,
+        searxng_base_url: next.searxngBaseUrl.trim() || null,
       });
-      const nextCredentials = await client.listWebSearchCredentials();
       setConfig(nextConfig);
-      setCredentials(nextCredentials.credentials);
       setMode(nextConfig.mode);
+      setProvider(nextConfig.provider ?? "");
       setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
       setSearxngBaseUrl(nextConfig.searxng_base_url ?? "");
       toast.success("Saved web-search settings");
+      return true;
     } catch (err) {
       setError(String(err));
+      return false;
     } finally {
       setSaving(false);
     }
+  }
+
+  async function saveMode(nextMode: WebSearchMode) {
+    setMode(nextMode);
+    await persistConfig({
+      mode: nextMode,
+      provider,
+      timeoutSeconds,
+      searxngBaseUrl,
+    });
+  }
+
+  async function saveProvider(nextProvider: WebSearchProviderKind | "") {
+    if (nextProvider && providerNeedsKey(nextProvider)) {
+      const ready = credentials.find((row) => row.provider === nextProvider);
+      if (!ready?.has_credential) {
+        setError(
+          `${providerLabel(nextProvider)} needs an API key before you can make it active.`,
+        );
+        return;
+      }
+    }
+    if (nextProvider === SEARXNG_PROVIDER && !searxngBaseUrl.trim()) {
+      setError("SearXNG needs an instance URL before you can make it active.");
+      return;
+    }
+    setProvider(nextProvider);
+    await persistConfig({
+      mode,
+      provider: nextProvider,
+      timeoutSeconds,
+      searxngBaseUrl,
+    });
+  }
+
+  async function saveTimeout() {
+    await persistConfig({ mode, provider, timeoutSeconds, searxngBaseUrl });
+  }
+
+  async function saveSearxngUrl() {
+    await persistConfig({ mode, provider, timeoutSeconds, searxngBaseUrl });
   }
 
   async function removeCredential(target: WebSearchProviderKind) {
@@ -196,7 +260,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
               <Select
                 value={mode}
                 disabled={working}
-                onValueChange={(next) => setMode(next as WebSearchMode)}
+                onValueChange={(next) => void saveMode(next as WebSearchMode)}
               >
                 <SelectTrigger aria-label="Search mode">
                   <SelectValue />
@@ -224,12 +288,14 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
                 value={apiKeys[credential.provider] ?? ""}
                 disabled={working}
                 removing={removing === credential.provider}
+                savingKey={savingKey === credential.provider}
                 onChange={(value) =>
                   setApiKeys((current) => ({
                     ...current,
                     [credential.provider]: value,
                   }))
                 }
+                onSave={() => void saveCredential(credential.provider)}
                 onRemove={() => void removeCredential(credential.provider)}
               />
             ))}
@@ -250,6 +316,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
                 value={searxngBaseUrl}
                 disabled={working}
                 onChange={(event) => setSearxngBaseUrl(event.target.value)}
+                onBlur={() => void saveSearxngUrl()}
               />
             </SettingsField>
           </SettingsSection>
@@ -261,7 +328,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
             <ActiveProviderField
               value={provider}
               disabled={working}
-              onChange={setProvider}
+              onChange={(next) => void saveProvider(next)}
               options={[
                 ...credentials.map((credential) => ({
                   kind: credential.provider,
@@ -281,21 +348,9 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
               value={timeoutSeconds}
               disabled={working}
               onChange={setTimeoutSeconds}
+              onBlur={() => void saveTimeout()}
             />
           </SettingsSection>
-
-          {/* One save for the whole surface: it stores every key typed above
-              and the selection together, so a provider cannot go active in a
-              pass that failed to save its key. */}
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              disabled={working}
-              onClick={() => void save()}
-            >
-              {saving ? "Saving…" : "Save settings"}
-            </Button>
-          </div>
 
           <p className="text-sm leading-relaxed text-muted-foreground">
             Foreground and background agents can request configured search.

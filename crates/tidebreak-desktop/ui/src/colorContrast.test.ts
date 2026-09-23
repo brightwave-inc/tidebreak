@@ -415,6 +415,10 @@ describe("token contrast in both themes (see DESIGN.md)", () => {
   it("keeps status marks and the focus ring visible on every ground", () => {
     expect(tokenPairs([...TONES, "ring"], () => GROUNDS, MARK)).toEqual([]);
   });
+
+  it("keeps the unchecked switch track visible on the page and card", () => {
+    expect(tokenPairs(["switch-track"], () => SURFACES, MARK)).toEqual([]);
+  });
 });
 
 describe("status tones keep their hue (see DESIGN.md)", () => {

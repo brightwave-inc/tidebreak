@@ -462,7 +462,7 @@ function ManagedGatewayPanel({
               </Button>
               <Button
                 type="button"
-                variant="destructive"
+                variant="outline"
                 disabled={working}
                 onClick={() =>
                   void run(async () => {
@@ -588,7 +588,7 @@ function ManagedGatewayPanel({
             {mountSignpost}
           </SettingsSection>
         ) : (
-          <SettingsSection>{mountSignpost}</SettingsSection>
+          <SettingsSection title="Local apps">{mountSignpost}</SettingsSection>
         ))}
 
       <p className="text-sm leading-relaxed text-muted-foreground">
@@ -612,7 +612,7 @@ function ManagedGatewayPanel({
             </div>
             <Button
               type="button"
-              variant="destructive"
+              variant="ghost-destructive"
               size="sm"
               disabled={working}
               onClick={() => void leaveGateway(gatewayUrl)}

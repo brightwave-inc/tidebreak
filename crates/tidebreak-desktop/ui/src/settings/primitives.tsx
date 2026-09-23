@@ -98,9 +98,9 @@ export function SettingsField({
 }
 
 /**
- * A group of related fields, with an optional heading and description above a
- * transparent bordered card. A panel is a stack of these; a section with no
- * heading is just the card, for panels that carry a single unnamed group.
+ * A group of related fields, with a heading and optional description above a
+ * transparent bordered card. A panel is a stack of these. Every group takes a
+ * title so the two-column layout stays aligned across the page.
  */
 export function SettingsSection({
   title,

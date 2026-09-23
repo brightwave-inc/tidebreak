@@ -78,7 +78,7 @@ export function AppsView({
         className="pr-1 pl-4"
         {...paneHeaderDragRegion()}
       >
-        <h1 className="text-lg font-medium">Apps</h1>
+        <h1 className="settings-panel-title">Apps</h1>
         <span className="grow" />
         <div className="pr-2">
           <WithTooltip label="Refresh">

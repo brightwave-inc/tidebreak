@@ -29,7 +29,7 @@ export function AppearancePanel({
       title="Appearance"
       description="Choose how Tidebreak looks. System follows your operating system setting."
     >
-      <SettingsSection>
+      <SettingsSection title="Theme">
         <SettingsField label="Theme">
           <RadioGroup
             value={mode}

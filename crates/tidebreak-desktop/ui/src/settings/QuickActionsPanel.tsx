@@ -25,7 +25,7 @@ export function QuickActionsPanel() {
       title="Quick actions"
       description="The prompts Tidebreak sends when you click a workspace action such as Create PR. Each one goes into the workspace chat as soon as you click it. {base} is the target branch. {pr} is the pull request number."
     >
-      <SettingsSection>
+      <SettingsSection title="Action prompts">
         {WORKFLOW_PROMPT_FIELDS.map((field) => {
           const customized = workflowPromptIsCustom(field.id, overrides);
           return (

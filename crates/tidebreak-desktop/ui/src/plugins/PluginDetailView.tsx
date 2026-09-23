@@ -92,7 +92,7 @@ export function PluginDetailView({
                 />
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex min-w-0 flex-col gap-1.5">
-                    <h1 className="text-2xl font-semibold tracking-tight">
+                    <h1 className="settings-panel-title">
                       {plugin.display_name}
                     </h1>
                     <p className="text-muted-foreground text-sm text-pretty">

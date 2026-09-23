@@ -100,7 +100,7 @@ export function ProvidersPanel({
         title="Providers"
         description="This Tidebreak is managed by your organization."
       >
-        <SettingsSection>
+        <SettingsSection title="Model providers">
           <p className="text-sm text-muted-foreground">
             Model providers are configured by your organization&apos;s model
             gateway. Your own API keys and endpoints are not used, and cannot be
@@ -405,7 +405,7 @@ function ProviderRow({
                 {info.has_credential && (
                   <Button
                     type="button"
-                    variant="destructive"
+                    variant="outline"
                     disabled={saving}
                     onClick={() => void clearCredential()}
                   >
@@ -606,30 +606,6 @@ function OpenAiCredentialSection({
         Use a ChatGPT subscription (Plus / Pro) or an OpenAI Platform API key.
         Saving either one turns OpenAI on.
       </p>
-      {signedInWithChatgpt ? (
-        <div className="flex flex-wrap gap-2">
-          <Button
-            type="button"
-            variant="destructive"
-            disabled={saving}
-            onClick={() => void signOutChatgpt()}
-          >
-            Sign out of ChatGPT
-          </Button>
-        </div>
-      ) : (
-        <div className="flex flex-wrap gap-2">
-          <Button
-            type="button"
-            disabled={saving}
-            onClick={() => void signInWithChatgpt()}
-          >
-            {info.auth_mode === "api_key"
-              ? "Switch to ChatGPT sign-in"
-              : "Sign in with ChatGPT"}
-          </Button>
-        </div>
-      )}
       {pendingUrl && (
         <p className="text-xs text-muted-foreground">
           Waiting for the browser to finish signing in.{" "}
@@ -674,11 +650,31 @@ function OpenAiCredentialSection({
         {info.has_credential && info.auth_mode === "api_key" && (
           <Button
             type="button"
-            variant="destructive"
+            variant="outline"
             disabled={saving}
             onClick={onClear}
           >
             Clear
+          </Button>
+        )}
+        {signedInWithChatgpt ? (
+          <Button
+            type="button"
+            variant="outline"
+            disabled={saving}
+            onClick={() => void signOutChatgpt()}
+          >
+            Sign out of ChatGPT
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            disabled={saving}
+            onClick={() => void signInWithChatgpt()}
+          >
+            {info.auth_mode === "api_key"
+              ? "Switch to ChatGPT sign-in"
+              : "Sign in with ChatGPT"}
           </Button>
         )}
       </div>
