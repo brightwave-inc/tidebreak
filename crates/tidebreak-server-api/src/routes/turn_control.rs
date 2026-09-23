@@ -346,10 +346,6 @@ pub(crate) fn replacement_refused(
             "turn_not_latest",
             format!("turn {turn} is not the latest turn; only the latest turn can be rerun"),
         ),
-        Refusal::AlreadyReplaced => ServerError::conflict_kind(
-            "turn_already_replaced",
-            format!("turn {turn} was already rerun"),
-        ),
     }
 }
 

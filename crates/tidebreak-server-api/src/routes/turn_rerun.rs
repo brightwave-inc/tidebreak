@@ -450,7 +450,9 @@ async fn rerun_input(
     })
 }
 
-/// Refuse unless `turn_id` is the chat's latest turn, finished, and not rerun.
+/// Refuse unless `turn_id` is the chat's latest turn and has finished. A turn
+/// that was rerun is followed by the turn that reran it, so it is never the
+/// latest.
 async fn require_latest_settled(
     store: &ScopedStore,
     chat_id: SessionId,
@@ -474,17 +476,6 @@ async fn require_latest_settled(
         return Err(super::turn_control::replacement_refused(
             turn_id,
             Refusal::NotLatest,
-        ));
-    }
-    if store
-        .list_turn_replacements(chat_id)
-        .await?
-        .iter()
-        .any(|replacement| replacement.replaces == turn_id)
-    {
-        return Err(super::turn_control::replacement_refused(
-            turn_id,
-            Refusal::AlreadyReplaced,
         ));
     }
     Ok(())

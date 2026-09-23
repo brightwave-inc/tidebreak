@@ -561,6 +561,42 @@ pub fn replaced_turns(
         .collect()
 }
 
+#[cfg(test)]
+mod replacement_tests {
+    use super::*;
+
+    fn rerun(turn_id: TurnId, replaces: TurnId, kind: TurnReplacementKind) -> TurnReplacement {
+        TurnReplacement {
+            turn_id,
+            replaces,
+            kind,
+        }
+    }
+
+    #[test]
+    fn an_edit_anywhere_along_the_chain_discards_every_answer_before_it() {
+        let [first, second, third, fourth] = std::array::from_fn(|_| TurnId::new());
+        let placements = replaced_turns(&[
+            rerun(second, first, TurnReplacementKind::Regenerate),
+            rerun(third, second, TurnReplacementKind::Edit),
+            rerun(fourth, third, TurnReplacementKind::Regenerate),
+        ]);
+        // The first two answered a message the edit changed.
+        assert_eq!(placements[&first], ReplacedTurn::Discarded);
+        assert_eq!(placements[&second], ReplacedTurn::Discarded);
+        // The third answered the edited message, which the fourth answers now.
+        assert_eq!(
+            placements[&third],
+            ReplacedTurn::EarlierVersion { current: fourth }
+        );
+        assert!(!placements.contains_key(&fourth));
+        assert_eq!(
+            replaced_turn_ids(&[rerun(second, first, TurnReplacementKind::Regenerate),]),
+            std::collections::HashSet::from([first])
+        );
+    }
+}
+
 /// Why a replacement turn was refused before anything was written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnReplacementRefusal {
@@ -568,10 +604,9 @@ pub enum TurnReplacementRefusal {
     UnknownTurn,
     /// The turn has not finished yet.
     Unsettled,
-    /// A later turn exists. Only the latest turn can be rerun.
+    /// A later turn exists. Only the latest turn can be rerun, and a turn
+    /// that was rerun already is no longer the latest.
     NotLatest,
-    /// Another turn already replaced this one.
-    AlreadyReplaced,
 }
 
 /// One message accepted while its chat had a live turn, waiting its turn.

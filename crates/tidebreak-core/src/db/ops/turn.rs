@@ -514,16 +514,11 @@ where
         .one(conn)
         .await
         .map_err(store_err)?;
-    if latest.is_some_and(|latest| latest.id != target.id) {
-        return Ok(Some(TurnReplacementRefusal::NotLatest));
-    }
-    let replaced = entities::turn::Entity::find()
-        .filter(entities::turn::Column::ReplacesTurnId.eq(target.id))
-        .one(conn)
-        .await
-        .map_err(store_err)?
-        .is_some();
-    Ok(replaced.then_some(TurnReplacementRefusal::AlreadyReplaced))
+    // A turn that was rerun is followed by the turn that reran it, so this
+    // also refuses a second rerun of the same turn.
+    Ok(latest
+        .is_some_and(|latest| latest.id != target.id)
+        .then_some(TurnReplacementRefusal::NotLatest))
 }
 
 /// Every turn in this chat that reran another, oldest first.
