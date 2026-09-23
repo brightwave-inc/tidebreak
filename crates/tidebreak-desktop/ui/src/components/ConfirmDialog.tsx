@@ -25,24 +25,41 @@ export type ConfirmOptions = {
   destructive?: boolean;
 };
 
+export type DecideOptions = ConfirmOptions & {
+  /**
+   * A second way forward beside the confirm button, for when the reader may
+   * want something gentler: Archive beside Delete. It sits between Cancel
+   * and the confirm button and never takes the destructive style.
+   */
+  alternativeLabel: string;
+};
+
+/** Which button closed a {@link DecideOptions} dialog. */
+export type Decision = "confirm" | "alternative" | "cancel";
+
 type PendingConfirm = ConfirmOptions & {
   id: number;
-  resolve: (value: boolean) => void;
+  alternativeLabel?: string;
+  resolve: (value: Decision) => void;
 };
 
 /**
  * Promise-based confirmation backed by the shared AlertDialog. Overlapping
  * requests are queued in call order so every returned promise is settled by
  * the dialog that belongs to it.
+ *
+ * `confirm` asks a yes-or-no question. `decide` adds one alternative, and
+ * answers with the button the reader chose. Both are the same dialog.
  */
 export function useConfirm(): {
   confirm: (options: ConfirmOptions) => Promise<boolean>;
+  decide: (options: DecideOptions) => Promise<Decision>;
   dialog: ReactElement;
 } {
   const [pending, setPending] = useState<PendingConfirm | null>(null);
   const pendingRef = useRef<PendingConfirm | null>(null);
   const queueRef = useRef<PendingConfirm[]>([]);
-  const buttonResultRef = useRef<boolean | null>(null);
+  const buttonResultRef = useRef<Decision | null>(null);
   const nextIdRef = useRef(0);
   const phaseRef = useRef<"idle" | "open" | "closing">("idle");
 
@@ -53,9 +70,9 @@ export function useConfirm(): {
     setPending(next);
   }, []);
 
-  const confirm = useCallback(
-    (options: ConfirmOptions) => {
-      return new Promise<boolean>((resolve) => {
+  const decide = useCallback(
+    (options: ConfirmOptions & { alternativeLabel?: string }) => {
+      return new Promise<Decision>((resolve) => {
         queueRef.current.push({ ...options, id: ++nextIdRef.current, resolve });
         if (phaseRef.current === "idle") activateNext();
       });
@@ -63,7 +80,13 @@ export function useConfirm(): {
     [activateNext],
   );
 
-  const settle = useCallback((result: boolean) => {
+  const confirm = useCallback(
+    async (options: ConfirmOptions) =>
+      (await decide({ ...options, alternativeLabel: undefined })) === "confirm",
+    [decide],
+  );
+
+  const settle = useCallback((result: Decision) => {
     const current = pendingRef.current;
     if (!current) return;
     pendingRef.current = null;
@@ -82,10 +105,12 @@ export function useConfirm(): {
 
   useEffect(
     () => () => {
-      pendingRef.current?.resolve(false);
+      pendingRef.current?.resolve("cancel");
       pendingRef.current = null;
       phaseRef.current = "idle";
-      for (const queued of queueRef.current.splice(0)) queued.resolve(false);
+      for (const queued of queueRef.current.splice(0)) {
+        queued.resolve("cancel");
+      }
     },
     [],
   );
@@ -95,7 +120,7 @@ export function useConfirm(): {
       open={pending !== null}
       onOpenChange={(open) => {
         if (!open) {
-          const result = buttonResultRef.current ?? false;
+          const result = buttonResultRef.current ?? "cancel";
           buttonResultRef.current = null;
           settle(result);
         }
@@ -114,15 +139,28 @@ export function useConfirm(): {
           <AlertDialogFooter>
             <AlertDialogCancel
               onClick={() => {
-                buttonResultRef.current = false;
+                buttonResultRef.current = "cancel";
               }}
             >
               {pending.cancelLabel ?? "Cancel"}
             </AlertDialogCancel>
+            {pending.alternativeLabel && (
+              <AlertDialogAction
+                variant="outline"
+                // Stacked on a narrow window, the buttons get their spacing
+                // from their own top margin, the way Cancel does.
+                className="mt-2 sm:mt-0"
+                onClick={() => {
+                  buttonResultRef.current = "alternative";
+                }}
+              >
+                {pending.alternativeLabel}
+              </AlertDialogAction>
+            )}
             <AlertDialogAction
               variant={pending.destructive ? "destructive" : "default"}
               onClick={() => {
-                buttonResultRef.current = true;
+                buttonResultRef.current = "confirm";
               }}
             >
               {pending.confirmLabel ?? "Confirm"}
@@ -133,5 +171,5 @@ export function useConfirm(): {
     </AlertDialog>
   );
 
-  return { confirm, dialog };
+  return { confirm, decide, dialog };
 }

@@ -287,6 +287,17 @@ async fn cross_principal_rest_surface_is_disjoint() {
             Some(patch_body.clone()),
         ),
         ("DELETE", format!("/chats/{}", chat.id), None),
+        (
+            "PATCH",
+            format!("/chats/{}", chat.id),
+            Some(serde_json::json!({"pinned": true})),
+        ),
+        (
+            "PATCH",
+            format!("/chats/{}", chat.id),
+            Some(serde_json::json!({"archived": true})),
+        ),
+        ("POST", format!("/chats/{}/read", chat.id), None),
         ("GET", format!("/chats/{}/messages", chat.id), None),
         (
             "POST",
@@ -715,6 +726,7 @@ fn member_plane_routes() -> Vec<(&'static str, &'static str)> {
         ("GET", "/providers/openai/chatgpt/status"),
         ("GET", "/voice-transcription"),
         ("GET", "/chats"),
+        ("GET", "/chats?archived=true"),
         ("GET", "/projects"),
         ("GET", "/documents"),
         ("GET", "/inbox"),

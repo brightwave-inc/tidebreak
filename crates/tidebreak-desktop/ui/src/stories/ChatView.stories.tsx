@@ -69,6 +69,12 @@ const storyChat = {
   network_policy: { mode: "open" },
   attachment_revision: 1,
   memory_incognito: false,
+  last_activity_at: "2026-08-24T13:00:00Z",
+  pinned_at: null,
+  archived_at: null,
+  running: false,
+  unread: false,
+  turn_count: 1,
   root_attachments: [],
   created_at: "2026-08-24T13:00:00Z",
 } satisfies Chat;

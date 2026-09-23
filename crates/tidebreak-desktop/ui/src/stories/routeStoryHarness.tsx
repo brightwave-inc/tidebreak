@@ -81,11 +81,28 @@ export const routeProjectInstructions = [
   "- Flag anything that would break a 0.x profile on upgrade.",
 ].join("\n");
 
-const baseChats = [
-  {
-    id: "chat-1",
+/**
+ * A moment of activity relative to now, so the rail's date groups always have
+ * rows whatever day the story renders. Day 0 is a few minutes ago; day N is
+ * midday N calendar days back.
+ */
+export function activityAt(daysAgo: number, minutesAgo = 5): string {
+  if (daysAgo === 0) {
+    return new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  }
+  const day = new Date();
+  day.setHours(12, 0, 0, 0);
+  day.setDate(day.getDate() - daysAgo);
+  return new Date(day.getTime() - minutesAgo * 60_000).toISOString();
+}
+
+/** One conversation as the list serves it, with quiet defaults. */
+export function routeChat(
+  chat: Pick<Chat, "id" | "title"> & Partial<Chat>,
+): Chat {
+  const lastActivityAt = chat.last_activity_at ?? activityAt(0, 20);
+  return {
     project_id: null,
-    title: "Review the updater migration",
     model: null,
     reasoning_effort: null,
     permission_mode: "ask",
@@ -93,39 +110,44 @@ const baseChats = [
     attachment_revision: 0,
     memory_incognito: false,
     root_attachments: [],
-    created_at: "2026-08-24T13:10:00.000Z",
-  },
-  {
+    created_at: lastActivityAt,
+    last_activity_at: lastActivityAt,
+    pinned_at: null,
+    archived_at: null,
+    running: false,
+    unread: false,
+    turn_count: 3,
+    ...chat,
+  };
+}
+
+const baseChats: Chat[] = [
+  routeChat({
+    id: "chat-1",
+    title: "Review the updater migration",
+    last_activity_at: activityAt(0, 2),
+    running: true,
+  }),
+  routeChat({
     id: "chat-2",
-    project_id: null,
     title: "Map plugin permission states",
-    model: null,
-    reasoning_effort: null,
     permission_mode: "plan",
     network_policy: { mode: "off" },
-    attachment_revision: 0,
-    memory_incognito: false,
-    root_attachments: [],
-    created_at: "2026-08-23T18:30:00.000Z",
-  },
-  {
+    last_activity_at: activityAt(0, 90),
+    unread: true,
+  }),
+  routeChat({
     id: "chat-3",
     project_id: "project-1",
     title: "Make the dense sidebar easier to scan",
-    model: null,
-    reasoning_effort: null,
-    permission_mode: "ask",
     network_policy: {
       mode: "allowed_hosts",
       allowed_hosts: ["github.com"],
       package_managers: false,
     },
-    attachment_revision: 0,
-    memory_incognito: false,
-    root_attachments: [],
-    created_at: "2026-08-22T09:40:00.000Z",
-  },
-] satisfies Chat[];
+    last_activity_at: activityAt(1),
+  }),
+];
 
 export const routeChats: Chat[] = baseChats;
 
@@ -145,9 +167,150 @@ export const denseRouteChats: Chat[] = [
         "Summarize the permission review",
         "Organize the research handoff",
       ][index % 6],
-      created_at: `2026-08-${String(21 - index).padStart(2, "0")}T12:00:00.000Z`,
+      running: false,
+      unread: false,
+      last_activity_at: activityAt(index + 1),
     }),
   ),
+];
+
+/**
+ * A list with every group in it: pinned work, today's running and unread
+ * turns, and a tail that reaches back weeks. One untitled conversation that
+ * nothing happened in is here too, and the rail leaves it out.
+ */
+export const groupedRouteChats: Chat[] = [
+  routeChat({
+    id: "pinned-1",
+    title: "Quarterly board deck",
+    pinned_at: activityAt(2),
+    last_activity_at: activityAt(4),
+  }),
+  routeChat({
+    id: "pinned-2",
+    title: "Customer interview synthesis",
+    pinned_at: activityAt(9),
+    last_activity_at: activityAt(12),
+  }),
+  routeChat({
+    id: "today-1",
+    title: "Draft the launch announcement",
+    last_activity_at: activityAt(0, 1),
+    running: true,
+  }),
+  routeChat({
+    id: "today-2",
+    title: "Summarize the pricing survey",
+    last_activity_at: activityAt(0, 35),
+    unread: true,
+  }),
+  routeChat({
+    id: "today-3",
+    title: "Plan the offsite agenda",
+    last_activity_at: activityAt(0, 70),
+  }),
+  routeChat({
+    id: "today-4",
+    title: "Review the updater migration",
+    last_activity_at: activityAt(0, 120),
+  }),
+  routeChat({
+    id: "yesterday-1",
+    title: "Reconcile the September invoices",
+    last_activity_at: activityAt(1, 60),
+    unread: true,
+  }),
+  routeChat({
+    id: "yesterday-2",
+    title: "Compare vendor security reviews",
+    last_activity_at: activityAt(1, 240),
+  }),
+  routeChat({
+    id: "week-1",
+    title: "Research competitor onboarding flows",
+    last_activity_at: activityAt(3),
+  }),
+  routeChat({
+    id: "week-2",
+    title: "Outline the hiring plan for Q4",
+    last_activity_at: activityAt(5),
+  }),
+  routeChat({
+    id: "older-1",
+    title: "Clean up the analytics dashboard",
+    last_activity_at: activityAt(11),
+  }),
+  routeChat({
+    id: "older-2",
+    title: "Audit navigation at narrow widths",
+    last_activity_at: activityAt(26),
+  }),
+  routeChat({
+    id: "older-3",
+    title: "Prepare the release brief",
+    last_activity_at: activityAt(48),
+  }),
+  routeChat({
+    id: "empty-1",
+    title: null,
+    turn_count: 0,
+    last_activity_at: activityAt(0, 10),
+  }),
+];
+
+/** Titles long enough to truncate at every rail width. */
+export const longTitleRouteChats: Chat[] = [
+  routeChat({
+    id: "long-1",
+    title:
+      "Investigate why the nightly export to the finance data warehouse keeps timing out on the largest accounts",
+    last_activity_at: activityAt(0, 3),
+    running: true,
+  }),
+  routeChat({
+    id: "long-2",
+    title:
+      "Rewrite the onboarding checklist so a new teammate can ship on day one without asking anyone",
+    last_activity_at: activityAt(0, 50),
+    unread: true,
+  }),
+  routeChat({
+    id: "long-3",
+    title:
+      "Compare the three contract proposals line by line and flag every clause that shifts liability to us",
+    pinned_at: activityAt(1),
+    last_activity_at: activityAt(2),
+  }),
+  routeChat({
+    id: "long-4",
+    title: "Summarizethequarterlymetricsreportwithoutanyspacesatallinthetitle",
+    last_activity_at: activityAt(6),
+  }),
+];
+
+/** What the archive lists: out of the list, most recently archived first. */
+export const archivedRouteChats: Chat[] = [
+  routeChat({
+    id: "archived-1",
+    title: "Close out the Q2 vendor audit",
+    archived_at: activityAt(0, 30),
+    last_activity_at: activityAt(9),
+  }),
+  routeChat({
+    id: "archived-2",
+    project_id: "project-2",
+    title: "Research notes for the pricing page",
+    archived_at: activityAt(3),
+    last_activity_at: activityAt(20),
+  }),
+  routeChat({
+    id: "archived-3",
+    title:
+      "Draft the migration guide for customers moving off the legacy importer",
+    archived_at: activityAt(14),
+    last_activity_at: activityAt(40),
+    running: true,
+  }),
 ];
 
 function waitingEntry(
@@ -628,6 +791,7 @@ type RouteClientMethods = Pick<
   | "notificationUnreadCount"
   | "markNotificationsRead"
   | "markAllNotificationsRead"
+  | "listChats"
 >;
 
 export function pending<T>(): Promise<T> {
@@ -845,6 +1009,8 @@ export function storyClient(
     notificationUnreadCount: async () => 0,
     markNotificationsRead: async () => 0,
     markAllNotificationsRead: async () => 0,
+    listChats: async (options) =>
+      options?.archived ? archivedRouteChats : routeChats,
     ...overrides,
   };
 
@@ -879,6 +1045,9 @@ export function storyAppContext(
     setStatus: () => {},
     newChat: () => {},
     deleteChat: () => {},
+    togglePinChat: () => {},
+    archiveChat: () => {},
+    unarchiveChat: () => {},
     startRename: () => {},
     commitRename: () => {},
     cancelRename: () => {},
@@ -899,6 +1068,8 @@ export function storyAppContext(
 
 type StoreFixture = {
   chats?: Chat[];
+  archivedChats?: Chat[];
+  archivedLoaded?: boolean;
   chatsLoaded?: boolean;
   chatsError?: string | null;
   creatingChat?: boolean;
@@ -914,6 +1085,8 @@ type StoreFixture = {
 
 export function resetRouteStoryStores({
   chats = routeChats,
+  archivedChats = [],
+  archivedLoaded = false,
   chatsLoaded = true,
   chatsError = null,
   creatingChat = false,
@@ -928,6 +1101,8 @@ export function resetRouteStoryStores({
 }: StoreFixture = {}): void {
   useChatListStore.setState({
     chats,
+    archivedChats,
+    archivedLoaded,
     chatsLoaded,
     chatsError,
     creatingChat,
@@ -961,6 +1136,7 @@ export function resetRouteStoryStores({
     collapsed: false,
     filtering: false,
     query: "",
+    showAllOlder: false,
   });
   useUiStore.setState({
     sidebarCollapsed,

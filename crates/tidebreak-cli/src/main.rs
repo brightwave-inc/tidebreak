@@ -123,7 +123,7 @@ mod setup;
 
 use help::{set_usage_family, usage_error, Family};
 use print::OutputFormat;
-use setup::{Command as SetupCommand, SecretSource};
+use setup::{ChatPlacement, Command as SetupCommand, SecretSource};
 
 /// What `--version` reports.
 ///
@@ -557,12 +557,39 @@ fn parse_setup(family: &str, args: Vec<String>) -> (SetupCommand, OutputFormat) 
     let mut cursor = Cursor::new(args);
     let verb = cursor.positional(&format!("a {family} subcommand"));
     let command = match (family, verb.as_str()) {
-        ("chat", "list") => SetupCommand::ChatList,
+        ("chat", "list") => {
+            let mut archived = false;
+            let mut format = OutputFormat::Text;
+            while let Some(flag) = cursor.next() {
+                match flag.as_str() {
+                    "--archived" => archived = true,
+                    "--output-format" => format = parse_format(cursor.value("--output-format")),
+                    other => usage_error(&format!("unknown chat list argument {other:?}")),
+                }
+            }
+            return (SetupCommand::ChatList { archived }, format);
+        }
         ("chat", "create") => SetupCommand::ChatCreate,
         ("chat", "delete") => {
             let chat = parse_chat_id(&cursor.positional("a chat id"));
             SetupCommand::ChatDelete { chat }
         }
+        ("chat", "pin") => SetupCommand::ChatPlace {
+            chat: parse_chat_id(&cursor.positional("a chat id")),
+            placement: ChatPlacement::Pin,
+        },
+        ("chat", "unpin") => SetupCommand::ChatPlace {
+            chat: parse_chat_id(&cursor.positional("a chat id")),
+            placement: ChatPlacement::Unpin,
+        },
+        ("chat", "archive") => SetupCommand::ChatPlace {
+            chat: parse_chat_id(&cursor.positional("a chat id")),
+            placement: ChatPlacement::Archive,
+        },
+        ("chat", "unarchive") => SetupCommand::ChatPlace {
+            chat: parse_chat_id(&cursor.positional("a chat id")),
+            placement: ChatPlacement::Unarchive,
+        },
         ("chat", "steer") => {
             // `turn` is the durable turn identity from the chat event stream
             // (not an agent-run id). Remaining positionals are the steer text;

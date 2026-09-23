@@ -115,6 +115,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260923_000002_memory_evidence_event_kind",
             "m20260923_000003_notification_body",
             "m20260923_000004_pull_request_observed_times",
+            "m20260923_000005_conversation_list_state",
         ]
     );
     assert!(db
@@ -125,6 +126,77 @@ async fn a_fresh_database_records_the_whole_chain() {
         .await
         .unwrap()
         .is_none());
+}
+
+/// An upgraded list keeps the order the reader last saw: each session's
+/// activity is its latest turn, and one with no turns reads its creation.
+#[tokio::test]
+async fn the_list_state_backfill_reads_the_latest_turn() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(
+        &db,
+        Some(steps_before("m20260923_000005_conversation_list_state")),
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        r#"
+INSERT INTO session (
+id, owner, workspace_id, kind, harness_kind, permission_mode, lifecycle,
+spawn_epoch, attention_state, attention_source, created_at, title
+) VALUES
+(X'0000000000000000000000000000f001', 'local', NULL, 'interactive', 'internal',
+ 'ask', 'idle', 0, '{"type":"idle"}', 'lifecycle', '2026-08-01T00:00:00Z', 'worked'),
+(X'0000000000000000000000000000f002', 'local', NULL, 'interactive', 'internal',
+ 'ask', 'idle', 0, '{"type":"idle"}', 'lifecycle', '2026-08-02T00:00:00Z', NULL);
+INSERT INTO turn (id, owner, session_id, ordinal, status, user_input, started_at, ended_at)
+VALUES
+(X'0000000000000000000000000000f011', 'local', X'0000000000000000000000000000f001',
+ 1, 'completed', 'first', '2026-09-01T00:00:00Z', '2026-09-01T00:05:00Z'),
+(X'0000000000000000000000000000f012', 'local', X'0000000000000000000000000000f001',
+ 2, 'running', 'second', '2026-09-02T00:00:00Z', NULL);
+"#,
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(&db, None).await.unwrap();
+
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT title, last_activity_at, pinned_at, archived_at, unread_since \
+             FROM session ORDER BY created_at"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
+    let state = rows
+        .iter()
+        .map(|row| {
+            (
+                row.try_get::<Option<String>>("", "title").unwrap(),
+                row.try_get::<Option<String>>("", "last_activity_at")
+                    .unwrap(),
+                row.try_get::<Option<String>>("", "pinned_at").unwrap(),
+                row.try_get::<Option<String>>("", "archived_at").unwrap(),
+                row.try_get::<Option<String>>("", "unread_since").unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        state,
+        vec![
+            (
+                Some("worked".to_owned()),
+                Some("2026-09-02T00:00:00Z".to_owned()),
+                None,
+                None,
+                None,
+            ),
+            (None, None, None, None, None),
+        ]
+    );
 }
 
 #[tokio::test]

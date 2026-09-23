@@ -33,10 +33,10 @@ use tidebreak_core::local_app::{AppGrant, AppRecord, AppRevision};
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
     AcceptTurnSteerOutcome, AgentRun, AgentRunId, AgentRunResult, AnswerUserQuestionsOutcome,
-    AnswerUserQuestionsRequest, CallId, Chat, ChatTranscriptPage, ChatTranscriptSnapshot,
-    DecidePlanRequest, DeleteChatOutcome, DeleteProjectOutcome, DocumentId, DocumentListCursor,
-    DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, ImageRef,
-    JournaledTurnOutcome, MessageAttachment, MoveChatOutcome, NetworkPolicy, OwnerId,
+    AnswerUserQuestionsRequest, CallId, Chat, ChatListing, ChatTranscriptPage,
+    ChatTranscriptSnapshot, DecidePlanRequest, DeleteChatOutcome, DeleteProjectOutcome, DocumentId,
+    DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord,
+    ImageRef, JournaledTurnOutcome, MessageAttachment, MoveChatOutcome, NetworkPolicy, OwnerId,
     PendingPlanApproval, PendingUserQuestions, PermissionMode, Project, ProjectId, ReasoningEffort,
     RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
     SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedAgentEvent, SessionId,
@@ -94,6 +94,48 @@ impl ScopedStore {
     /// List the principal's chats, most-recently-created first.
     pub async fn list_chats(&self) -> Result<Vec<Chat>> {
         self.store.list_chats_scoped(&self.owner).await
+    }
+
+    /// The principal's conversations as their list of work shows them:
+    /// pinned first, then by latest activity. `archived` picks the archive.
+    pub async fn list_chat_listings(&self, archived: bool) -> Result<Vec<ChatListing>> {
+        self.store
+            .list_chat_listings_scoped(&self.owner, archived)
+            .await
+    }
+
+    /// One of the principal's conversations as the list shows it, or a
+    /// `404` that does not reveal whether someone else's exists.
+    pub async fn require_chat_listing(
+        &self,
+        id: SessionId,
+    ) -> std::result::Result<ChatListing, ServerError> {
+        self.store
+            .get_chat_listing_scoped(&self.owner, id)
+            .await?
+            .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))
+    }
+
+    /// Pin the principal's conversation to the top of their list, or unpin
+    /// it. `false` when there is no such conversation.
+    pub async fn set_chat_pinned(&self, id: SessionId, pinned: bool) -> Result<bool> {
+        self.store
+            .set_chat_pinned_scoped(&self.owner, id, pinned)
+            .await
+    }
+
+    /// Archive the principal's conversation, or bring it back. `false` when
+    /// there is no such conversation.
+    pub async fn set_chat_archived(&self, id: SessionId, archived: bool) -> Result<bool> {
+        self.store
+            .set_chat_archived_scoped(&self.owner, id, archived)
+            .await
+    }
+
+    /// Clear the unread mark on the principal's conversation. `false` when
+    /// there is no such conversation.
+    pub async fn mark_chat_read(&self, id: SessionId) -> Result<bool> {
+        self.store.mark_chat_read_scoped(&self.owner, id).await
     }
 
     /// Create a chat and apply related settings only if the chat insert

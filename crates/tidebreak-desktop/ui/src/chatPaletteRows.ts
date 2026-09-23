@@ -24,9 +24,9 @@ const UNTITLED = "New chat";
 /**
  * Recent conversations, as rows that open them.
  *
- * Left in the order the caller passed — the chat list is already sorted by
- * what happened last — so with nothing typed the palette opens on the same
- * conversations the sidebar is showing.
+ * Left in the order the caller passed: the list of work's order, pinned first
+ * and then by what happened last. With nothing typed the palette opens on the
+ * same conversations the rail is showing.
  */
 export function chatPaletteRows(input: {
   chats: readonly Chat[];
@@ -74,7 +74,11 @@ export function projectPaletteRows(input: {
   }));
 }
 
-/** What chat mode does, and where else it goes. */
+/**
+ * What chat mode does, and where else it goes. "Start new work" runs the same
+ * action as the shortcut it shows: open the home composer, which creates the
+ * conversation on the first send.
+ */
 export function chatNavigationPaletteRows(input: {
   navigate: (path: string) => void;
   onNewChat: () => void;

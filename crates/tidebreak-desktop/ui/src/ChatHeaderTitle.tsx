@@ -1,8 +1,19 @@
 import { useNavigate } from "@tanstack/react-router";
-import { Bug, Download, Ellipsis, Pencil, Trash2 } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  Bug,
+  Download,
+  Ellipsis,
+  Pencil,
+  Pin,
+  PinOff,
+  Trash2,
+} from "lucide-react";
 
 import type { Chat } from "./api";
 import { useApp } from "./AppContext";
+import { hasListState } from "./chatListGroups";
 import { chatDebugDeps, copyChatDebug, saveChatDebug } from "./ChatDebugBundle";
 import { useChatListStore } from "./ChatListStore";
 import { hasLocalHostAuthority } from "./host";
@@ -28,7 +39,19 @@ import { WithTooltip } from "@/components/ui/tooltip";
  */
 export function ChatHeaderTitle({ chat }: { chat: Chat }) {
   const navigate = useNavigate();
-  const { startRename, commitRename, cancelRename, deleteChat } = useApp();
+  const {
+    startRename,
+    commitRename,
+    cancelRename,
+    deleteChat,
+    togglePinChat,
+    archiveChat,
+    unarchiveChat,
+  } = useApp();
+  const pinned = Boolean(chat.pinned_at);
+  const archived = Boolean(chat.archived_at);
+  // A server older than the list of work cannot pin or archive.
+  const placeable = hasListState(chat);
   const renaming = useChatListStore(
     (state) => state.renamingChatId === chat.id,
   );
@@ -110,6 +133,12 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
+          {placeable && !archived && (
+            <DropdownMenuItem onSelect={() => togglePinChat(chat)}>
+              {pinned ? <PinOff /> : <Pin />}
+              {pinned ? "Unpin" : "Pin"}
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem onSelect={() => startRename(chat)}>
             <Pencil />
             Rename
@@ -136,6 +165,18 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
             </>
           )}
           <DropdownMenuSeparator />
+          {placeable &&
+            (archived ? (
+              <DropdownMenuItem onSelect={() => unarchiveChat(chat)}>
+                <ArchiveRestore />
+                Unarchive
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem onSelect={() => archiveChat(chat)}>
+                <Archive />
+                Archive
+              </DropdownMenuItem>
+            ))}
           <DropdownMenuItem
             variant="destructive"
             onSelect={() => deleteChat(chat)}

@@ -9,14 +9,14 @@ use sea_orm::{
 use serde_json::Value;
 
 use crate::attention::{AttentionSource, AttentionState};
-use crate::code::{HarnessKind, SessionKind, SessionLifecycle};
+use crate::code::{HarnessKind, SessionKind, SessionLifecycle, TurnStatus};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedAgentEvent};
 use crate::id::{AgentRunId, CallId, HostRootId, MessageId, ProjectId, SessionId, TurnId};
 use crate::model::{
-    validate_chat_root_projection, validate_chat_root_projection_against_project, Chat,
-    ChatRootAttachment, Message, OwnerId, ReasoningEffort, Role, RootAttachmentOrigin,
-    ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
+    validate_chat_root_projection, validate_chat_root_projection_against_project, AgentRunTier,
+    Chat, ChatListing, ChatRootAttachment, Message, OwnerId, ReasoningEffort, Role,
+    RootAttachmentOrigin, ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::provider::MessageReasoning;
 use crate::storage::{
@@ -277,6 +277,11 @@ where
         attachment_revision: Set(chat.attachment_revision),
         memory_incognito: Set(chat.memory_incognito),
         visibility: Set("private".to_owned()),
+        // Nothing has happened yet: the list reads the creation time.
+        last_activity_at: Set(None),
+        pinned_at: Set(None),
+        archived_at: Set(None),
+        unread_since: Set(None),
     }
     .insert(conn)
     .await
@@ -517,6 +522,12 @@ pub(in crate::db) async fn update_chat_metadata(
             entities::session::Column::Title,
             sea_orm::sea_query::Expr::value(title),
         );
+        // A rename is the owner working on the conversation, so it moves up
+        // their list the way a turn does.
+        update = update.col_expr(
+            entities::session::Column::LastActivityAt,
+            sea_orm::sea_query::Expr::value(Some(canonical_db_timestamp(Utc::now())?)),
+        );
     }
     if let Some(model) = model {
         update = update.col_expr(
@@ -640,6 +651,593 @@ pub(in crate::db) async fn list_chats(
     Ok(chats)
 }
 
+/// How many conversation ids one listing query binds. SQLite's bound
+/// parameter limit sits well above this on every build we ship.
+const LISTING_BATCH: usize = 500;
+
+/// Turn facts the list of work shows beside each conversation.
+#[derive(Debug, Default, Clone, Copy)]
+struct ChatTurnActivity {
+    turn_count: u64,
+    running: bool,
+}
+
+/// Count each conversation's turns and find the ones with a turn in flight.
+///
+/// Two grouped reads per batch rather than one per conversation, so a long
+/// list costs the same handful of queries as a short one. Both ride the
+/// `(session_id, ordinal)` index.
+async fn chat_turn_activity_on<C>(
+    conn: &C,
+    ids: &[uuid::Uuid],
+) -> Result<HashMap<uuid::Uuid, ChatTurnActivity>>
+where
+    C: ConnectionTrait,
+{
+    let mut activity = HashMap::<uuid::Uuid, ChatTurnActivity>::new();
+    for batch in ids.chunks(LISTING_BATCH) {
+        let counts = entities::turn::Entity::find()
+            .select_only()
+            .column(entities::turn::Column::SessionId)
+            .column_as(entities::turn::Column::Id.count(), "turn_count")
+            .filter(entities::turn::Column::SessionId.is_in(batch.iter().copied()))
+            .group_by(entities::turn::Column::SessionId)
+            .into_tuple::<(uuid::Uuid, i64)>()
+            .all(conn)
+            .await
+            .map_err(store_err)?;
+        for (session_id, count) in counts {
+            activity.entry(session_id).or_default().turn_count =
+                u64::try_from(count).unwrap_or_default();
+        }
+        // The same definition of "busy" the attention badge uses.
+        let live = entities::turn::Entity::find()
+            .select_only()
+            .column(entities::turn::Column::SessionId)
+            .distinct()
+            .filter(entities::turn::Column::SessionId.is_in(batch.iter().copied()))
+            .filter(
+                entities::turn::Column::Status
+                    .is_in(TurnStatus::LIVE.iter().map(|status| status.as_str())),
+            )
+            .into_tuple::<uuid::Uuid>()
+            .all(conn)
+            .await
+            .map_err(store_err)?;
+        for session_id in live {
+            activity.entry(session_id).or_default().running = true;
+        }
+    }
+    Ok(activity)
+}
+
+fn chat_listing_from_models(
+    model: entities::session::Model,
+    roots: Vec<entities::chat_root_attachment::Model>,
+    activity: ChatTurnActivity,
+) -> Result<ChatListing> {
+    let last_activity_at = model.last_activity_at;
+    let pinned_at = model.pinned_at;
+    let archived_at = model.archived_at;
+    let unread = model.unread_since.is_some();
+    let chat = chat_from_models(model, roots)?;
+    Ok(ChatListing {
+        last_activity_at: last_activity_at.unwrap_or(chat.created_at),
+        pinned_at,
+        archived_at,
+        running: activity.running,
+        unread,
+        turn_count: activity.turn_count,
+        chat,
+    })
+}
+
+/// The list's order: pinned conversations first, the most recently pinned on
+/// top, then everything else by its latest activity. The archive puts the
+/// most recently archived first.
+fn sort_chat_listings(listings: &mut [ChatListing], archived: bool) {
+    listings.sort_by(|left, right| {
+        let placement = if archived {
+            right.archived_at.cmp(&left.archived_at)
+        } else {
+            right.pinned_at.cmp(&left.pinned_at)
+        };
+        placement
+            .then_with(|| right.last_activity_at.cmp(&left.last_activity_at))
+            .then_with(|| right.chat.created_at.cmp(&left.chat.created_at))
+            .then_with(|| right.chat.id.0.cmp(&left.chat.id.0))
+    });
+}
+
+/// The owner's conversations as their list of work shows them.
+///
+/// `archived` picks the archive instead of the list. Neither hides a
+/// conversation that has no turns yet: a script that creates one and passes
+/// its id to the next command has to find it here. Clients decide whether an
+/// empty conversation is worth a row.
+pub(in crate::db) async fn list_chat_listings(
+    store: &DbStore,
+    owner: Option<&OwnerId>,
+    archived: bool,
+) -> Result<Vec<ChatListing>> {
+    let mut query = entities::session::Entity::find().filter(internal_sessions());
+    if let Some(owner) = owner {
+        query = query.filter(entities::session::Column::Owner.eq(owner.as_str()));
+    }
+    query = if archived {
+        query.filter(entities::session::Column::ArchivedAt.is_not_null())
+    } else {
+        query.filter(entities::session::Column::ArchivedAt.is_null())
+    };
+    let rows = query
+        .find_with_related(entities::chat_root_attachment::Entity)
+        .order_by_asc(entities::chat_root_attachment::Column::Position)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    let ids = rows.iter().map(|(model, _)| model.id).collect::<Vec<_>>();
+    let activity = chat_turn_activity_on(&store.conn, &ids).await?;
+    let mut listings = rows
+        .into_iter()
+        .map(|(model, roots)| {
+            let turns = activity.get(&model.id).copied().unwrap_or_default();
+            chat_listing_from_models(model, roots, turns)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    sort_chat_listings(&mut listings, archived);
+    Ok(listings)
+}
+
+/// One of the owner's conversations as the list shows it, archived or not.
+pub(in crate::db) async fn get_chat_listing(
+    store: &DbStore,
+    id: SessionId,
+    owner: Option<&OwnerId>,
+) -> Result<Option<ChatListing>> {
+    let mut query = entities::session::Entity::find_by_id(id.0).filter(internal_sessions());
+    if let Some(owner) = owner {
+        query = query.filter(entities::session::Column::Owner.eq(owner.as_str()));
+    }
+    let mut rows = query
+        .find_with_related(entities::chat_root_attachment::Entity)
+        .order_by_asc(entities::chat_root_attachment::Column::Position)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    let Some((model, roots)) = rows.pop() else {
+        return Ok(None);
+    };
+    let activity = chat_turn_activity_on(&store.conn, &[model.id]).await?;
+    let turns = activity.get(&model.id).copied().unwrap_or_default();
+    chat_listing_from_models(model, roots, turns).map(Some)
+}
+
+/// Take the write lock on the owner's conversation and read it back.
+///
+/// `None` when there is no such conversation for this owner. Someone else's
+/// conversation is indistinguishable from an absent one (#853).
+async fn lock_owned_chat_on(
+    transaction: &sea_orm::DatabaseTransaction,
+    id: SessionId,
+    owner: Option<&OwnerId>,
+) -> Result<Option<entities::session::Model>> {
+    if !acquire_chat_write_lock(transaction, id).await? {
+        return Ok(None);
+    }
+    let mut query = entities::session::Entity::find_by_id(id.0).filter(internal_sessions());
+    if let Some(owner) = owner {
+        query = query.filter(entities::session::Column::Owner.eq(owner.as_str()));
+    }
+    query.one(transaction).await.map_err(store_err)
+}
+
+/// Write one conversation's pin and archive times.
+async fn write_chat_placement_on(
+    transaction: &sea_orm::DatabaseTransaction,
+    id: SessionId,
+    pinned_at: Option<chrono::DateTime<Utc>>,
+    archived_at: Option<chrono::DateTime<Utc>>,
+) -> Result<()> {
+    entities::session::Entity::update_many()
+        .col_expr(
+            entities::session::Column::PinnedAt,
+            sea_orm::sea_query::Expr::value(pinned_at),
+        )
+        .col_expr(
+            entities::session::Column::ArchivedAt,
+            sea_orm::sea_query::Expr::value(archived_at),
+        )
+        .filter(entities::session::Column::Id.eq(id.0))
+        .exec(transaction)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+/// Pin a conversation to the top of its owner's list, or unpin it.
+///
+/// Pinning again keeps the first pin time, so the pinned group does not
+/// reorder. Pinning takes the conversation out of the archive: the owner wants
+/// it in front of them. Returns `false` when there is no such conversation.
+pub(in crate::db) async fn set_chat_pinned(
+    store: &DbStore,
+    id: SessionId,
+    pinned: bool,
+    owner: Option<&OwnerId>,
+) -> Result<bool> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let Some(model) = lock_owned_chat_on(&transaction, id, owner).await? else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    };
+    let (pinned_at, archived_at) = if pinned {
+        let now = canonical_db_timestamp(Utc::now())?;
+        (Some(model.pinned_at.unwrap_or(now)), None)
+    } else {
+        (None, model.archived_at)
+    };
+    write_chat_placement_on(&transaction, id, pinned_at, archived_at).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(true)
+}
+
+/// Archive a conversation out of its owner's list, or bring it back.
+///
+/// Archiving keeps every turn, output, and source; it only moves the row. It
+/// also unpins, since a pin means "keep this in front of me". Archiving again
+/// keeps the first archive time. Bringing a conversation back clears its
+/// unread mark: the owner went looking for it, and an old result must not
+/// return to the list as news. Returns `false` when there is no such
+/// conversation.
+pub(in crate::db) async fn set_chat_archived(
+    store: &DbStore,
+    id: SessionId,
+    archived: bool,
+    owner: Option<&OwnerId>,
+) -> Result<bool> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let Some(model) = lock_owned_chat_on(&transaction, id, owner).await? else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    };
+    let (pinned_at, archived_at) = if archived {
+        let now = canonical_db_timestamp(Utc::now())?;
+        (None, Some(model.archived_at.unwrap_or(now)))
+    } else {
+        (model.pinned_at, None)
+    };
+    write_chat_placement_on(&transaction, id, pinned_at, archived_at).await?;
+    if !archived {
+        entities::session::Entity::update_many()
+            .col_expr(
+                entities::session::Column::UnreadSince,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .filter(entities::session::Column::Id.eq(id.0))
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(true)
+}
+
+/// Record that the owner has seen what their conversation last did.
+///
+/// Clears the unread mark a finished turn left. Returns `false` when there is
+/// no such conversation.
+pub(in crate::db) async fn mark_chat_read(
+    store: &DbStore,
+    id: SessionId,
+    owner: Option<&OwnerId>,
+) -> Result<bool> {
+    let mut update = entities::session::Entity::update_many()
+        .col_expr(
+            entities::session::Column::UnreadSince,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .filter(entities::session::Column::Id.eq(id.0))
+        .filter(internal_sessions());
+    if let Some(owner) = owner {
+        update = update.filter(entities::session::Column::Owner.eq(owner.as_str()));
+    }
+    let result = update.exec(&store.conn).await.map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
+/// Move a conversation forward in its owner's list: a turn started or ended,
+/// or the owner renamed it.
+pub(in crate::db) async fn touch_chat_activity_on<C>(
+    conn: &C,
+    id: SessionId,
+    at: chrono::DateTime<Utc>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    entities::session::Entity::update_many()
+        .col_expr(
+            entities::session::Column::LastActivityAt,
+            sea_orm::sea_query::Expr::value(Some(at)),
+        )
+        .filter(entities::session::Column::Id.eq(id.0))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+/// A turn started: move the conversation to the top of its owner's list, and
+/// bring it back out of the archive, since the owner is working in it again.
+/// A new turn supersedes whatever the last one left unread; its own end marks
+/// the conversation again unless someone is watching it.
+pub(in crate::db) async fn record_started_turn_on<C>(
+    conn: &C,
+    id: SessionId,
+    at: chrono::DateTime<Utc>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let none = Option::<chrono::DateTime<Utc>>::None;
+    entities::session::Entity::update_many()
+        .col_expr(
+            entities::session::Column::LastActivityAt,
+            sea_orm::sea_query::Expr::value(Some(at)),
+        )
+        .col_expr(
+            entities::session::Column::ArchivedAt,
+            sea_orm::sea_query::Expr::value(none),
+        )
+        .col_expr(
+            entities::session::Column::UnreadSince,
+            sea_orm::sea_query::Expr::value(none),
+        )
+        .filter(entities::session::Column::Id.eq(id.0))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+/// A turn finished: move the conversation forward and mark it unread until
+/// its owner opens it. The first unseen finish is the one kept.
+async fn record_finished_turn_on<C>(
+    conn: &C,
+    id: SessionId,
+    at: chrono::DateTime<Utc>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    touch_chat_activity_on(conn, id, at).await?;
+    entities::session::Entity::update_many()
+        .col_expr(
+            entities::session::Column::UnreadSince,
+            sea_orm::sea_query::Expr::value(Some(at)),
+        )
+        .filter(entities::session::Column::Id.eq(id.0))
+        .filter(entities::session::Column::UnreadSince.is_null())
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+/// Every column outside `session` that names a conversation, as
+/// `(table, column)`.
+///
+/// A conversation that any of these rows points at holds something, so the
+/// empty-conversation sweep keeps it. `agent_run` is the one reference left
+/// out, because every conversation owns its foreground run from the moment it
+/// exists: [`chat_holds_nothing`] counts only the other runs, and the rows in
+/// [`AGENT_RUN_REFERENCES`] that name any of its runs. A test walks the schema
+/// and fails when a table names a session or an agent run and these lists do
+/// not.
+pub(in crate::db) const CHAT_REFERENCES: &[(&str, &str)] = &[
+    ("agent_run_inbox", "chat_id"),
+    ("app_revision", "chat_id"),
+    ("approval", "session_id"),
+    ("chat_image_publication", "chat_id"),
+    ("chat_root_attachment", "chat_id"),
+    ("code_conversation_request", "session_id"),
+    ("code_external_binding", "session_id"),
+    ("code_external_event", "session_id"),
+    ("code_inference_resolution", "root_session_id"),
+    ("code_managed_decision", "session_id"),
+    ("code_native_tool_receipt", "session_id"),
+    ("code_parent_wait", "parent_session_id"),
+    ("code_pull_request_attribution", "session_id"),
+    ("code_queued_turn", "session_id"),
+    ("code_session_context", "parent_session_id"),
+    ("code_session_context", "session_id"),
+    ("code_session_image", "session_id"),
+    ("code_session_incarnation", "session_id"),
+    ("code_session_inference", "session_id"),
+    ("code_trigger_delivery_receipt", "session_id"),
+    ("code_turn_steer", "session_id"),
+    ("code_watch", "session_id"),
+    ("context_checkpoint", "chat_id"),
+    ("document", "chat_id"),
+    ("event", "session_id"),
+    ("exec_file_change", "chat_id"),
+    ("message", "chat_id"),
+    ("message_identity", "chat_id"),
+    ("output", "chat_id"),
+    ("root_attachment_change", "chat_id"),
+    ("sandbox_spawn_checkpoint", "session_id"),
+    ("sandbox_tool_call", "chat_id"),
+    ("session_access", "session_id"),
+    ("standing_tool_grant", "chat_id"),
+    ("task_plan", "chat_id"),
+    ("tool_call", "chat_id"),
+    ("turn", "session_id"),
+    ("turn_agent_run_wait_member", "chat_id"),
+    ("turn_agent_run_wait_set", "session_id"),
+    ("turn_client_wait", "session_id"),
+];
+
+/// Every column outside `agent_run` that names an agent run, as
+/// `(table, column)`. A row here for any of a conversation's runs, the
+/// foreground one included, means that run did something.
+pub(in crate::db) const AGENT_RUN_REFERENCES: &[(&str, &str)] = &[
+    ("agent_run_cancellation", "agent_run_id"),
+    ("agent_run_claim", "agent_run_id"),
+    ("agent_run_inbox", "child_run_id"),
+    ("agent_run_inbox", "parent_run_id"),
+    ("agent_run_progress", "agent_run_id"),
+    ("agent_run_result", "agent_run_id"),
+    ("agent_run_task_plan", "agent_run_id"),
+    ("app_revision", "producing_run_id"),
+    ("output_revision", "producing_run_id"),
+    ("sandbox_spawn_checkpoint", "child_run_id"),
+    ("sandbox_spawn_checkpoint", "parent_run_id"),
+    ("sandbox_tool_call", "agent_run_id"),
+    ("turn_agent_run_wait_member", "child_run_id"),
+    ("turn_agent_run_wait_member", "parent_run_id"),
+    ("turn_agent_run_wait_set", "parent_run_id"),
+];
+
+/// The conversations no other row points at: nothing in
+/// [`CHAT_REFERENCES`], no agent run beyond the foreground one every
+/// conversation starts with, and nothing in [`AGENT_RUN_REFERENCES`] for any
+/// of its runs.
+fn chat_holds_nothing() -> sea_orm::Condition {
+    use sea_orm::sea_query::{Alias, Expr, ExprTrait, Query};
+
+    let chat_id = || (entities::session::Entity, entities::session::Column::Id);
+    let run = |column| (entities::agent_run::Entity, column);
+    let mut condition = sea_orm::Condition::all();
+    for (table, column) in CHAT_REFERENCES {
+        condition = condition.add(Expr::not_exists(
+            Query::select()
+                .expr(Expr::val(1))
+                .from(Alias::new(*table))
+                .and_where(Expr::col((Alias::new(*table), Alias::new(*column))).equals(chat_id()))
+                .to_owned(),
+        ));
+    }
+    condition = condition.add(Expr::not_exists(
+        Query::select()
+            .expr(Expr::val(1))
+            .from(entities::agent_run::Entity)
+            .and_where(Expr::col(run(entities::agent_run::Column::ChatId)).equals(chat_id()))
+            .and_where(
+                Expr::col(run(entities::agent_run::Column::Tier))
+                    .ne(AgentRunTier::Foreground.as_str())
+                    .or(Expr::col(run(entities::agent_run::Column::Depth)).ne(0)),
+            )
+            .to_owned(),
+    ));
+    for (table, column) in AGENT_RUN_REFERENCES {
+        condition = condition.add(Expr::not_exists(
+            Query::select()
+                .expr(Expr::val(1))
+                .from(Alias::new(*table))
+                .and_where(
+                    Expr::col((Alias::new(*table), Alias::new(*column))).in_subquery(
+                        Query::select()
+                            .column(run(entities::agent_run::Column::Id))
+                            .from(entities::agent_run::Entity)
+                            .and_where(
+                                Expr::col(run(entities::agent_run::Column::ChatId))
+                                    .equals(chat_id()),
+                            )
+                            .to_owned(),
+                    ),
+                )
+                .to_owned(),
+        ));
+    }
+    condition
+}
+
+/// The conversations the sweep may delete: created before `created_before`,
+/// and nothing has happened in them since.
+///
+/// The owner never named, pinned, archived, or worked in one, no session
+/// worker ever drove it, and no row anywhere points at it
+/// ([`chat_holds_nothing`]). A session the code runtime drives never
+/// qualifies: a Slack thread waits in the queue as a session no worker has
+/// claimed yet, and until one does it looks as idle as an empty chat.
+fn prunable_chats(created_before: chrono::DateTime<Utc>) -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(internal_sessions())
+        .add(code_session_ops::code_runtime_sessions().not())
+        .add(entities::session::Column::Kind.eq(SessionKind::Interactive.as_str()))
+        .add(entities::session::Column::OwnerKind.is_null())
+        .add(entities::session::Column::ActsAs.is_null())
+        .add(entities::session::Column::HarnessResumeRef.is_null())
+        .add(entities::session::Column::Title.is_null())
+        .add(entities::session::Column::PinnedAt.is_null())
+        .add(entities::session::Column::ArchivedAt.is_null())
+        .add(entities::session::Column::LastActivityAt.is_null())
+        .add(entities::session::Column::UnreadSince.is_null())
+        .add(entities::session::Column::CreatedAt.lt(created_before))
+        .add(chat_holds_nothing())
+}
+
+/// Delete the conversations nothing ever happened in, created before
+/// `created_before`, across every owner.
+///
+/// Deleting one must lose nothing, so the test is strict: see
+/// [`prunable_chats`]. Each candidate is checked again under the session
+/// write lock every writer to it takes, then erased by the same cascade a
+/// delete uses, so one that gains a first message between the scan and the
+/// delete stays. Returns the ids it removed.
+pub(in crate::db) async fn prune_empty_chats(
+    store: &DbStore,
+    created_before: chrono::DateTime<Utc>,
+) -> Result<Vec<SessionId>> {
+    let created_before = canonical_db_timestamp(created_before)?;
+    let candidates = entities::session::Entity::find()
+        .select_only()
+        .column(entities::session::Column::Id)
+        .filter(prunable_chats(created_before))
+        .into_tuple::<uuid::Uuid>()
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    let mut pruned = Vec::new();
+    for id in candidates.into_iter().map(SessionId) {
+        if prune_empty_chat(store, id, created_before).await? {
+            pruned.push(id);
+        }
+    }
+    Ok(pruned)
+}
+
+/// Delete one empty conversation, checking under its write lock that it is
+/// still empty. Returns whether it went.
+async fn prune_empty_chat(
+    store: &DbStore,
+    id: SessionId,
+    created_before: chrono::DateTime<Utc>,
+) -> Result<bool> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let still_empty = acquire_chat_write_lock(&transaction, id).await?
+        && entities::session::Entity::find_by_id(id.0)
+            .filter(prunable_chats(created_before))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some()
+        // A paused queue is the one session state kept outside a session
+        // column: it names the session only inside its settings key.
+        && entities::setting::Entity::find_by_id(format!("sessions.{id}.queue_paused"))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_none();
+    if !still_empty {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    erase_quiesced_chat_on(&transaction, id).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(true)
+}
+
 /// Remove one fully quiesced conversation and its terminal history.
 ///
 /// Every turn writer takes the chat fence, and all runnable work is rejected
@@ -740,19 +1338,34 @@ pub(in crate::db) async fn delete_chat(
         return Ok(DeleteChatOutcome::RootAttachmentStateUnresolved);
     }
 
+    let background_run_ids = erase_quiesced_chat_on(&transaction, chat_id).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(DeleteChatOutcome::Deleted { background_run_ids })
+}
+
+/// Erase one conversation and everything it owns, under the caller's
+/// transaction and chat write lock.
+///
+/// The caller has already proved the conversation quiesced: no turn can run,
+/// no root is attached, and no folder change is unresolved. Returns the
+/// background runs whose host workspaces the caller may destroy now.
+async fn erase_quiesced_chat_on(
+    transaction: &sea_orm::DatabaseTransaction,
+    chat_id: SessionId,
+) -> Result<Vec<AgentRunId>> {
     // Sources are product state owned by the conversation. Their
     // content-addressed blobs are cleaned asynchronously after this atomic
     // operational transaction commits.
     let documents = entities::document::Entity::find()
         .filter(entities::document::Column::ChatId.eq(chat_id.0))
-        .all(&transaction)
+        .all(transaction)
         .await
         .map_err(store_err)?;
     for document in documents {
         let deleted = entities::document::Entity::delete_many()
             .filter(entities::document::Column::Id.eq(document.id))
             .filter(entities::document::Column::ChatId.eq(chat_id.0))
-            .exec(&transaction)
+            .exec(transaction)
             .await
             .map_err(store_err)?;
         if deleted.rows_affected != 1 {
@@ -762,7 +1375,7 @@ pub(in crate::db) async fn delete_chat(
             )));
         }
         if let Some(blob_id) = document.source_blob_id {
-            blob_ops::enqueue_on(&transaction, blob_id).await?;
+            blob_ops::enqueue_on(transaction, blob_id).await?;
         }
     }
 
@@ -773,27 +1386,27 @@ pub(in crate::db) async fn delete_chat(
     // claim performs the authoritative union reference check and cancels a
     // candidate that is still live, exactly as it does for documents.
     let mut image_blob_ids =
-        chat_image_publication_ops::list_chat_blob_ids_on(&transaction, chat_id).await?;
-    chat_image_publication_ops::delete_for_chat_on(&transaction, chat_id).await?;
+        chat_image_publication_ops::list_chat_blob_ids_on(transaction, chat_id).await?;
+    chat_image_publication_ops::delete_for_chat_on(transaction, chat_id).await?;
     image_blob_ids
-        .extend(message_attachment_ops::list_chat_blob_ids_on(&transaction, chat_id).await?);
+        .extend(message_attachment_ops::list_chat_blob_ids_on(transaction, chat_id).await?);
     // Attachments must go before the message rows they point at, which the
     // ordering below depends on.
-    message_attachment_ops::delete_for_chat_on(&transaction, chat_id).await?;
+    message_attachment_ops::delete_for_chat_on(transaction, chat_id).await?;
     image_blob_ids.sort_unstable();
     image_blob_ids.dedup();
     for blob_id in image_blob_ids {
-        blob_ops::enqueue_on(&transaction, blob_id).await?;
+        blob_ops::enqueue_on(transaction, blob_id).await?;
     }
 
     // The file-change journal is the third, on the same terms: deleting the
     // conversation retracts the undo it offered, so the prior copies it was
     // holding become retirement candidates.
     let snapshot_blob_ids =
-        exec_file_change_ops::list_chat_blob_ids_on(&transaction, chat_id).await?;
-    exec_file_change_ops::delete_for_chat_on(&transaction, chat_id).await?;
+        exec_file_change_ops::list_chat_blob_ids_on(transaction, chat_id).await?;
+    exec_file_change_ops::delete_for_chat_on(transaction, chat_id).await?;
     for blob_id in snapshot_blob_ids {
-        blob_ops::enqueue_on(&transaction, blob_id).await?;
+        blob_ops::enqueue_on(transaction, blob_id).await?;
     }
 
     // Delete dependency leaves before their parent lifecycle rows. These
@@ -802,46 +1415,46 @@ pub(in crate::db) async fn delete_chat(
     // owner that can erase their complete, quiesced graph in one transaction.
     entities::turn_client_wait::Entity::delete_many()
         .filter(entities::turn_client_wait::Column::SessionId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::turn_agent_run_wait_member::Entity::delete_many()
         .filter(entities::turn_agent_run_wait_member::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::turn_agent_run_wait_set::Entity::delete_many()
         .filter(entities::turn_agent_run_wait_set::Column::SessionId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::code_turn_steer::Entity::delete_many()
         .filter(entities::code_turn_steer::Column::SessionId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::sandbox_spawn_checkpoint::Entity::delete_many()
         .filter(entities::sandbox_spawn_checkpoint::Column::SessionId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     // The task plan restricts against the chat, its last-writing turn, and the
     // call that wrote it, so it goes before all three.
     entities::task_plan::Entity::delete_many()
         .filter(entities::task_plan::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::tool_call::Entity::delete_many()
         .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     // Approval-bearing tool calls own immutable receipts in the event journal.
     // Remove those references before deleting their journal rows.
     entities::event::Entity::delete_many()
         .filter(entities::event::Column::SessionId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     // A background run's plan restricts against both the run and the checkpoint
@@ -856,17 +1469,17 @@ pub(in crate::db) async fn delete_chat(
                     .into_query(),
             ),
         )
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::sandbox_tool_call::Entity::delete_many()
         .filter(entities::sandbox_tool_call::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::agent_run_inbox::Entity::delete_many()
         .filter(entities::agent_run_inbox::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     // Background runs own host workspaces named `agent-run-<id>`. Capture the
@@ -875,7 +1488,7 @@ pub(in crate::db) async fn delete_chat(
     let background_run_ids = entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
         .filter(entities::agent_run::Column::Tier.eq("background"))
-        .all(&transaction)
+        .all(transaction)
         .await
         .map_err(store_err)?
         .into_iter()
@@ -890,12 +1503,12 @@ pub(in crate::db) async fn delete_chat(
         .filter(
             entities::agent_run_cancellation::Column::AgentRunId.in_subquery(agent_runs.clone()),
         )
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::agent_run_result::Entity::delete_many()
         .filter(entities::agent_run_result::Column::AgentRunId.in_subquery(agent_runs.clone()))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::code_turn_failure::Entity::delete_many()
@@ -908,7 +1521,7 @@ pub(in crate::db) async fn delete_chat(
                     .into_query(),
             ),
         )
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::code_turn_claim::Entity::delete_many()
@@ -921,17 +1534,17 @@ pub(in crate::db) async fn delete_chat(
                     .into_query(),
             ),
         )
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::turn::Entity::delete_many()
         .filter(entities::turn::Column::SessionId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::message_identity::Entity::delete_many()
         .filter(entities::message_identity::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     // A context checkpoint references its inclusive source message. It is
@@ -939,34 +1552,34 @@ pub(in crate::db) async fn delete_chat(
     // leaving a checkpoint that could outlive this conversation's history.
     entities::context_checkpoint::Entity::delete_many()
         .filter(entities::context_checkpoint::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::message::Entity::delete_many()
         .filter(entities::message::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::agent_run_claim::Entity::delete_many()
         .filter(entities::agent_run_claim::Column::AgentRunId.in_subquery(agent_runs))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::agent_run::Entity::delete_many()
         .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
         .filter(entities::agent_run::Column::Depth.eq(1))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::agent_run::Entity::delete_many()
         .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
         .filter(entities::agent_run::Column::Depth.eq(0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     entities::root_attachment_change::Entity::delete_many()
         .filter(entities::root_attachment_change::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
     // A conversation the internal engine has hosted carries code-side rows
@@ -974,17 +1587,15 @@ pub(in crate::db) async fn delete_chat(
     // They key the session row, so they go first, and their image blobs join
     // the retirement candidates on the same terms as the chat-side ones.
     for blob_id in
-        code_session_ops::delete_session_dependents_on(&transaction, SessionId(chat_id.0)).await?
+        code_session_ops::delete_session_dependents_on(transaction, SessionId(chat_id.0)).await?
     {
-        blob_ops::enqueue_on(&transaction, blob_id).await?;
+        blob_ops::enqueue_on(transaction, blob_id).await?;
     }
     entities::session::Entity::delete_by_id(chat_id.0)
-        .exec(&transaction)
+        .exec(transaction)
         .await
         .map_err(store_err)?;
-
-    transaction.commit().await.map_err(store_err)?;
-    Ok(DeleteChatOutcome::Deleted { background_run_ids })
+    Ok(background_run_ids)
 }
 
 /// Read the visible transcript and cursor for future journal replay under the
@@ -1991,6 +2602,8 @@ where
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("chat {chat_id} does not exist")))?;
+    let terminal = turn_id.is_some() && is_terminal_event(event);
+    let created_at = Utc::now();
     entities::event::ActiveModel {
         session_id: Set(chat_id.0),
         seq: Set(seq),
@@ -1998,16 +2611,21 @@ where
         event: Set(serde_json::to_value(crate::chat_journal::journal_row(
             event,
         ))?),
-        created_at: Set(Utc::now()),
+        created_at: Set(created_at),
         turn_id: Set(turn_id.map(|id| id.0)),
         lease_token: Set(lease_token),
         attempt_event_ordinal: Set(attempt_event_ordinal),
         scan_token: Set(scan_token),
-        terminal: Set(turn_id.is_some() && is_terminal_event(event)),
+        terminal: Set(terminal),
     }
     .insert(conn)
     .await
     .map_err(store_err)?;
+    // Every way a turn ends journals exactly one terminal row here, so this is
+    // the one place the list learns that a turn finished.
+    if terminal {
+        record_finished_turn_on(conn, chat_id, canonical_db_timestamp(created_at)?).await?;
+    }
     Ok(())
 }
 

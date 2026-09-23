@@ -11,7 +11,8 @@ export type RefreshTarget =
   | "taskPlan"
   | "notifications"
   | "queuedTurns"
-  | "inbox";
+  | "inbox"
+  | "chats";
 
 /**
  * A revision counter per pollable target.
@@ -37,6 +38,11 @@ export type RefreshSignalStore = {
    * for it, and the inbox read is what tells you an agent needs you.
    */
   inbox: number;
+  /**
+   * A turn in the open conversation began or ended, so the list of work has
+   * a row that is running, stopped, or moved.
+   */
+  chats: number;
   signal: (target: RefreshTarget) => void;
 };
 
@@ -50,6 +56,7 @@ export function createRefreshSignalStore() {
     notifications: 0,
     queuedTurns: 0,
     inbox: 0,
+    chats: 0,
     signal: (target) =>
       set(
         (state) =>

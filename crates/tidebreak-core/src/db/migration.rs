@@ -27,6 +27,7 @@
 mod baseline;
 mod channel_repository_confirm;
 mod code_conversation_request;
+mod conversation_list_state;
 mod external_steer_admission;
 mod external_steer_recovery;
 mod external_thread_context;
@@ -135,6 +136,7 @@ impl MigratorTrait for Migrator {
             Box::new(memory_evidence_kind::MemoryEvidenceEventKind),
             Box::new(notification_body::NotificationBody),
             Box::new(pull_request_observed_times::PullRequestObservedTimes),
+            Box::new(conversation_list_state::ConversationListState),
         ]
     }
 }

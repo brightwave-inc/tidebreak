@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, time::Duration as StdDuration};
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement, TransactionTrait};
 use tidebreak_core::{
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentEvent,
@@ -10,14 +10,14 @@ use tidebreak_core::{
     AgentRunStatus, AgentRunTier, AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest,
     AnswerUserQuestions, AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest,
     ApplyTurnSteerOutcome, AssistantCitationInput, BeginRootAttachmentChange,
-    BeginRootAttachmentChangeOutcome, CallId, Chat, ChatRootAttachment,
+    BeginRootAttachmentChangeOutcome, CallId, Chat, ChatListing, ChatRootAttachment,
     CheckpointSandboxSpawnOutcome, CitationLocator, ClaimClientToolCallOutcome,
     ClientToolCallRequest, CompleteTurnRunOutcome, DbStore, DeleteChatOutcome,
     DeleteProjectOutcome, DocumentBlob, DocumentId, DocumentSourceUpsert, DocumentUpsert,
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
-    MessageReasoning, ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, Project,
-    ProjectId, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
+    MessageReasoning, OwnerId, ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome,
+    Project, ProjectId, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
     RequestTurnCancellationOutcome, ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome,
     Role, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentChangeTerminal,
     RootAttachmentOrigin, SandboxSpawnCheckpointRequest, SessionId, SpawnSandboxAgentResult,
@@ -28,6 +28,129 @@ use tidebreak_core::{
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The list of work's SQL on PostgreSQL: the grouped turn count, the live
+/// turn scan, the conditional unread write, and the prune's time cutoff.
+#[tokio::test]
+async fn postgres_the_list_of_work_follows_activity_pins_archive_and_unread() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("TIDEBREAK_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("TIDEBREAK_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("TIDEBREAK_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    // A fresh owner keeps this test's rows apart from every other test's.
+    let owner = OwnerId::new(&format!("user:list-{}", uuid::Uuid::new_v4())).unwrap();
+    let ids = |listings: &[ChatListing]| {
+        listings
+            .iter()
+            .map(|listing| listing.chat.id)
+            .collect::<Vec<_>>()
+    };
+    let mut older = sample_chat();
+    older.created_at -= Duration::seconds(10);
+    let newer = sample_chat();
+    store.create_chat_scoped(&owner, &older).await.unwrap();
+    store.create_chat_scoped(&owner, &newer).await.unwrap();
+    assert_eq!(
+        ids(&store
+            .list_chat_listings_scoped(&owner, false)
+            .await
+            .unwrap()),
+        vec![newer.id, older.id]
+    );
+
+    // A turn moves the older conversation to the top and shows it running.
+    let turn_id = TurnId::new();
+    assert!(matches!(
+        store
+            .accept_turn(turn_id, older.id, "fake", "list order")
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::Accepted(_)
+    ));
+    let listed = store
+        .list_chat_listings_scoped(&owner, false)
+        .await
+        .unwrap();
+    assert_eq!(ids(&listed), vec![older.id, newer.id]);
+    assert!(listed[0].running);
+    assert_eq!(listed[0].turn_count, 1);
+
+    // Ending the turn stops it running and leaves it unread until read.
+    let turn = store.get_turn(turn_id).await.unwrap().unwrap();
+    store
+        .request_turn_cancellation_and_append_event(turn_id, turn.updated_at + Duration::seconds(1))
+        .await
+        .unwrap();
+    let ended = store
+        .get_chat_listing_scoped(&owner, older.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!ended.running);
+    assert!(ended.unread);
+    assert!(store.mark_chat_read_scoped(&owner, older.id).await.unwrap());
+    assert!(
+        !store
+            .get_chat_listing_scoped(&owner, older.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .unread
+    );
+
+    // Pinning lifts a conversation over activity; archiving moves it out.
+    assert!(store
+        .set_chat_pinned_scoped(&owner, newer.id, true)
+        .await
+        .unwrap());
+    assert_eq!(
+        ids(&store
+            .list_chat_listings_scoped(&owner, false)
+            .await
+            .unwrap()),
+        vec![newer.id, older.id]
+    );
+    assert!(store
+        .set_chat_archived_scoped(&owner, newer.id, true)
+        .await
+        .unwrap());
+    assert_eq!(
+        ids(&store.list_chat_listings_scoped(&owner, true).await.unwrap()),
+        vec![newer.id]
+    );
+    assert_eq!(
+        ids(&store
+            .list_chat_listings_scoped(&owner, false)
+            .await
+            .unwrap()),
+        vec![older.id]
+    );
+
+    // Pruning removes an old conversation nothing happened in, and only that.
+    let mut empty = sample_chat();
+    empty.created_at = DateTime::from_timestamp(946_684_800, 0).unwrap();
+    store.create_chat_scoped(&owner, &empty).await.unwrap();
+    let pruned = store
+        .prune_empty_chats(DateTime::from_timestamp(946_684_801, 0).unwrap())
+        .await
+        .unwrap();
+    assert!(pruned.contains(&empty.id));
+    assert!(store
+        .get_chat_scoped(&owner, empty.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .get_chat_scoped(&owner, older.id)
+        .await
+        .unwrap()
+        .is_some());
+}
 
 #[tokio::test]
 async fn postgres_turn_identity_converges_without_an_admission_ledger() {

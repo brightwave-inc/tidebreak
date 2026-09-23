@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useId, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  Archive,
   ChevronRight,
   CircleAlert,
   Ellipsis,
@@ -12,6 +13,12 @@ import { create } from "zustand";
 import type { Chat } from "@/api";
 import { useApp } from "@/AppContext";
 import { useChatAttention } from "@/ChatAttention";
+import {
+  groupChats,
+  isListableChat,
+  predatesListState,
+  type ChatListGroup,
+} from "@/chatListGroups";
 import { useChatListStore } from "@/ChatListStore";
 import { useProjectListStore } from "@/ProjectListStore";
 import { SearchInput } from "@/components/SearchInput";
@@ -33,15 +40,51 @@ export function matchesChatSearch(chat: Chat, query: string): boolean {
 }
 
 /**
- * The conversations this section shows: the loose ones, narrowed by the filter.
+ * The conversations this section shows: the loose ones that earn a row,
+ * narrowed by the filter.
  *
  * A chat filed under a project appears under that project and nowhere else, so
- * the rail never shows one conversation in two places.
+ * the rail never shows one conversation in two places. A chat nothing has
+ * happened in stays out unless it is the one on screen.
  */
-export function listedChats(chats: Chat[], query: string): Chat[] {
+export function listedChats(
+  chats: Chat[],
+  query: string,
+  activeChatId?: string | null,
+): Chat[] {
   return chats.filter(
-    (chat) => chat.project_id === null && matchesChatSearch(chat, query),
+    (chat) =>
+      chat.project_id === null &&
+      isListableChat(chat, activeChatId) &&
+      matchesChatSearch(chat, query),
   );
+}
+
+/** How many Older rows the rail shows before it offers the rest. */
+export const OLDER_PREVIEW_ROWS = 20;
+
+/**
+ * The rows a group shows. Older stops at a preview until the reader asks for
+ * the rest, but never hides the conversation on screen.
+ */
+export function visibleGroupRows(
+  group: ChatListGroup,
+  showAllOlder: boolean,
+  activeChatId?: string,
+): { rows: Chat[]; hidden: number } {
+  if (
+    group.key !== "older" ||
+    showAllOlder ||
+    group.chats.length <= OLDER_PREVIEW_ROWS
+  ) {
+    return { rows: group.chats, hidden: 0 };
+  }
+  const rows = group.chats.slice(0, OLDER_PREVIEW_ROWS);
+  const active = group.chats.find(
+    (chat, index) => chat.id === activeChatId && index >= OLDER_PREVIEW_ROWS,
+  );
+  if (active) rows.push(active);
+  return { rows, hidden: group.chats.length - rows.length };
 }
 
 const CHATS_COLLAPSED_KEY = "tidebreak.chats-collapsed";
@@ -55,24 +98,27 @@ function readStoredCollapsed(): boolean {
 }
 
 /**
- * The section's own chrome state, outside the component because the rail
- * remounts on every route change: a filter typed before opening a chat has to
- * still be there after, and a collapsed list has to stay collapsed. Collapse
- * is a durable preference; the filter is for the reader's current hunt, so it
- * lives only as long as the window. Exported so shell tests can reset it —
- * module state outlives their renders.
+ * The section's own chrome state, outside the component so it outlives any
+ * one render of the rail: a filter typed before opening a chat has to still be
+ * there after, and a collapsed list has to stay collapsed. Collapse is a
+ * durable preference; the filter and the expanded Older group are for the
+ * reader's current hunt, so they live only as long as the window. Exported so
+ * shell tests can reset it — module state outlives their renders.
  */
 export const useChatsSectionState = create<{
   collapsed: boolean;
   filtering: boolean;
   query: string;
+  showAllOlder: boolean;
   toggleCollapsed: () => void;
   setFiltering: (filtering: boolean) => void;
   setQuery: (query: string) => void;
+  setShowAllOlder: (showAllOlder: boolean) => void;
 }>()((set) => ({
   collapsed: readStoredCollapsed(),
   filtering: false,
   query: "",
+  showAllOlder: false,
   toggleCollapsed: () =>
     set((state) => {
       const collapsed = !state.collapsed;
@@ -88,13 +134,15 @@ export const useChatsSectionState = create<{
   setFiltering: (filtering) =>
     set(filtering ? { filtering } : { filtering, query: "" }),
   setQuery: (query) => set({ query }),
+  setShowAllOlder: (showAllOlder) => set({ showAllOlder }),
 }));
 
 /**
- * The rail's list of conversations, most recent first — the whole list, since
- * this is the only chat list there is. The header row carries the section's
- * three controls: the title collapses it, the ellipsis holds its options, and
- * the plus starts a chat.
+ * The rail's list of work: pinned conversations first, then the rest by
+ * when something last happened in them, under Today, Yesterday, Previous 7
+ * days, and Older. The header row carries the section's three controls: the
+ * title collapses it, the ellipsis holds its options, and the plus starts new
+ * work.
  */
 export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
   const navigate = useNavigate();
@@ -105,6 +153,8 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
     commitRename,
     cancelRename,
     moveChatToProject,
+    togglePinChat,
+    archiveChat,
   } = useApp();
   const chats = useChatListStore((state) => state.chats);
   const projects = useProjectListStore((state) => state.projects);
@@ -120,7 +170,8 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
   const collapsed = useChatsSectionState((state) => state.collapsed);
   const filtering = useChatsSectionState((state) => state.filtering);
   const query = useChatsSectionState((state) => state.query);
-  const { toggleCollapsed, setFiltering, setQuery } =
+  const showAllOlder = useChatsSectionState((state) => state.showAllOlder);
+  const { toggleCollapsed, setFiltering, setQuery, setShowAllOlder } =
     useChatsSectionState.getState();
 
   // The filter appears from a menu selection, so nothing natural has focus.
@@ -129,7 +180,25 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
     if (filtering) filterRef.current?.querySelector("input")?.focus();
   }, [filtering]);
 
-  const listed = listedChats(chats, query);
+  const listed = listedChats(chats, query, activeChatId);
+  const groups = groupChats(listed, new Date());
+  // A server older than the list of work has no archive to show.
+  const archiveAvailable = !predatesListState(chats);
+  const activeListed = listed.some((chat) => chat.id === activeChatId);
+
+  // The rail stays mounted while the pane changes, so the list keeps its
+  // scroll. Opening a conversation from somewhere else — the palette, the
+  // inbox, a banner — still has to bring its row into view.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!activeChatId || !activeListed || collapsed) return;
+    const row = [
+      ...(listRef.current?.querySelectorAll<HTMLElement>("[data-chat-row]") ??
+        []),
+    ].find((element) => element.dataset.chatRow === activeChatId);
+    row?.scrollIntoView?.({ block: "nearest" });
+  }, [activeChatId, activeListed, collapsed]);
+
   // A collapsed list hides the per-row markers, so the header has to say when
   // something in it is waiting.
   const hiddenAttention =
@@ -180,6 +249,14 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
               <ListFilter />
               {filtering ? "Hide filter" : "Filter work"}
             </DropdownMenuItem>
+            {archiveAvailable && (
+              <DropdownMenuItem
+                onSelect={() => void navigate({ to: "/archive" })}
+              >
+                <Archive />
+                Archived work
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
         <button
@@ -207,33 +284,66 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
 
       {!collapsed && (
         <div
-          className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto"
+          ref={listRef}
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2"
           aria-label="Work list"
         >
-          {listed.map((chat) => (
-            <RecentChatRow
-              key={chat.id}
-              chat={chat}
-              active={chat.id === activeChatId}
-              needsAttention={chatIdsWithPendingPrompts.has(chat.id)}
-              renaming={renamingChatId === chat.id}
-              renameDraft={renameChatDraft}
-              savingTitle={savingTitle}
-              mutating={deletingChatId !== null || creatingChat}
-              projects={projects}
-              onRenameDraftChange={setRenameDraft}
-              onOpen={() =>
-                void navigate({ to: "/c/$chatId", params: { chatId: chat.id } })
-              }
-              onStartRename={() => startRename(chat)}
-              onCommitRename={() => commitRename(chat)}
-              onCancelRename={cancelRename}
-              onMoveToProject={(projectId) =>
-                moveChatToProject(chat, projectId)
-              }
-              onDelete={() => deleteChat(chat)}
-            />
-          ))}
+          {groups.map((group, index) => {
+            const { rows, hidden } = visibleGroupRows(
+              group,
+              showAllOlder,
+              activeChatId,
+            );
+            return (
+              <ChatGroup
+                key={group.key}
+                label={group.label}
+                first={index === 0}
+              >
+                {rows.map((chat) => (
+                  <RecentChatRow
+                    key={chat.id}
+                    chat={chat}
+                    active={chat.id === activeChatId}
+                    needsAttention={chatIdsWithPendingPrompts.has(chat.id)}
+                    renaming={renamingChatId === chat.id}
+                    renameDraft={renameChatDraft}
+                    savingTitle={savingTitle}
+                    mutating={deletingChatId !== null || creatingChat}
+                    projects={projects}
+                    onRenameDraftChange={setRenameDraft}
+                    onOpen={() =>
+                      void navigate({
+                        to: "/c/$chatId",
+                        params: { chatId: chat.id },
+                      })
+                    }
+                    onStartRename={() => startRename(chat)}
+                    onCommitRename={() => commitRename(chat)}
+                    onCancelRename={cancelRename}
+                    onMoveToProject={(projectId) =>
+                      moveChatToProject(chat, projectId)
+                    }
+                    onTogglePin={() => togglePinChat(chat)}
+                    onArchive={() => archiveChat(chat)}
+                    onDelete={() => deleteChat(chat)}
+                  />
+                ))}
+                {group.key === "older" && hidden > 0 && (
+                  <ShowMoreButton onClick={() => setShowAllOlder(true)}>
+                    Show {hidden} more
+                  </ShowMoreButton>
+                )}
+                {group.key === "older" &&
+                  showAllOlder &&
+                  group.chats.length > OLDER_PREVIEW_ROWS && (
+                    <ShowMoreButton onClick={() => setShowAllOlder(false)}>
+                      Show fewer
+                    </ShowMoreButton>
+                  )}
+              </ChatGroup>
+            );
+          })}
           {listed.length === 0 && query.trim() && (
             <p className="px-2 py-1 text-xs text-muted-foreground">
               No work title contains that.
@@ -242,5 +352,54 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
         </div>
       )}
     </div>
+  );
+}
+
+/** One date group: a quiet label over its rows. */
+function ChatGroup({
+  label,
+  first,
+  children,
+}: {
+  label: string;
+  first: boolean;
+  children: ReactNode;
+}) {
+  const labelId = useId();
+  return (
+    <div
+      role="group"
+      aria-labelledby={labelId}
+      className="flex flex-col gap-0.5"
+    >
+      <div
+        id={labelId}
+        className={cn(
+          "px-2 pb-1 text-xs font-medium text-muted-foreground",
+          first ? "pt-1" : "pt-3",
+        )}
+      >
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function ShowMoreButton({
+  onClick,
+  children,
+}: {
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="cursor-pointer self-start rounded-md px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+      onClick={onClick}
+    >
+      {children}
+    </button>
   );
 }

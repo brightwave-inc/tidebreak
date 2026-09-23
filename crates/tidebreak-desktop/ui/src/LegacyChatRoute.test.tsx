@@ -1,9 +1,13 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+
+import type { Chat } from "./api";
+import { useChatListStore } from "./ChatListStore";
 import { LegacyChatRoute } from "./LegacyChatRoute";
+
 const mocks = vi.hoisted(() => ({
-  client: { getCodeSession: vi.fn() },
+  client: { getCodeSession: vi.fn(), getChat: vi.fn() },
   navigate: vi.fn(),
 }));
 vi.mock("./AppContext", () => ({ useApp: () => ({ client: mocks.client }) }));
@@ -13,11 +17,68 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("./ChatRoute", () => ({
   ChatRoute: ({ chatId }: { chatId: string }) => <p>Owner chat {chatId}</p>,
 }));
+
+function chat(id: string, archivedAt: string | null = null): Chat {
+  return {
+    id,
+    project_id: null,
+    title: "Quarterly review",
+    model: null,
+    reasoning_effort: null,
+    permission_mode: null,
+    network_policy: { mode: "off" },
+    attachment_revision: 0,
+    root_attachments: [],
+    memory_incognito: false,
+    created_at: "2026-09-01T12:00:00Z",
+    last_activity_at: "2026-09-01T12:00:00Z",
+    pinned_at: null,
+    archived_at: archivedAt,
+    running: false,
+    unread: false,
+    turn_count: 2,
+  };
+}
+
 afterEach(cleanup);
 beforeEach(() => {
   mocks.client.getCodeSession.mockReset();
+  mocks.client.getChat.mockReset();
   mocks.navigate.mockReset();
+  useChatListStore.setState({
+    chats: [],
+    archivedChats: [],
+    chatsLoaded: true,
+  });
 });
+
+it("opens a conversation the list holds without asking the server", () => {
+  useChatListStore.setState({ chats: [chat("listed")] });
+  render(<LegacyChatRoute chatId="listed" />);
+  expect(screen.getByText("Owner chat listed")).toBeTruthy();
+  expect(mocks.client.getCodeSession).not.toHaveBeenCalled();
+  expect(mocks.client.getChat).not.toHaveBeenCalled();
+});
+
+it("keeps the open conversation mounted when a refresh drops it", () => {
+  useChatListStore.setState({ chats: [chat("open")] });
+  render(<LegacyChatRoute chatId="open" />);
+  expect(screen.getByText("Owner chat open")).toBeTruthy();
+
+  // Archived from the command line: the next list no longer holds it.
+  act(() => useChatListStore.setState({ chats: [] }));
+  expect(screen.getByText("Owner chat open")).toBeTruthy();
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(mocks.client.getCodeSession).not.toHaveBeenCalled();
+});
+
+it("waits for the list before deciding a chat is absent", () => {
+  useChatListStore.setState({ chatsLoaded: false });
+  render(<LegacyChatRoute chatId="early" />);
+  expect(screen.getByRole("status").textContent).toBe("Opening conversation…");
+  expect(mocks.client.getCodeSession).not.toHaveBeenCalled();
+});
+
 it("redirects an authorized shared legacy link before owner chat mounts", async () => {
   mocks.client.getCodeSession.mockResolvedValue({
     id: "shared",
@@ -33,22 +94,28 @@ it("redirects an authorized shared legacy link before owner chat mounts", async 
   );
   expect(screen.queryByText("Owner chat shared")).toBeNull();
 });
-it.each([true, undefined])(
-  "keeps an owner or legacy session on the normal chat route",
-  async (is_owner) => {
-    mocks.client.getCodeSession.mockResolvedValue({
-      id: "owned",
-      is_owner,
-      workspace_id: null,
-      harness_kind: "internal",
-    });
-    render(<LegacyChatRoute chatId="owned" />);
-    expect(await screen.findByText("Owner chat owned")).toBeTruthy();
-    expect(mocks.navigate).not.toHaveBeenCalled();
-  },
-);
+
+it("adopts an archived conversation opened by link", async () => {
+  mocks.client.getCodeSession.mockResolvedValue({
+    id: "archived",
+    is_owner: true,
+    workspace_id: null,
+    harness_kind: "internal",
+  });
+  mocks.client.getChat.mockResolvedValue(
+    chat("archived", "2026-09-10T12:00:00Z"),
+  );
+  render(<LegacyChatRoute chatId="archived" />);
+  expect(await screen.findByText("Owner chat archived")).toBeTruthy();
+  expect(
+    useChatListStore.getState().archivedChats.map((item) => item.id),
+  ).toEqual(["archived"]);
+  expect(mocks.navigate).not.toHaveBeenCalled();
+});
+
 it("does not turn a failed access lookup into shared access", async () => {
   mocks.client.getCodeSession.mockRejectedValue(new Error("not found"));
+  mocks.client.getChat.mockRejectedValue(new Error("not found"));
   render(<LegacyChatRoute chatId="private" />);
   expect(await screen.findByText("Owner chat private")).toBeTruthy();
   expect(mocks.navigate).not.toHaveBeenCalled();

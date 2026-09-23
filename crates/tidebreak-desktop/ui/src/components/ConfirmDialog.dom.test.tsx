@@ -60,3 +60,39 @@ it("closes between queued confirmations and puts focus on the next cancel", asyn
   await user.keyboard("[Space]");
   await waitFor(() => expect(screen.getByText("[true,false]")).toBeVisible());
 });
+
+function DecisionHarness() {
+  const { decide, dialog } = useConfirm();
+  const [result, setResult] = useState<string | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() =>
+          void decide({
+            title: "Delete the brief?",
+            alternativeLabel: "Archive",
+            confirmLabel: "Delete work",
+            destructive: true,
+          }).then(setResult)
+        }
+      >
+        Ask
+      </button>
+      {result && <output>{result}</output>}
+      {dialog}
+    </>
+  );
+}
+
+it.each([
+  ["Archive", "alternative"],
+  ["Delete work", "confirm"],
+  ["Cancel", "cancel"],
+])("answers %s with %s", async (button, expected) => {
+  const user = userEvent.setup();
+  render(<DecisionHarness />);
+  await user.click(screen.getByRole("button", { name: "Ask" }));
+  await user.click(await screen.findByRole("button", { name: button }));
+  await waitFor(() => expect(screen.getByText(expected)).toBeVisible());
+});

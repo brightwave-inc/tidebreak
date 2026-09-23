@@ -1500,6 +1500,16 @@ pub mod session {
         /// digest injection and no post-turn capture.
         pub memory_incognito: bool,
         pub visibility: String,
+        /// Where the conversation sits in its owner's list of work. A turn
+        /// that starts or ends, and a rename, move this forward. `None` until
+        /// something happens; the creation time stands in.
+        pub last_activity_at: Option<DateTimeUtc>,
+        /// When the owner pinned the conversation to the top of the list.
+        pub pinned_at: Option<DateTimeUtc>,
+        /// When the owner archived the conversation out of the list.
+        pub archived_at: Option<DateTimeUtc>,
+        /// When a turn finished that the owner has not opened since.
+        pub unread_since: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

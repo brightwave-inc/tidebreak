@@ -22,6 +22,36 @@ use crate::api::client::Client;
 use crate::api::wire::{McpServerInfo, McpServersInfo};
 use crate::print::OutputFormat;
 
+/// Where `chat pin|unpin|archive|unarchive` moves a chat in the list of work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatPlacement {
+    Pin,
+    Unpin,
+    Archive,
+    Unarchive,
+}
+
+impl ChatPlacement {
+    /// The `PATCH /chats/{id}` body that makes the move.
+    fn body(self) -> serde_json::Value {
+        match self {
+            Self::Pin => serde_json::json!({ "pinned": true }),
+            Self::Unpin => serde_json::json!({ "pinned": false }),
+            Self::Archive => serde_json::json!({ "archived": true }),
+            Self::Unarchive => serde_json::json!({ "archived": false }),
+        }
+    }
+
+    fn done(self) -> &'static str {
+        match self {
+            Self::Pin => "pinned",
+            Self::Unpin => "unpinned",
+            Self::Archive => "archived",
+            Self::Unarchive => "unarchived",
+        }
+    }
+}
+
 /// Where a command reads secret material from.
 pub enum SecretSource {
     /// Everything on stdin, up to EOF (the default).
@@ -101,12 +131,18 @@ pub enum Command {
     McpAdd { definition: serde_json::Value },
     /// Remove one user-configured MCP server by name.
     McpRemove { name: String },
-    /// Every chat, most recently active first.
-    ChatList,
+    /// The list of work: pinned chats first, then by latest activity. With
+    /// `archived`, the archive instead.
+    ChatList { archived: bool },
     /// A fresh chat (server-side defaults seed the rest).
     ChatCreate,
     /// Delete a chat outright.
     ChatDelete { chat: SessionId },
+    /// Pin, unpin, archive, or unarchive a chat.
+    ChatPlace {
+        chat: SessionId,
+        placement: ChatPlacement,
+    },
     /// Steer an active turn with more user text.
     ///
     /// `turn` is the durable turn identity from the chat's event stream (not
@@ -388,27 +424,53 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
             }
             println!("tidebreak: removed the MCP server {name}");
         }
-        Command::ChatList => {
-            let chats = client.list_chats().await?;
+        Command::ChatList { archived } => {
+            let chats = client.list_chat_listings(archived).await?;
             if format == OutputFormat::Json {
                 return emit(&serde_json::json!({
-                    "chats": chats.iter().map(|chat| serde_json::json!({
-                        "id": chat.id,
-                        "title": chat.title,
-                        "model": chat.model,
-                        "permission_mode": chat.permission_mode,
-                        "created_at": chat.created_at,
+                    "chats": chats.iter().map(|listing| serde_json::json!({
+                        "id": listing.chat.id,
+                        "title": listing.chat.title,
+                        "model": listing.chat.model,
+                        "permission_mode": listing.chat.permission_mode,
+                        "created_at": listing.chat.created_at,
+                        "last_activity_at": listing.last_activity_at,
+                        "pinned": listing.pinned_at.is_some(),
+                        "archived": listing.archived_at.is_some(),
+                        "running": listing.running,
+                        "unread": listing.unread,
                     })).collect::<Vec<_>>(),
                 }));
             }
             if chats.is_empty() {
-                eprintln!("tidebreak: no chats");
+                eprintln!(
+                    "tidebreak: {}",
+                    if archived {
+                        "no archived chats"
+                    } else {
+                        "no chats"
+                    }
+                );
                 return Ok(());
             }
-            for chat in chats {
-                let title = chat.title.as_deref().unwrap_or("(untitled)");
-                let model = chat.model.as_deref().unwrap_or("-");
-                println!("{:<36}  {title:<40}  {model}", chat.id);
+            for listing in chats {
+                let title = listing.chat.title.as_deref().unwrap_or("(untitled)");
+                let model = listing.chat.model.as_deref().unwrap_or("-");
+                let state = [
+                    listing.pinned_at.is_some().then_some("pinned"),
+                    listing.running.then_some("running"),
+                    listing.unread.then_some("unread"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(",");
+                let row = format!("{:<36}  {title:<40}  {model}", listing.chat.id);
+                if state.is_empty() {
+                    println!("{row}");
+                } else {
+                    println!("{row}  {state}");
+                }
             }
         }
         Command::ChatCreate => {
@@ -427,6 +489,17 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                 return emit(&serde_json::json!({ "id": chat, "deleted": true }));
             }
             println!("tidebreak: deleted chat {chat}");
+        }
+        Command::ChatPlace { chat, placement } => {
+            let listing = client.place_chat(chat, &placement.body()).await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({
+                    "id": chat,
+                    "pinned": listing.pinned_at.is_some(),
+                    "archived": listing.archived_at.is_some(),
+                }));
+            }
+            println!("tidebreak: {} chat {chat}", placement.done());
         }
         Command::ChatSteer {
             chat,
@@ -916,6 +989,58 @@ mod tests {
                 .is_empty(),
             "delete must take the chat out of the listing"
         );
+
+        serve.abort();
+    }
+
+    /// Pin and archive are the same server state the desktop rail shows, so
+    /// a script can keep the list tidy without the app.
+    #[tokio::test]
+    async fn pin_and_archive_move_a_chat_through_the_list() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        tidebreak_core::KeychainSecretProvider::use_mock();
+        let server = tidebreak_server::bind_configured(Config::desktop(dir.path()))
+            .await
+            .expect("bind the server");
+        let client = Client::new(server.local_addr(), server.token()).expect("build the client");
+        let serve = tokio::spawn(server.serve());
+
+        execute(&client, Command::ChatCreate, OutputFormat::Text)
+            .await
+            .expect("create a chat");
+        let chat = client.list_chats().await.expect("list")[0].id;
+        let place = |placement| Command::ChatPlace { chat, placement };
+
+        execute(&client, place(ChatPlacement::Pin), OutputFormat::Text)
+            .await
+            .expect("pin the chat");
+        let listed = client.list_chat_listings(false).await.expect("list");
+        assert!(listed[0].pinned_at.is_some(), "pin must show in the list");
+
+        execute(&client, place(ChatPlacement::Archive), OutputFormat::Text)
+            .await
+            .expect("archive the chat");
+        assert!(client
+            .list_chat_listings(false)
+            .await
+            .expect("list")
+            .is_empty());
+        let archived = client.list_chat_listings(true).await.expect("archive");
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].pinned_at, None, "archiving unpins");
+
+        execute(&client, place(ChatPlacement::Unarchive), OutputFormat::Text)
+            .await
+            .expect("unarchive the chat");
+        assert_eq!(
+            client.list_chat_listings(false).await.expect("list").len(),
+            1
+        );
+        assert!(client
+            .list_chat_listings(true)
+            .await
+            .expect("archive")
+            .is_empty());
 
         serve.abort();
     }

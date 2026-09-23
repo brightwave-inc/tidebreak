@@ -21,11 +21,11 @@ import { panelSearchFrom, type PanelSearch } from "./panel/panelUrl";
 import { PluginsPage } from "./plugins/PluginsPage";
 import { ProjectFilesView } from "./ProjectFilesView";
 import { useProjectListStore } from "./ProjectListStore";
-import { RouteFrame } from "./RouteFrame";
 import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
-import { AppSidebar } from "./sidebar/AppSidebar";
 import { PaneDragBand } from "./WindowDragStrip";
+import { WorkArchivePage } from "./WorkArchivePage";
+import { WorkLayout } from "./WorkLayout";
 import {
   CodeDeliveryPage,
   codeDeliverySearchFrom,
@@ -69,21 +69,50 @@ function CodeRouteSuspense({ children }: { children: ReactNode }) {
 const rootRoute = createRootRoute({ component: AppShell });
 
 /**
+ * The pathless layout every Work route hangs off. It mounts the Work rail
+ * once, so moving between home, the libraries, the inbox, projects, and
+ * conversations swaps only the pane: the rail keeps its scroll and never
+ * remounts on a switch.
+ */
+const workLayoutRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  id: "work-layout",
+  component: WorkLayout,
+});
+
+/**
  * A conversation's URL carries its layout and, when arrived at from the inbox,
  * the parked call the transcript should reveal.
  */
 type ChatSearch = PanelSearch & { focus?: string; at?: string };
 
+/**
+ * Home's URL carries the layout params a conversation's does, and the project
+ * new work starts in when it was started from one.
+ */
+type HomeSearch = PanelSearch & { project?: string };
+
 const homeRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workLayoutRoute,
   path: "/",
   // Home hosts panels the way a conversation does — the Apps library opens
   // beside the composer — so it reads the same layout params. Which panel
   // types home actually accepts is decided by HomeRoute, not the URL parser.
-  validateSearch: (search: Record<string, unknown>): PanelSearch =>
-    panelSearchFrom(search),
-  component: HomeRoute,
+  validateSearch: (search: Record<string, unknown>): HomeSearch => ({
+    ...panelSearchFrom(search),
+    project: typeof search.project === "string" ? search.project : undefined,
+  }),
+  component: HomeRouteComponent,
 });
+
+/**
+ * Keyed on the project so new work in one project never inherits another's
+ * draft or the conversation its attachments created.
+ */
+function HomeRouteComponent() {
+  const { project } = homeRoute.useSearch();
+  return <HomeRoute key={project ?? "home"} projectId={project ?? null} />;
+}
 
 /**
  * The install-wide libraries, each a full page with the shared rail. They used
@@ -91,13 +120,13 @@ const homeRoute = createRoute({
  * scoped to one, so they take the pane the way the inbox does.
  */
 const appsRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workLayoutRoute,
   path: "/apps",
   component: () => <AppsPage />,
 });
 
 const appDetailRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workLayoutRoute,
   path: "/apps/$appId",
   component: AppDetailRouteComponent,
 });
@@ -108,13 +137,13 @@ function AppDetailRouteComponent() {
 }
 
 const pluginsRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workLayoutRoute,
   path: "/plugins",
   component: () => <PluginsPage />,
 });
 
 const pluginDetailRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workLayoutRoute,
   path: "/plugins/$pluginId",
   component: PluginDetailRouteComponent,
 });
@@ -125,27 +154,35 @@ function PluginDetailRouteComponent() {
 }
 
 /**
- * The inbox shares home's rail: what is waiting spans conversations, so it is
- * not scoped to one either.
+ * The inbox takes the pane beside the Work rail: what is waiting spans
+ * conversations, so it is not scoped to one either.
  */
 const inboxRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workLayoutRoute,
   path: "/inbox",
   component: InboxRoute,
 });
 
 function InboxRoute() {
   return (
-    <RouteFrame sidebar={<AppSidebar />}>
-      <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
-        <InboxView />
-      </div>
-    </RouteFrame>
+    <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      <InboxView />
+    </div>
   );
 }
 
+/**
+ * Archived work: out of the list, not deleted. Reached from the Work list's
+ * options, with a way to open, bring back, or delete each conversation.
+ */
+const archiveRoute = createRoute({
+  getParentRoute: () => workLayoutRoute,
+  path: "/archive",
+  component: WorkArchivePage,
+});
+
 const chatRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workLayoutRoute,
   path: "/c/$chatId",
   validateSearch: (search: Record<string, unknown>): ChatSearch => ({
     ...panelSearchFrom(search),
@@ -163,9 +200,10 @@ const chatRoute = createRoute({
 });
 
 /**
- * Keyed on the chat id so a switch remounts rather than reusing the component.
+ * Keyed on the chat id so a switch remounts the pane rather than reusing it.
  * Everything scoped to one conversation lives below here, and the unmount is
- * what guarantees none of it is carried into the next.
+ * what guarantees none of it is carried into the next. The rail sits above,
+ * in the Work layout, and stays.
  */
 function ChatRouteComponent() {
   const { chatId } = chatRoute.useParams();
@@ -183,7 +221,7 @@ function ChatRouteComponent() {
  * project's link still lands on the right transcript.
  */
 const projectChatRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workLayoutRoute,
   path: "/p/$projectId/c/$chatId",
   validateSearch: chatRoute.options.validateSearch,
   component: ProjectChatRouteComponent,
@@ -208,7 +246,7 @@ function ProjectChatRouteComponent() {
  * material behind them, which a reader visits far less often.
  */
 const projectRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workLayoutRoute,
   path: "/p/$projectId",
   component: ProjectRouteComponent,
 });
@@ -219,12 +257,10 @@ function ProjectRouteComponent() {
     useProjectListStore.getState().expandProject(projectId);
   }, [projectId]);
   return (
-    <RouteFrame sidebar={<AppSidebar />}>
-      <div className="content-container relative min-h-0 w-full min-w-0 flex-1 overflow-auto">
-        <PaneDragBand />
-        <ProjectFilesView projectId={projectId} />
-      </div>
-    </RouteFrame>
+    <div className="content-container relative min-h-0 w-full min-w-0 flex-1 overflow-auto">
+      <PaneDragBand />
+      <ProjectFilesView projectId={projectId} />
+    </div>
   );
 }
 
@@ -449,17 +485,20 @@ const workspaceApprovalRoute = createRoute({
 });
 
 export const routeTree = rootRoute.addChildren([
-  homeRoute,
+  workLayoutRoute.addChildren([
+    homeRoute,
+    appsRoute,
+    appDetailRoute,
+    pluginsRoute,
+    pluginDetailRoute,
+    inboxRoute,
+    archiveRoute,
+    chatRoute,
+    projectRoute,
+    projectChatRoute,
+  ]),
   connectApprovalRoute,
   workspaceApprovalRoute,
-  appsRoute,
-  appDetailRoute,
-  pluginsRoute,
-  pluginDetailRoute,
-  inboxRoute,
-  chatRoute,
-  projectRoute,
-  projectChatRoute,
   codeLayoutRoute.addChildren([
     codeRoute,
     codeSessionRoute,

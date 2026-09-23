@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 use tidebreak_core::{
     AgentConfig, AgentError, AgentErrorInfo, AgentEvent, AgentRunInboxStatus, AgentRunStatus,
     ApprovalClass, BeginRootAttachmentChange, BlobMetadata, BlobStore, BlobStream, CallId, Chat,
-    ChatRequest, ChatRootAttachment, ClientToolCallRequest, ContentBlock, DbStore,
+    ChatListing, ChatRequest, ChatRootAttachment, ClientToolCallRequest, ContentBlock, DbStore,
     DeleteProjectOutcome, HostRootId, Message, MessageId, ModelProvider,
     ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome, Profile, Project, ProjectId,
     ProviderEvent, ProviderId, Role, RootAttachmentChangeAction, RootAttachmentChangeId,
@@ -39,6 +39,7 @@ mod app_gateway_page;
 mod app_grant;
 mod app_invoke;
 mod app_library;
+mod chat_list;
 mod chat_titling;
 mod code;
 mod code_approvals;

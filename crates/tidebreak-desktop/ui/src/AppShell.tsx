@@ -50,12 +50,13 @@ import {
   detachChatFolders,
   inspectLiveChatWork,
   liveChatWorkIsBlocking,
+  nextChatAfterDelete,
   purgeDeletedChatHostAuthority,
-  prependReplacementChat,
   stopLiveChatWork,
   tryDeleteChat,
   waitForChatQuiescent,
 } from "./ChatDeletion";
+import { hasListState } from "./chatListGroups";
 import { useChatListStore } from "./ChatListStore";
 import { useChatSessionStore } from "./ChatSessionStore";
 import {
@@ -81,7 +82,7 @@ import {
   type PanelSearch,
 } from "./panel/panelUrl";
 import type { LayoutState } from "./panel/panelTypes";
-import { connectOutputs } from "./deliverables";
+import { connectOutputs, listDeliverables } from "./deliverables";
 import { useProjectListStore } from "./ProjectListStore";
 import { useComposerDrafts } from "./ComposerDrafts";
 import { useConfirm } from "./components/ConfirmDialog";
@@ -115,6 +116,7 @@ import { WindowDragStrip } from "./WindowDragStrip";
 import { useActiveChatId } from "./useActiveChatId";
 import { useAgentNotifications } from "./useAgentNotifications";
 import { useBannerTargetNavigation } from "./bannerTarget";
+import { useChatListWatcher } from "./useChatListWatcher";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
 import {
   hasOpenModalDialog,
@@ -185,6 +187,9 @@ type AppContextActions = Pick<
   | "refreshChats"
   | "newChat"
   | "deleteChat"
+  | "togglePinChat"
+  | "archiveChat"
+  | "unarchiveChat"
   | "startRename"
   | "commitRename"
   | "cancelRename"
@@ -220,6 +225,9 @@ function GatedShellHooks({
   // Watched here rather than in the conversation, so that the agent parking a
   // turn on a question is noticed whatever screen the reader is on.
   useChatPromptWatcher(client, chatId);
+  // The list of work shows which conversations are running or finished while
+  // you were elsewhere, so it stays current whichever screen is up.
+  useChatListWatcher(client);
   useAgentNotifications(client);
   // Opening the app from a desktop banner opens the conversation it named.
   useBannerTargetNavigation();
@@ -233,8 +241,10 @@ function GatedShellHooks({
  * to the local server.
  *
  * Everything here outlives a conversation. Anything scoped to one — its
- * transcript, its socket, its composer, and now its rail — belongs to the chat
- * route, which is remounted per chat and so cannot carry state across a switch.
+ * transcript, its socket, its composer — belongs to the chat route, which is
+ * remounted per chat and so cannot carry state across a switch. The rail sits
+ * between the two: the Work layout route mounts it once, so it outlives each
+ * conversation but not the Work half of the app.
  *
  * The mutations below stay here because they outlive the route that triggers
  * them: deleting the open conversation has to survive that conversation's own
@@ -297,7 +307,7 @@ export function AppShell() {
   // create/rename/delete/move all rewrite the same rail and must not interleave.
   const projectMutationRef = useRef(false);
   const skipProjectRenameCommitRef = useRef(false);
-  const { confirm, dialog: confirmDialog } = useConfirm();
+  const { confirm, decide, dialog: confirmDialog } = useConfirm();
   const desktopUpdates = useDesktopUpdates();
   const uncleanExit = useUncleanExitNotice();
   const desktopNavigation = useDesktopNavigation();
@@ -740,11 +750,11 @@ export function AppShell() {
   }, [client, info]);
 
   /**
-   * Create a named project and the first chat inside it.
+   * Create a named project and start new work inside it.
    *
-   * A project with no conversation is a folder the reader has to fill. The
-   * dialog already collected the name, so this does both writes and opens the
-   * chat rather than leaving an empty row in the rail.
+   * A project with no conversation is a folder the reader has to fill, so the
+   * reader lands on the composer with the project chosen. The conversation
+   * itself waits for the first message, like any new work.
    */
   async function onNewProject(title: string): Promise<boolean> {
     const trimmed = title.trim();
@@ -859,27 +869,17 @@ export function AppShell() {
     }
   }
 
-  /** Start a conversation inside a project and open it there. */
+  /**
+   * Start new work inside a project: the home composer, with the project
+   * chosen. Nothing is created until the first message goes, so a start the
+   * reader abandons leaves nothing behind, and its draft waits under the
+   * project for the next time.
+   */
   async function onNewChatInProject(projectId: string) {
-    if (!client || creationInFlightRef.current || deletionInFlightRef.current)
-      return;
-    creationInFlightRef.current = true;
-    chatListActions.setCreatingChat(true);
-    try {
-      const created = await client.createChat(undefined, projectId);
-      chatListActions.prependChat(created);
-      chatListActions.setChatsError(null);
-      projectListActions.expandProject(projectId);
-      await navigate({
-        to: "/p/$projectId/c/$chatId",
-        params: { projectId, chatId: created.id },
-      });
-    } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not create the work."));
-    } finally {
-      creationInFlightRef.current = false;
-      chatListActions.setCreatingChat(false);
-    }
+    projectListActions.expandProject(projectId);
+    await navigate({ to: "/", search: { project: projectId } });
+    // After the route settles, so the page heading does not take focus back.
+    window.requestAnimationFrame(focusComposer);
   }
 
   /** File a conversation under a project, or take it back out with `null`. */
@@ -918,22 +918,20 @@ export function AppShell() {
     setProviders(providerList.providers);
   }
 
+  /**
+   * Start new work on the home composer, which creates the conversation on
+   * the first send. The shortcut, the rail's plus, and the palette all come
+   * here, so they behave the same way and none of them leaves an empty
+   * conversation behind.
+   */
   async function onNewChat() {
-    if (!client || creationInFlightRef.current || deletionInFlightRef.current)
-      return;
-    creationInFlightRef.current = true;
-    chatListActions.setCreatingChat(true);
-    try {
-      const created = await client.createChat();
-      chatListActions.prependChat(created);
-      chatListActions.setChatsError(null);
-      await navigate({ to: "/c/$chatId", params: { chatId: created.id } });
-    } catch (err) {
-      chatListActions.setChatsError(`Could not create work: ${String(err)}`);
-    } finally {
-      creationInFlightRef.current = false;
-      chatListActions.setCreatingChat(false);
+    const { pathname, search } = router.state.location;
+    // New work in a project is a different composer; plain new work leaves it.
+    if (pathname !== "/" || (search as { project?: string }).project) {
+      await navigate({ to: "/" });
     }
+    // After the route settles, so the page heading does not take focus back.
+    window.requestAnimationFrame(focusComposer);
   }
 
   async function onDeleteChat(target: Chat) {
@@ -963,16 +961,38 @@ export function AppShell() {
       return;
     }
     const stopping = liveChatWorkIsBlocking(work);
-    const confirmed = await confirm({
+    // Outputs go with the conversation, so the dialog says how many. A count
+    // that cannot be read still warns, in general terms, rather than going
+    // quiet about them.
+    const outputs = await listDeliverables(target.id).then(
+      (catalog) => catalog.deliverables.length,
+      () => null,
+    );
+    // Archive is the gentler answer to "get this out of my list", so the
+    // dialog offers it beside Delete, unless the conversation is archived
+    // already or the server is older than the archive.
+    const offerArchive = hasListState(current) && !current.archived_at;
+    const confirmation = {
       title: `Delete ${label}?`,
-      description: deletionDescription(
-        current.root_attachments.length,
+      description: deletionDescription({
+        folders: current.root_attachments.length,
+        outputs,
         stopping,
-      ),
+        offerArchive,
+      }),
       confirmLabel: stopping ? "Stop and delete" : "Delete work",
       destructive: true,
-    });
-    if (!confirmed) return;
+    };
+    const decision = offerArchive
+      ? await decide({ ...confirmation, alternativeLabel: "Archive" })
+      : (await confirm(confirmation))
+        ? "confirm"
+        : "cancel";
+    if (decision === "alternative") {
+      await onSetChatArchived(current, true);
+      return;
+    }
+    if (decision !== "confirm") return;
 
     deletionInFlightRef.current = true;
     chatListActions.setDeletingChatId(target.id);
@@ -1039,24 +1059,69 @@ export function AppShell() {
       }
       // Nothing left to send it to.
       useComposerDrafts.getState().clearDraft(target.id);
-      let refreshed = await client.listChats();
-      if (!deletingOpenChat) {
-        chatListActions.setChats(refreshed);
-        return;
-      }
-      let next: Chat | undefined = refreshed[0];
-      if (!next) {
-        next = await client.createChat();
-        refreshed = prependReplacementChat(refreshed, next);
-      }
+      const refreshed = await client.listChats();
       chatListActions.setChats(refreshed);
-      await navigate({ to: "/c/$chatId", params: { chatId: next.id } });
+      // The list read does not cover the archive, where the chat may have been.
+      chatListActions.removeChat(target.id);
+      if (!deletingOpenChat) return;
+      // Land on the top of the list, or home when nothing is left. Home is
+      // where new work starts, so nothing is created here.
+      const next = nextChatAfterDelete(refreshed);
+      await (next
+        ? navigate({ to: "/c/$chatId", params: { chatId: next.id } })
+        : navigate({ to: "/" }));
     } catch (err) {
       chatListActions.setChatsError(chatDeletionErrorMessage(err));
     } finally {
       deletionInFlightRef.current = false;
       chatListActions.setDeletingChatId(null);
     }
+  }
+
+  /** Pin a conversation to the top of the list, or unpin it. */
+  async function onTogglePinChat(target: Chat) {
+    if (!client) return;
+    try {
+      chatListActions.replaceChat(
+        await client.setChatPinned(target.id, !target.pinned_at),
+      );
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not pin the work."));
+    }
+  }
+
+  /**
+   * Move a conversation into the archive or back out.
+   *
+   * Archiving is not deleting, so it needs no confirmation. The toast offers
+   * the way back, and the archive page lists everything archived.
+   */
+  async function onSetChatArchived(target: Chat, archived: boolean) {
+    if (!client) return;
+    const label = target.title?.trim() || "Work";
+    try {
+      chatListActions.replaceChat(
+        await client.setChatArchived(target.id, archived),
+      );
+    } catch (err) {
+      toast.error(
+        friendlyErrorMessage(
+          err,
+          archived ? "Could not archive the work." : "Could not unarchive it.",
+        ),
+      );
+      return;
+    }
+    if (!archived) {
+      toast.success(`${label} is back in your list.`);
+      return;
+    }
+    toast.success(`${label} archived.`, {
+      action: {
+        label: "Undo",
+        onClick: () => void onSetChatArchived(target, false),
+      },
+    });
   }
 
   function startChatRename(target: Chat) {
@@ -1162,6 +1227,9 @@ export function AppShell() {
     refreshChats,
     newChat: () => void onNewChat(),
     deleteChat: (target) => void onDeleteChat(target),
+    togglePinChat: (target) => void onTogglePinChat(target),
+    archiveChat: (target) => void onSetChatArchived(target, true),
+    unarchiveChat: (target) => void onSetChatArchived(target, false),
     startRename: startChatRename,
     commitRename: (target) => void commitChatRename(target),
     cancelRename: cancelChatRename,
@@ -1186,6 +1254,9 @@ export function AppShell() {
     refreshChats: () => contextActionsRef.current.refreshChats(),
     newChat: () => contextActionsRef.current.newChat(),
     deleteChat: (chat) => contextActionsRef.current.deleteChat(chat),
+    togglePinChat: (chat) => contextActionsRef.current.togglePinChat(chat),
+    archiveChat: (chat) => contextActionsRef.current.archiveChat(chat),
+    unarchiveChat: (chat) => contextActionsRef.current.unarchiveChat(chat),
     startRename: (chat) => contextActionsRef.current.startRename(chat),
     commitRename: (chat) => contextActionsRef.current.commitRename(chat),
     cancelRename: () => contextActionsRef.current.cancelRename(),
@@ -1387,7 +1458,8 @@ export function AppShell() {
               />
             )}
           </FloatingNotices>
-          {/* Each route renders its own rail beside its content — see RouteFrame. */}
+          {/* Each layout route renders its rail beside its content — see
+              WorkLayout and CodeLayout. */}
           <div className="app-body">
             <DocumentTitle />
             <Outlet />

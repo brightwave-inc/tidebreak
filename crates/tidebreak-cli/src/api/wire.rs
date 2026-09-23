@@ -16,8 +16,8 @@
 //! here rather than at a prompt.
 
 pub use tidebreak_core::{
-    Chat, PendingPlanApproval, PendingUserQuestions, RendererToolName, ToolActionPreview,
-    ToolApprovalKind,
+    Chat, ChatListing, PendingPlanApproval, PendingUserQuestions, RendererToolName,
+    ToolActionPreview, ToolApprovalKind,
 };
 pub use tidebreak_server::wire::{
     AgentActivityHistoryItem, ApprovalGrantRung, RendererAgentEvent, RendererChatFrame,

@@ -99,6 +99,15 @@ where
     .await
     .map_err(store_err)?;
     insert_attachments_on(conn, owner, turn.id, &turn.attachments).await?;
+    // Every turn the runtime starts, a Slack message or a queued one
+    // included, moves the conversation in its owner's list the way a turn
+    // from the chat routes does.
+    super::super::conversation::record_started_turn_on(
+        conn,
+        turn.session_id,
+        super::super::turn::canonical_db_timestamp(turn.started_at)?,
+    )
+    .await?;
     Ok(())
 }
 

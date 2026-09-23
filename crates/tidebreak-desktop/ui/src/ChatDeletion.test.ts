@@ -7,7 +7,7 @@ import {
   detachChatFolders,
   inspectLiveChatWork,
   liveChatWorkIsBlocking,
-  prependReplacementChat,
+  nextChatAfterDelete,
   purgeDeletedChatHostAuthority,
   stopLiveChatWork,
   tryDeleteChat,
@@ -36,6 +36,12 @@ function chat(id: string, projectId: string | null): Chat {
     network_policy: { mode: "off" },
     attachment_revision: 0,
     memory_incognito: false,
+    last_activity_at: "2026-07-21T12:00:00Z",
+    pinned_at: null,
+    archived_at: null,
+    running: false,
+    unread: false,
+    turn_count: 1,
     root_attachments: [],
     created_at: "2026-07-21T12:00:00Z",
   };
@@ -51,15 +57,17 @@ function withFolders(target: Chat, rootIds: string[]): Chat {
   };
 }
 
-describe("chat deletion replacement", () => {
-  it("puts a new loose replacement ahead of the chats that remain", () => {
-    const projectChat = chat("project-chat", "project-1");
-    const refreshed = [projectChat];
-    const replacement = chat("loose-replacement", null);
-    expect(prependReplacementChat(refreshed, replacement)).toEqual([
-      replacement,
-      projectChat,
-    ]);
+describe("where deleting the open chat lands", () => {
+  it("opens the top of the list, skipping a chat nothing happened in", () => {
+    const empty = { ...chat("empty", null), title: null, turn_count: 0 };
+    const worked = chat("worked", null);
+    expect(nextChatAfterDelete([empty, worked])?.id).toBe("worked");
+  });
+
+  it("goes home rather than creating a chat when nothing is left", () => {
+    const empty = { ...chat("empty", null), title: null, turn_count: 0 };
+    expect(nextChatAfterDelete([])).toBeNull();
+    expect(nextChatAfterDelete([empty])).toBeNull();
   });
 });
 
@@ -86,21 +94,46 @@ describe("connected folders on delete", () => {
   });
 
   it("says what confirming also disconnects", () => {
-    expect(deletionDescription(0)).toBe("This cannot be undone.");
-    expect(deletionDescription(1)).toBe(
-      "Disconnects 1 connected folder first. This cannot be undone.",
+    expect(deletionDescription({ folders: 0, outputs: 0 })).toBe(
+      "This cannot be undone. Archive keeps everything and takes it out of your list.",
     );
-    expect(deletionDescription(2)).toBe(
-      "Disconnects 2 connected folders first. This cannot be undone.",
+    expect(deletionDescription({ folders: 1, outputs: 0 })).toBe(
+      "Disconnects 1 connected folder. This cannot be undone. Archive keeps everything and takes it out of your list.",
+    );
+    expect(deletionDescription({ folders: 2, outputs: 0 })).toContain(
+      "Disconnects 2 connected folders.",
+    );
+  });
+
+  it("says how many outputs go with the conversation", () => {
+    expect(deletionDescription({ folders: 0, outputs: 3 })).toBe(
+      "Deletes 3 outputs. Export them first if you need them. This cannot be undone. Archive keeps everything and takes it out of your list.",
+    );
+    expect(deletionDescription({ folders: 0, outputs: 1 })).toContain(
+      "Deletes 1 output. Export it first if you need it.",
+    );
+    // An unread count still warns rather than going quiet.
+    expect(deletionDescription({ folders: 0, outputs: null })).toContain(
+      "Deletes any outputs it made.",
+    );
+  });
+
+  it("does not offer the archive to a conversation already in it", () => {
+    expect(
+      deletionDescription({ folders: 0, outputs: 2, offerArchive: false }),
+    ).toBe(
+      "Deletes 2 outputs. Export them first if you need them. This cannot be undone.",
     );
   });
 
   it("says stop and delete when work is still running", () => {
-    expect(deletionDescription(0, true)).toBe(
-      "This stops the running response and background agents, then deletes the conversation. This cannot be undone.",
-    );
-    expect(deletionDescription(1, true)).toContain(
-      "disconnects 1 connected folder",
+    expect(
+      deletionDescription({ folders: 0, outputs: 0, stopping: true }),
+    ).toContain("Stops the running response and background agents.");
+    expect(
+      deletionDescription({ folders: 1, outputs: 2, stopping: true }),
+    ).toBe(
+      "Stops the running response and background agents. Disconnects 1 connected folder. Deletes 2 outputs. Export them first if you need them. This cannot be undone. Archive keeps everything and takes it out of your list.",
     );
   });
 });

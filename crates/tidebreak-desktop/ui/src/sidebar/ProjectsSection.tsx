@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ChevronRight,
@@ -16,6 +16,7 @@ import {
 import type { Project } from "@/api";
 import { useApp } from "@/AppContext";
 import { useChatAttention } from "@/ChatAttention";
+import { isListableChat, sortChats } from "@/chatListGroups";
 import { useChatListStore } from "@/ChatListStore";
 import { useProjectListStore } from "@/ProjectListStore";
 import {
@@ -53,6 +54,8 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
     startRename,
     commitRename,
     cancelRename,
+    togglePinChat,
+    archiveChat,
   } = useApp();
   const navigate = useNavigate();
   const projects = useProjectListStore((state) => state.projects);
@@ -90,6 +93,24 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
   );
   const [creatingOpen, setCreatingOpen] = useState(false);
 
+  // The rail stays mounted across conversations, so a conversation opened
+  // from elsewhere has to bring its row into view itself.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const activeExpanded = chats.some(
+    (chat) =>
+      chat.id === activeChatId &&
+      chat.project_id !== null &&
+      expandedProjectIds.includes(chat.project_id),
+  );
+  useEffect(() => {
+    if (!activeChatId || !activeExpanded) return;
+    const row = [
+      ...(listRef.current?.querySelectorAll<HTMLElement>("[data-chat-row]") ??
+        []),
+    ].find((element) => element.dataset.chatRow === activeChatId);
+    row?.scrollIntoView?.({ block: "nearest" });
+  }, [activeChatId, activeExpanded]);
+
   return (
     <div className="mt-1 flex shrink-0 flex-col">
       <div className="flex shrink-0 items-center gap-0.5 pr-1">
@@ -114,9 +135,21 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
         creating={creatingProject}
       />
 
-      <div className="flex flex-col gap-0.5" aria-label="Projects">
+      <div
+        ref={listRef}
+        className="flex flex-col gap-0.5"
+        aria-label="Projects"
+      >
         {projects.map((project) => {
-          const held = chats.filter((chat) => chat.project_id === project.id);
+          // Pinned first, then by activity, and only the conversations that
+          // earn a row — the same rules as the list of work below.
+          const held = sortChats(
+            chats.filter(
+              (chat) =>
+                chat.project_id === project.id &&
+                isListableChat(chat, activeChatId),
+            ),
+          );
           const expanded = expandedProjectIds.includes(project.id);
           return (
             <div key={project.id} className="flex flex-col gap-0.5">
@@ -174,6 +207,8 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
                       onMoveToProject={(projectId) =>
                         moveChatToProject(chat, projectId)
                       }
+                      onTogglePin={() => togglePinChat(chat)}
+                      onArchive={() => archiveChat(chat)}
                       onDelete={() => deleteChat(chat)}
                     />
                   ))}

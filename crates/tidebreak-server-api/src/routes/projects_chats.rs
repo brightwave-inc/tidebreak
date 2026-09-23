@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path as FsPath;
 
 use tidebreak_core::{
-    AgentRunId, Chat, DeleteChatOutcome, DeleteProjectOutcome, DocumentId,
+    AgentRunId, Chat, ChatListing, DeleteChatOutcome, DeleteProjectOutcome, DocumentId,
     Message as StoredMessage, MessageId, MoveChatOutcome, PermissionMode, Project, ProjectId,
     ReasoningEffort, Role, SessionId, TurnId, CONTEXT_CHECKPOINT_FORMAT_V1,
     CONTEXT_CHECKPOINT_FORMAT_V2,
@@ -338,7 +338,7 @@ pub async fn create_chat(
     let chat = store
         .create_chat_with_project_defaults_and_settings(&chat, &sticky_default_updates)
         .await?;
-    Ok((StatusCode::CREATED, Json(chat)))
+    Ok((StatusCode::CREATED, Json(ChatListing::new(chat))))
 }
 
 /// Body of `PATCH /chats/{id}`. A double option (like `PUT /settings`): absent
@@ -376,19 +376,33 @@ pub struct ChatUpdate {
     /// are not rewritten.
     #[serde(default)]
     pub memory_incognito: Option<bool>,
+    /// Pin the conversation to the top of the list of work, or unpin it.
+    /// Pinning takes it out of the archive.
+    #[serde(default)]
+    pub pinned: Option<bool>,
+    /// Archive the conversation out of the list of work, or bring it back.
+    /// Archiving keeps everything and unpins; a new turn brings it back too.
+    #[serde(default)]
+    pub archived: Option<bool>,
 }
 
-/// `PATCH /chats/{id}` — update the human-facing title and/or model selection.
+/// `PATCH /chats/{id}` — update the human-facing title, the settings a turn
+/// runs with, and where the conversation sits in the list of work.
 pub async fn patch_chat(
     State(state): State<AppState>,
     auth: AuthContext,
     store: ScopedStore,
     Path(id): Path<SessionId>,
     Json(mut body): Json<ChatUpdate>,
-) -> Result<Json<Chat>, ServerError> {
+) -> Result<Json<ChatListing>, ServerError> {
     let owner = auth.principal.owner_id();
     // Validate every supplied field before touching durable state. This keeps a
     // mixed request all-or-nothing from the user's point of view.
+    if body.pinned == Some(true) && body.archived == Some(true) {
+        return Err(ServerError::bad_request(
+            "a conversation cannot be pinned and archived at once",
+        ));
+    }
     if let Some(Some(model)) = body.model.as_mut() {
         *model = validate_model_selection(&state, model, false, Some(&auth.principal.owner_id()))
             .await?;
@@ -431,12 +445,14 @@ pub async fn patch_chat(
         }
     }
 
-    let mut chat = store.require_chat(id).await?;
+    // Existence first, so a missing conversation answers `404` before any
+    // write lands.
+    store.require_chat(id).await?;
 
     if !store
         .update_chat_metadata(
             id,
-            title.clone(),
+            title,
             body.model.clone(),
             body.reasoning_effort,
             body.permission_mode,
@@ -492,25 +508,22 @@ pub async fn patch_chat(
         )
         .await?;
     }
-    if let Some(title) = title {
-        chat.title = title;
+    // Archive before pin, so `{archived: false, pinned: true}` brings the
+    // conversation back and pins it, and `{archived: true, pinned: false}`
+    // leaves it archived.
+    if let Some(archived) = body.archived {
+        if !store.set_chat_archived(id, archived).await? {
+            return Err(ServerError::not_found(format!("chat {id} not found")));
+        }
     }
-    if let Some(model) = body.model {
-        chat.model = model;
+    if let Some(pinned) = body.pinned {
+        if !store.set_chat_pinned(id, pinned).await? {
+            return Err(ServerError::not_found(format!("chat {id} not found")));
+        }
     }
-    if let Some(reasoning_effort) = body.reasoning_effort {
-        chat.reasoning_effort = reasoning_effort;
-    }
-    if let Some(permission_mode) = body.permission_mode {
-        chat.permission_mode = permission_mode;
-    }
-    if let Some(network_policy) = body.network_policy {
-        chat.network_policy = network_policy;
-    }
-    if let Some(memory_incognito) = body.memory_incognito {
-        chat.memory_incognito = memory_incognito;
-    }
-    Ok(Json(chat))
+    // Read back rather than patch the request onto an earlier read: a title
+    // the server derived meanwhile, and the list state, are part of the answer.
+    Ok(Json(store.require_chat_listing(id).await?))
 }
 
 /// A renderer-safe durable transcript entry. Internal routing and tool state
@@ -997,17 +1010,44 @@ pub async fn list_chat_messages(
     }))
 }
 
-/// `GET /chats` — list chats, most-recently-created first.
-pub async fn list_chats(store: ScopedStore) -> Result<Json<Vec<Chat>>, ServerError> {
-    Ok(Json(store.list_chats().await?))
+/// Query of `GET /chats`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatListQuery {
+    /// List the archive instead of the list of work.
+    #[serde(default)]
+    pub archived: bool,
 }
 
-/// `GET /chats/{id}` — fetch one chat, or `404`.
+/// `GET /chats` — the reader's list of work: pinned conversations first, then
+/// the rest by their latest activity. `?archived=true` lists the archive,
+/// most recently archived first. Both include conversations with no turns
+/// yet, so an id a script just created is always found.
+pub async fn list_chats(
+    store: ScopedStore,
+    Query(query): Query<ChatListQuery>,
+) -> Result<Json<Vec<ChatListing>>, ServerError> {
+    Ok(Json(store.list_chat_listings(query.archived).await?))
+}
+
+/// `GET /chats/{id}` — fetch one chat, archived or not, or `404`.
 pub async fn get_chat(
     store: ScopedStore,
     Path(id): Path<SessionId>,
-) -> Result<Json<Chat>, ServerError> {
-    Ok(Json(store.require_chat(id).await?))
+) -> Result<Json<ChatListing>, ServerError> {
+    Ok(Json(store.require_chat_listing(id).await?))
+}
+
+/// `POST /chats/{id}/read` — record that the reader has seen what the
+/// conversation last did. Clears the unread mark a finished turn left.
+pub async fn mark_chat_read(
+    store: ScopedStore,
+    Path(id): Path<SessionId>,
+) -> Result<StatusCode, ServerError> {
+    if !store.mark_chat_read(id).await? {
+        return Err(ServerError::not_found(format!("chat {id} not found")));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `DELETE /chats/{id}` — remove a quiesced conversation and its product

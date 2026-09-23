@@ -53,9 +53,11 @@ tidebreak settings exec remove-key <provider>
 tidebreak mcp-server list
 tidebreak mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
 tidebreak mcp-server remove <name>
-tidebreak chat list
+tidebreak chat list [--archived]
 tidebreak chat create
 tidebreak chat delete <chat>
+tidebreak chat pin|unpin <chat>
+tidebreak chat archive|unarchive <chat>
 tidebreak chat steer <chat> <turn> <text...>
 tidebreak agent-run list <chat>
 tidebreak agent-run show <chat> <run>

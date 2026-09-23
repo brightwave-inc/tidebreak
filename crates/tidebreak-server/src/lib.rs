@@ -29,6 +29,7 @@ pub mod bus;
 pub mod chat_titling;
 pub mod chatgpt_runtime;
 pub mod code;
+mod empty_chat_pruner;
 pub use code::chrome;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
@@ -418,6 +419,7 @@ pub struct Server {
     _agent_run_scratch_reaper: AbortTask,
     _blob_retirement_worker: AbortTask,
     _blob_orphan_auditor: AbortTask,
+    _empty_chat_pruner: AbortTask,
     _approval_judge_worker: AbortTask,
     _memory_sweep: AbortTask,
     _mcp_supervisor: AbortTask,
@@ -621,6 +623,7 @@ impl Server {
         self._agent_run_scratch_reaper.abort();
         self._blob_retirement_worker.abort();
         self._blob_orphan_auditor.abort();
+        self._empty_chat_pruner.abort();
         self._approval_judge_worker.abort();
         self._memory_sweep.abort();
         self._mcp_supervisor.abort();
@@ -639,6 +642,7 @@ impl Server {
         self._agent_run_scratch_reaper.wait().await;
         self._blob_retirement_worker.wait().await;
         self._blob_orphan_auditor.wait().await;
+        self._empty_chat_pruner.wait().await;
         self._approval_judge_worker.wait().await;
         self._memory_sweep.wait().await;
         self._mcp_supervisor.wait().await;
@@ -1671,6 +1675,7 @@ async fn bind_inner(
         state.blob_retirement_wake.clone(),
         blob_orphan_auditor::BlobOrphanAuditorConfig::default(),
     );
+    let empty_chat_pruner_store = state.store.clone();
     let (chat_quiesce_worker, chat_quiesce_control) = update_quiesce::chat_quiesce_pair();
     let turn_worker = engine::internal::leg::LegDriver::new(
         state.store.clone(),
@@ -1899,6 +1904,12 @@ async fn bind_inner(
         blob_orphan_auditor,
         |worker| worker.run(),
     );
+    let empty_chat_pruner = supervise_worker(
+        &worker_health,
+        "empty_chat_pruner",
+        empty_chat_pruner_store,
+        empty_chat_pruner::run,
+    );
     let approval_judge_worker = supervise_worker(
         &worker_health,
         "approval_judge",
@@ -1957,6 +1968,7 @@ async fn bind_inner(
         _agent_run_scratch_reaper: AbortTask(agent_run_scratch_reaper),
         _blob_retirement_worker: AbortTask(blob_retirement_worker),
         _blob_orphan_auditor: AbortTask(blob_orphan_auditor),
+        _empty_chat_pruner: AbortTask(empty_chat_pruner),
         _approval_judge_worker: AbortTask(approval_judge_worker),
         _memory_sweep: AbortTask(memory_sweep_worker),
         _mcp_supervisor: AbortTask(mcp_supervisor),

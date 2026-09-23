@@ -805,6 +805,7 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
         snapshot.session_columns,
         [
             ("acts_as".to_owned(), "<null>".to_owned()),
+            ("archived_at".to_owned(), "<null>".to_owned()),
             ("attention_source".to_owned(), "lifecycle".to_owned()),
             (
                 "attention_state".to_owned(),
@@ -813,14 +814,22 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("execution_location".to_owned(), "machine".to_owned()),
             ("harness_kind".to_owned(), "internal".to_owned()),
             ("kind".to_owned(), "interactive".to_owned()),
+            // Backfilled from the conversation's latest turn, so the upgraded
+            // list keeps the order the reader last saw.
+            (
+                "last_activity_at".to_owned(),
+                "2026-09-01T00:00:02+00:00".to_owned()
+            ),
             ("lifecycle".to_owned(), "idle".to_owned()),
             ("memory_incognito".to_owned(), "false".to_owned()),
             ("network_policy".to_owned(), r#"{"mode":"open"}"#.to_owned()),
             ("owner_kind".to_owned(), "<null>".to_owned()),
             ("permission_mode".to_owned(), "<null>".to_owned()),
+            ("pinned_at".to_owned(), "<null>".to_owned()),
             ("reasoning_effort".to_owned(), "<null>".to_owned()),
             ("spawn_epoch".to_owned(), "0".to_owned()),
             ("title".to_owned(), "kept".to_owned()),
+            ("unread_since".to_owned(), "<null>".to_owned()),
             ("visibility".to_owned(), "private".to_owned()),
             ("workspace_id".to_owned(), "<null>".to_owned()),
         ]
