@@ -88,7 +88,7 @@ pub struct ChatListing {
 pub struct ChatBranchOrigin {
     /// The original conversation. It may since have been deleted.
     pub chat_id: SessionId,
-    /// The last turn of the original the branch copied, or `None` when the
+    /// The last turn of the original the branch copied. Empty when the
     /// branch copied no turns: an edit of the original's first message.
     pub turn_id: Option<TurnId>,
     /// When the branch was made. Everything in the branch older than this is

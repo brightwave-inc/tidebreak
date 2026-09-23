@@ -431,6 +431,10 @@ mod tests {
         generate::collect_from::<crate::routes::MemoryStatusBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::MemoryIngestBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ChatTranscript>(&cfg, &mut out);
+        // Rerun and branch a chat: the request bodies and the answer.
+        generate::collect_from::<crate::routes::RegenerateTurnBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::EditTurnBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::ChatTurnStarted>(&cfg, &mut out);
         generate::collect_from::<crate::providers::ProviderInfo>(&cfg, &mut out);
         generate::collect_from::<crate::providers::ProviderAuthMode>(&cfg, &mut out);
         generate::collect_from::<crate::model_discovery::DiscoveredModels>(&cfg, &mut out);

@@ -36,7 +36,7 @@ use super::providers_models::validate_model_selection;
 use super::turn_control::{admit_turn, preflight_turn, TurnInput, TurnSubmission};
 
 /// Body of `POST /chats/{id}/turns/{turn_id}/regenerate`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct RegenerateTurnBody {
     /// Client-generated identity of the new turn, for acceptance and
@@ -44,7 +44,8 @@ pub struct RegenerateTurnBody {
     pub new_turn_id: TurnId,
     /// Answer with this model instead of the chat's. The chat keeps its own
     /// model for the turns after this one.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub model: Option<String>,
 }
 
@@ -52,7 +53,7 @@ pub struct RegenerateTurnBody {
 ///
 /// An absent field keeps what the edited message had, so a client that only
 /// changes the text sends only the text.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct EditTurnBody {
     /// Client-generated identity of the new turn.
@@ -60,16 +61,20 @@ pub struct EditTurnBody {
     /// The new message.
     pub content: String,
     /// Published image attachment ids, in display order.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub attachments: Option<Vec<uuid::Uuid>>,
     /// The conversation's document ids.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub file_attachments: Option<Vec<DocumentId>>,
     /// Skills the message explicitly invokes.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub invoked_skills: Option<Vec<String>>,
     /// Whether any of the text came from voice transcription.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub voice_input_used: Option<bool>,
 }
 

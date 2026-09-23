@@ -781,6 +781,56 @@ memory_incognito: boolean,
  */
 created_at: string, };
 
+/**
+ * One earlier answer to a message that was answered again.
+ */
+export type ChatAnswerVersion = {
+/**
+ * The turn that gave this answer.
+ */
+turn_id: TurnId,
+/**
+ * The turn shown in its place now: the newest answer to the same
+ * message.
+ */
+current_turn_id: TurnId,
+/**
+ * The answer's messages, oldest first. The message it answered is the
+ * current turn's.
+ */
+messages: Array<ChatMessageSnapshot>,
+/**
+ * The answer's finished tool activity.
+ */
+tool_activity: Array<ChatToolActivitySnapshot>,
+/**
+ * How the answer ended.
+ */
+terminal_turn: ChatTerminalTurnSnapshot, };
+
+/**
+ * The conversation a branch came from, and where.
+ *
+ * The branch owns a copy of everything it shows, so this is a link and
+ * nothing more: the original can be renamed, moved, or deleted, and the
+ * branch keeps working.
+ */
+export type ChatBranchOrigin = {
+/**
+ * The original conversation. It may since have been deleted.
+ */
+chat_id: SessionId,
+/**
+ * The last turn of the original the branch copied. Empty when the
+ * branch copied no turns: an edit of the original's first message.
+ */
+turn_id: TurnId | null,
+/**
+ * When the branch was made. Everything in the branch older than this is
+ * the copied history.
+ */
+branched_at: string, };
+
 export type ChatGptSignInStatus = { signed_in: boolean, pending_authorization_url?: string, error?: string, };
 
 /**
@@ -819,6 +869,10 @@ unread: boolean,
  * until it is named or pinned: nothing has happened in it yet.
  */
 turn_count: number,
+/**
+ * Where this conversation was branched from, when it is a branch.
+ */
+branched_from?: ChatBranchOrigin,
 /**
  * Stable identifier.
  */
@@ -873,7 +927,12 @@ created_at: string, };
  * A renderer-safe durable transcript entry. Internal routing and tool state
  * deliberately remain behind the server boundary.
  */
-export type ChatMessageSnapshot = { id: MessageId, role: TranscriptRole, content: string, created_at: string, citations: Array<AssistantCitationSnapshot>,
+export type ChatMessageSnapshot = { id: MessageId,
+/**
+ * The turn this message belongs to. A message the reader sent opens its
+ * turn; the actions on a message name the turn.
+ */
+turn_id: TurnId, role: TranscriptRole, content: string, created_at: string, citations: Array<AssistantCitationSnapshot>,
 /**
  * Images submitted with this user message. These are durable identity and
  * geometry only; image bytes remain behind a chat-scoped authenticated
@@ -929,7 +988,13 @@ invoked_skills?: Array<string>,
  * Token accounting for the turn, so a freshly opened chat can show
  * context usage without waiting for the next turn to finish.
  */
-usage: RendererTurnUsage, voice_input_used: boolean, finished_at: string, };
+usage: RendererTurnUsage, voice_input_used: boolean, finished_at: string,
+/**
+ * What this turn did outside the conversation. Read only for the
+ * conversation's latest turn, the one an edit can replace: an edit of a
+ * turn with any of these starts a new conversation instead.
+ */
+side_effects?: Array<TurnSideEffect>, };
 
 export type ChatTerminalTurnStatus = "completed" | "failed" | "cancelled";
 
@@ -951,6 +1016,11 @@ export type ChatToolActivitySnapshot = {
  * reject.
  */
 call_id: CallId,
+/**
+ * The turn that made the call, so a reader can tell which answer it
+ * belongs to when a turn has been answered more than once.
+ */
+turn_id: TurnId,
 /**
  * Allowlisted renderer tool name, never a provider-supplied one.
  *
@@ -1019,7 +1089,41 @@ has_more: boolean,
  * Pass as `before` to read the page just older than this one. Set exactly
  * when `has_more` is.
  */
-earlier_cursor: number | null, };
+earlier_cursor: number | null,
+/**
+ * Earlier answers to messages that were answered again, oldest first.
+ *
+ * `messages`, `tool_activity`, and `terminal_turns` hold the conversation
+ * as it stands, with each message's current answer. A regenerated
+ * answer moves here, keyed to the turn now shown in its place. An answer
+ * that failed or stopped before it said anything is not kept, and an
+ * edited turn is gone from the conversation altogether.
+ */
+answer_versions: Array<ChatAnswerVersion>, };
+
+/**
+ * Answer of the regenerate and edit routes.
+ */
+export type ChatTurnStarted = {
+/**
+ * The conversation the new turn runs in. An edit that starts a new
+ * conversation answers with that conversation.
+ */
+chat_id: SessionId,
+/**
+ * The new turn.
+ */
+turn_id: TurnId,
+/**
+ * Whether the edit started a new conversation instead of replacing the
+ * turn in place.
+ */
+branched: boolean,
+/**
+ * What the replaced turn did outside the conversation, which is why an
+ * edit started a new conversation. Empty otherwise.
+ */
+side_effects: Array<TurnSideEffect>, };
 
 /**
  * Hint that a turn recorded a checkpoint. The diff body is loaded separately.
@@ -2319,6 +2423,38 @@ models: Array<DiscoveredModel>, };
  * preserves the existing stable URI identity used by source ingestion.
  */
 export type DocumentId = string;
+
+/**
+ * Body of `POST /chats/{id}/turns/{turn_id}/edit`.
+ *
+ * An absent field keeps what the edited message had, so a client that only
+ * changes the text sends only the text.
+ */
+export type EditTurnBody = {
+/**
+ * Client-generated identity of the new turn.
+ */
+new_turn_id: TurnId,
+/**
+ * The new message.
+ */
+content: string,
+/**
+ * Published image attachment ids, in display order.
+ */
+attachments?: Array<string>,
+/**
+ * The conversation's document ids.
+ */
+file_attachments?: Array<DocumentId>,
+/**
+ * Skills the message explicitly invokes.
+ */
+invoked_skills?: Array<string>,
+/**
+ * Whether any of the text came from voice transcription.
+ */
+voice_input_used?: boolean, };
 
 /**
  * Host-owned, non-secret egress policy for the managed exec sandboxes.
@@ -4990,6 +5126,21 @@ export type RefusalOutcome = { details: RefusalDetails, partial_output: boolean,
  */
 export type RefusalSource = "report_blocked";
 
+/**
+ * Body of `POST /chats/{id}/turns/{turn_id}/regenerate`.
+ */
+export type RegenerateTurnBody = {
+/**
+ * Client-generated identity of the new turn, for acceptance and
+ * ambiguous retries.
+ */
+new_turn_id: TurnId,
+/**
+ * Answer with this model instead of the chat's. The chat keeps its own
+ * model for the turns after this one.
+ */
+model?: string, };
+
 export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "task_plan_updated", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass,
 /**
  * Whether the Auto-mode judge owns this card right now. The card
@@ -6298,6 +6449,15 @@ export type TurnId = string;
  * Where one closing-message rewrite stands.
  */
 export type TurnRewriteState = "rewriting" | "rewritten" | "failed";
+
+/**
+ * What a turn did outside the conversation.
+ *
+ * An edit that would replace a turn with any of these starts a new
+ * conversation instead: the original keeps the record of what ran, and what
+ * ran is not undone either way.
+ */
+export type TurnSideEffect = "files_written" | "outputs_created" | "connected_apps_called" | "other_actions";
 
 /**
  * One user→engine turn.
