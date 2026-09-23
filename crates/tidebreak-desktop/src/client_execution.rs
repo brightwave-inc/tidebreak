@@ -54,6 +54,71 @@ pub(crate) use receipt_store::{
 const RECOVERY_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const RECOVERY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a native executor sleeps when nothing wakes it.
+///
+/// The server wakes executors when client work becomes pending, so this sweep
+/// only catches what a wake cannot announce: a claim whose lease ran out,
+/// receipts left by a restart, and conversations deleted in the meantime.
+const EXECUTOR_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// The first retry after a pass that deferred work. Each further deferred
+/// pass doubles it, up to [`EXECUTOR_SWEEP_INTERVAL`].
+const EXECUTOR_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Paces one native executor loop between passes.
+///
+/// A pass runs when the server signals new client work, when the safety sweep
+/// comes due, or sooner when the previous pass deferred work. Nothing here
+/// lists conversations: each pass asks the server once for what is pending.
+pub(crate) struct ExecutorPace {
+    wake: tidebreak_server::ClientExecutionWake,
+    delay: PassDelay,
+}
+
+impl ExecutorPace {
+    pub(crate) fn new(wake: tidebreak_server::ClientExecutionWake) -> Self {
+        Self {
+            wake,
+            delay: PassDelay::default(),
+        }
+    }
+
+    /// Wait until the next pass should run.
+    pub(crate) async fn wait(&mut self, deferred: bool) {
+        let delay = self.delay.next(deferred);
+        tokio::select! {
+            () = self.wake.notified() => {}
+            () = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+/// The longest an executor waits before its next pass if nothing wakes it.
+#[derive(Debug)]
+struct PassDelay {
+    retry: std::time::Duration,
+}
+
+impl Default for PassDelay {
+    fn default() -> Self {
+        Self {
+            retry: EXECUTOR_RETRY_INTERVAL,
+        }
+    }
+}
+
+impl PassDelay {
+    fn next(&mut self, deferred: bool) -> std::time::Duration {
+        if deferred {
+            let delay = self.retry;
+            self.retry = self.retry.saturating_mul(2).min(EXECUTOR_SWEEP_INTERVAL);
+            delay
+        } else {
+            self.retry = EXECUTOR_RETRY_INTERVAL;
+            EXECUTOR_SWEEP_INTERVAL
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExecutionMode {
     Interactive,
@@ -608,6 +673,24 @@ mod tests {
     use super::product_sync::{attachment_operation_id, validate_product_change};
     use super::receipt_store::{AttachmentPhase, CleanupPhase, ProductRootAttachmentSync};
     use super::*;
+
+    /// An idle executor waits the whole sweep; one that deferred work retries
+    /// sooner, backs off while it keeps deferring, and starts over once a
+    /// pass goes through.
+    #[test]
+    fn executor_passes_back_off_while_deferring_and_idle_at_the_sweep() {
+        let mut delay = PassDelay::default();
+        assert_eq!(delay.next(false), EXECUTOR_SWEEP_INTERVAL);
+
+        let retries = (0..6).map(|_| delay.next(true)).collect::<Vec<_>>();
+        assert_eq!(
+            retries,
+            [2, 4, 8, 16, 30, 30].map(std::time::Duration::from_secs)
+        );
+
+        assert_eq!(delay.next(false), EXECUTOR_SWEEP_INTERVAL);
+        assert_eq!(delay.next(true), EXECUTOR_RETRY_INTERVAL);
+    }
 
     #[test]
     fn canonical_folder_request_rejects_identity_and_contract_changes() {

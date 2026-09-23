@@ -2344,6 +2344,10 @@ impl LegDriver {
                                         call_id: request.id,
                                     });
                                 }
+                                // A native executor runs this call, and it
+                                // sleeps between slow safety sweeps. Wake it
+                                // now that the call is durable.
+                                self.events.notify_client_execution_pending();
                                 return Ok(LegDriverOutcome::WaitingForClient {
                                     turn_id: turn.id,
                                     call_id: request.id,

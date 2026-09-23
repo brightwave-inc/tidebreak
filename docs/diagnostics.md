@@ -45,7 +45,7 @@ The ZIP contains `snapshot.json`, `metrics.prom`, `manifest.json`, a short
 `README.txt`, and available tails from this allowlist:
 
 - `logs/tidebreak.log` and its one rotation.
-- `logs/tidebreak.events.jsonl` and its one rotation.
+- `logs/tidebreak.events.jsonl` and its four rotations.
 - `boot-failures.log`.
 
 The snapshot contains build and process metadata, uptime, CPU time, maximum
@@ -64,6 +64,12 @@ where the local data model has a safe equivalent. Tidebreak does not ship an
 OTLP exporter yet. A later exporter can send the same spans without changing
 the instrumented call sites.
 
+The request histograms count every HTTP request, but the structured log only
+records a request that failed with a 4xx or 5xx status or took 250 ms or
+longer. Fast successful requests are mostly local polling, and a record for
+each one used to fill the file in minutes. To record a span for every request
+while you investigate, see [Logging filters](#logging-filters).
+
 ## Privacy and bounds
 
 The export code reads only the allowlist above. It does not read the database,
@@ -80,15 +86,19 @@ diagnostics emitted elsewhere in Tidebreak. Review an archive before sharing
 it.
 
 The human log rotates at 5 MiB and keeps one prior file. The JSONL log rotates
-at 10 MiB and also keeps one prior file. Each exported log file is capped to
-the last 10 MiB of its source. On Unix, Tidebreak writes the log files and CLI
-exports with owner-only `0600` permissions.
+at 10 MiB and keeps four prior files. Each exported log file is capped to the
+last 10 MiB of its source. A background thread writes each log file, so a
+logging call never waits on the disk. On Unix, Tidebreak writes the log files
+and CLI exports with owner-only `0600` permissions.
 
 ## Logging filters
 
 `TIDEBREAK_LOG` controls the human log and debug stderr mirror. Diagnostic
 timing events stay out of those outputs even if this filter enables their
-target.
+target. By default, the human log leaves out the warning the database pool
+writes for each caller that waits longer than 2 seconds for a connection.
+Instead, it writes one summary a minute with the number of slow waits and the
+longest one.
 
 `TIDEBREAK_DIAGNOSTICS_LOG` controls the structured JSONL file. Its default
 records only the payload-free `tidebreak_diagnostics=info` target. To change
@@ -97,6 +107,8 @@ its level, set:
 ```sh
 TIDEBREAK_DIAGNOSTICS_LOG=off,tidebreak_diagnostics=trace
 ```
+
+At `debug` or finer, the file also records a span for every HTTP request.
 
 Both variables use `tracing-subscriber` filter directives. An invalid value
 falls back to the built-in default.

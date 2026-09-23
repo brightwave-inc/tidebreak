@@ -170,6 +170,10 @@ pub trait GatewayEndpoints: Send + Sync {
 pub trait GatewayMcpControl: Send + Sync {
     async fn auto_mount_gateway_endpoints(&self, entitled: &[String]) -> Result<bool>;
     async fn refresh_connected_app_roster(&self);
+
+    /// A sign-in stored a new session. Servers that stopped retrying because
+    /// they had no session may connect again.
+    async fn gateway_session_changed(&self) {}
 }
 
 /// Commits one signed-in pairing through the embedding server's policy store.

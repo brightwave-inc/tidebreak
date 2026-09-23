@@ -29,7 +29,6 @@ use super::{
     FolderOperationPhase, FolderOperationReceipt, StoredResolution,
 };
 
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const MAX_DIRECTORY_ENTRIES: usize = 128;
 const MAX_RESULT_CONTENT_BYTES: usize = 60 * 1024;
 const MAX_FILE_CONTENT_BYTES: usize = 56 * 1024;
@@ -41,13 +40,17 @@ const MAX_STAGED_READ_BYTES: u64 = 4 * 1024 * 1024;
 /// Recover persisted outcomes, then discover new matching client calls. The
 /// loop is deliberately native-owned: no renderer event or user action is an
 /// execution authority.
-pub(crate) async fn recover_connected_folder_operations(app: tauri::AppHandle) {
+pub(crate) async fn recover_connected_folder_operations(
+    app: tauri::AppHandle,
+    wake: tidebreak_server::ClientExecutionWake,
+) {
+    let mut pace = super::ExecutorPace::new(wake);
     loop {
         let failed = recover_once(&app).await;
         if failed {
             eprintln!("tidebreak-desktop: connected-folder executor deferred work");
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        pace.wait(failed).await;
     }
 }
 
@@ -70,39 +73,27 @@ async fn recover_once(app: &tauri::AppHandle) -> bool {
         }
     }
 
-    let Some(store) = state.store() else {
-        return true;
-    };
     let client = match control_plane(&state) {
         Ok(client) => client,
         Err(_) => return true,
     };
-    let chats = match store.list_chats().await {
-        Ok(chats) => chats,
+    let pending = match client.all_pending().await {
+        Ok(pending) => pending,
         Err(_) => return true,
     };
-    for chat in chats {
-        let calls = match client.pending(chat.id).await {
-            Ok(calls) => calls,
-            Err(_) => {
-                failed = true;
-                continue;
-            }
-        };
-        for call in calls
-            .into_iter()
-            .filter(|call| should_discover_call(call, &recovered_call_ids))
-        {
-            let receipt = FolderOperationReceipt::new(
-                chat.id,
-                call.id,
-                state.receipts.executor_id(),
-                dispatch_recovery(&call.name),
-            );
-            if let Err(error) = execute_receipt(app, &state, receipt).await {
-                eprintln!("tidebreak-desktop: connected-folder execution deferred: {error}");
-                failed = true;
-            }
+    for pending in pending
+        .into_iter()
+        .filter(|pending| should_discover_call(&pending.call, &recovered_call_ids))
+    {
+        let receipt = FolderOperationReceipt::new(
+            pending.chat_id,
+            pending.call.id,
+            state.receipts.executor_id(),
+            dispatch_recovery(&pending.call.name),
+        );
+        if let Err(error) = execute_receipt(app, &state, receipt).await {
+            eprintln!("tidebreak-desktop: connected-folder execution deferred: {error}");
+            failed = true;
         }
     }
     failed

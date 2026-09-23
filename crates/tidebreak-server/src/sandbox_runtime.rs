@@ -132,4 +132,8 @@ impl SandboxHost for ServerSandboxHost {
     fn publish_event(&self, session_id: SessionId, event: SequencedAgentEvent) {
         let _ = self.events.sender(session_id).send(event);
     }
+
+    fn host_execution_pending(&self) {
+        self.events.notify_client_execution_pending();
+    }
 }

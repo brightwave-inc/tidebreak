@@ -21,20 +21,23 @@ use super::{
     FolderOperationPhase,
 };
 
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaimConflictDisposition {
     Defer,
     Retire,
 }
 
-pub(crate) async fn recover_delegated_file_read(app: tauri::AppHandle) {
+pub(crate) async fn recover_delegated_file_read(
+    app: tauri::AppHandle,
+    wake: tidebreak_server::ClientExecutionWake,
+) {
+    let mut pace = super::ExecutorPace::new(wake);
     loop {
-        if recover_once(&app).await {
+        let failed = recover_once(&app).await;
+        if failed {
             eprintln!("tidebreak-desktop: delegated-file executor deferred work");
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        pace.wait(failed).await;
     }
 }
 

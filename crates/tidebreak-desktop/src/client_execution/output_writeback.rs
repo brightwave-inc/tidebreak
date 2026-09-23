@@ -30,8 +30,6 @@ use super::{
     OutputWritebackReceipt, StoredResolution,
 };
 
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum OutputWritebackDecision {
@@ -122,12 +120,17 @@ pub(crate) async fn resolve_output_writeback_request(
     execute_receipt(&app, &state, receipt).await
 }
 
-pub(crate) async fn recover_output_writebacks(app: AppHandle) {
+pub(crate) async fn recover_output_writebacks(
+    app: AppHandle,
+    wake: tidebreak_server::ClientExecutionWake,
+) {
+    let mut pace = super::ExecutorPace::new(wake);
     loop {
-        if recover_once(&app).await {
+        let failed = recover_once(&app).await;
+        if failed {
             eprintln!("tidebreak-desktop: output write-back executor deferred work");
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        pace.wait(failed).await;
     }
 }
 

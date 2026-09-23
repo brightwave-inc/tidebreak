@@ -59,7 +59,6 @@ use super::{
     FolderOperationPhase, StoredResolution,
 };
 
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 /// Ceiling on the serialized model-facing result, well under the durable
 /// per-call result budget so the resolve payload never fails validation.
 const MAX_RESULT_CONTENT_BYTES: usize = 56 * 1024;
@@ -818,13 +817,17 @@ pub(crate) async fn resume_computer_use_control(
 
 /// Recover persisted outcomes, then discover new computer-use calls. Native-
 /// owned like the folder executor: no renderer event is an execution authority.
-pub(crate) async fn recover_computer_use_operations(app: AppHandle) {
+pub(crate) async fn recover_computer_use_operations(
+    app: AppHandle,
+    wake: tidebreak_server::ClientExecutionWake,
+) {
+    let mut pace = super::ExecutorPace::new(wake);
     loop {
         let failed = recover_once(&app).await;
         if failed {
             eprintln!("tidebreak-desktop: computer-use executor deferred work");
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        pace.wait(failed).await;
     }
 }
 
@@ -847,34 +850,25 @@ async fn recover_once(app: &AppHandle) -> bool {
         }
     }
 
-    let Some(store) = state.store() else {
-        return true;
-    };
     let client = match control_plane(&state) {
         Ok(client) => client,
         Err(_) => return true,
     };
-    let chats = match store.list_chats().await {
-        Ok(chats) => chats,
+    let pending = match client.all_pending().await {
+        Ok(pending) => pending,
         Err(_) => return true,
     };
-    for chat in chats {
-        let calls = match client.pending(chat.id).await {
-            Ok(calls) => calls,
-            Err(_) => {
-                failed = true;
-                continue;
-            }
-        };
-        for call in calls
-            .into_iter()
-            .filter(|call| !recovered_call_ids.contains(&call.id) && is_computer_use_call(call))
-        {
-            let receipt = ComputerUseReceipt::new(chat.id, call.id, state.receipts.executor_id());
-            if let Err(error) = execute_receipt(app, &state, receipt).await {
-                eprintln!("tidebreak-desktop: computer-use execution deferred: {error}");
-                failed = true;
-            }
+    for pending in pending.into_iter().filter(|pending| {
+        !recovered_call_ids.contains(&pending.call.id) && is_computer_use_call(&pending.call)
+    }) {
+        let receipt = ComputerUseReceipt::new(
+            pending.chat_id,
+            pending.call.id,
+            state.receipts.executor_id(),
+        );
+        if let Err(error) = execute_receipt(app, &state, receipt).await {
+            eprintln!("tidebreak-desktop: computer-use execution deferred: {error}");
+            failed = true;
         }
     }
     failed

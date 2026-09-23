@@ -260,25 +260,24 @@ pub async fn list_pending_client_executions_raw(
 }
 
 /// Native-only authoritative pending work across every conversation.
+///
+/// One store read serves the whole sweep, so an executor can call this on a
+/// timer without costing a read per conversation.
 pub async fn list_all_pending_client_executions(
     State(state): State<AppState>,
     _executor: ClientExecutor,
 ) -> Result<Json<Vec<NativePendingClientExecution>>, ServerError> {
-    let mut pending = Vec::new();
-    for chat in state.store.list_chats().await? {
-        pending.extend(
-            state
-                .store
-                .list_pending_client_tool_calls(chat.id)
-                .await?
-                .into_iter()
-                .filter(|call| call.name != tidebreak_core::ASK_USER_QUESTIONS_TOOL)
-                .map(|call| NativePendingClientExecution {
-                    chat_id: chat.id,
-                    call,
-                }),
-        );
-    }
+    let pending = state
+        .store
+        .list_all_pending_client_tool_calls()
+        .await?
+        .into_iter()
+        .filter(|call| call.name != tidebreak_core::ASK_USER_QUESTIONS_TOOL)
+        .map(|call| NativePendingClientExecution {
+            chat_id: call.chat_id,
+            call,
+        })
+        .collect();
     state.turn_job_wake.notify_one();
     Ok(Json(pending))
 }

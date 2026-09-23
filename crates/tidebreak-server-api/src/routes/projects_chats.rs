@@ -446,6 +446,11 @@ pub async fn patch_chat(
     {
         return Err(ServerError::not_found(format!("chat {id} not found")));
     }
+    if body.permission_mode.is_some() {
+        // A new mode can release a write-back that was waiting on the reader,
+        // so wake the native executor rather than leave it to the next sweep.
+        state.events.notify_client_execution_pending();
+    }
     if let Some(memory_incognito) = body.memory_incognito {
         if !store
             .set_chat_memory_incognito(id, memory_incognito)

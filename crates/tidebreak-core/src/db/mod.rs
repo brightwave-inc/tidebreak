@@ -3160,6 +3160,10 @@ impl Store for DbStore {
         ops::client_execution::list_pending_client_tool_calls(self, chat_id).await
     }
 
+    async fn list_all_pending_client_tool_calls(&self) -> Result<Vec<ToolCallRecord>> {
+        ops::client_execution::list_all_pending_client_tool_calls(self).await
+    }
+
     async fn list_pending_user_questions(
         &self,
         chat_id: SessionId,

@@ -810,9 +810,29 @@ struct HistogramBucketSnapshot {
     count: u64,
 }
 
+/// A successful request faster than this leaves no record in the structured
+/// log. The request histograms still count every request.
+const SLOW_REQUEST: Duration = Duration::from_millis(250);
+
 /// Measure one matched request without recording its raw URI or query string.
 pub async fn observe_http_request(
     State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    observe_request(&state.diagnostics, request, next).await
+}
+
+/// Count every request, and log only the ones worth reading later.
+///
+/// Most requests are fast local polls, and writing a record for each one was
+/// most of what the app wrote to disk while idle. So the per-request span is
+/// `debug`, which the default structured filter leaves unrecorded, and the
+/// completion event is written only for a failed or slow request.
+/// `TIDEBREAK_DIAGNOSTICS_LOG=tidebreak_diagnostics=debug` records the span
+/// for every request again.
+async fn observe_request(
+    diagnostics: &Diagnostics,
     request: Request<Body>,
     next: Next,
 ) -> Response {
@@ -824,7 +844,7 @@ pub async fn observe_http_request(
         .unwrap_or("<unmatched>")
         .to_owned();
     let operation_name = format!("{method} {route}");
-    let span = tracing::info_span!(
+    let span = tracing::debug_span!(
         target: EVENT_TARGET,
         "http.server.request",
         otel.name = %operation_name,
@@ -837,29 +857,39 @@ pub async fn observe_http_request(
         error.type = tracing::field::Empty,
     );
     let started = Instant::now();
-    let _in_flight = state.diagnostics.begin_http();
+    let _in_flight = diagnostics.begin_http();
     let response = next.run(request).instrument(span.clone()).await;
     let duration = started.elapsed();
     let status = response.status();
-    state
-        .diagnostics
-        .observe_http(&method, &route, status, duration);
+    diagnostics.observe_http(&method, &route, status, duration);
     span.record("http.response.status_code", status.as_u16());
     span.record("tidebreak.duration_ms", duration_ms(duration));
     if status.is_server_error() {
         span.record("error.type", status.as_str());
         span.record("otel.status_code", "ERROR");
     }
-    span.in_scope(|| {
-        tracing::info!(
-            target: EVENT_TARGET,
-            event_name = "http.server.request.completed",
-            http_status_code = status.as_u16(),
-            duration_ms = duration_ms(duration),
-            "request completed"
-        );
-    });
+    if worth_logging(status, duration) {
+        // The span is usually unrecorded, so the event names the request.
+        span.in_scope(|| {
+            tracing::info!(
+                target: EVENT_TARGET,
+                event_name = "http.server.request.completed",
+                http.request.method = %method,
+                http.route = %route,
+                http_status_code = status.as_u16(),
+                duration_ms = duration_ms(duration),
+                "request completed"
+            );
+        });
+    }
     response
+}
+
+/// Whether a finished request earns a record in the structured log: it
+/// failed, or it was slow. Informational and redirect answers count as
+/// success, like 2xx.
+fn worth_logging(status: StatusCode, duration: Duration) -> bool {
+    status.is_client_error() || status.is_server_error() || duration >= SLOW_REQUEST
 }
 
 /// `GET /diagnostics/snapshot` — one stable JSON view of live measurements.
@@ -1240,10 +1270,35 @@ struct BundleFileManifest {
 }
 
 struct BundleEntry {
-    path: &'static str,
+    path: String,
     bytes: Vec<u8>,
     source_bytes: u64,
     tail_truncated: bool,
+}
+
+/// The log files a bundle may carry, as (profile path, archive path): each
+/// log with every rotation it keeps, and the boot failure log. Nothing else
+/// under the profile is read.
+fn bundled_logs() -> Vec<(String, String)> {
+    let mut logs = Vec::new();
+    for (name, rotations) in [
+        ("logs/tidebreak.log", crate::logging::LOG_ROTATIONS),
+        (
+            "logs/tidebreak.events.jsonl",
+            crate::logging::EVENT_LOG_ROTATIONS,
+        ),
+    ] {
+        logs.push((name.to_owned(), name.to_owned()));
+        for slot in 1..=rotations {
+            let rotated = format!("{name}.{slot}");
+            logs.push((rotated.clone(), rotated));
+        }
+    }
+    logs.push((
+        "boot-failures.log".to_owned(),
+        "logs/boot-failures.log".to_owned(),
+    ));
+    logs
 }
 
 fn build_bundle(
@@ -1254,18 +1309,9 @@ fn build_bundle(
     let mut entries = Vec::new();
     let directory = Dir::open_ambient_dir(data_dir, ambient_authority()).ok();
     if let Some(directory) = directory.as_ref() {
-        for (source, destination) in [
-            ("logs/tidebreak.log", "logs/tidebreak.log"),
-            ("logs/tidebreak.log.1", "logs/tidebreak.log.1"),
-            ("logs/tidebreak.events.jsonl", "logs/tidebreak.events.jsonl"),
-            (
-                "logs/tidebreak.events.jsonl.1",
-                "logs/tidebreak.events.jsonl.1",
-            ),
-            ("boot-failures.log", "logs/boot-failures.log"),
-        ] {
+        for (source, destination) in bundled_logs() {
             if let Some((bytes, source_bytes, tail_truncated)) =
-                read_regular_tail(directory, source, BUNDLE_LOG_TAIL_BYTES)?
+                read_regular_tail(directory, &source, BUNDLE_LOG_TAIL_BYTES)?
             {
                 entries.push(BundleEntry {
                     path: destination,
@@ -1280,7 +1326,7 @@ fn build_bundle(
     let file_manifest = entries
         .iter()
         .map(|entry| BundleFileManifest {
-            path: entry.path.to_owned(),
+            path: entry.path.clone(),
             source_bytes: entry.source_bytes,
             included_bytes: entry.bytes.len(),
             tail_truncated: entry.tail_truncated,
@@ -1320,7 +1366,7 @@ fn build_bundle(
     write_zip_file(&mut archive, "snapshot.json", &snapshot, options)?;
     write_zip_file(&mut archive, "metrics.prom", metrics.as_bytes(), options)?;
     for entry in entries {
-        write_zip_file(&mut archive, entry.path, &entry.bytes, options)?;
+        write_zip_file(&mut archive, &entry.path, &entry.bytes, options)?;
     }
     archive
         .finish()
@@ -1513,6 +1559,16 @@ mod tests {
             b"{\"event\":\"timing\"}\n",
         )
         .unwrap();
+        std::fs::write(
+            dir.path().join("logs/tidebreak.events.jsonl.4"),
+            b"{\"event\":\"oldest\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("logs/tidebreak.events.jsonl.5"),
+            b"{\"event\":\"past the last slot\"}\n",
+        )
+        .unwrap();
         std::fs::write(dir.path().join("tidebreak.db"), b"private database").unwrap();
         std::fs::write(dir.path().join("secret.txt"), b"private secret").unwrap();
 
@@ -1526,11 +1582,106 @@ mod tests {
         names.sort();
         assert!(names.contains(&"logs/tidebreak.log".to_owned()));
         assert!(names.contains(&"logs/tidebreak.events.jsonl".to_owned()));
+        assert!(names.contains(&"logs/tidebreak.events.jsonl.4".to_owned()));
+        assert!(!names.contains(&"logs/tidebreak.events.jsonl.5".to_owned()));
         assert!(names.contains(&"manifest.json".to_owned()));
         assert!(names.contains(&"metrics.prom".to_owned()));
         assert!(names.contains(&"snapshot.json".to_owned()));
         assert!(!names.iter().any(|name| name.contains("tidebreak.db")));
         assert!(!names.iter().any(|name| name.contains("secret")));
+    }
+
+    async fn observe_for_test(
+        State(diagnostics): State<Arc<Diagnostics>>,
+        request: Request<Body>,
+        next: Next,
+    ) -> Response {
+        observe_request(&diagnostics, request, next).await
+    }
+
+    /// Idle polling must not write to disk. A fast successful request leaves
+    /// nothing in the structured log, not even a span record, while a failed
+    /// one leaves one completion event that names its route.
+    #[tokio::test]
+    async fn only_failed_or_slow_requests_reach_the_event_log() {
+        use tower::ServiceExt as _;
+        use tracing::instrument::WithSubscriber as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let writer = crate::logging::open_event_writer(dir.path()).unwrap();
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(
+            crate::logging::structured_layer(
+                writer.clone(),
+                tracing_subscriber::EnvFilter::new(crate::logging::DEFAULT_DIAGNOSTIC_DIRECTIVES),
+            ),
+        ));
+        let diagnostics = Arc::new(Diagnostics::new());
+        let app = axum::Router::new()
+            .route(
+                "/chats/{id}/client-executions/pending/raw",
+                axum::routing::get(|| async { "[]" }),
+            )
+            .route(
+                "/broken",
+                axum::routing::get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                diagnostics.clone(),
+                observe_for_test,
+            ));
+        let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let events = dir.path().join("logs/tidebreak.events.jsonl");
+
+        let response = app
+            .clone()
+            .oneshot(get("/chats/7/client-executions/pending/raw"))
+            .with_subscriber(dispatch.clone())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        writer.clone().flush().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&events).unwrap(),
+            "",
+            "a fast successful poll must write nothing"
+        );
+
+        let response = app
+            .oneshot(get("/broken"))
+            .with_subscriber(dispatch)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        writer.clone().flush().unwrap();
+        let contents = std::fs::read_to_string(&events).unwrap();
+        let records = contents.lines().collect::<Vec<_>>();
+        assert_eq!(records.len(), 1, "{contents}");
+        let record: serde_json::Value = serde_json::from_str(records[0]).unwrap();
+        assert_eq!(record["event_name"], "http.server.request.completed");
+        assert_eq!(record["http.route"], "/broken");
+        assert_eq!(record["http_status_code"], 500);
+
+        // The histograms still count both requests.
+        let counted: u64 = diagnostics
+            .snapshot(Profile::Desktop)
+            .http
+            .requests
+            .iter()
+            .map(|request| request.duration.count)
+            .sum();
+        assert_eq!(counted, 2);
+    }
+
+    #[test]
+    fn slow_and_failed_requests_are_logged_and_fast_successes_are_not() {
+        let fast = Duration::from_millis(3);
+        assert!(!worth_logging(StatusCode::OK, fast));
+        assert!(!worth_logging(StatusCode::SWITCHING_PROTOCOLS, fast));
+        assert!(!worth_logging(StatusCode::NOT_MODIFIED, fast));
+        assert!(worth_logging(StatusCode::NOT_FOUND, fast));
+        assert!(worth_logging(StatusCode::INTERNAL_SERVER_ERROR, fast));
+        assert!(worth_logging(StatusCode::OK, SLOW_REQUEST));
     }
 
     #[test]

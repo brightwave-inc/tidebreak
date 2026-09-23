@@ -1430,6 +1430,7 @@ impl SandboxAgentRunWorker {
                 if matches {
                     let head = recovered[0].id;
                     self.publish_progress(run.id, head, narration).await;
+                    self.wake_host_executor(&entries);
                     self.wake.notify_one();
                     return Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(head));
                 }
@@ -1446,6 +1447,7 @@ impl SandboxAgentRunWorker {
                 // Keyed by the batch's first call so a replayed commit
                 // republishes nothing, exactly as a single checkpoint did.
                 self.publish_progress(run.id, head, narration).await;
+                self.wake_host_executor(&entries);
                 // This shared wake is only a latency hint; the dedicated
                 // executor's durable candidate scan remains the recovery path.
                 // A call the host already answered has no executor and simply
@@ -1484,6 +1486,18 @@ impl SandboxAgentRunWorker {
     /// checkpoint's durable identity so a retried commit republishes nothing,
     /// and a failure here is reported and dropped rather than allowed to
     /// disturb a transition that already succeeded.
+    /// Wake the host's native executor when this batch parked a file read
+    /// only the host can answer. Other calls run in this process, so they
+    /// wake nobody outside it.
+    fn wake_host_executor(&self, entries: &[SandboxToolCallParkEntry]) {
+        if entries.iter().any(|entry| {
+            entry.resolution.is_none()
+                && entry.call.name == tidebreak_core::SANDBOX_READ_DELEGATED_FILE_TOOL
+        }) {
+            self.host.host_execution_pending();
+        }
+    }
+
     async fn publish_progress(
         &self,
         run_id: tidebreak_core::AgentRunId,

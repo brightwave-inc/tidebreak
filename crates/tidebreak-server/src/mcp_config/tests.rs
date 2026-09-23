@@ -753,6 +753,90 @@ async fn signed_out_gateway_mounts_degrade_to_a_sign_in_diagnostic() {
     );
 }
 
+async fn parked(runtime: &McpRuntime, name: &str) -> Option<ReconnectPark> {
+    runtime
+        .state
+        .lock()
+        .await
+        .servers
+        .get(name)
+        .unwrap()
+        .reconnect
+        .parked
+}
+
+/// Retrying a signed-out gateway mount cannot succeed before the next
+/// sign-in, so the supervisor stops retrying it (and logging each attempt)
+/// until one happens. A manual reconnect still tries.
+#[tokio::test]
+async fn a_signed_out_gateway_mount_waits_for_a_sign_in_instead_of_retrying() {
+    let (runtime, _store, _directory) = test_runtime().await;
+    let definitions = vec![gateway_definition("tools", "tools")];
+    runtime
+        .replace_permissive(definitions.clone(), ids_for(&definitions))
+        .await;
+    assert_eq!(parked(&runtime, "tools").await, Some(ReconnectPark::SignIn));
+    assert!(runtime
+        .supervised_servers(ManualLockdown::Open)
+        .await
+        .is_empty());
+
+    assert!(runtime.reconnect("tools").await.is_err());
+    assert_eq!(parked(&runtime, "tools").await, Some(ReconnectPark::SignIn));
+    assert_eq!(runtime.info().await.servers[0].health, McpHealth::Degraded);
+
+    runtime.gateway_session_changed().await;
+    assert_eq!(parked(&runtime, "tools").await, None);
+    let supervised = runtime.supervised_servers(ManualLockdown::Open).await;
+    assert_eq!(supervised.len(), 1);
+    assert_eq!(supervised[0].0, "tools");
+    assert_eq!(supervised[0].2, INITIAL_RECONNECT_BACKOFF);
+}
+
+/// A missing parent environment variable cannot appear while Tidebreak runs,
+/// so that server stops retrying too. A sign-in does not wake it.
+#[tokio::test]
+async fn a_server_missing_its_environment_stops_retrying() {
+    const MISSING: &str = "TIDEBREAK_TEST_MCP_PARKED_ENV_MUST_NOT_EXIST_7C21";
+    assert!(std::env::var_os(MISSING).is_none());
+    let (runtime, _store, _directory) = test_runtime().await;
+    let mut definition = http_definition("docs", "https://mcp.example.test/mcp");
+    definition.bearer_token_env = Some(MISSING.to_string());
+    let definitions = vec![definition];
+    runtime
+        .replace_permissive(definitions.clone(), ids_for(&definitions))
+        .await;
+
+    assert_eq!(
+        parked(&runtime, "docs").await,
+        Some(ReconnectPark::Configuration)
+    );
+    runtime.gateway_session_changed().await;
+    assert_eq!(
+        parked(&runtime, "docs").await,
+        Some(ReconnectPark::Configuration)
+    );
+    assert!(runtime
+        .supervised_servers(ManualLockdown::Open)
+        .await
+        .is_empty());
+}
+
+/// A server that keeps failing the same way logs that failure once; a new
+/// failure logs again, and each failure lengthens the wait.
+#[test]
+fn a_repeated_reconnect_failure_is_reported_once() {
+    let mut reconnect = super::runtime::Reconnect::default();
+    assert!(reconnect.failed(None, "Server error: HTTP 503"));
+    assert!(!reconnect.failed(None, "Server error: HTTP 503"));
+    assert!(reconnect.failed(None, "Timed out after 10000 ms"));
+    assert!(reconnect.failed(
+        Some(ReconnectPark::SignIn),
+        "Sign in to the model gateway to reconnect this server."
+    ));
+    assert_eq!(reconnect.parked, Some(ReconnectPark::SignIn));
+}
+
 /// The roster's gateway section is where a model learns the ids a gateway
 /// binding names, so it must spell out the binding shape, elide a long
 /// catalog instead of pasting it into every tool description, and be absent

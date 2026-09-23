@@ -1020,6 +1020,8 @@ pub fn run() {
                 tauri::async_runtime::block_on(runtime.shutdown());
             }
             tauri::async_runtime::block_on(app.state::<host_access::HostAccess>().shutdown());
+            // Last: write out log lines still queued for the log files.
+            tidebreak_server::logging::shutdown();
         }
         _ => {}
     });
@@ -1163,35 +1165,55 @@ async fn boot_server(
     tauri::async_runtime::spawn(async move {
         browser_downloads::recover_browser_downloads(browser_download_app).await;
     });
+    // Each executor sleeps until the server says client work is pending, with
+    // a slow safety sweep behind it, instead of polling every conversation.
     let folder_operation_app = app.clone();
+    let folder_operation_wake = server.client_execution_wake();
     tauri::async_runtime::spawn(async move {
         client_execution::folder_operations::recover_connected_folder_operations(
             folder_operation_app,
+            folder_operation_wake,
         )
         .await;
     });
     let delegated_file_app = app.clone();
+    let delegated_file_wake = server.client_execution_wake();
     tauri::async_runtime::spawn(async move {
-        client_execution::delegated_file_read::recover_delegated_file_read(delegated_file_app)
-            .await;
+        client_execution::delegated_file_read::recover_delegated_file_read(
+            delegated_file_app,
+            delegated_file_wake,
+        )
+        .await;
     });
     let computer_use_app = app.clone();
+    let computer_use_wake = server.client_execution_wake();
     tauri::async_runtime::spawn(async move {
-        client_execution::computer_use::recover_computer_use_operations(computer_use_app).await;
+        client_execution::computer_use::recover_computer_use_operations(
+            computer_use_app,
+            computer_use_wake,
+        )
+        .await;
     });
     #[cfg(target_os = "macos")]
     {
         let foreground_browser_app = app.clone();
+        let foreground_browser_wake = server.client_execution_wake();
         tauri::async_runtime::spawn(async move {
             client_execution::browser::recover_foreground_browser_operations(
                 foreground_browser_app,
+                foreground_browser_wake,
             )
             .await;
         });
     }
     let output_writeback_app = app.clone();
+    let output_writeback_wake = server.client_execution_wake();
     tauri::async_runtime::spawn(async move {
-        client_execution::output_writeback::recover_output_writebacks(output_writeback_app).await;
+        client_execution::output_writeback::recover_output_writebacks(
+            output_writeback_app,
+            output_writeback_wake,
+        )
+        .await;
     });
     let root_attachment_app = app.clone();
     tauri::async_runtime::spawn(async move {

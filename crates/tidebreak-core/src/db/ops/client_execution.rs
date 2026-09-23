@@ -16,6 +16,7 @@ use crate::storage::{
 };
 
 use super::super::{entities, store_err, DbStore};
+use super::conversation::internal_sessions;
 use super::turn::canonical_db_timestamp;
 use super::{
     acquire_chat_write_lock, acquire_tool_call_write_lock, acquire_turn_write_lock,
@@ -481,9 +482,10 @@ pub(in crate::db) async fn list_pending_client_tool_calls(
     store: &DbStore,
     chat_id: SessionId,
 ) -> Result<Vec<ToolCallRecord>> {
-    expire_claimed_client_tool_calls(store, chat_id, Utc::now()).await?;
+    let scope = PendingScope::Chat(chat_id);
+    expire_claimed_client_tool_calls(store, scope, Utc::now()).await?;
     let models = entities::tool_call::Entity::find()
-        .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
+        .filter(scope.condition())
         .filter(entities::tool_call::Column::Execution.eq(ToolCallExecution::Client.as_str()))
         .filter(entities::tool_call::Column::Status.eq(ToolCallStatus::Pending.as_str()))
         .order_by_asc(entities::tool_call::Column::HistoryOrder)
@@ -493,18 +495,69 @@ pub(in crate::db) async fn list_pending_client_tool_calls(
     models.into_iter().map(tool_call_from_model).collect()
 }
 
+/// Every pending client call across all conversations, in one query.
+///
+/// This is the native executor's sweep. It covers the same conversations as
+/// the per-chat read, and it expires lapsed claims the same way, so one
+/// request replaces a request per conversation.
+pub(in crate::db) async fn list_all_pending_client_tool_calls(
+    store: &DbStore,
+) -> Result<Vec<ToolCallRecord>> {
+    let scope = PendingScope::AllChats;
+    expire_claimed_client_tool_calls(store, scope, Utc::now()).await?;
+    let models = entities::tool_call::Entity::find()
+        .filter(scope.condition())
+        .filter(entities::tool_call::Column::Execution.eq(ToolCallExecution::Client.as_str()))
+        .filter(entities::tool_call::Column::Status.eq(ToolCallStatus::Pending.as_str()))
+        .order_by_asc(entities::tool_call::Column::ChatId)
+        .order_by_asc(entities::tool_call::Column::HistoryOrder)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    models.into_iter().map(tool_call_from_model).collect()
+}
+
+/// Which conversations a pending-call read covers.
+#[derive(Clone, Copy)]
+enum PendingScope {
+    Chat(SessionId),
+    /// Every conversation the per-chat read would accept. Code sessions are
+    /// not conversations, so their rows stay out of the native sweep.
+    AllChats,
+}
+
+impl PendingScope {
+    fn condition(self) -> sea_orm::Condition {
+        match self {
+            Self::Chat(chat_id) => {
+                sea_orm::Condition::all().add(entities::tool_call::Column::ChatId.eq(chat_id.0))
+            }
+            Self::AllChats => {
+                let chats = sea_orm::sea_query::Query::select()
+                    .column(entities::session::Column::Id)
+                    .from(entities::session::Entity)
+                    .cond_where(internal_sessions())
+                    .to_owned();
+                sea_orm::Condition::all()
+                    .add(entities::tool_call::Column::ChatId.in_subquery(chats))
+            }
+        }
+    }
+}
+
 async fn expire_claimed_client_tool_calls(
     store: &DbStore,
-    chat_id: SessionId,
+    scope: PendingScope,
     now: DateTime<Utc>,
 ) -> Result<()> {
     let now = canonical_db_timestamp(now)?;
     let expired = entities::tool_call::Entity::find()
-        .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
+        .filter(scope.condition())
         .filter(entities::tool_call::Column::Execution.eq(ToolCallExecution::Client.as_str()))
         .filter(entities::tool_call::Column::Status.eq(ToolCallStatus::Pending.as_str()))
         .filter(entities::tool_call::Column::ClientLeaseToken.is_not_null())
         .filter(entities::tool_call::Column::ClientLeaseExpiresAt.lte(now))
+        .order_by_asc(entities::tool_call::Column::ChatId)
         .order_by_asc(entities::tool_call::Column::HistoryOrder)
         .all(&store.conn)
         .await
@@ -522,7 +575,7 @@ async fn expire_claimed_client_tool_calls(
             store,
             CallId(call.id),
             ResolutionAuthority::ExpiredClient {
-                chat_id,
+                chat_id: SessionId(call.chat_id),
                 lease_token,
                 now,
             },

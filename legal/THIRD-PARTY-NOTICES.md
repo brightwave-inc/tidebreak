@@ -27,9 +27,9 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 855
+- Rust crates: 857
 - Desktop UI production packages: 537
-- Distinct license texts: 591
+- Distinct license texts: 593
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -3678,6 +3678,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/Brendonovich/swift-rs
 - License text: `LICENSE-APACHE` ([L-caeafacc0eaf](#l-caeafacc0eaf)), `LICENSE-MIT` ([L-7593ea50d2d4](#l-7593ea50d2d4))
 
+### symlink 0.1.0
+
+- License: `MIT/Apache-2.0`
+- Repository: https://gitlab.com/chris-morgan/symlink
+- License text: `COPYRIGHT` ([L-a31494bb41a3](#l-a31494bb41a3)), `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-52404bf8d9d7](#l-52404bf8d9d7))
+
 ### symphonia 0.6.1
 
 - License: `MPL-2.0`
@@ -4140,6 +4146,12 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE` ([L-da6b30502bad](#l-da6b30502bad))
 
 ### tracing 0.1.44
+
+- License: `MIT`
+- Repository: https://github.com/tokio-rs/tracing
+- License text: `LICENSE` ([L-c1e08ee9a728](#l-c1e08ee9a728))
+
+### tracing-appender 0.2.5
 
 - License: `MIT`
 - Repository: https://github.com/tokio-rs/tracing
@@ -16745,6 +16757,36 @@ limitations under the License.
 
 ```
 Copyright (c) 2018 Carl Lerche
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### L-52404bf8d9d7
+
+```
+Copyright (c) 2014 Chris Morgan and the Teepee project developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -29556,6 +29598,14 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+### L-a31494bb41a3
+
+```
+This project is dual-licensed under the terms of the MIT and Apache (version 2.0) licenses.
+
+Copyright (c) 2014 Chris Morgan and the Teepee project developers
 ```
 
 ### L-a3320aa8d192

@@ -136,7 +136,11 @@ const VERSION: &str = match option_env!("TIDEBREAK_VERSION") {
 
 #[tokio::main]
 async fn main() {
-    match run().await {
+    let outcome = run().await;
+    // Log files are written by background threads; write out what they still
+    // hold before `exit` ends the process under them.
+    tidebreak_server::logging::shutdown();
+    match outcome {
         Ok(0) => {}
         Ok(code) => std::process::exit(code),
         Err(error) => {

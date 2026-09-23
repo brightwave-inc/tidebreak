@@ -42,7 +42,6 @@ use super::{
     ForegroundBrowserReceipt, StoredResolution,
 };
 
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 // The server grants a 60-second lease. Renew while native consent is pending.
 const LEASE_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 /// Keep the serialized result under the durable client-resolution ceiling.
@@ -102,15 +101,21 @@ impl ForegroundBrowserExecutorState {
         Ok(capability_id)
     }
 
-    fn retain_live_chats(&self, registry: &BrowserRegistry, live_chat_ids: &HashSet<Uuid>) {
+    /// The conversations that currently hold a capability.
+    fn chat_ids(&self) -> Vec<Uuid> {
+        lock(&self.capabilities).keys().copied().collect()
+    }
+
+    /// Revoke the capabilities of conversations that no longer exist.
+    fn forget_chats(&self, registry: &BrowserRegistry, deleted_chat_ids: &HashSet<Uuid>) {
         let stale = {
             let mut capabilities = lock(&self.capabilities);
             let stale = capabilities
                 .iter()
-                .filter(|(chat_id, _)| !live_chat_ids.contains(chat_id))
+                .filter(|(chat_id, _)| deleted_chat_ids.contains(chat_id))
                 .map(|(_, capability_id)| *capability_id)
                 .collect::<Vec<_>>();
-            capabilities.retain(|chat_id, _| live_chat_ids.contains(chat_id));
+            capabilities.retain(|chat_id, _| !deleted_chat_ids.contains(chat_id));
             stale
         };
         for capability_id in stale {
@@ -121,12 +126,17 @@ impl ForegroundBrowserExecutorState {
 
 /// Recover persisted outcomes, then discover new foreground browser calls.
 /// The renderer is never an execution authority.
-pub(crate) async fn recover_foreground_browser_operations(app: AppHandle) {
+pub(crate) async fn recover_foreground_browser_operations(
+    app: AppHandle,
+    wake: tidebreak_server::ClientExecutionWake,
+) {
+    let mut pace = super::ExecutorPace::new(wake);
     loop {
-        if recover_once(&app).await {
+        let failed = recover_once(&app).await;
+        if failed {
             eprintln!("tidebreak-desktop: foreground browser executor deferred work");
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        pace.wait(failed).await;
     }
 }
 
@@ -150,18 +160,32 @@ async fn recover_once(app: &AppHandle) -> bool {
         Ok(client) => client,
         Err(_) => return true,
     };
-    let chats = match store.list_chats().await {
-        Ok(chats) => chats,
-        Err(_) => return true,
-    };
-    let live_chat_ids = chats.iter().map(|chat| chat.id.0).collect::<HashSet<_>>();
+
+    // Check only the conversations this executor holds state for, so a pass
+    // never lists every conversation.
+    let mut failed = false;
+    let mut held_chat_ids = receipts
+        .iter()
+        .map(|receipt| receipt.chat_id.0)
+        .collect::<HashSet<_>>();
+    held_chat_ids.extend(state.foreground_browser.chat_ids());
+    let mut deleted_chat_ids = HashSet::new();
+    for chat_id in held_chat_ids {
+        match store.get_chat(SessionId::from(chat_id)).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                deleted_chat_ids.insert(chat_id);
+            }
+            // Unknown is not deleted: keep the state and retry later.
+            Err(_) => failed = true,
+        }
+    }
     state
         .foreground_browser
-        .retain_live_chats(&registry, &live_chat_ids);
+        .forget_chats(&registry, &deleted_chat_ids);
 
-    let mut failed = false;
     for receipt in receipts {
-        if !live_chat_ids.contains(&receipt.chat_id.0) {
+        if deleted_chat_ids.contains(&receipt.chat_id.0) {
             if let Err(error) = state
                 .receipts
                 .remove_foreground_browser(receipt.call_id)
@@ -178,23 +202,21 @@ async fn recover_once(app: &AppHandle) -> bool {
         }
     }
 
-    for chat in chats {
-        let calls = match client.pending(chat.id).await {
-            Ok(calls) => calls,
-            Err(_) => {
-                failed = true;
-                continue;
-            }
-        };
-        for call in calls.into_iter().filter(|call| {
-            !recovered_call_ids.contains(&call.id) && is_foreground_browser_call(call)
-        }) {
-            let receipt =
-                ForegroundBrowserReceipt::new(chat.id, call.id, state.receipts.executor_id());
-            if let Err(error) = execute_receipt(app, &state, &registry, receipt).await {
-                eprintln!("tidebreak-desktop: foreground browser execution deferred: {error}");
-                failed = true;
-            }
+    let pending = match client.all_pending().await {
+        Ok(pending) => pending,
+        Err(_) => return true,
+    };
+    for pending in pending.into_iter().filter(|pending| {
+        !recovered_call_ids.contains(&pending.call.id) && is_foreground_browser_call(&pending.call)
+    }) {
+        let receipt = ForegroundBrowserReceipt::new(
+            pending.chat_id,
+            pending.call.id,
+            state.receipts.executor_id(),
+        );
+        if let Err(error) = execute_receipt(app, &state, &registry, receipt).await {
+            eprintln!("tidebreak-desktop: foreground browser execution deferred: {error}");
+            failed = true;
         }
     }
     failed
