@@ -514,7 +514,7 @@ describe("FileViewer", () => {
         revision_ref: "mg-wip/sb-1-i1",
       }),
       undefined,
-      "Saved checkpoints are read-only",
+      "Sandbox files are read-only",
     ],
     [
       "a sandbox workspace",

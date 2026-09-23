@@ -75,7 +75,7 @@ export function readOnlyReason(
 ): string | null {
   if (pageReason) return pageReason;
   if (!blob) return null;
-  if (blob.revision === "retained") return "Saved checkpoints are read-only";
+  // The revision chip beside this already says which checkpoint it is.
   if (blob.revision !== undefined) return "Sandbox files are read-only";
   if (blob.binary) {
     return imageMediaTypeForPath(blob.path)

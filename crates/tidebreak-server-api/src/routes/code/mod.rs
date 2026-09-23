@@ -128,10 +128,10 @@ pub(crate) use types::{
     CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSnapshot,
     CodeWorkspaceTree, CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList,
     HarnessSignInRead, HarnessSignInTerminal, MergeCodePrBody, QueuedTurn,
-    ResolveCodeDeliveryRepositoriesBody, SaveWorkspaceFileBody,
-    SequencedEventFrame, SessionAccessSnapshot, SessionDigest, SessionSnapshot,
-    SetCodeWorktreeRootBody, SetSessionVisibilityBody, TurnSnapshot, UpdateCodeTriggerBody,
-    UpdateNotice, WorkspaceTitleProposal,
+    ResolveCodeDeliveryRepositoriesBody, SaveWorkspaceFileBody, SequencedEventFrame,
+    SessionAccessSnapshot, SessionDigest, SessionSnapshot, SetCodeWorktreeRootBody,
+    SetSessionVisibilityBody, TurnSnapshot, UpdateCodeTriggerBody, UpdateNotice,
+    WorkspaceTitleProposal,
 };
 #[cfg(test)]
 #[allow(unused_imports)]
