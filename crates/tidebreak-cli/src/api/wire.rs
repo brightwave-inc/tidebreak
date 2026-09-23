@@ -25,9 +25,9 @@ pub use tidebreak_server::wire::{
 };
 // REST records.
 pub use tidebreak_server::wire::{
-    AgentRunSnapshot, DeliverablePreview, DeliverableSummary, DeliverablesCatalog, McpServerInfo,
-    McpServersInfo, ModelCatalog, OutputRevisionInfo, OutputRevisionsCatalog, ProviderInfo,
-    ProvidersList,
+    AgentRunSnapshot, ChatTurnStarted, DeliverablePreview, DeliverableSummary, DeliverablesCatalog,
+    McpServerInfo, McpServersInfo, ModelCatalog, OutputRevisionInfo, OutputRevisionsCatalog,
+    ProviderInfo, ProvidersList, TurnSideEffect,
 };
 // The version handshake an attach reads before anything else.
 pub use tidebreak_server::wire::{compatibility, Compatibility, ServerVersion};
@@ -143,6 +143,7 @@ mod tests {
                 "DeliverablesCatalog" => round_trip::<DeliverablesCatalog>(name, value),
                 "DeliverablePreview" => round_trip::<DeliverablePreview>(name, value),
                 "OutputRevisionsCatalog" => round_trip::<OutputRevisionsCatalog>(name, value),
+                "ChatTurnStarted" => round_trip::<ChatTurnStarted>(name, value),
                 other => panic!("fixture {name} names a type this crate does not read: {other}"),
             }
         }

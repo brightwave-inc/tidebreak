@@ -123,6 +123,9 @@ tidebreak chat delete <chat>
 tidebreak chat pin|unpin <chat>
 tidebreak chat archive|unarchive <chat>
 tidebreak chat steer <chat> <turn> <text...>
+tidebreak chat regenerate <chat> [--turn <turn>] [--model <key>] [--wait]
+tidebreak chat edit <chat> <text...> [--turn <turn>] [--wait]
+tidebreak chat branch <chat> [--turn <turn>]
 tidebreak agent-run list <chat>
 tidebreak agent-run show <chat> <run>
 tidebreak agent-run cancel <chat> <run>
@@ -411,7 +414,32 @@ cargo run -p tidebreak-cli -- plugins install \
 cargo run -p tidebreak-cli -- chat list
 CHAT=$(cargo run -p tidebreak-cli -- chat create)
 cargo run -p tidebreak-cli -- -p "…" --chat "$CHAT"
+cargo run -p tidebreak-cli -- chat regenerate "$CHAT" --wait
+cargo run -p tidebreak-cli -- chat regenerate "$CHAT" --model anthropic::claude-opus-5
+cargo run -p tidebreak-cli -- chat edit "$CHAT" "Make it shorter" --wait
+BRANCH=$(cargo run -p tidebreak-cli -- chat branch "$CHAT")
 ```
+
+`chat regenerate`, `chat edit`, and `chat branch` rerun and branch a
+conversation the way the desktop's message actions do. Each acts on the
+conversation's latest turn unless you pass `--turn`.
+
+- `regenerate` answers the latest message again. The earlier answer stays as a
+  version you can page back to in the app. `--model` answers with another
+  model this once; the conversation keeps its own model.
+- `edit` replaces the latest message and answers the new one. When the turn it
+  replaces wrote files, created outputs, called connected apps, or started
+  other work, the edit starts a new conversation instead, and says so on
+  stderr. The original conversation keeps its record of what ran.
+- `branch` starts a new conversation with a copy of the history through the
+  turn, named after the original and linked back to it. It prints the new
+  conversation's id.
+
+Without `--wait`, `regenerate` and `edit` print the new turn's id and return
+once the turn is accepted. With `--wait`, they print the answer, and exit `1`
+when the turn fails or is stopped. `--output-format json` adds `chat`, `turn`,
+`replaces`, `branched`, and `side_effects`, and with `--wait`, `status` and
+`answer`.
 
 **A key is never a command-line argument.** `set-key` reads it from stdin, or
 from the environment variable named by `--from-env`. Arguments are visible to

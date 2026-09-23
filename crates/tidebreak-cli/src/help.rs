@@ -190,6 +190,9 @@ usage: tidebreak provider list
        tidebreak chat pin|unpin <chat>
        tidebreak chat archive|unarchive <chat>
        tidebreak chat steer <chat> <turn> <text...>
+       tidebreak chat regenerate <chat> [--turn <turn>] [--model <key>] [--wait]
+       tidebreak chat edit <chat> <text...> [--turn <turn>] [--wait]
+       tidebreak chat branch <chat> [--turn <turn>]
        tidebreak agent-run list <chat>
        tidebreak agent-run show <chat> <run>
        tidebreak agent-run cancel <chat> <run>
@@ -402,7 +405,10 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
                 "Show settings and configure web search or exec",
             ),
             ("mcp-server …", "List, add, or remove MCP servers"),
-            ("chat …", "List, create, delete, or steer chats"),
+            (
+                "chat …",
+                "List, create, delete, steer, regenerate, edit, or branch chats",
+            ),
             ("agent-run …", "List, show, or cancel agent runs"),
             (
                 "plugins install",
