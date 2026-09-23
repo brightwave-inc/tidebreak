@@ -1038,22 +1038,9 @@ export function AppShell() {
     const version = desktopUpdates.state.version;
     const confirmed = await confirm({
       title: "Restart Tidebreak to update?",
-      description: (
-        <>
-          <span>
-            {version ? `Version ${version}` : "The update"} is ready. Tidebreak
-            will close and reopen. Wait for active work to finish before
-            restarting.
-          </span>
-          <span className="notice-surface notice-warning mt-3 block rounded-md border px-3 py-2.5">
-            <strong className="block font-medium">Pre-v1 data warning</strong>
-            <span className="mt-0.5 block">
-              Until Tidebreak reaches version 1.0, this update may wipe all
-              Tidebreak data on this device.
-            </span>
-          </span>
-        </>
-      ),
+      // Decision 0080: the restart brings work to a safe point itself, so
+      // the reader does not have to wait for it first.
+      description: `${version ? `Version ${version}` : "The update"} is ready. Tidebreak closes and reopens to install it. Running chats continue after the restart. Code sessions finish their current turn first. If a turn is still running after a short wait, Tidebreak stays open so you can try again later.`,
       confirmLabel: "Restart and update",
     });
     if (confirmed) await desktopUpdates.restart();

@@ -31,6 +31,7 @@ mod notification;
 mod operation_log;
 mod output;
 mod parent_terminal_guard;
+mod pre_migration_backup;
 mod project;
 mod root_attachment;
 mod sandbox_spawn_checkpoint;

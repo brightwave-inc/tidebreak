@@ -2892,8 +2892,8 @@ async fn a_schema_epoch_reset_keeps_the_policy_and_its_session() {
         .await
         .unwrap();
 
-    // The epoch reset, as desktop_schema performs it: the database files
-    // are deleted; everything else in the data directory stays.
+    // The schema reset, as desktop_schema performs it: the database files
+    // leave the data directory; everything else in it stays.
     std::fs::remove_file(data_dir.join("tidebreak.db")).unwrap();
     assert!(!data_dir.join("tidebreak.db").exists());
 

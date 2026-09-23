@@ -207,3 +207,10 @@ agent wanders.
   are thin clients, and tests that re-walk each route through the CLI would be
   duplicate coverage under the testing policy; one smoke test that a
   credential set via CLI is immediately usable by a turn suffices.
+
+## Amended 2026-09-23
+
+[Decision 100](0100-the-1-0-compatibility-surface.md) keeps the HTTP and
+WebSocket API internal until a versioned API exists. The CLI, its flags, exit
+codes, and JSON output, and the `-p` stdin decision protocol are the stable
+surface for 1.x.

@@ -670,41 +670,48 @@ minor. The `semver:breaking` version-resolver entry in
 For example, `0.3.2` becomes `0.3.3` for an improvement or fix and `0.4.0` for
 either a feature or a breaking pre-1.0 change.
 
-Desktop upgrades from **v0.61.0** onward keep local data. Schema changes after
-that pin are appended migrations
-([decision 61](decisions/0061-schema-changes-are-migrations.md)). An upgrade
-from **v0.60.0 or earlier** still rebuilds the SQLite profile once on first
-open of a post-pin binary, because those databases predate the recorded
-baseline. v0 will not reconstruct projects lost in that window. Hosted
-PostgreSQL never used the epoch; it upgrades in place.
+Desktop upgrades from **v0.61.0** onward keep local data, and every 1.x
+release keeps that promise
+([decision 100](decisions/0100-the-1-0-compatibility-surface.md)). Schema
+changes after that pin are appended migrations
+([decision 61](decisions/0061-schema-changes-are-migrations.md)). Before an
+update applies a migration, the desktop app copies the database to
+`backups/pre-migration-<version>-<timestamp>.db` in its data directory and
+keeps the two newest copies. A profile from **v0.60.0 or earlier** predates the
+recorded baseline, so the first post-pin build moves it into
+`backups/unrecognized-<timestamp>/` and starts a fresh one. Nothing deletes it,
+but Tidebreak cannot bring back projects that builds before v0.61.0 already
+reset. Hosted PostgreSQL never used the epoch; it upgrades in place.
 
 ## Preparing and shipping 1.0.0
 
-`1.0.0` is a deliberate compatibility commitment. The current desktop schema
-guard rejects every non-zero product major, so a `v1.0.0` app cannot initialize
-its local profile until this checklist is complete:
+`1.0.0` is a deliberate compatibility commitment, and
+[decision 100](decisions/0100-the-1-0-compatibility-surface.md) records what
+it keeps compatible. The desktop schema guard already accepts product majors
+`0` and `1` with the same append-only migration chain, so a `v1.0.0` app opens
+every profile that v0.61.0 or later wrote. It refuses any later major until
+that major defines its own upgrade path.
 
-1. Define the stable compatibility surface: persisted local data,
-   configuration, CLI/API behavior, extension protocols, and supported upgrade
-   window.
-2. Replace the product-major guard in
-   `crates/tidebreak-server/src/desktop_schema.rs` with the v1 lifecycle. Most
-   of what this item used to describe is already done:
-   [decision 61](decisions/0061-schema-changes-are-migrations.md) froze the
-   baseline, made every schema change an appended migration, and flipped the
-   journal fixtures' failure messages back to "add an alias or write a
-   migration". What is left is the release commitment itself — squash the chain
-   into a single clean first migration for `1.0.0`, move `LAST_RESET_EPOCH` to
-   that squash, and decide whether `reset_pre_v1_state` can finally go, which
-   depends on whether any profile below the pin can still reach a v1 binary.
-   The lifecycle must preserve supported data, migrate transactionally, fail
-   safely, and test upgrades from the latest 0.x state.
+1. Confirm that decision 100 still matches the product: the local data
+   promise, the CLI commands, flags, exit codes, and JSON output, the
+   `agent-mcp` tools, the `-p` stdin decision protocol, and the supported
+   platforms.
+2. Keep the migration chain. Do not squash it into a new baseline, do not move
+   `LAST_RESET_EPOCH`, and do not add a path that deletes a profile. A squash
+   renames the first migration, so every existing database would record names
+   the release does not know, and the release meant to upgrade those profiles
+   would refuse them instead. Schema changes stay appended migrations
+   ([decision 61](decisions/0061-schema-changes-are-migrations.md)).
+   `a_major_one_build_opens_a_0x_profile_and_keeps_its_data` in
+   `crates/tidebreak-server/src/desktop_schema.rs` pins that a 1.x build opens
+   a 0.x profile with its data.
 3. Verify the provisioned release pipeline with clean install and 0.x upgrade
    smoke tests on macOS and both Windows architectures, clean install and
    update checks for both Linux Debian architectures, and AppImage launch and
    update checks on a second distribution.
-4. Update `SECURITY.md` with supported release lines, security-fix policy, and
-   end-of-support expectations. Document backup, migration, and rollback.
+4. Confirm that `SECURITY.md` still names the supported release line and how
+   fixes ship, and that the backup and restore steps in the troubleshooting
+   guide and in [self-hosting](self-hosting.md#upgrading) match the release.
 5. In the same readiness work, change the `semver:breaking` version resolver's
    `semver-increment` from `minor` to `major`. This activates normal SemVer for
    all releases after 1.0.

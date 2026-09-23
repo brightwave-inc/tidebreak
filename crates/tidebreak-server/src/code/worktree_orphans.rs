@@ -3,13 +3,15 @@
 //! Code worktrees do not live in the data directory. Decision 53 moved them to
 //! a user-visible root on purpose, because a worktree is user work —
 //! uncommitted code on a real branch. The reset in [`crate::desktop_schema`]
-//! deletes the database and nothing outside the data directory, so it drops
-//! the `code_workspace` rows and leaves the trees behind: directories full of
-//! possibly-uncommitted work, entries in each source repository's
-//! `.git/worktrees`, and branches on the user's real repository.
+//! moves the database into a backup folder and touches nothing outside the
+//! data directory, so the live profile loses the `code_workspace` rows and the
+//! trees stay behind: directories full of possibly-uncommitted work, entries
+//! in each source repository's `.git/worktrees`, and branches on the user's
+//! real repository.
 //!
-//! Only a profile below the migration pin still takes a reset (decision 61),
-//! so this runs once per such profile and then never again.
+//! Only a profile below the migration pin (decision 61), or one this build
+//! cannot read, still takes a reset, so this runs once per such profile and
+//! then never again.
 //!
 //! Deleting them is not the answer, and neither is silence. So the reset
 //! writes them down. Right before the database goes, read the rows that name
@@ -69,8 +71,8 @@ pub(crate) async fn record_orphaned_worktrees(database: &Path, data_dir: &Path) 
             tracing::warn!(
                 database = %database.display(),
                 %error,
-                "could not read code worktrees out of the database this epoch reset is about to \
-                 delete; any worktrees it recorded are orphaned without a record"
+                "could not read code worktrees out of the database this reset is about to move \
+                 aside; any worktrees it recorded are orphaned without a record"
             );
             return;
         }
@@ -84,28 +86,29 @@ pub(crate) async fn record_orphaned_worktrees(database: &Path, data_dir: &Path) 
             sidecar = %sidecar.display(),
             %error,
             count = found.len(),
-            "failed to record the code worktrees this epoch reset orphaned; they are still on \
-             disk and now have no record"
+            "failed to record the code worktrees this reset orphaned; they are still on disk \
+             and now have no record"
         );
         return;
     }
     tracing::warn!(
         sidecar = %sidecar.display(),
         count = found.len(),
-        "this epoch reset dropped the workspaces owning code worktrees that are still on disk; \
+        "this reset set aside the workspaces owning code worktrees that are still on disk; \
          their paths, branches, and source repositories are recorded in the sidecar, and nothing \
          removes the trees, their `.git/worktrees` entries, or their branches"
     );
 }
 
-/// Read the doomed database's worktree rows, keeping only trees still on disk.
+/// Read the worktree rows of the database about to move, keeping only trees
+/// still on disk.
 async fn scan(database: &Path) -> Result<Vec<OrphanedWorktree>, String> {
     if !database.exists() {
         return Ok(Vec::new());
     }
     // Read-only, so a scan can never create or migrate the file it is about to
-    // delete. One connection, and `immutable=1` so SQLite does not map WAL or
-    // SHM. Windows refuses the caller's delete while those mappings live.
+    // move. One connection, and `immutable=1` so SQLite does not map WAL or
+    // SHM. Windows refuses the caller's rename while those mappings live.
     let url = format!("sqlite://{}?mode=ro&immutable=1", database.display());
     let mut options = ConnectOptions::new(url);
     options.max_connections(1).min_connections(0);
@@ -122,14 +125,14 @@ async fn scan(database: &Path) -> Result<Vec<OrphanedWorktree>, String> {
         Ok(rows) => Ok(rows),
         Err(_) => query(&connection, "SELECT * FROM code_workspace").await,
     };
-    // Close before returning either way: Windows refuses to delete a file this
-    // process still has open, and the caller deletes this one next.
+    // Close before returning either way: Windows refuses to rename a file this
+    // process still has open, and the caller moves this one next.
     if let Err(error) = connection.close().await {
         tracing::warn!(
             database = %database.display(),
             %error,
-            "could not close the doomed database after scanning worktrees; Windows may refuse \
-             the reset delete until the handle is gone"
+            "could not close the database after scanning worktrees; Windows may refuse to \
+             move it until the handle is gone"
         );
     }
 

@@ -19,9 +19,10 @@
 //! drift apart with no test to notice. That is what
 //! `a_stepwise_upgrade_lands_on_the_fresh_schema` notices now.
 //!
-//! Squash this chain into a single clean snapshot before `1.0.0`, so that
-//! release's first migration is a baseline rather than this development
-//! history.
+//! Never squash this chain, including at `1.0.0`. A database records each
+//! migration by name, so a squash would leave every existing database holding
+//! names the new chain does not know. 1.0 upgrades 0.x profiles in place by
+//! keeping this history.
 
 mod baseline;
 mod channel_repository_confirm;

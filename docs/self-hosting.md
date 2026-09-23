@@ -823,11 +823,24 @@ different `curl`, CA-certificate, Node, `gh`, or transitive package bytes.
 Updating the snapshot date and the pins is therefore an explicit
 dependency-maintenance change rather than an incidental effect of rebuilding.
 
-The server applies its own schema migrations on boot. Take a database backup
-before an upgrade. Schema changes are appended migrations
-([decision record 61](decisions/0061-schema-changes-are-migrations.md));
-hosted PostgreSQL upgrades in place. Pre-1.0 still means you should not put
-irreplaceable data here without a backup.
+The server applies its own schema migrations on boot. Each schema change is an
+appended migration that upgrades the database in place
+([decision record 61](decisions/0061-schema-changes-are-migrations.md)), and
+hosted PostgreSQL upgrades the same way.
+
+You own PostgreSQL backups. The desktop app copies its local SQLite database
+before a migration, but the server never copies PostgreSQL. Take a
+[backup](#backup) before every upgrade, and do not keep irreplaceable data here
+without one.
+
+To roll back, restore the backup you took before the upgrade into a fresh
+database, then start the older version's image against it. An older server
+does not open a database that a newer one migrated. It stops at boot with this
+message:
+
+```text
+This Tidebreak profile was written by a newer version. Install that version or later, or restore a backup.
+```
 
 ## What is not supported yet
 
