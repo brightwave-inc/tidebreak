@@ -439,6 +439,60 @@ describe("FileViewer", () => {
     expect(screen.getByText("Unsaved changes")).toBeVisible();
   });
 
+  it("keeps each file's buffer its own when the viewer moves to another file", async () => {
+    const client = textClient(textBlob("fn a() {}\n", { path: "src/a.rs" }));
+    // B is open for editing in another tab, with nothing unsaved yet.
+    act(() =>
+      useCodeFileDraftStore.getState().startEditing("workspace-1", "src/b.rs", {
+        text: "fn b() {}\n",
+        hash: DISK_HASH,
+      }),
+    );
+    const { rerender } = render(
+      <FileViewer client={client} workspaceId="workspace-1" path="src/a.rs" />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    type(screen.getByRole("textbox", { name: "Text editor" }), "fn a2() {}\n");
+
+    // B's read is still in flight, so all the viewer has for B is its draft.
+    client.getCodeWorkspaceBlob.mockReturnValue(new Promise(() => {}));
+    rerender(
+      <FileViewer client={client} workspaceId="workspace-1" path="src/b.rs" />,
+    );
+
+    await waitFor(() =>
+      expect(client.getCodeWorkspaceBlob).toHaveBeenLastCalledWith(
+        "workspace-1",
+        "src/b.rs",
+      ),
+    );
+    expect(screen.getByRole("textbox", { name: "Text editor" })).toHaveValue(
+      "fn b() {}\n",
+    );
+    const drafts = Object.values(useCodeFileDraftStore.getState().drafts);
+    expect(
+      drafts.map(({ path, baseText, text, conflict }) => ({
+        path,
+        baseText,
+        text,
+        conflict,
+      })),
+    ).toEqual([
+      {
+        path: "src/b.rs",
+        baseText: "fn b() {}\n",
+        text: "fn b() {}\n",
+        conflict: null,
+      },
+      {
+        path: "src/a.rs",
+        baseText: "fn a() {}\n",
+        text: "fn a2() {}\n",
+        conflict: null,
+      },
+    ]);
+  });
+
   it.each([
     [
       "a file the viewer cut short",

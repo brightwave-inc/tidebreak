@@ -6,7 +6,11 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
-import Editor, { DiffEditor, type OnMount } from "@monaco-editor/react";
+import Editor, {
+  DiffEditor,
+  type DiffOnMount,
+  type OnMount,
+} from "@monaco-editor/react";
 import { Check, CircleAlert, Eye, Lock, Pencil } from "lucide-react";
 import { toast } from "sonner";
 
@@ -20,6 +24,7 @@ import { Spinner } from "@/components/ui/spinner";
 import type { FileBytesSource } from "@/document/useFileDownload";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { MessageMarkdown } from "@/MessageMarkdown";
+import { usesCommandModifier } from "@/ShellShortcuts";
 import { useTheme } from "@/theme";
 import {
   codeFileName,
@@ -121,8 +126,9 @@ export function FileViewer({
     () => client.getCodeWorkspaceBlob(workspaceId, path),
     [client, workspaceId, path],
   );
+  const fileKey = `${workspaceId}:${path}`;
   const resource = useLiveResource({
-    key: `${workspaceId}:${path}`,
+    key: fileKey,
     revision: contentRevision,
     load,
     errorMessage: "Could not open that file",
@@ -133,13 +139,29 @@ export function FileViewer({
   const dirty = draft !== undefined && isCodeFileDraftDirty(draft);
   const saving = draft?.save.kind === "saving";
   const markdown = isMarkdownPath(path);
-  const [view, setView] = useState<FileView>(() =>
-    markdown && revealLine === undefined && !editing ? "preview" : "source",
-  );
+  const openingView: FileView =
+    markdown && revealLine === undefined && !editing ? "preview" : "source";
+  const [view, setView] = useState<FileView>(openingView);
   const [comparison, setComparison] = useState<string | null>(null);
   const [comparing, setComparing] = useState(false);
   const { confirm, dialog } = useConfirm();
   const mounted = useRef(true);
+
+  // The page reuses this viewer when you switch from one file tab to
+  // another. The view and any comparison belong to the file they were made
+  // for, and work started for one file must not land on the next.
+  const [shownFile, setShownFile] = useState(fileKey);
+  if (shownFile !== fileKey) {
+    setShownFile(fileKey);
+    setView(openingView);
+    setComparison(null);
+    setComparing(false);
+  }
+  const showing = useRef(fileKey);
+  showing.current = fileKey;
+  /** Whether the viewer still shows the file an async step started for. */
+  const stillShowing = (key: string) =>
+    mounted.current && showing.current === key;
 
   useEffect(() => {
     configureMonaco();
@@ -162,6 +184,13 @@ export function FileViewer({
     if (revealLine !== undefined) setView("source");
   }, [revealLine, revealRevision]);
 
+  // The comparison belongs to the notice. When the notice goes, however it
+  // went, the editor comes back.
+  const conflicted = Boolean(draft?.conflict);
+  useEffect(() => {
+    if (!conflicted) setComparison(null);
+  }, [conflicted]);
+
   const blocker = readOnlyReason(data, pageReadOnlyReason);
   const canEdit = data !== null && blocker === null && editableBlob(data);
 
@@ -173,10 +202,10 @@ export function FileViewer({
     setView("source");
   }
 
-  function settle(outcome: CodeFileSaveOutcome) {
+  function settle(outcome: CodeFileSaveOutcome, key: string) {
     if (outcome.kind !== "saved") return;
     noteWorkspaceFilesChanged(workspaceId);
-    if (!mounted.current) return;
+    if (!stillShowing(key)) return;
     setComparison(null);
     // The saved text is the file now. Adopting it also drops any read that
     // started before the save, so it cannot land and look like a change.
@@ -193,7 +222,8 @@ export function FileViewer({
 
   async function save() {
     if (!draft || saving) return;
-    settle(await saveCodeFileDraft(client, workspaceId, path));
+    const key = fileKey;
+    settle(await saveCodeFileDraft(client, workspaceId, path), key);
   }
 
   async function overwrite() {
@@ -207,10 +237,12 @@ export function FileViewer({
       destructive: true,
     });
     if (!confirmed) return;
+    const key = fileKey;
     settle(
       await saveCodeFileDraft(client, workspaceId, path, {
         baseHash: diskHash,
       }),
+      key,
     );
   }
 
@@ -230,10 +262,10 @@ export function FileViewer({
   }
 
   /** Read the version on disk now, and hand it to the draft and the view. */
-  async function readDisk(): Promise<CodeWorkspaceBlob | null> {
+  async function readDisk(key: string): Promise<CodeWorkspaceBlob | null> {
     try {
       const blob = await client.getCodeWorkspaceBlob(workspaceId, path);
-      if (mounted.current) adopt(blob);
+      if (stillShowing(key)) adopt(blob);
       else
         useCodeFileDraftStore.getState().diskVersion(workspaceId, path, blob);
       return blob;
@@ -246,12 +278,13 @@ export function FileViewer({
   }
 
   async function reloadFromDisk() {
-    const blob = await readDisk();
+    const key = fileKey;
+    const blob = await readDisk(key);
     if (!blob) return;
     const drafts = useCodeFileDraftStore.getState();
     if (editableBlob(blob)) drafts.reload(workspaceId, path, blob);
     else drafts.discard(workspaceId, [path]);
-    setComparison(null);
+    if (stillShowing(key)) setComparison(null);
   }
 
   function keepMine() {
@@ -264,10 +297,12 @@ export function FileViewer({
       setComparison(null);
       return;
     }
+    const key = fileKey;
     setComparing(true);
-    const blob = await readDisk();
-    if (mounted.current) setComparing(false);
-    if (!blob || !mounted.current) return;
+    const blob = await readDisk(key);
+    if (!stillShowing(key)) return;
+    setComparing(false);
+    if (!blob) return;
     if (blob.binary || blob.truncated) {
       toast.error("The version on disk cannot be compared here.");
       return;
@@ -483,7 +518,15 @@ function PreviewToggle({
   );
 }
 
-/** Save and its way out: Discard while there is something to lose, Done after. */
+const SAVE_SHORTCUT =
+  typeof navigator !== "undefined" && usesCommandModifier(navigator.userAgent)
+    ? "⌘S"
+    : "Ctrl+S";
+
+/**
+ * Save and its way out: Discard while there is something to lose, Done after.
+ * Progress shows in the status beside them, so the buttons keep their width.
+ */
 function EditActions({
   dirty,
   saving,
@@ -510,11 +553,10 @@ function EditActions({
         type="button"
         size="xs"
         disabled={!dirty || saving}
-        title="Save (⌘S)"
+        title={`Save (${SAVE_SHORTCUT})`}
         onClick={onSave}
       >
-        {saving && <Spinner className="size-3 text-current" aria-hidden />}
-        {saving ? "Saving…" : "Save"}
+        Save
       </Button>
     </div>
   );
@@ -676,13 +718,19 @@ function BlobBody({
     reveal(revealLine);
   }, [reveal, revealLine, revealRevision]);
 
-  const onChange = useCallback(
-    (value: string | undefined) => {
-      if (value === undefined) return;
-      useCodeFileDraftStore.getState().setText(workspaceId, path, value);
-    },
-    [workspaceId, path],
-  );
+  // One change handler for the editor's whole life, reading which file it
+  // shows now. Monaco keeps a handler subscribed until a new one replaces it,
+  // so a handler bound to one file would go on writing the next file's text
+  // into the first one's draft after a tab switch.
+  const changeTarget = useRef({ workspaceId, path, editing });
+  changeTarget.current = { workspaceId, path, editing };
+  const onChange = useCallback((value: string | undefined) => {
+    const target = changeTarget.current;
+    if (!target.editing || value === undefined) return;
+    useCodeFileDraftStore
+      .getState()
+      .setText(target.workspaceId, target.path, value);
+  }, []);
 
   const options = useMemo(
     () => ({
@@ -695,7 +743,9 @@ function BlobBody({
       fontSize: 13,
       lineHeight: 20,
       wordWrap: "on" as const,
+      // The line you are typing on is marked only while you are typing.
       renderLineHighlight: editing ? ("line" as const) : ("none" as const),
+      renderLineHighlightOnlyWhenFocus: true,
       automaticLayout: true,
       padding: { top: 8 },
     }),
@@ -736,7 +786,7 @@ function BlobBody({
       {comparison !== null && draft && (
         <div className="flex min-h-0 flex-1 flex-col">
           <p className="text-muted-foreground border-b px-3 py-1.5 text-xs">
-            What your changes do to the version on disk
+            From the version on disk to your changes
           </p>
           <div className="min-h-0 flex-1" aria-label="Comparison">
             <DiffEditor
@@ -745,17 +795,8 @@ function BlobBody({
               theme={monacoTheme(theme)}
               original={comparison}
               modified={draft.text}
-              options={{
-                readOnly: true,
-                originalEditable: false,
-                minimap: { enabled: false },
-                scrollBeyondLastLine: false,
-                fontSize: 13,
-                lineHeight: 20,
-                automaticLayout: true,
-                renderOverviewRuler: false,
-                useInlineViewWhenSpaceIsLimited: true,
-              }}
+              options={COMPARISON_OPTIONS}
+              onMount={wrapBothSides}
             />
           </div>
         </div>
@@ -777,7 +818,7 @@ function BlobBody({
           path={path}
           theme={monacoTheme(theme)}
           value={text}
-          onChange={editing ? onChange : undefined}
+          onChange={onChange}
           onMount={(editor) => {
             editorRef.current = editor;
             reveal(revealLine);
@@ -789,11 +830,43 @@ function BlobBody({
   );
 }
 
+const COMPARISON_OPTIONS = {
+  readOnly: true,
+  originalEditable: false,
+  minimap: { enabled: false },
+  scrollBeyondLastLine: false,
+  fontSize: 13,
+  lineHeight: 20,
+  wordWrap: "on" as const,
+  automaticLayout: true,
+  renderOverviewRuler: false,
+  // Side by side where the pane has room; one column where it does not.
+  useInlineViewWhenSpaceIsLimited: true,
+};
+
+/**
+ * Wrap long lines on the version on disk as well as on yours.
+ *
+ * Monaco lays the diff out before its container has a width, so it starts in
+ * the one-column view and switches the disk side's wrapping off. Moving to
+ * side by side turns it back on through one override and leaves another off,
+ * so the disk side would run past the divider. Each layout clears that second
+ * override; the one-column view still keeps the hidden side unwrapped through
+ * the first.
+ */
+function wrapBothSides(diff: Parameters<DiffOnMount>[0]) {
+  const original = diff.getOriginalEditor();
+  const inherit = () =>
+    original.updateOptions({ wordWrapOverride2: "inherit" });
+  inherit();
+  original.onDidLayoutChange(inherit);
+}
+
 /** The file rendered as markdown, with the app's own renderer. */
 function MarkdownPreview({ text }: { text: string }) {
   return (
     <div
-      className="min-h-0 flex-1 overflow-auto"
+      className="bg-background min-h-0 flex-1 overflow-auto"
       role="document"
       aria-label="Markdown preview"
     >

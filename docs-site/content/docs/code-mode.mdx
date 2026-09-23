@@ -86,6 +86,29 @@ one turn's work without untangling it from the rest.
 Nothing reaches your branch because a turn finished. The worktree holds the
 change until you commit it.
 
+## Editing files
+
+To change a file yourself, open it from the **Files** tab and choose **Edit**.
+Press **⌘S** (**Ctrl+S** on Windows and Linux) or choose **Save** to write it
+back to the worktree. To throw your changes away, choose **Discard** and
+confirm.
+
+- A dot on the file's tab means it has unsaved changes. They stay when you
+  switch tabs. Closing the tab, leaving the workspace, or reloading asks first.
+- An agent can change the same file while you edit it. Tidebreak keeps your
+  text and says **This file changed on disk.** Choose **Reload** to take the
+  version on disk, or **Keep my changes**.
+- A save does not replace changes you have not seen. If the file changed
+  since you opened it, the save stops and offers **Compare**, which shows the
+  version on disk beside yours, and **Overwrite**, which replaces it after you
+  confirm.
+- Markdown files (`.md`, `.mdx`, `.markdown`) open as a rendered preview.
+  Choose **Preview** to switch between the page and its source, while you read
+  or while you edit.
+
+Images, binary files, files over 512 KB, text that is not UTF-8, and files in
+a sandbox workspace stay read-only. The file's header says why.
+
 ## Permission modes
 
 Code mode uses the same four modes as chats — Plan, Ask, Auto, and Allow all —
@@ -128,8 +151,8 @@ signed out, you get copyable instructions rather than a button that fails.
 Code mode is a full surface, not a preview, but some things are deliberately
 out of scope for now:
 
-- No in-app code editor. Tidebreak reviews changes; it does not replace the
-  editor you write in.
+- The file viewer edits one existing text file at a time. It does not create,
+  rename, or delete files, and it does not replace the editor you write in.
 - Checkpoints are recorded, but there is no restore-from-checkpoint surface
   yet.
 

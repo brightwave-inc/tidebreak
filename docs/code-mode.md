@@ -124,8 +124,8 @@ crates/tidebreak-desktop/ui/src/code/         the UI family (below)
 New dependencies, all exact-pinned and lockfile-matching: one Rust
 pseudo-terminal crate (terminals only — the harness crate must not depend on
 it, enforced by a dependency check), the terminal-emulator UI package pair,
-and the Monaco editor pair (`@monaco-editor/react`, `monaco-editor`) driving a
-read-only file viewer. Nothing else: no git library and no diff library (git
+and the Monaco editor pair (`@monaco-editor/react`, `monaco-editor`) driving the
+file viewer and its editor. Nothing else: no git library and no diff library (git
 produces diffs; the UI styles them). `@tanstack/react-virtual` virtualizes the
 delivery pull-request and workflow-run lists through `code/delivery/VirtualRows.tsx`.
 
@@ -607,7 +607,8 @@ POST            /code/mcp/connected-apps             loopback MCP bridge over ev
 
 GET             /code/workspaces/{id}/files          changed files vs base, per-turn filter
 GET             /code/workspaces/{id}/diff?turn=&file=   bounded unified diff
-GET             /code/workspaces/{id}/tree | /search | /blob   the read-only file viewer
+GET             /code/workspaces/{id}/tree | /search | /blob   the file viewer; /blob carries a hash
+PUT             /code/workspaces/{id}/file           {path, content, base_hash}  save one text file
 POST            /code/workspaces/{id}/git/commit | /git/push | /git/pr
 GET             /code/workspaces/{id}/pr             PR + checks digest (gh; graceful absence)
 POST            /code/workspaces/{id}/pr/check-logs
@@ -699,7 +700,8 @@ of its own: registering one opens the new-workspace dialog, and picking one on
   and `pullRequestPresentation.ts` (pull-request state and presentation),
   `DiffPanel`/`FilesPanel` (server-produced unified diffs styled with the
   semantic status tokens; per-file grouping; per-turn anchoring),
-  `FileViewer` (Monaco in read-only mode over the tree/search/blob routes),
+  `FileViewer` (Monaco over the tree/search/blob routes, with the editor
+  described in [Editing files](#editing-files)),
   `TerminalPane` (ephemeral renderer over the cursor-read
   API; replays recent bytes on mount; chunked writes on a frame budget).
 - Settings: one new section, "Coding engines" — the doctor.
@@ -709,6 +711,62 @@ of its own: registering one opens the new-workspace dialog, and picking one on
   in the repository's settings.
 - Wire: generated types plus hand-written validators in
   `ui/src/code/parsers.ts`, per [`docs/wire-types.md`](wire-types.md).
+
+## Editing files
+
+The file viewer edits one existing text file at a time. The contract is a
+compare-and-swap on the file's bytes: a save lands only over the version the
+editor loaded, so it does not overwrite an agent's edit nobody has seen.
+
+- `GET /code/workspaces/{id}/blob` returns `hash`, the SHA-256 of the file's
+  bytes as lowercase hex, when `content` is the whole file as exact UTF-8 in a
+  local worktree. A cut-short, binary, lossily decoded, or sandbox view has no
+  hash, and the viewer offers no Edit for it.
+- `PUT /code/workspaces/{id}/file` takes `{path, content, base_hash}` and
+  writes `content` byte for byte, line endings included, only while the file
+  on disk still hashes to `base_hash`. Otherwise it answers `409` with kind
+  `file_changed` and `current_hash`, the hash on disk now. Saving against
+  `current_hash` is how the editor's Overwrite lands.
+- The path resolves the way the read resolves it
+  (`worktree::locate_worktree_file`), and the save refuses anything outside
+  the worktree or under `.git` (checked on the path and on where its links
+  lead), a directory, a file the viewer reads as binary or cuts short, text
+  that is not UTF-8, a read-only file, and text over 512 KiB (`413`). It never
+  creates a file. A sandbox workspace answers `409 workspace_remote`, and a
+  caller who may only view a shared session's workspace gets `404`, the gate
+  commit and push use.
+- The write goes to a temporary file beside the original, takes the
+  original's permissions, and replaces it with one rename, under the
+  workspace write lock that terminal writes and archive also take. It does
+  not wait for a running turn: the hash is the guard. The hash check and the
+  rename are not atomic against other processes, so an agent write that lands
+  in the milliseconds between them is lost.
+- A save belongs to no turn, so it writes nothing to a session journal.
+  Instead it publishes `files_changed` on `/updates` to the owner and the
+  caller, and the workspace page adds that count to the session's content
+  revision, so the file list, the diff, and the changed-file count refresh the
+  way they do after an agent's edit.
+
+In the desktop, `CodeFileDraftStore` holds each unsaved buffer by workspace
+and path, so the text outlives the viewer when you switch tabs. The center
+tabs read it to mark a file with unsaved changes, and `useUnsavedFilesGuard`
+reads it to ask before a navigation drops one: the layout lives in the URL,
+so closing a tab, leaving the workspace, and going back are all navigations
+it sees. The page's unload handler and the reload shortcut ask the same
+question. `unsavedCodeFiles` answers it for every workspace, for a later quit
+confirmation.
+
+A reload that finds the file changed under an unsaved buffer keeps the buffer
+and raises a notice with Reload and Keep my changes. A refused save raises the
+same notice with Compare, a Monaco diff of the version on disk against yours,
+and Overwrite. Markdown files (`.md`, `.mdx`, `.markdown`) open as a rendered
+preview through the app's markdown renderer, with a toggle back to the source
+while reading or editing.
+
+Out of scope: creating, renaming, or deleting files; editing in a sandbox
+workspace; multi-file find and replace; editing inside the diff panel. The
+macOS View > Reload menu item reloads from the native side, so it does not
+ask about unsaved files yet.
 
 ## Testing
 
@@ -727,7 +785,7 @@ of its own: registering one opens the new-workspace dialog, and picking one on
 
 Recorded in [`docs/deferred.md`](deferred.md): running a harness in a PTY;
 checkpoint restore (the refs land in v1; the restore surface does not);
-an in-app code editor; chat–code convergence (the single-surface end
-state: one conversation concept with an optional workspace binding,
-engines behind the adapter contract, no user-facing mode choice); the local
-mobile relay; and a per-repo worktree-location override.
+an in-app editor beyond saving existing text files; chat–code convergence
+(the single-surface end state: one conversation concept with an optional
+workspace binding, engines behind the adapter contract, no user-facing mode
+choice); the local mobile relay; and a per-repo worktree-location override.

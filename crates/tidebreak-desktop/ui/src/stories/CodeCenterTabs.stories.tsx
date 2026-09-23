@@ -33,6 +33,7 @@ function TabStrip({
   canNewTerminal = true,
   region = "primary" as const,
   initialConversationFocused,
+  dirtyFilePaths,
 }: {
   editorTabs: PanelContent[];
   conversations?: CodeConversationTab[];
@@ -42,6 +43,7 @@ function TabStrip({
   canNewTerminal?: boolean;
   region?: "primary" | "secondary";
   initialConversationFocused?: boolean;
+  dirtyFilePaths?: ReadonlySet<string>;
 }) {
   const [active, setActive] = useState(editorTabs.length > 0 ? 0 : -1);
   const [chatFocused, setChatFocused] = useState(
@@ -85,6 +87,7 @@ function TabStrip({
         canNewTerminal={canNewTerminal}
         onSplitActive={fn()}
         region={region}
+        dirtyFilePaths={dirtyFilePaths}
         browserTitles={{ "browser-1": "Storybook — Tidebreak" }}
         terminalLabels={{
           "term-1": "Terminal 1",
@@ -133,6 +136,18 @@ export const IndependentBrowserBesideFile: Story = {
       { type: "file", path: "src/main.rs" },
       { type: "browser", browserId: "browser-1" },
     ],
+  },
+};
+
+/** A dot marks the file whose buffer holds unsaved changes. */
+export const UnsavedFile: Story = {
+  args: {
+    editorTabs: [
+      { type: "file", path: "README.md" },
+      { type: "file", path: "crates/tidebreak-server/src/code/file_save.rs" },
+      { type: "diff", path: "README.md" },
+    ],
+    dirtyFilePaths: new Set(["README.md"]),
   },
 };
 
