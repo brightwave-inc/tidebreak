@@ -4,7 +4,7 @@ import { ShortcutsList } from "@/ShortcutsDialog";
 
 /**
  * The keyboard-shortcut help, drawn from the same table the listener matches
- * on.
+ * on, with the composer's own keys listed last in every mode.
  *
  * The list is per mode because one chord can mean two things: Cmd+N is a
  * conversation in chat and a workspace in code. `command` is fixed per story

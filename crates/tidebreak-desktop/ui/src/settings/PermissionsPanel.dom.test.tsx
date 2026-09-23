@@ -27,6 +27,7 @@ const onCapabilityConsentsChanged = vi.hoisted(() =>
 );
 vi.mock("../host", () => ({
   hasNativeHost: () => false,
+  hasMacOverlayTitlebar: () => false,
   attachedRemotely: () => false,
   listCapabilityConsents,
   onCapabilityConsentsChanged,
