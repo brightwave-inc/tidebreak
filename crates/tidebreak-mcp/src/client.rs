@@ -481,6 +481,7 @@ impl Session {
             wire: Wire::Stream(StreamWire {
                 reader,
                 writer,
+                partial_line: Vec::new(),
                 _child: child,
             }),
             next_id: 1,
@@ -595,6 +596,11 @@ impl Session {
 struct StreamWire {
     reader: BoxReader,
     writer: BoxWriter,
+    /// The bytes of a line read so far. They live here rather than in the
+    /// read's own frame, so a read that is cancelled partway, such as one a
+    /// timeout gave up on, leaves them for the next read instead of losing
+    /// them and starting that read in the middle of a frame.
+    partial_line: Vec<u8>,
     // Keeping the child owns its lifecycle; `kill_on_drop(true)` handles both a
     // normal registry teardown and a failed initialization.
     _child: Option<Child>,
@@ -620,7 +626,8 @@ impl StreamWire {
         tools_list_changed: &mut bool,
     ) -> Result<Value> {
         loop {
-            let Some(line) = read_bounded_line(&mut self.reader).await? else {
+            let Some(line) = read_bounded_line(&mut self.reader, &mut self.partial_line).await?
+            else {
                 return Err(mcp_message("external server closed stdout before replying"));
             };
             if line.iter().all(u8::is_ascii_whitespace) {
@@ -720,27 +727,37 @@ pub(crate) fn server_request_response(id: Value, method: &str) -> Result<Value> 
     Ok(serde_json::to_value(response)?)
 }
 
-async fn read_bounded_line(reader: &mut BoxReader) -> Result<Option<Vec<u8>>> {
-    let mut line = Vec::new();
+/// Read one newline-terminated frame, bounded at [`MAX_JSON_RPC_FRAME_BYTES`].
+///
+/// Cancel-safe: `partial` holds what has been read of the current line, and
+/// the only await is the buffer fill, which consumes nothing. A read dropped
+/// at that await, for example by a timeout, has moved every byte it consumed
+/// into `partial`, so the next read finishes the same line.
+async fn read_bounded_line(
+    reader: &mut BoxReader,
+    partial: &mut Vec<u8>,
+) -> Result<Option<Vec<u8>>> {
     loop {
         let available = reader
             .fill_buf()
             .await
             .map_err(|error| mcp_error("could not read from external server", error))?;
         if available.is_empty() {
+            let line = std::mem::take(partial);
             return Ok((!line.is_empty()).then_some(line));
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
         let consumed = newline.map_or(available.len(), |index| index + 1);
-        if line.len().saturating_add(consumed) > MAX_JSON_RPC_FRAME_BYTES {
+        if partial.len().saturating_add(consumed) > MAX_JSON_RPC_FRAME_BYTES {
+            partial.clear();
             return Err(mcp_message(
                 "external server JSON-RPC frame exceeds the limit",
             ));
         }
-        line.extend_from_slice(&available[..consumed]);
+        partial.extend_from_slice(&available[..consumed]);
         reader.consume(consumed);
         if newline.is_some() {
-            return Ok(Some(line));
+            return Ok(Some(std::mem::take(partial)));
         }
     }
 }
@@ -2449,5 +2466,36 @@ mod tests {
                 .expect("invalid scheme must fail");
             assert!(error.to_string().contains("http or https"));
         }
+    }
+
+    /// A read that a timeout cancels partway through a frame keeps the bytes
+    /// it had read, so the next read returns the whole frame, not its tail.
+    #[tokio::test]
+    async fn a_cancelled_read_keeps_the_partial_frame() {
+        let (client, mut server) = duplex(1024);
+        let mut reader: BoxReader = Box::new(BufReader::new(client));
+        let mut partial = Vec::new();
+        server.write_all(br#"{"jsonrpc":"2.0","#).await.unwrap();
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(50),
+            read_bounded_line(&mut reader, &mut partial),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the read waits for the rest of the frame"
+        );
+
+        server
+            .write_all(b"\"id\":7,\"result\":{}}\n")
+            .await
+            .unwrap();
+        let line = read_bounded_line(&mut reader, &mut partial)
+            .await
+            .unwrap()
+            .expect("the frame completes");
+        let value: Value = serde_json::from_slice(&line).expect("the whole frame, not its tail");
+        assert_eq!(value["id"], json!(7));
+        assert!(partial.is_empty());
     }
 }
