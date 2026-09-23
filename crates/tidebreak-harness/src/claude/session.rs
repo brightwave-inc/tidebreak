@@ -2,10 +2,12 @@
 //!
 //! The child runs `--input-format stream-json` with its stdin held open, so a
 //! turn is one user line written into a process that is already warm. The
-//! stream's own `result` line ends the turn; the child stays up for the next
-//! one. Record 57 has the measurements that forced this.
+//! turn's own `result` line ends it; the child stays up for the next one.
+//! Record 57 has the measurements that forced this. A task reads the child's
+//! stdout for the child's whole life, because the engine also writes between
+//! turns: see [`ReaderShared`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::Hasher;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -19,16 +21,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
-use tokio::time::{timeout, timeout_at, Instant};
+use tokio::time::timeout;
 use tracing::warn;
 
 use crate::child::{turn_outcome, ChildPid};
-use crate::claude::parse::ClaudeStreamParser;
+use crate::claude::parse::{ClaudeStreamParser, TurnMark};
 use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
     spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError,
-    HarnessEvent, HarnessSession, ProcessTreeChild, ProjectConfig, SessionSpec, StreamBudget,
-    StreamLine, StreamLineBuffer, TurnInput, TurnOutcome,
+    HarnessEvent, HarnessEventSink, HarnessSession, ProcessTreeChild, ProjectConfig, SessionSpec,
+    StreamBudget, StreamLine, StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::{PermissionMode, ReasoningEffort};
 
@@ -360,27 +362,392 @@ pub(crate) fn bypass_policy(mode: PermissionMode) -> BypassPolicy {
     }
 }
 
-/// The stdout half of a live child, plus the parser reading it.
-///
-/// `run_turn` is the only reader, and it holds this for the length of a turn.
-struct ChildReader {
-    stdout: ChildStdout,
-    lines: StreamLineBuffer,
-    /// One parser per child: its `session_started` guard is what keeps a
-    /// repeated `system/init` from minting a second session for the same
-    /// process.
-    parser: ClaudeStreamParser,
-    /// Parser count already added to the session total.
-    flushed_unrecognized: u64,
+/// A reply to one control request. `Err` carries the engine's reason.
+type ControlReply = Result<(), String>;
+
+/// A control request waiting on its `control_response`.
+struct ControlWaiter {
+    reply: oneshot::Sender<ControlReply>,
+    /// A stop request. The turn's own end answers it too, because the engine
+    /// can end the turn before it acknowledges the stop.
+    stop: bool,
 }
 
-/// One live `claude` child and the three handles a session needs on it.
+/// The user turn a child is running, as its stdout reader sees it.
+struct PendingTurn {
+    /// The client `uuid` on the turn's stdin line.
+    uuid: String,
+    /// The engine took the line off its queue: a `command_lifecycle` line
+    /// said `started`, or a reply named the uuid. From here on, the next
+    /// `result` ends this turn.
+    started: bool,
+    done: oneshot::Sender<TurnEnd>,
+}
+
+/// How a user turn left the stream.
+struct TurnEnd {
+    /// The turn's own `result` arrived.
+    saw_terminal: bool,
+    /// The child's stdout closed, so the process is gone.
+    eof: bool,
+    /// Reading the child's stdout failed.
+    error: Option<io::Error>,
+}
+
+#[derive(Default)]
+struct ReaderState {
+    /// The user turn waiting on this child.
+    turn: Option<PendingTurn>,
+    /// This child reports `command_lifecycle` for the lines the session
+    /// sends. 2.1.259 does (captured).
+    lifecycle: bool,
+    /// Stdout closed or failed. Nothing more will arrive.
+    closed: bool,
+    /// Control requests waiting on their `control_response`, by request id.
+    controls: HashMap<String, ControlWaiter>,
+}
+
+/// What a child's stdout reader shares with the session.
 ///
-/// The locks are separate on purpose: `interrupt` writes to stdin while
-/// `run_turn` holds the reader, and either may need to stop the process.
+/// One task reads the child's stdout for the child's whole life, between
+/// turns as well as during them. The engine keeps writing between turns:
+/// when a background task ends after a turn's `result`, it reports the end
+/// and runs a turn of its own, with its own `result`. Reading only inside
+/// turns left those lines in the pipe, and the next user turn took that
+/// `result` as its own and ended early.
+struct ReaderShared {
+    sink: Arc<dyn HarnessEventSink>,
+    resume_ref: Arc<Mutex<Option<String>>>,
+    unrecognized: Arc<AtomicU64>,
+    state: Mutex<ReaderState>,
+}
+
+/// Where one line's events go.
+enum Route {
+    /// The user turn in flight: every event, as the engine sent it.
+    Turn,
+    /// The line ends the user turn in flight.
+    EndsTurn(PendingTurn),
+    /// Activity nobody asked for: between turns, or a turn the engine
+    /// started itself.
+    Background,
+}
+
+impl ReaderShared {
+    fn state(&self) -> std::sync::MutexGuard<'_, ReaderState> {
+        self.state.lock().expect("claude reader state")
+    }
+
+    /// Wait for the end of the user turn whose stdin line carries `uuid`.
+    /// `None` when stdout has already closed.
+    fn begin_turn(&self, uuid: &str) -> Option<oneshot::Receiver<TurnEnd>> {
+        let mut state = self.state();
+        if state.closed {
+            return None;
+        }
+        let (done, receiver) = oneshot::channel();
+        state.turn = Some(PendingTurn {
+            uuid: uuid.to_owned(),
+            started: false,
+            done,
+        });
+        Some(receiver)
+    }
+
+    /// Stop waiting for a turn whose line never reached the child.
+    fn abandon_turn(&self) {
+        self.state().turn = None;
+    }
+
+    fn is_closed(&self) -> bool {
+        self.state().closed
+    }
+
+    /// Wait for the `control_response` that answers `request_id`. `None`
+    /// when stdout has already closed.
+    fn await_control(
+        &self,
+        request_id: &str,
+        stop: bool,
+    ) -> Option<oneshot::Receiver<ControlReply>> {
+        let mut state = self.state();
+        if state.closed {
+            return None;
+        }
+        let (reply, receiver) = oneshot::channel();
+        state
+            .controls
+            .insert(request_id.to_owned(), ControlWaiter { reply, stop });
+        Some(receiver)
+    }
+
+    fn cancel_control(&self, request_id: &str) {
+        self.state().controls.remove(request_id);
+    }
+
+    /// Answer every stop request still waiting.
+    fn settle_stops(&self, reply: &ControlReply) {
+        let waiters: Vec<ControlWaiter> = {
+            let mut state = self.state();
+            let ids: Vec<String> = state
+                .controls
+                .iter()
+                .filter(|(_, waiter)| waiter.stop)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.iter()
+                .filter_map(|id| state.controls.remove(id))
+                .collect()
+        };
+        for waiter in waiters {
+            let _ = waiter.reply.send(reply.clone());
+        }
+    }
+
+    fn observe_control_response(&self, line: &str) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("control_response") {
+            return;
+        }
+        let Some(request_id) = value
+            .pointer("/response/request_id")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
+        let Some(waiter) = self.state().controls.remove(request_id) else {
+            return;
+        };
+        let reply = match value
+            .pointer("/response/subtype")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("success") => Ok(()),
+            Some("error") => Err(value
+                .pointer("/response/error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("the engine rejected the request")
+                .to_owned()),
+            _ => Err("the engine returned a malformed acknowledgement".to_owned()),
+        };
+        let _ = waiter.reply.send(reply);
+    }
+
+    /// Decide where a line goes, from what it says about its turn.
+    ///
+    /// The user's line gets a client `uuid`, and the engine reports its fate
+    /// in `command_lifecycle` lines: `queued` when the engine reads it,
+    /// `started` when a turn takes it. A `result` read before `started` ends
+    /// a turn that was already running when the line arrived, so it never
+    /// ends the user's turn. The first `result` after `started` does, even
+    /// when a turn the engine started itself took the line between two tool
+    /// calls and its `result` names no uuid (captured on 2.1.259).
+    ///
+    /// An engine that reports no lifecycle for the line falls back to the
+    /// first `result` after the write, unless that `result` names only other
+    /// lines.
+    fn route(&self, mark: &TurnMark) -> Route {
+        let mut state = self.state();
+        let ReaderState {
+            turn, lifecycle, ..
+        } = &mut *state;
+        let Some(pending) = turn.as_mut() else {
+            return Route::Background;
+        };
+        if let Some((uuid, command_state)) = &mark.command {
+            if *uuid == pending.uuid {
+                *lifecycle = true;
+                pending.started |= command_state == "started";
+            }
+        }
+        pending.started |= mark.user_messages.contains(&pending.uuid);
+        if mark.ends_turn {
+            let ours = pending.started || (!*lifecycle && mark.user_messages.is_empty());
+            if !ours {
+                return Route::Background;
+            }
+            return Route::EndsTurn(turn.take().expect("the pending turn"));
+        }
+        if pending.started || !*lifecycle {
+            Route::Turn
+        } else {
+            Route::Background
+        }
+    }
+
+    /// Stdout closed or failed: nothing more will reach anyone waiting.
+    fn close(&self, error: Option<io::Error>) {
+        let (turn, controls) = {
+            let mut state = self.state();
+            state.closed = true;
+            (state.turn.take(), std::mem::take(&mut state.controls))
+        };
+        for waiter in controls.into_values() {
+            let _ = waiter.reply.send(Err(
+                "the engine exited before acknowledging the request".into()
+            ));
+        }
+        if let Some(turn) = turn {
+            let _ = turn.done.send(TurnEnd {
+                saw_terminal: false,
+                eof: error.is_none(),
+                error,
+            });
+        }
+    }
+}
+
+/// Read one child's stdout until it closes.
+async fn read_stdout(shared: Arc<ReaderShared>, mut stdout: ChildStdout) {
+    let budget = StreamBudget::default();
+    let mut lines = StreamLineBuffer::new();
+    let mut parser = ClaudeStreamParser::new();
+    let mut flushed = 0;
+    let mut chunk = vec![0_u8; budget.chunk_size];
+    let mut chunks_this_tick = 0;
+    let error = loop {
+        match stdout.read(&mut chunk).await {
+            Ok(0) => break None,
+            Ok(count) => {
+                let tick = lines.push(&chunk[..count], budget);
+                if tick.overflow_chunks > 0 {
+                    warn!(
+                        overflow_chunks = tick.overflow_chunks,
+                        "engine stdout exceeded the parse budget"
+                    );
+                }
+                for line in tick.lines {
+                    read_line(&shared, &mut parser, &line, false).await;
+                }
+                flush_unrecognized(&shared, &parser, &mut flushed);
+            }
+            Err(error) => break Some(error),
+        }
+        chunks_this_tick += 1;
+        if chunks_this_tick >= budget.max_chunks_per_tick {
+            chunks_this_tick = 0;
+            tokio::task::yield_now().await;
+        }
+    };
+    if error.is_none() {
+        if let Some(pending) = lines.pending_line() {
+            read_line(&shared, &mut parser, &pending, true).await;
+            flush_unrecognized(&shared, &parser, &mut flushed);
+        }
+    }
+    shared.close(error);
+}
+
+/// Add the parser's new unrecognized events to the session total. The parser
+/// dies with its child, so the total lives on the session.
+fn flush_unrecognized(shared: &ReaderShared, parser: &ClaudeStreamParser, flushed: &mut u64) {
+    let total = parser.unrecognized();
+    shared
+        .unrecognized
+        .fetch_add(total - *flushed, Ordering::SeqCst);
+    *flushed = total;
+}
+
+/// Parse one line and deliver its events where [`ReaderShared::route`] says.
+///
+/// `last` marks the unterminated line left in the buffer when stdout closed.
+async fn read_line(
+    shared: &ReaderShared,
+    parser: &mut ClaudeStreamParser,
+    line: &StreamLine,
+    last: bool,
+) {
+    // A cut line is not JSON and answers no control request. The parser
+    // recovers what event it was from the part that arrived.
+    let events = if line.cut {
+        parser.push_cut_line(&line.text)
+    } else {
+        shared.observe_control_response(&line.text);
+        parser.push_line(&line.text)
+    };
+    let mark = parser.take_turn_mark();
+    for event in &events {
+        if let HarnessEvent::SessionStarted {
+            resume_ref: Some(resume),
+            ..
+        } = event
+        {
+            *shared.resume_ref.lock().expect("claude resume") = Some(resume.clone());
+        }
+    }
+    match shared.route(&mark) {
+        Route::Turn => {
+            for event in events {
+                shared.sink.emit(event).await;
+            }
+        }
+        Route::Background => {
+            for event in events.into_iter().filter_map(background_event) {
+                shared.sink.emit(event).await;
+            }
+        }
+        Route::EndsTurn(turn) => {
+            let interrupted = events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnInterrupted));
+            for event in events {
+                shared.sink.emit(event).await;
+            }
+            shared.settle_stops(&if interrupted {
+                Ok(())
+            } else {
+                Err("the turn ended before the interrupt was acknowledged".into())
+            });
+            let _ = turn.done.send(TurnEnd {
+                saw_terminal: true,
+                eof: last,
+                error: None,
+            });
+        }
+    }
+}
+
+/// An event from activity nobody asked for, the way the transcript keeps it.
+///
+/// The engine's own turn keeps its messages, tool calls, and notices, such as
+/// the notice that a background task finished. Its streaming text is left
+/// out, because the message that follows repeats it. Its end is not a turn
+/// end the session reports: only a failure reaches the transcript, as a
+/// notice.
+fn background_event(event: HarnessEvent) -> Option<HarnessEvent> {
+    match event {
+        HarnessEvent::AssistantDelta { .. }
+        | HarnessEvent::ReasoningDelta { .. }
+        | HarnessEvent::UserSteered { .. }
+        | HarnessEvent::TurnStarted
+        | HarnessEvent::TurnCompleted { .. }
+        | HarnessEvent::TurnInterrupted => None,
+        HarnessEvent::TurnFailed { error } => Some(HarnessEvent::HarnessNotice {
+            level: tidebreak_core::HarnessNoticeLevel::Warning,
+            message: format!(
+                "Claude Code could not finish a turn it started on its own: {}",
+                error.message
+            )
+            .chars()
+            .take(tidebreak_core::MAX_NOTICE_CHARS)
+            .collect(),
+        }),
+        other => Some(other),
+    }
+}
+
+/// One live `claude` child and the handles a session needs on it.
+///
+/// The locks are separate on purpose: `interrupt` writes to stdin while a
+/// turn waits on the reader, and either may need to stop the process.
 struct EngineChannel {
     stdin: AsyncMutex<ChildStdin>,
-    reader: AsyncMutex<ChildReader>,
+    /// State the stdout reader shares with the session.
+    reader: Arc<ReaderShared>,
+    /// The task reading the child's stdout.
+    reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     child: AsyncMutex<Option<ProcessTreeChild>>,
     /// Exit status of a child that was already reaped by `interrupt` or by
     /// retirement, so the turn in flight can still report how it ended.
@@ -407,8 +774,11 @@ struct EngineChannel {
 }
 
 impl EngineChannel {
-    /// Whether the process behind this channel is gone.
+    /// Whether the process behind this channel is gone, or its stdout is.
     async fn has_exited(&self) -> bool {
+        if self.reader.is_closed() {
+            return true;
+        }
         let mut slot = self.child.lock().await;
         match slot.as_mut() {
             Some(child) => !matches!(child.try_wait(), Ok(None)),
@@ -446,7 +816,15 @@ impl EngineChannel {
         if status.is_some() {
             *self.reaped.lock().expect("claude child exit") = status;
         }
+        // Nothing waits on a retired child's output.
+        self.stop_reading();
         status
+    }
+
+    fn stop_reading(&self) {
+        if let Some(task) = self.reader_task.lock().expect("claude reader task").take() {
+            task.abort();
+        }
     }
 
     async fn interrupt_tree(&self, grace: Duration) -> io::Result<Option<ExitStatus>> {
@@ -476,12 +854,10 @@ impl EngineChannel {
     }
 }
 
-/// How the reader left the stream.
-struct TurnRead {
-    /// A `result` line closed the turn.
-    saw_terminal: bool,
-    /// The child's stdout closed, so the process is gone.
-    eof: bool,
+impl Drop for EngineChannel {
+    fn drop(&mut self) {
+        self.stop_reading();
+    }
 }
 
 /// Live Claude Code session: one child for the session lifetime.
@@ -495,12 +871,14 @@ pub struct ClaudeSession {
     /// The session's current permission mode, which a live switch moves.
     /// `spec.permission_mode` is only what it started on.
     permission_mode: Mutex<PermissionMode>,
-    resume_ref: Mutex<Option<String>>,
+    /// Shared with each child's stdout reader, which records the session id
+    /// the engine reports.
+    resume_ref: Arc<Mutex<Option<String>>>,
     channel: AsyncMutex<Option<Arc<EngineChannel>>>,
     pid: ChildPid,
     /// Unrecognized events summed across every child this session has run.
     /// The parser dies with its child, so the total lives out here.
-    unrecognized: AtomicU64,
+    unrecognized: Arc<AtomicU64>,
     /// Stops asked for during the turn in flight. The first is a control
     /// request the engine answers; a second stops the process.
     interrupts_this_turn: AtomicU64,
@@ -510,12 +888,6 @@ pub struct ClaudeSession {
     /// Monotonic id for control requests, so a late `control_response` is
     /// never confused with the current one.
     next_control_id: AtomicU64,
-    pending_interrupt: Mutex<Option<PendingClaudeInterrupt>>,
-}
-
-struct PendingClaudeInterrupt {
-    request_id: String,
-    reply: Option<oneshot::Sender<Result<(), HarnessError>>>,
 }
 
 /// Clears the in-flight flag however `run_turn` leaves.
@@ -526,6 +898,16 @@ impl Drop for TurnGuard<'_> {
         self.0.store(false, Ordering::SeqCst);
     }
 }
+
+/// Claude Code moves long foreground work to the background when this is
+/// truthy. The pinned 2.1.259 reads it in two places: a foreground subagent
+/// that runs past 120 seconds, and an MCP tool call in print mode. `0` keeps
+/// both in the foreground, where the transcript can follow them.
+///
+/// It does not change how 2.1.259 runs an `Agent` call that leaves
+/// `run_in_background` unset: that call starts in the background either way
+/// (captured with the variable at `0`).
+const AUTO_BACKGROUND_ENV: &str = "CLAUDE_AUTO_BACKGROUND_TASKS";
 
 impl ClaudeSession {
     pub(super) fn new(spec: SessionSpec) -> Self {
@@ -539,14 +921,13 @@ impl ClaudeSession {
             private_directory,
             plans_directory,
             permission_mode: Mutex::new(permission_mode),
-            resume_ref: Mutex::new(resume_ref),
+            resume_ref: Arc::new(Mutex::new(resume_ref)),
             channel: AsyncMutex::new(None),
             pid: ChildPid::new(),
-            unrecognized: AtomicU64::new(0),
+            unrecognized: Arc::new(AtomicU64::new(0)),
             interrupts_this_turn: AtomicU64::new(0),
             turn_in_flight: AtomicBool::new(false),
             next_control_id: AtomicU64::new(1),
-            pending_interrupt: Mutex::new(None),
         }
     }
 
@@ -686,8 +1067,11 @@ impl ClaudeSession {
         });
         if self.spec.tool_bridge.is_some() {
             // Managed human tools must remain in the foreground of the native turn.
-            env.retain(|(name, _)| name != "CLAUDE_AUTO_BACKGROUND_TASKS");
-            env.push(("CLAUDE_AUTO_BACKGROUND_TASKS".into(), "0".into()));
+            crate::override_env(&mut env, AUTO_BACKGROUND_ENV, "0");
+        } else if !env.iter().any(|(name, _)| name == AUTO_BACKGROUND_ENV) {
+            // A settings overlay that names the variable is the session
+            // asking for background work, so its value stands.
+            env.push((AUTO_BACKGROUND_ENV.into(), "0".into()));
         }
         if self.spec.project_config == ProjectConfig::Skip {
             crate::override_env(&mut env, DISABLE_CRON_ENV, "1");
@@ -736,20 +1120,23 @@ impl ClaudeSession {
 
         let captured = Arc::new(Mutex::new(Vec::new()));
         let sink = captured.clone();
-        // Nothing reads stderr between turns, so a child that chatters there
-        // would fill its pipe and stall. Drain it for the child's whole life
-        // and keep the tail for whichever turn has to explain a death.
+        // A child that chatters on stderr would fill its pipe and stall.
+        // Drain it for the child's whole life and keep the tail for whichever
+        // turn has to explain a death.
         let stderr_task =
             tokio::spawn(async move { drain_capped(stderr, MAX_STDERR_BYTES, &sink).await });
+        let reader = Arc::new(ReaderShared {
+            sink: self.spec.sink.clone(),
+            resume_ref: self.resume_ref.clone(),
+            unrecognized: self.unrecognized.clone(),
+            state: Mutex::new(ReaderState::default()),
+        });
+        let reader_task = tokio::spawn(read_stdout(reader.clone(), stdout));
 
         Ok(Arc::new(EngineChannel {
             stdin: AsyncMutex::new(stdin),
-            reader: AsyncMutex::new(ChildReader {
-                stdout,
-                lines: StreamLineBuffer::new(),
-                parser: ClaudeStreamParser::new(),
-                flushed_unrecognized: 0,
-            }),
+            reader,
+            reader_task: Mutex::new(Some(reader_task)),
             child: AsyncMutex::new(Some(child)),
             reaped: Mutex::new(None),
             stderr: captured,
@@ -815,215 +1202,33 @@ impl ClaudeSession {
         stdin.flush().await
     }
 
-    fn permission_mode_acknowledgement(
-        line: &str,
-        request_id: &str,
-    ) -> Option<Result<(), HarnessError>> {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            return None;
-        };
-        if value.get("type").and_then(serde_json::Value::as_str) != Some("control_response") {
-            return None;
-        }
-        let response = value.get("response")?;
-        let response_request_id = response
-            .get("request_id")
-            .and_then(serde_json::Value::as_str)?;
-        if response_request_id != request_id {
-            return None;
-        }
-        match response.get("subtype").and_then(serde_json::Value::as_str) {
-            Some("success") => Some(Ok(())),
-            Some("error") => {
-                let detail = response
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("the engine rejected the request");
-                Some(Err(HarnessError::PermissionModeSwitchFailed(detail.into())))
-            }
-            _ => Some(Err(HarnessError::PermissionModeSwitchFailed(
-                "the engine returned a malformed acknowledgement".into(),
-            ))),
-        }
-    }
-
-    /// Read until the engine confirms this exact mode request.
+    /// Wait for the engine to confirm the control request `request_id`.
     ///
-    /// Permission-mode changes only reach the worker between turns, so this
-    /// method is the sole stdout reader while it waits. Any unrelated frames
-    /// still pass through the normal parser instead of disappearing.
+    /// The stdout reader answers `receiver` when the matching
+    /// `control_response` arrives, and every other line on the way still
+    /// reaches the parser.
     async fn wait_for_permission_mode_acknowledgement(
-        &self,
-        channel: &EngineChannel,
-        request_id: &str,
+        receiver: oneshot::Receiver<ControlReply>,
     ) -> Result<(), HarnessError> {
-        let mut guard = channel.reader.lock().await;
-        let reader = &mut *guard;
-        let budget = StreamBudget::default();
-        let mut chunk = vec![0_u8; budget.chunk_size];
-        let deadline = Instant::now() + CONTROL_RESPONSE_TIMEOUT;
-
-        loop {
-            let read = timeout_at(deadline, reader.stdout.read(&mut chunk)).await;
-            let count = match read {
-                Ok(Ok(0)) => {
-                    return Err(HarnessError::PermissionModeSwitchFailed(
-                        "the engine exited before acknowledging the request".into(),
-                    ));
-                }
-                Ok(Ok(count)) => count,
-                Ok(Err(error)) => {
-                    return Err(HarnessError::PermissionModeSwitchFailed(format!(
-                        "could not read the engine acknowledgement: {error}"
-                    )));
-                }
-                Err(_) => {
-                    return Err(HarnessError::PermissionModeSwitchFailed(
-                        "timed out waiting for the engine acknowledgement".into(),
-                    ));
-                }
-            };
-
-            let tick = reader.lines.push(&chunk[..count], budget);
-            if tick.overflow_chunks > 0 {
-                warn!(
-                    overflow_chunks = tick.overflow_chunks,
-                    "engine stdout exceeded the parse budget while awaiting a mode change"
-                );
-            }
-            let mut acknowledgement = None;
-            for line in tick.lines {
-                if !line.cut {
-                    if let Some(result) =
-                        Self::permission_mode_acknowledgement(&line.text, request_id)
-                    {
-                        acknowledgement.get_or_insert(result);
-                        continue;
-                    }
-                }
-                emit_parsed(self, &mut reader.parser, &self.resume_ref, &line).await;
-            }
-            if let Some(result) = acknowledgement {
-                return result;
-            }
-            tokio::task::yield_now().await;
-        }
-    }
-
-    fn register_interrupt(
-        &self,
-        request_id: String,
-    ) -> oneshot::Receiver<Result<(), HarnessError>> {
-        let (reply, receiver) = oneshot::channel();
-        *self.pending_interrupt.lock().expect("claude interrupt") = Some(PendingClaudeInterrupt {
-            request_id,
-            reply: Some(reply),
-        });
-        receiver
-    }
-
-    fn cancel_interrupt(&self, request_id: &str, detail: &str) {
-        let pending = {
-            let mut slot = self.pending_interrupt.lock().expect("claude interrupt");
-            if slot
-                .as_ref()
-                .is_none_or(|pending| pending.request_id != request_id)
-            {
-                return;
-            }
-            slot.take()
-        };
-        if let Some(mut pending) = pending {
-            if let Some(reply) = pending.reply.take() {
-                let _ = reply.send(Err(HarnessError::Other(detail.into())));
-            }
-        }
-    }
-
-    fn fail_pending_interrupt(&self, detail: &str) {
-        let request_id = self
-            .pending_interrupt
-            .lock()
-            .expect("claude interrupt")
-            .as_ref()
-            .map(|pending| pending.request_id.clone());
-        if let Some(request_id) = request_id {
-            self.cancel_interrupt(&request_id, detail);
-        }
-    }
-
-    fn observe_control_response(&self, line: &str) {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            return;
-        };
-        if value.get("type").and_then(serde_json::Value::as_str) != Some("control_response") {
-            return;
-        }
-        let Some(request_id) = value
-            .pointer("/response/request_id")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
-        let pending = {
-            let mut slot = self.pending_interrupt.lock().expect("claude interrupt");
-            if slot
-                .as_ref()
-                .is_none_or(|pending| pending.request_id != request_id)
-            {
-                return;
-            }
-            slot.take()
-        };
-        let Some(mut pending) = pending else {
-            return;
-        };
-        let result = match value
-            .pointer("/response/subtype")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("success") => Ok(()),
-            Some("error") => {
-                let detail = value
-                    .pointer("/response/error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("the engine rejected the interrupt");
-                Err(HarnessError::Other(detail.into()))
-            }
-            _ => Err(HarnessError::Other(
-                "the engine returned a malformed interrupt response".into(),
+        match timeout(CONTROL_RESPONSE_TIMEOUT, receiver).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(detail))) => Err(HarnessError::PermissionModeSwitchFailed(detail)),
+            Ok(Err(_)) => Err(HarnessError::PermissionModeSwitchFailed(
+                "the engine exited before acknowledging the request".into(),
             )),
-        };
-        if let Some(reply) = pending.reply.take() {
-            let _ = reply.send(result);
-        }
-    }
-
-    fn resolve_interrupt_for_terminal(&self, interrupted: bool) {
-        let pending = self
-            .pending_interrupt
-            .lock()
-            .expect("claude interrupt")
-            .take();
-        if let Some(mut pending) = pending {
-            if let Some(reply) = pending.reply.take() {
-                let result = if interrupted {
-                    Ok(())
-                } else {
-                    Err(HarnessError::Other(
-                        "the turn ended before the interrupt was acknowledged".into(),
-                    ))
-                };
-                let _ = reply.send(result);
-            }
+            Err(_) => Err(HarnessError::PermissionModeSwitchFailed(
+                "timed out waiting for the engine acknowledgement".into(),
+            )),
         }
     }
 
     async fn interrupt_process_tree(&self) -> Result<(), HarnessError> {
-        self.fail_pending_interrupt("the native interrupt did not complete");
         let taken = self.channel.lock().await.take();
         self.pid.clear();
         if let Some(channel) = taken {
+            channel
+                .reader
+                .settle_stops(&Err("the native interrupt did not complete".into()));
             channel
                 .interrupt_tree(INTERRUPT_GRACE)
                 .await
@@ -1034,96 +1239,37 @@ impl ClaudeSession {
         Ok(())
     }
 
-    /// Read the stream until the turn's own terminal event, or until the
-    /// child's stdout closes.
-    async fn read_turn(&self, channel: &EngineChannel) -> Result<TurnRead, HarnessError> {
-        let mut guard = channel.reader.lock().await;
-        let reader = &mut *guard;
-        let budget = StreamBudget::default();
-        let mut chunk = vec![0_u8; budget.chunk_size];
-        let mut saw_terminal = false;
-        let mut eof = false;
-        let mut failed = None;
-        loop {
-            let mut chunks_this_tick = 0;
-            while chunks_this_tick < budget.max_chunks_per_tick {
-                match reader.stdout.read(&mut chunk).await {
-                    Ok(0) => {
-                        eof = true;
-                        break;
-                    }
-                    Ok(n) => {
-                        let tick = reader.lines.push(&chunk[..n], budget);
-                        if tick.overflow_chunks > 0 {
-                            warn!(
-                                overflow_chunks = tick.overflow_chunks,
-                                "engine stdout exceeded the parse budget"
-                            );
-                        }
-                        // Every line of the tick is drained even once the turn
-                        // has ended: the engine writes lifecycle frames after
-                        // its `result`, and a half-consumed tick would lose
-                        // them. Reading past the tick would block instead —
-                        // the child has nothing more to say until the next
-                        // prompt.
-                        for line in tick.lines {
-                            saw_terminal |=
-                                emit_parsed(self, &mut reader.parser, &self.resume_ref, &line)
-                                    .await;
-                        }
-                        if saw_terminal {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        failed = Some(HarnessError::from(err));
-                        break;
-                    }
-                }
-                chunks_this_tick += 1;
-            }
-            // The child is long-lived, so the turn ends on the stream's own
-            // terminal event. Leaving the loop here is what keeps the process
-            // running for the next prompt.
-            if saw_terminal || eof || failed.is_some() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        if eof {
-            if let Some(pending) = reader.lines.pending_line() {
-                saw_terminal |=
-                    emit_parsed(self, &mut reader.parser, &self.resume_ref, &pending).await;
-            }
-        }
-        if eof {
-            self.fail_pending_interrupt(
-                "engine stdout closed before the interrupt was acknowledged",
-            );
-        }
-        let total = reader.parser.unrecognized();
-        self.unrecognized
-            .fetch_add(total - reader.flushed_unrecognized, Ordering::SeqCst);
-        reader.flushed_unrecognized = total;
-        match failed {
-            Some(err) => Err(err),
-            None => Ok(TurnRead { saw_terminal, eof }),
-        }
-    }
-
     async fn run_turn_inner(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
-        self.fail_pending_interrupt("the prior turn ended before the interrupt was acknowledged");
         self.interrupts_this_turn.store(0, Ordering::SeqCst);
         self.turn_in_flight.store(true, Ordering::SeqCst);
         let _in_flight = TurnGuard(&self.turn_in_flight);
-        let prompt = encode_turn_stdin(&input);
+        // The engine names this uuid in what it reports about the line, which
+        // is how the turn's own `result` is told from any other.
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let prompt = encode_turn_stdin(&input, &uuid);
         let mut retried = false;
-        let channel = loop {
+        let (channel, done) = loop {
             let (channel, fresh) = self
                 .ensure_channel(input.model.as_deref(), input.reasoning_effort)
                 .await?;
-            match self.write_line(&channel, &prompt).await {
-                Ok(()) => break channel,
+            channel.reader.settle_stops(&Err(
+                "the prior turn ended before the interrupt was acknowledged".into(),
+            ));
+            let written = match channel.reader.begin_turn(&uuid) {
+                Some(done) => match self.write_line(&channel, &prompt).await {
+                    Ok(()) => Ok(done),
+                    Err(err) => {
+                        channel.reader.abandon_turn();
+                        Err(err)
+                    }
+                },
+                None => Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "the engine child closed its output",
+                )),
+            };
+            match written {
+                Ok(done) => break (channel, done),
                 Err(err) if !fresh && !retried => {
                     retried = true;
                     warn!(%err, "engine child refused the turn; respawning");
@@ -1136,20 +1282,22 @@ impl ClaudeSession {
             }
         };
 
-        let read = match self.read_turn(&channel).await {
-            Ok(read) => read,
-            Err(err) => {
-                self.retire_channel().await;
-                return Err(err);
-            }
-        };
-
-        if !read.eof {
+        // A reader that went away without a word saw its child go.
+        let end = done.await.unwrap_or(TurnEnd {
+            saw_terminal: false,
+            eof: true,
+            error: None,
+        });
+        if let Some(error) = end.error {
+            self.retire_channel().await;
+            return Err(error.into());
+        }
+        if !end.eof {
             let stderr = channel.take_stderr();
             if !stderr.is_empty() {
                 warn!(bytes = stderr.len(), "engine stderr (capped)");
             }
-            return Ok(turn_outcome(None, read.saw_terminal, &stderr));
+            return Ok(turn_outcome(None, end.saw_terminal, &stderr));
         }
 
         let status = channel.exit_status().await;
@@ -1158,7 +1306,7 @@ impl ClaudeSession {
             warn!(bytes = stderr.len(), "engine stderr (capped)");
         }
         self.retire_channel().await;
-        Ok(turn_outcome(status, read.saw_terminal, &stderr))
+        Ok(turn_outcome(status, end.saw_terminal, &stderr))
     }
 }
 
@@ -1233,7 +1381,10 @@ impl HarnessSession for ClaudeSession {
             "tb-interrupt-{}",
             self.next_control_id.fetch_add(1, Ordering::SeqCst)
         );
-        let receiver = self.register_interrupt(request_id.clone());
+        let Some(receiver) = channel.reader.await_control(&request_id, true) else {
+            // Stdout already closed: the turn is ending on its own.
+            return self.interrupt_process_tree().await;
+        };
         let mut line = serde_json::to_vec(&serde_json::json!({
             "type": "control_request",
             "request_id": request_id,
@@ -1242,23 +1393,20 @@ impl HarnessSession for ClaudeSession {
         .map_err(|err| HarnessError::Other(format!("encode interrupt: {err}")))?;
         line.push(b'\n');
         if let Err(err) = self.write_line(&channel, &line).await {
-            self.cancel_interrupt(&request_id, "the engine refused the interrupt request");
+            channel.reader.cancel_control(&request_id);
             warn!(%err, "engine child refused a stop request; stopping the process");
             return self.interrupt_process_tree().await;
         }
 
         match timeout(CONTROL_RESPONSE_TIMEOUT, receiver).await {
             Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(err))) => {
-                warn!(%err, "engine rejected a stop request; stopping the process");
+            Ok(Ok(Err(detail))) => {
+                warn!(%detail, "engine rejected a stop request; stopping the process");
                 self.interrupt_process_tree().await
             }
             Ok(Err(_)) => self.interrupt_process_tree().await,
             Err(_) => {
-                self.cancel_interrupt(
-                    &request_id,
-                    "timed out waiting for the engine to acknowledge the interrupt",
-                );
+                channel.reader.cancel_control(&request_id);
                 self.interrupt_process_tree().await
             }
         }
@@ -1295,19 +1443,26 @@ impl HarnessSession for ClaudeSession {
         }))
         .map_err(|err| HarnessError::Other(format!("encode set_permission_mode: {err}")))?;
         line.push(b'\n');
-        if let Err(error) = self.write_line(&channel, &line).await {
-            self.retire_channel().await;
-            return Err(HarnessError::PermissionModeSwitchFailed(format!(
-                "could not write the engine request: {error}"
-            )));
-        }
-        if let Err(error) = self
-            .wait_for_permission_mode_acknowledgement(&channel, &request_id)
-            .await
-        {
+        let acknowledged = match channel.reader.await_control(&request_id, false) {
+            Some(receiver) => match self.write_line(&channel, &line).await {
+                Ok(()) => Self::wait_for_permission_mode_acknowledgement(receiver).await,
+                Err(error) => {
+                    channel.reader.cancel_control(&request_id);
+                    self.retire_channel().await;
+                    return Err(HarnessError::PermissionModeSwitchFailed(format!(
+                        "could not write the engine request: {error}"
+                    )));
+                }
+            },
+            None => Err(HarnessError::PermissionModeSwitchFailed(
+                "the engine exited before acknowledging the request".into(),
+            )),
+        };
+        if let Err(error) = acknowledged {
             // A lost or malformed acknowledgement cannot prove whether the
             // engine applied the request. Retire the child so the next turn
             // launches under the prior mode that Tidebreak still reports.
+            channel.reader.cancel_control(&request_id);
             self.retire_channel().await;
             return Err(error);
         }
@@ -1362,46 +1517,6 @@ impl Drop for ClaudeSession {
     }
 }
 
-/// Emits one line's events, reporting whether any of them ended the turn.
-async fn emit_parsed(
-    session: &ClaudeSession,
-    parser: &mut ClaudeStreamParser,
-    resume_ref: &Mutex<Option<String>>,
-    line: &StreamLine,
-) -> bool {
-    // A cut line is not JSON and answers no control request. The parser
-    // recovers what event it was from the part that arrived.
-    let events = if line.cut {
-        parser.push_cut_line(&line.text)
-    } else {
-        session.observe_control_response(&line.text);
-        parser.push_line(&line.text)
-    };
-    let mut terminal = false;
-    let mut interrupted = false;
-    for event in events {
-        if let HarnessEvent::SessionStarted {
-            resume_ref: Some(resume),
-            ..
-        } = &event
-        {
-            *resume_ref.lock().expect("claude resume") = Some(resume.clone());
-        }
-        terminal |= matches!(
-            event,
-            HarnessEvent::TurnCompleted { .. }
-                | HarnessEvent::TurnFailed { .. }
-                | HarnessEvent::TurnInterrupted
-        );
-        interrupted |= matches!(event, HarnessEvent::TurnInterrupted);
-        session.spec.sink.emit(event).await;
-    }
-    if terminal {
-        session.resolve_interrupt_for_terminal(interrupted);
-    }
-    terminal
-}
-
 async fn drain_capped<R>(mut reader: R, cap: usize, into: &Mutex<Vec<u8>>)
 where
     R: AsyncReadExt + Unpin,
@@ -1422,7 +1537,10 @@ where
 }
 
 /// One stream-json user line per turn, on a stdin that stays open.
-pub(crate) fn encode_turn_stdin(input: &TurnInput) -> Vec<u8> {
+///
+/// `uuid` is the client id the engine names when it reports what happened to
+/// the line and on the `result` of the turn that took it.
+pub(crate) fn encode_turn_stdin(input: &TurnInput, uuid: &str) -> Vec<u8> {
     let text = turn_text(input);
     let mut content = Vec::new();
     if !text.is_empty() || input.images.is_empty() {
@@ -1450,6 +1568,7 @@ pub(crate) fn encode_turn_stdin(input: &TurnInput) -> Vec<u8> {
             "role": "user",
             "content": content,
         },
+        "uuid": uuid,
     }))
     .unwrap_or_else(|_| input.text.as_bytes().to_vec());
     encoded.push(b'\n');
@@ -1463,14 +1582,17 @@ mod encode_tests {
 
     #[test]
     fn text_rides_one_stream_json_user_line() {
-        let encoded = encode_turn_stdin(&TurnInput {
-            turn_id: None,
-            text: "hello".into(),
-            model: None,
-            reasoning_effort: None,
-            fast_mode: false,
-            images: Vec::new(),
-        });
+        let encoded = encode_turn_stdin(
+            &TurnInput {
+                turn_id: None,
+                text: "hello".into(),
+                model: None,
+                reasoning_effort: None,
+                fast_mode: false,
+                images: Vec::new(),
+            },
+            "turn-uuid",
+        );
         let line = String::from_utf8(encoded).unwrap();
         assert!(
             line.ends_with('\n'),
@@ -1479,21 +1601,25 @@ mod encode_tests {
         let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(value["type"], "user");
         assert_eq!(value["message"]["content"][0]["text"], "hello");
+        assert_eq!(value["uuid"], "turn-uuid", "the engine names this id back");
     }
 
     #[test]
     fn images_ride_stream_json_user_content() {
-        let encoded = encode_turn_stdin(&TurnInput {
-            turn_id: None,
-            text: "look".into(),
-            model: None,
-            reasoning_effort: None,
-            fast_mode: false,
-            images: vec![TurnImage {
-                media_type: "image/png".into(),
-                bytes: b"pixels".to_vec(),
-            }],
-        });
+        let encoded = encode_turn_stdin(
+            &TurnInput {
+                turn_id: None,
+                text: "look".into(),
+                model: None,
+                reasoning_effort: None,
+                fast_mode: false,
+                images: vec![TurnImage {
+                    media_type: "image/png".into(),
+                    bytes: b"pixels".to_vec(),
+                }],
+            },
+            "turn-uuid",
+        );
         let line = String::from_utf8(encoded).unwrap();
         assert!(line.ends_with('\n'));
         let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
@@ -2800,5 +2926,286 @@ done
             "the replacement resumes the session: {}",
             launches[1]
         );
+    }
+
+    /// Captures from the pinned release of a background task that ends
+    /// between turns.
+    fn capture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code/2.1.259")
+    }
+
+    /// A stand-in engine that replays a capture from the pinned release.
+    ///
+    /// For each user line it reads, it prints what the real engine printed
+    /// after that line and before the next one. The captured client uuids
+    /// become the ones this session sent, the way the engine names back
+    /// whatever uuid it receives.
+    fn replay_engine(dir: &Path, capture: &str) -> PathBuf {
+        let stdout =
+            std::fs::read_to_string(capture_dir().join(format!("{capture}.ndjson"))).unwrap();
+        let lines: Vec<&str> = stdout.lines().collect();
+        let writes: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(capture_dir().join(format!("{capture}.stdin.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            writes[0]["before"], 0,
+            "the engine prints nothing unprompted"
+        );
+        let captured: Vec<&str> = writes
+            .iter()
+            .map(|write| write["line"]["uuid"].as_str().unwrap())
+            .collect();
+        for (index, write) in writes.iter().enumerate() {
+            let start = usize::try_from(write["before"].as_u64().unwrap()).unwrap();
+            let end = writes.get(index + 1).map_or(lines.len(), |next| {
+                usize::try_from(next["before"].as_u64().unwrap()).unwrap()
+            });
+            let mut segment = lines[start..end].join("\n");
+            segment.push('\n');
+            for (number, uuid) in captured.iter().enumerate() {
+                segment = segment.replace(uuid, &format!("@uuid{}@", number + 1));
+            }
+            std::fs::write(dir.join(format!("segment-{}.ndjson", index + 1)), segment).unwrap();
+        }
+        write_engine(
+            dir,
+            &format!(
+                r#"#!/bin/sh
+n=0
+subst=""
+while IFS= read -r line; do
+  n=$((n+1))
+  uuid=$(printf '%s' "$line" | sed -n 's/.*"uuid":"\([^"]*\)".*/\1/p')
+  subst="$subst -e s/@uuid$n@/$uuid/g"
+  segment="{dir}/segment-$n.ndjson"
+  if [ -f "$segment" ]; then sed $subst "$segment"; fi
+done
+"#,
+                dir = dir.display()
+            ),
+        )
+    }
+
+    fn completions(events: &[HarnessEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, HarnessEvent::TurnCompleted { .. }))
+            .count()
+    }
+
+    fn says(events: &[HarnessEvent], text: &str) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                HarnessEvent::AssistantMessage { text: said, parent_call_id: None } if said == text
+            )
+        })
+    }
+
+    async fn run_to_end(session: &ClaudeSession, text: &str) -> TurnOutcome {
+        tokio::time::timeout(Duration::from_secs(10), session.run_turn(turn(text)))
+            .await
+            .unwrap_or_else(|_| panic!("the turn {text:?} never ended"))
+            .unwrap()
+    }
+
+    /// Captured on 2.1.259: a background command finishes after the turn's
+    /// `result`, and the engine reports it and runs a turn of its own, with
+    /// its own `result`. That output arrives between turns. It must reach the
+    /// transcript as it happens, as background activity, and the next user
+    /// turn must run to its own `result`.
+    #[tokio::test]
+    async fn a_background_task_that_ends_between_turns_does_not_end_the_next_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = replay_engine(dir.path(), "background-turn-between-turns");
+        let sink = Arc::new(Recorder::default());
+        let session = session_with(binary, dir.path(), sink.clone());
+
+        assert!(matches!(
+            run_to_end(&session, "start a background job").await,
+            TurnOutcome::Clean
+        ));
+        let first = sink.snapshot();
+        assert!(says(
+            &first,
+            "Started the background job; it reports when it finishes."
+        ));
+        assert_eq!(completions(&first), 1);
+
+        // Nobody is running a turn, and the engine's output still arrives.
+        let notice = "Background command \"Run a short background job\" completed (exit code 0)";
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let events = sink.snapshot();
+                let noticed = events.iter().any(|event| {
+                    matches!(event, HarnessEvent::HarnessNotice { message, .. } if message == notice)
+                });
+                if noticed && says(&events, "The background job finished.") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the background task's end never reached the transcript between turns");
+        let between = sink.snapshot();
+        assert_eq!(
+            completions(&between),
+            1,
+            "the engine's own turn is not a turn the session reports as ended"
+        );
+        assert!(
+            between[first.len()..].iter().all(|event| !matches!(
+                event,
+                HarnessEvent::AssistantDelta { .. } | HarnessEvent::ReasoningDelta { .. }
+            )),
+            "streaming text of a turn nobody asked for stays out"
+        );
+
+        assert!(matches!(
+            run_to_end(&session, "Say the word done.").await,
+            TurnOutcome::Clean
+        ));
+        let events = sink.snapshot();
+        let second = &events[between.len()..];
+        assert!(says(second, "done."), "the turn ran to its own answer");
+        assert!(matches!(
+            second.last(),
+            Some(HarnessEvent::TurnCompleted { .. })
+        ));
+        assert_eq!(completions(&events), 2);
+    }
+
+    /// The same capture, with the next turn sent the moment the first one
+    /// ends. The engine wrote its own turn's `result` before the user's line
+    /// went out, so that `result` must not end the user's turn, whichever
+    /// side of the write the reader happens to see it on.
+    #[tokio::test]
+    async fn a_result_written_before_the_users_line_never_ends_that_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = replay_engine(dir.path(), "background-turn-between-turns");
+        let sink = Arc::new(Recorder::default());
+        let session = session_with(binary, dir.path(), sink.clone());
+
+        run_to_end(&session, "start a background job").await;
+        let before = sink.snapshot().len();
+        run_to_end(&session, "Say the word done.").await;
+
+        let events = sink.snapshot();
+        assert!(says(&events[before..], "done."));
+        assert_eq!(completions(&events), 2);
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::TurnCompleted { .. })
+        ));
+    }
+
+    /// Captured on 2.1.259: the user's line arrives while the engine is
+    /// running its own turn. The engine queues it and finishes its own turn
+    /// first, with a `result` that comes after the line was sent. That
+    /// `result` precedes the line's `started` lifecycle, so it is not the
+    /// user's, and the user's turn runs to its own.
+    #[tokio::test]
+    async fn a_line_queued_behind_the_engines_own_turn_waits_for_its_own_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = replay_engine(dir.path(), "background-turn-queued-prompt");
+        let sink = Arc::new(Recorder::default());
+        let session = session_with(binary, dir.path(), sink.clone());
+
+        run_to_end(&session, "start a background job").await;
+        let before = sink.snapshot().len();
+        run_to_end(&session, "Say the word done.").await;
+
+        let events = sink.snapshot();
+        let second = &events[before..];
+        assert!(says(second, "The background job finished."));
+        assert!(says(second, "done."));
+        assert!(
+            second.iter().all(|event| !matches!(
+                event,
+                HarnessEvent::AssistantDelta { text } if !"done.".contains(text.as_str())
+            )),
+            "only the user's own turn streams text: {second:?}"
+        );
+        assert_eq!(completions(&events), 2);
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::TurnCompleted { .. })
+        ));
+    }
+
+    /// Captured on 2.1.259: the user's line arrives while the engine's own
+    /// turn is running a tool, and the engine folds the line into that turn.
+    /// The turn's `result` names no user line and says the engine started
+    /// it, yet it is the end of the user's turn: the line's `started`
+    /// lifecycle came first. Waiting for another `result` would hang.
+    #[tokio::test]
+    async fn a_line_folded_into_the_engines_own_turn_ends_with_that_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = replay_engine(dir.path(), "background-turn-folded-prompt");
+        let sink = Arc::new(Recorder::default());
+        let session = session_with(binary, dir.path(), sink.clone());
+
+        run_to_end(&session, "start a background job").await;
+        let before = sink.snapshot().len();
+        assert!(matches!(
+            run_to_end(&session, "Say the word done.").await,
+            TurnOutcome::Clean
+        ));
+
+        let events = sink.snapshot();
+        assert!(says(&events[before..], "done."));
+        assert_eq!(completions(&events), 2);
+    }
+
+    /// `CLAUDE_AUTO_BACKGROUND_TASKS` lets the engine move long foreground
+    /// work to the background. Every session launches with it off, unless the
+    /// session's settings ask for it. The managed human tools force it off,
+    /// because they must answer inside the turn that asked.
+    #[tokio::test]
+    async fn every_session_keeps_foreground_work_in_the_foreground_unless_it_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = dir.path().join("seen");
+        let binary = write_engine(
+            dir.path(),
+            &format!(
+                r#"#!/bin/sh
+printf '%s' "${{CLAUDE_AUTO_BACKGROUND_TASKS-unset}}" > {seen}
+while IFS= read -r line; do
+  printf '{{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-bg","usage":{{}}}}\n'
+done
+"#,
+                seen = seen.display()
+            ),
+        );
+        let background = |session: &ClaudeSession| {
+            session
+                .compose_plan_for(None, None)
+                .unwrap()
+                .env
+                .into_iter()
+                .filter(|(name, _)| name == AUTO_BACKGROUND_ENV)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>()
+        };
+
+        let mut session = session_with(binary, dir.path(), Arc::new(Discard));
+        assert_eq!(background(&session), ["0"]);
+        session.run_turn(turn("hello")).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "0",
+            "the engine child sees it"
+        );
+
+        session.spec.extra_env = vec![(AUTO_BACKGROUND_ENV.into(), "1".into())];
+        assert_eq!(background(&session), ["1"], "the session asked for it");
+
+        session.spec.tool_bridge = Some(crate::ToolBridgeSpec {
+            helper: PathBuf::from("/managed-helper"),
+            socket: PathBuf::from("/managed.sock"),
+        });
+        assert_eq!(background(&session), ["0"], "managed human tools win");
     }
 }

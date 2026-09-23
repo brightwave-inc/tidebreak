@@ -6,6 +6,9 @@ scenarios = [
   "background-tasks",
   "subagent-task",
   "subagent-task-foreground",
+  "background-turn-between-turns",
+  "background-turn-queued-prompt",
+  "background-turn-folded-prompt",
 ]
 
 [managed_human_mcp]
@@ -95,3 +98,60 @@ command = "claude --help"
 captured = "2026-09-23"
 binary = "The pinned @anthropic-ai/claude-code@2.1.259 install under the Tidebreak data directory"
 result = "`--effort <level>` lists low, medium, high, xhigh, and max. The probe reads the same list from the running engine, and claude::EFFORT_LADDER is held to this capture."
+
+[background_turns]
+files = [
+  "background-turn-between-turns.ndjson",
+  "background-turn-queued-prompt.ndjson",
+  "background-turn-folded-prompt.ndjson",
+]
+stdin = "Each capture's <name>.stdin.json lists the user lines written to stdin, each with `before`: how many stdout lines the engine had printed when it was written."
+captured = "2026-09-23"
+binary = "The pinned install; `claude --version` printed `2.1.259 (Claude Code)`"
+command = "The background-tasks argv: claude -p --output-format stream-json --verbose --include-partial-messages --input-format stream-json --dangerously-skip-permissions --allow-dangerously-skip-permissions --settings '{\"plansDirectory\":\"<private>\"}' --setting-sources user --strict-mcp-config --bare"
+provider = "Scripted localhost Messages provider; no paid inference. ANTHROPIC_API_KEY was a placeholder, and HOME, CLAUDE_CONFIG_DIR, and TMPDIR were fresh directories. --bare skips keychain reads."
+notes = """
+Two user lines per session, each carrying a client `uuid` the way Tidebreak
+now sends them: 11111111-… for the first and 22222222-… for the second. The
+first turn runs a Bash command with run_in_background and ends. Four seconds
+later the command finishes; the engine reports it (task_updated,
+task_notification) and runs a turn of its own, whose `result` carries origin
+kind task-notification and names no user line.
+
+With a uuid on the line, the engine reports the line's fate in
+command_lifecycle lines: `queued` when it reads the line, `started` when a turn
+takes it, then `completed`. The first stream_event of a turn the line started,
+and that turn's `result`, name the uuid in user_message_uuid and
+user_message_uuids. The init line lists msg_lifecycle_v1 among its
+capabilities.
+
+- background-turn-between-turns: the second line is written after the
+  engine's own turn ended. It runs as its own turn.
+- background-turn-queued-prompt: the second line is written while the
+  engine's own turn waits on the model. The engine queues it, finishes its own
+  turn, and prints that turn's `result` after the line arrived and before its
+  `started`. Then the line runs as its own turn.
+- background-turn-folded-prompt: the engine's own turn runs a 4-second Bash
+  command, and the second line is written while it runs. The engine folds the
+  line into that turn after the command: `started` comes mid-turn, the model
+  answers the line, `completed` comes before the `result`, and the `result`
+  carries origin kind task-notification and no user_message_uuid.
+"""
+redactions = """
+The repository path became /workspace and the engine's task-output root
+/tmp/redacted. Nothing else changed: session, message, request, tool, task,
+and command ids, the client uuids, and timestamps are kept as emitted.
+"""
+
+[auto_background]
+captured = "2026-09-23"
+binary = "The pinned install; `claude --version` printed `2.1.259 (Claude Code)`"
+command = "The subagent-task argv and scripted provider, with CLAUDE_AUTO_BACKGROUND_TASKS=0 in the child environment, and HOME a fresh directory."
+result = """
+Not checked in as a stream. With CLAUDE_AUTO_BACKGROUND_TASKS=0, an Agent call
+that leaves run_in_background unset still starts in the background: its tool
+result is the "Async agent launched successfully" placeholder, the parent's
+result reports subagent_stats.requested.unset 1 and started_in_background 1,
+and the engine runs a turn of its own when the subagent finishes. The same as
+subagent-task, which ran without the variable.
+"""

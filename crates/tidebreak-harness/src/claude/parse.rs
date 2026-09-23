@@ -1,7 +1,7 @@
 //! Parse captured Claude Code `stream-json` lines into [`HarnessEvent`]s.
 //!
 //! Written only against the checked-in fixtures under
-//! `fixtures/claude-code/2.1.233/`. Unknown event types increment a counter
+//! `fixtures/claude-code/`. Unknown event types increment a counter
 //! and are logged (size-capped). They are never fatal and never dropped
 //! silently.
 
@@ -52,6 +52,29 @@ pub struct ClaudeStreamParser {
     tasks: HashMap<String, EngineTask>,
     emitted_session: bool,
     reported_model: Option<String>,
+    /// What the last line said about the turn it belongs to.
+    mark: TurnMark,
+}
+
+/// What one stream line says about the turn it belongs to.
+///
+/// The session sends each user line with a client `uuid`. 2.1.259 reports
+/// what happened to that line in `command_lifecycle` lines: `queued` when it
+/// reads the line, and `started` when a turn takes it off the queue. It also
+/// names the uuid in `user_message_uuid` and `user_message_uuids` on the
+/// first reply of the turn the line started, and on that turn's `result`
+/// (captured). A `result` ends whatever turn the engine was running, and that
+/// is not always a turn the session asked for: when a background task ends
+/// between turns, the engine runs a turn of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnMark {
+    /// A `command_lifecycle` line: the client uuid it names and the state it
+    /// reports.
+    pub command: Option<(String, String)>,
+    /// Client uuids of the user lines the line says its turn took.
+    pub user_messages: Vec<String>,
+    /// The line is a `result`, so it ends the turn the engine was running.
+    pub ends_turn: bool,
 }
 
 /// Which content block a stream event belongs to.
@@ -114,9 +137,16 @@ impl ClaudeStreamParser {
         self.resume_ref.as_deref()
     }
 
+    /// What the last line pushed said about the turn it belongs to. Taking
+    /// it leaves an empty mark until the next line.
+    pub fn take_turn_mark(&mut self) -> TurnMark {
+        std::mem::take(&mut self.mark)
+    }
+
     /// Parse one NDJSON line. Never returns an error: unknown shapes increment
     /// [`Self::unrecognized`].
     pub fn push_line(&mut self, line: &str) -> Vec<HarnessEvent> {
+        self.mark = TurnMark::default();
         let line = line.trim();
         if line.is_empty() {
             return Vec::new();
@@ -137,6 +167,7 @@ impl ClaudeStreamParser {
     /// loses that too; it comes back from the call or the stream that
     /// started the message.
     pub fn push_cut_line(&mut self, line: &str) -> Vec<HarnessEvent> {
+        self.mark = TurnMark::default();
         let Some(cut) = CutLine::recover(line) else {
             self.count_unrecognized("oversized-line", line);
             return Vec::new();
@@ -278,21 +309,48 @@ impl ClaudeStreamParser {
             self.count_unrecognized("missing-type", value);
             return Vec::new();
         };
+        self.mark.user_messages = user_messages(value);
         match kind {
             "system" => self.parse_system(value),
             "stream_event" => self.parse_stream_event(value),
             "assistant" => self.parse_assistant(value),
             "user" => self.parse_user(value),
-            "result" => self.parse_result(value),
+            "result" => {
+                self.mark.ends_turn = true;
+                self.parse_result(value)
+            }
             "control_response" => Vec::new(),
             // A heartbeat every 30 seconds while a tool runs (captured on
             // 2.1.259). The call's card already shows it running and times
             // it, and the heartbeat's own `tool_use_id` names no call.
             "tool_progress" => Vec::new(),
+            // What happened to a user line the session sent with a `uuid`
+            // (captured on 2.1.259). It carries nothing for the transcript;
+            // the session reads it to tell its own turn from one the engine
+            // started itself.
+            "command_lifecycle" => {
+                self.note_command(value);
+                Vec::new()
+            }
             other => {
                 self.count_unrecognized(other, value);
                 Vec::new()
             }
+        }
+    }
+
+    fn note_command(&mut self, value: &Value) {
+        let field = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+        };
+        match (field("command_uuid"), field("state")) {
+            (Some(uuid), Some(state)) => {
+                self.mark.command = Some((uuid.to_owned(), state.to_owned()));
+            }
+            _ => self.count_unrecognized("command_lifecycle/malformed", value),
         }
     }
 
@@ -911,6 +969,31 @@ fn parent_call_id(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
         .map(str::to_owned)
+}
+
+/// The client uuids a line names as the user lines its turn took:
+/// `user_message_uuids` in order, plus `user_message_uuid` when the list
+/// leaves it out. Empty when the line names none.
+fn user_messages(value: &Value) -> Vec<String> {
+    let mut uuids: Vec<String> = value
+        .get("user_message_uuids")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|uuid| !uuid.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if let Some(uuid) = value
+        .get("user_message_uuid")
+        .and_then(Value::as_str)
+        .filter(|uuid| !uuid.is_empty())
+    {
+        if !uuids.iter().any(|known| known == uuid) {
+            uuids.push(uuid.to_owned());
+        }
+    }
+    uuids
 }
 
 fn tool_detail(name: &str, input: &Value) -> ToolDetail {
