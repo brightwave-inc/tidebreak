@@ -296,6 +296,76 @@ async fn auto_mount_suffixes_a_name_a_manual_server_already_took() {
     );
 }
 
+/// A saved mount Tidebreak could not load still mounts its endpoint, and a
+/// skipped record still holds its name. Auto-mount mounts neither the
+/// endpoint again nor a server under that name, and the endpoint it can
+/// mount still lands.
+#[tokio::test]
+async fn auto_mount_leaves_skipped_records_their_endpoint_and_name() {
+    let (runtime, store, _directory) = test_runtime().await;
+    let now = chrono::Utc::now();
+    let record = |name: &str, definition: serde_json::Value| ConnectedApp {
+        id: ConnectedAppId::new(),
+        name: name.to_string(),
+        kind: ConnectedAppKind::McpServer,
+        definition,
+        created_at: now,
+        updated_at: now,
+    };
+    // A mount of the docs endpoint, written by a newer build.
+    let mount = record(
+        "docs",
+        serde_json::json!({
+            "name": "docs",
+            "gateway_endpoint": "docs",
+            "transport": "streamable_http"
+        }),
+    );
+    // Another newer record, under the name the tools endpoint would take.
+    let named = record(
+        "tools",
+        serde_json::json!({
+            "name": "tools",
+            "command": "/bin/tools",
+            "transport": "stdio"
+        }),
+    );
+    store
+        .replace_connected_apps(ConnectedAppKind::McpServer, &[mount, named])
+        .await
+        .unwrap();
+    runtime
+        .initialize(ConfiguredMcpServers::default())
+        .await
+        .unwrap()
+        .connect()
+        .await;
+
+    assert!(runtime
+        .auto_mount_gateway_endpoints(&["docs".to_string(), "tools".to_string()])
+        .await
+        .unwrap());
+    let info = runtime.info().await;
+    let mounted: Vec<(&str, Option<&str>)> = info
+        .servers
+        .iter()
+        .map(|server| {
+            (
+                server.definition.name.as_str(),
+                server.definition.gateway_endpoint.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(mounted, [("tools_2", Some("tools"))]);
+    let skipped: Vec<String> = runtime
+        .skipped_servers()
+        .await
+        .into_iter()
+        .map(|skipped| skipped.name)
+        .collect();
+    assert_eq!(skipped, ["docs", "tools"]);
+}
+
 #[test]
 fn parses_a_bounded_stdio_server_configuration() {
     let config = parse(
@@ -2980,8 +3050,11 @@ async fn servers_when(
 
 /// A saved server that is slow to answer holds up neither boot nor the
 /// server beside it. `initialize` publishes both as connecting without
-/// touching the network, each publishes its tools the moment it is up, and a
-/// turn that starts meanwhile waits a few seconds at most.
+/// touching the network, each publishes its tools the moment it is up, and
+/// work that starts meanwhile waits a few seconds at most. The wait is one
+/// deadline measured from boot, not a fresh wait for each caller: once it
+/// passes, nothing waits, and each caller learns which server is still
+/// connecting.
 #[tokio::test]
 async fn a_slow_saved_server_holds_up_neither_boot_nor_its_neighbors() {
     let (release_slow, held) = tokio::sync::watch::channel(false);
@@ -3023,16 +3096,29 @@ async fn a_slow_saved_server_holds_up_neither_boot_nor_its_neighbors() {
     assert_eq!(listed(&info, "slow").health, McpHealth::Initializing);
     assert!(runtime.snapshot().get("mcp__fast__fast_lookup").is_some());
 
-    // A turn that starts now waits for the slow server, but not for long.
+    // Work that starts now waits for the slow server, but not for long.
     let started = std::time::Instant::now();
-    let tools = runtime.snapshot_after_boot().await;
+    let view = runtime.tools_after_boot().await;
     assert!(
         started.elapsed() < BOOT_TOOLS_WAIT + Duration::from_secs(2),
         "a turn waited {:?} on a server that never answered",
         started.elapsed()
     );
-    assert!(tools.get("mcp__fast__fast_lookup").is_some());
-    assert!(tools.get("mcp__slow__slow_lookup").is_none());
+    assert!(view.registry.get("mcp__fast__fast_lookup").is_some());
+    assert!(view.registry.get("mcp__slow__slow_lookup").is_none());
+    assert_eq!(view.connecting, ["slow"]);
+
+    // The deadline has passed, so the next caller does not wait again.
+    let started = std::time::Instant::now();
+    let view = runtime.tools_after_boot().await;
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "a second caller waited {:?} after the boot deadline passed",
+        started.elapsed()
+    );
+    assert_eq!(view.connecting, ["slow"]);
+    let before = view.fingerprint;
+    assert_eq!(*runtime.tool_changes().borrow(), before);
 
     release_slow.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(15), connecting)
@@ -3040,12 +3126,144 @@ async fn a_slow_saved_server_holds_up_neither_boot_nor_its_neighbors() {
         .expect("boot connections settle once the server answers")
         .unwrap();
     let started = std::time::Instant::now();
-    let tools = runtime.snapshot_after_boot().await;
+    let view = runtime.tools_after_boot().await;
     assert!(started.elapsed() < Duration::from_secs(1));
-    assert!(tools.get("mcp__slow__slow_lookup").is_some());
+    assert!(view.registry.get("mcp__slow__slow_lookup").is_some());
+    assert!(view.connecting.is_empty());
+    // The change reached anyone watching for one.
+    assert_ne!(view.fingerprint, before);
+    assert_eq!(*runtime.tool_changes().borrow(), view.fingerprint);
     assert_eq!(
         listed(&runtime.info().await, "slow").health,
         McpHealth::Healthy
+    );
+}
+
+/// The gateway's apps reach `create_app`'s roster while a saved server is
+/// still connecting after boot, and a server that connects later keeps them.
+/// The roster read used to wait for every boot connection, and a connection
+/// that landed after an add wrote the roster without the gateway's apps.
+#[tokio::test]
+async fn the_gateway_roster_arrives_before_a_slow_server_and_stays() {
+    struct CreateApp;
+
+    #[async_trait::async_trait]
+    impl tidebreak_core::Tool for CreateApp {
+        fn spec(&self) -> tidebreak_core::ToolSpec {
+            tidebreak_core::ToolSpec {
+                name: tidebreak_core::local_app::CREATE_APP_TOOL.into(),
+                description: "Create an app.".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        fn approval_class(&self) -> tidebreak_core::ApprovalClass {
+            tidebreak_core::ApprovalClass::Sensitive
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &tidebreak_core::ToolCtx,
+            _args: serde_json::Value,
+        ) -> Result<tidebreak_core::ToolOutput> {
+            Ok(tidebreak_core::ToolOutput::text(""))
+        }
+    }
+
+    struct RosterGateway;
+
+    #[async_trait::async_trait]
+    impl GatewayEndpoints for RosterGateway {
+        async fn endpoint(&self, _slug: &str) -> Result<GatewayEndpointAccess> {
+            Err(AgentError::SignInRequired(
+                "no gateway session is stored".to_string(),
+            ))
+        }
+
+        async fn entitled_app_catalogs(&self) -> Vec<GatewayRosterApp> {
+            vec![GatewayRosterApp {
+                id: "app-incident".to_string(),
+                name: "Incident API".to_string(),
+                operation_ids: vec!["listIncidents".to_string()],
+            }]
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("mcp.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let runtime = Arc::new(McpRuntime::new(
+        Arc::new(ToolRegistry::new().with(Box::new(CreateApp))),
+        store.clone(),
+        Arc::new(TestSecrets::default()),
+        Arc::new(RosterGateway),
+        Arc::new(crate::managed_policy::ProvisionedPolicyFile::in_data_dir(
+            directory.path(),
+        )),
+        Arc::new(crate::managed_policy::NoOsPolicy),
+    ));
+    let roster = |runtime: &McpRuntime| {
+        runtime
+            .snapshot()
+            .specs()
+            .into_iter()
+            .find(|spec| spec.name == tidebreak_core::local_app::CREATE_APP_TOOL)
+            .expect("create_app is registered")
+            .description
+    };
+    let (release_slow, held) = tokio::sync::watch::channel(false);
+    let slow = serve_held_http_mcp("slow_lookup", held).await;
+    seed_records(
+        &store,
+        &[http_definition("slow", &format!("http://{slow}/mcp"))],
+    )
+    .await;
+
+    let boot = runtime
+        .initialize(ConfiguredMcpServers::default())
+        .await
+        .unwrap();
+    let connecting = tokio::spawn(boot.connect());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !roster(&runtime).contains("app-incident") {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the gateway roster waited for the slow server: {}",
+            roster(&runtime)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        listed(&runtime.info().await, "slow").health,
+        McpHealth::Initializing
+    );
+
+    // An add publishes while the slow server is still connecting.
+    let mut later = http_definition("later", "https://mcp.example.test/mcp");
+    later.enabled = false;
+    runtime
+        .add_server(later, ManualLockdown::Open)
+        .await
+        .unwrap();
+    release_slow.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(15), connecting)
+        .await
+        .expect("boot connections settle once the server answers")
+        .unwrap();
+    assert_eq!(
+        listed(&runtime.info().await, "slow").health,
+        McpHealth::Healthy
+    );
+    assert!(
+        roster(&runtime).contains("app-incident"),
+        "a later connection dropped the gateway roster: {}",
+        roster(&runtime)
     );
 }
 

@@ -113,6 +113,30 @@ async fn an_external_engine_session_mounts_the_connected_apps_bridge() {
         "the bridge lists the MCP runtime's tools: {body}"
     );
 
+    // The engine's client opens the event stream beside its requests, which
+    // tells it when to list its tools again.
+    let events = client
+        .get(&apps.mcp_endpoint_url)
+        .bearer_auth(&apps.token)
+        .header(header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        events.headers()[reqwest::header::CONTENT_TYPE],
+        "text/event-stream"
+    );
+    drop(events);
+    let refused = client
+        .get(&apps.mcp_endpoint_url)
+        .bearer_auth(&token)
+        .header(header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::UNAUTHORIZED);
+
     // The install token is not a bridge token: only the session-scoped
     // bearer the worker was handed reaches the apps.
     let refused = client

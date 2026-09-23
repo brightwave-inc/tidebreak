@@ -1345,7 +1345,9 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/code/mcp/connected-apps",
-            post(routes::code::connected_apps),
+            // POST carries the engine's requests; GET is the event stream
+            // that tells it when to list its tools again.
+            post(routes::code::connected_apps).get(routes::code::connected_apps_events),
         )
         .route_layer(axum::middleware::from_fn(auth::require_loopback_peer))
         .with_state(frame_state);

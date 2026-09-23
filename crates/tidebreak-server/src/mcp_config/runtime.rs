@@ -165,11 +165,22 @@ struct SkippedRecord {
     reason: String,
 }
 
-/// The `create_app` roster inputs one registry rebuild reads.
+/// The `create_app` roster inputs this machine answers for itself. The
+/// gateway's part lives in [`McpRuntime::gateway_roster`].
 struct Rosters {
     rest: Vec<RestRosterApp>,
     folders: Vec<crate::host_folders::ApprovedFolder>,
-    gateway: Vec<GatewayRosterApp>,
+}
+
+/// The tools new work gets, and the servers still making their first
+/// connection when they were read.
+pub struct McpToolsView {
+    pub registry: Arc<ToolRegistry>,
+    /// Configured servers whose tools are missing because their first
+    /// connection has not finished yet, by name.
+    pub connecting: Vec<String>,
+    /// What [`McpRuntime::tool_changes`] carries for this view.
+    pub fingerprint: u64,
 }
 
 /// Why a record whose environment values could not move into the credential
@@ -237,9 +248,22 @@ pub struct McpRuntime {
     sign_ins: std::sync::Mutex<HashMap<ConnectedAppId, SignInRecord>>,
     next_sign_in: AtomicU64,
     /// `false` while the saved servers published at boot are still making
-    /// their first connection. A turn waits on it, briefly; see
-    /// [`snapshot_after_boot`](Self::snapshot_after_boot).
+    /// their first connection. Work that starts meanwhile waits on it, until
+    /// `boot_deadline` at most; see [`wait_for_boot`](Self::wait_for_boot).
     boot_settled: tokio::sync::watch::Sender<bool>,
+    /// The one moment, measured from when boot published its servers, after
+    /// which nothing waits for them any more, however long they take.
+    boot_deadline: std::sync::Mutex<Option<tokio::time::Instant>>,
+    /// A fingerprint of the tools advertised to MCP clients: every mounted
+    /// MCP tool, and which servers are still making their first connection.
+    /// It changes exactly when that list changes, which is when the
+    /// connected-apps bridge tells an engine to list its tools again.
+    tool_changes: tokio::sync::watch::Sender<u64>,
+    /// The gateway's part of the `create_app` roster, as last read. Reading
+    /// it is a network call, so writes that must not wait on the network
+    /// reuse this copy, and a write that did read it fresh updates it. That
+    /// way no write drops a roster another write just fetched.
+    gateway_roster: std::sync::Mutex<Vec<GatewayRosterApp>>,
     /// Lets a test's fake authorization server live on loopback.
     #[cfg(test)]
     oauth_loopback: AtomicBool,
@@ -254,6 +278,7 @@ impl McpRuntime {
         provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
         os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     ) -> Self {
+        let tool_changes = tokio::sync::watch::Sender::new(tool_fingerprint(&base_tools, &[]));
         Self {
             base_tools: (*base_tools).clone(),
             tools: RwLock::new(base_tools),
@@ -275,6 +300,9 @@ impl McpRuntime {
             sign_ins: std::sync::Mutex::new(HashMap::new()),
             next_sign_in: AtomicU64::new(1),
             boot_settled: tokio::sync::watch::Sender::new(true),
+            boot_deadline: std::sync::Mutex::new(None),
+            tool_changes,
+            gateway_roster: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             oauth_loopback: AtomicBool::new(false),
         }
@@ -600,10 +628,7 @@ impl McpRuntime {
         }
         if torn_down {
             let registry = self.registry_for(&state).await;
-            *self
-                .tools
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+            self.store_registry(&state, registry);
         }
         torn_down
     }
@@ -745,9 +770,9 @@ impl McpRuntime {
     /// connecting anything: each server that connects reads as connecting,
     /// the rest as off. Returns the connections to run.
     ///
-    /// The registry published here carries the local `create_app` roster
-    /// only. The gateway's part of it is a network read, so it joins when the
-    /// boot connections have landed.
+    /// The registry published here carries the gateway's `create_app` roster
+    /// only as last read, which at boot is none: reading it is a network
+    /// call, so the boot connections fetch it beside themselves.
     async fn publish_starting(
         self: &Arc<Self>,
         configured: Vec<McpServerDefinition>,
@@ -789,6 +814,11 @@ impl McpRuntime {
             );
         }
         if !connecting.is_empty() {
+            *self
+                .boot_deadline
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(tokio::time::Instant::now() + BOOT_TOOLS_WAIT);
             self.boot_settled.send_replace(false);
         }
         let rosters = self.local_rosters().await;
@@ -806,29 +836,32 @@ impl McpRuntime {
     }
 
     /// Make the first connection to every server [`publish_starting`]
-    /// published, all at once, then mark boot settled and publish the
-    /// registry with the gateway's roster.
+    /// published, all at once, then mark boot settled. The gateway's
+    /// `create_app` roster is read beside the connections and published as
+    /// soon as it arrives, rather than after the slowest server, and a slow
+    /// gateway never holds boot unsettled.
     ///
     /// [`publish_starting`]: Self::publish_starting
     async fn connect_at_boot(self: &Arc<Self>, servers: Vec<(String, u64)>) {
-        if !servers.is_empty() {
-            // Before any connection presents a stored session, as a
-            // replacement does: a session issued for another URL goes.
-            let (definitions, ids) = {
-                let state = self.state.lock().await;
-                (state.definitions.clone(), state.ids.clone())
-            };
-            self.reconcile_oauth_sessions(&definitions, &ids).await;
-            let rosters = self.local_rosters().await;
-            join_all(
-                servers
-                    .iter()
-                    .map(|(name, epoch)| self.connect_booting(name, *epoch, &rosters)),
-            )
-            .await;
-        }
-        self.boot_settled.send_replace(true);
-        self.republish().await;
+        let connections = async {
+            if !servers.is_empty() {
+                // Before any connection presents a stored session, as a
+                // replacement does: a session issued for another URL goes.
+                let (definitions, ids) = {
+                    let state = self.state.lock().await;
+                    (state.definitions.clone(), state.ids.clone())
+                };
+                self.reconcile_oauth_sessions(&definitions, &ids).await;
+                join_all(
+                    servers
+                        .iter()
+                        .map(|(name, epoch)| self.connect_booting(name, *epoch)),
+                )
+                .await;
+            }
+            self.boot_settled.send_replace(true);
+        };
+        tokio::join!(connections, self.republish());
     }
 
     /// Make one published server's first connection, and publish its tools
@@ -838,7 +871,7 @@ impl McpRuntime {
     /// reconnect or the supervisor waits for this attempt instead of starting
     /// a second child. A settings save that replaced the server meanwhile
     /// wins: this result is dropped.
-    async fn connect_booting(&self, name: &str, epoch: u64, rosters: &Rosters) {
+    async fn connect_booting(&self, name: &str, epoch: u64) {
         let (reconnect_lock, definition, app_id) = {
             let state = self.state.lock().await;
             let Some(server) = state
@@ -884,6 +917,7 @@ impl McpRuntime {
             Ok(_) => super::stdio::resolved_display(&definition).await,
             Err(_) => None,
         };
+        let rosters = self.local_rosters().await;
         let mut state = self.state.lock().await;
         if state
             .definitions
@@ -934,21 +968,80 @@ impl McpRuntime {
         // A reconnect that waited on the lock with the old epoch returns this
         // result instead of starting another child.
         server.epoch = fresh_epoch;
-        self.write_registry(&state, rosters);
+        self.write_registry(&state, &rosters);
     }
 
-    /// The tool surface for work that starts now: a turn, or an external
-    /// engine listing its tools.
+    /// Wait, while saved servers are still making their first connection
+    /// after boot, until they have all landed or the one boot deadline passes,
+    /// whichever comes first.
     ///
-    /// While saved servers are still making their first connection after
-    /// boot, this waits for them, but never longer than [`BOOT_TOOLS_WAIT`].
-    /// After that it answers with the servers that are up; the rest reach
-    /// later snapshots as they connect. Once boot has settled, it answers at
-    /// once, like [`snapshot`](Self::snapshot).
-    pub async fn snapshot_after_boot(&self) -> Arc<ToolRegistry> {
+    /// The deadline is [`BOOT_TOOLS_WAIT`] after boot published its servers,
+    /// the same for every caller, so nothing waits once it has passed however
+    /// long a server keeps boot unsettled. Once boot has settled this returns
+    /// at once.
+    pub async fn wait_for_boot(&self) {
+        let deadline = *self
+            .boot_deadline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(deadline) = deadline else {
+            return;
+        };
         let mut settled = self.boot_settled.subscribe();
-        let _ = tokio::time::timeout(BOOT_TOOLS_WAIT, settled.wait_for(|settled| *settled)).await;
-        self.snapshot()
+        let _ = tokio::time::timeout_at(deadline, settled.wait_for(|settled| *settled)).await;
+    }
+
+    /// The tool surface for work that starts now, after [`wait_for_boot`],
+    /// with the servers still making their first connection, so the caller
+    /// can say so.
+    ///
+    /// [`wait_for_boot`]: Self::wait_for_boot
+    pub async fn tools_after_boot(&self) -> McpToolsView {
+        self.wait_for_boot().await;
+        self.tools_view().await
+    }
+
+    /// The published tools, the servers still making their first
+    /// connection, and the fingerprint of the two, read together.
+    ///
+    /// Every publication writes the registry while it holds the state lock,
+    /// so reading both under that lock sees one consistent moment, and the
+    /// fingerprint equals the one [`tool_changes`](Self::tool_changes) last
+    /// carried.
+    pub async fn tools_view(&self) -> McpToolsView {
+        let state = self.state.lock().await;
+        let registry = self.snapshot();
+        let connecting = connecting_servers(&state);
+        let fingerprint = tool_fingerprint(&registry, &connecting);
+        McpToolsView {
+            registry,
+            connecting,
+            fingerprint,
+        }
+    }
+
+    /// The fingerprint of the advertised tools, which changes each time a
+    /// server's tools arrive or leave, or a server stops connecting. The
+    /// connected-apps bridge watches it to tell an engine when to list its
+    /// tools again.
+    pub fn tool_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.tool_changes.subscribe()
+    }
+
+    /// Each configured server with a live connection, and how many tools it
+    /// mounted, by name.
+    pub async fn connected_tool_counts(&self) -> Vec<(String, usize)> {
+        let state = self.state.lock().await;
+        let mut connected: Vec<(String, usize)> = state
+            .servers
+            .iter()
+            .filter_map(|(name, server)| {
+                let client = server.client.as_ref()?;
+                Some((name.clone(), client.tools().count()))
+            })
+            .collect();
+        connected.sort();
+        connected
     }
 
     /// The saved records the loader skipped, with why, in storage order.
@@ -1014,7 +1107,8 @@ impl McpRuntime {
     /// new server even when it cannot connect yet, so its row says what it
     /// needs: a sign-in, a token variable, or a network that answers. One
     /// failure saves nothing: an OAuth sign-in Tidebreak cannot complete,
-    /// because that server could never connect.
+    /// because that server could never connect. A definition that arrives
+    /// turned off is saved without connecting at all.
     ///
     /// The server takes the definition's name, or the first free variant of
     /// it. When a configured server already has the definition's URL, nothing
@@ -1054,69 +1148,91 @@ impl McpRuntime {
             .chain(skipped.iter().map(|skipped| skipped.record.name.clone()))
             .collect();
         definition.name = unused_name(&definition.name, &taken);
+        if configured.len() >= MAX_SERVERS {
+            return Err(AgentError::config(format!(
+                "Tidebreak holds at most {MAX_SERVERS} MCP servers. Remove one before you add \
+                 another."
+            )));
+        }
         let mut candidate = configured;
         candidate.push(definition.clone());
         validate_servers(&candidate)?;
         let id = ConnectedAppId::new();
         ids.insert(definition.name.clone(), id);
-        let (result, oauth) = self
-            .connect_server(&definition, &BTreeMap::new(), Some(id))
-            .await;
-        if let (Err(error), Some(need)) = (&result, &oauth) {
-            if !need.saves() {
-                return Err(AgentError::config(failure_diagnostic(
-                    &definition,
-                    error,
-                    Some(need),
-                )));
+        let managed = if definition.enabled {
+            let (result, oauth) = self
+                .connect_server(&definition, &BTreeMap::new(), Some(id))
+                .await;
+            if let (Err(error), Some(need)) = (&result, &oauth) {
+                if !need.saves() {
+                    return Err(AgentError::config(failure_diagnostic(
+                        &definition,
+                        error,
+                        Some(need),
+                    )));
+                }
             }
-        }
-        self.persist_definitions(&candidate, &ids, &skipped).await?;
-        let resolved_command = match &result {
-            Ok(_) => super::stdio::resolved_display(&definition).await,
-            Err(_) => None,
-        };
-        let managed = match result {
-            Ok((client, ui_views)) => ManagedServer {
-                client: Some(client),
-                health: McpHealth::Healthy,
+            let resolved_command = match &result {
+                Ok(_) => super::stdio::resolved_display(&definition).await,
+                Err(_) => None,
+            };
+            match result {
+                Ok((client, ui_views)) => ManagedServer {
+                    client: Some(client),
+                    health: McpHealth::Healthy,
+                    diagnostic: None,
+                    resolved_command,
+                    reconnect: Reconnect::default(),
+                    epoch: self.fresh_epoch(),
+                    reconnect_lock: Arc::new(Mutex::new(())),
+                    ui_views,
+                    oauth: None,
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        server = %definition.name,
+                        "added MCP server did not connect: {error}"
+                    );
+                    let diagnostic = failure_diagnostic(&definition, &error, oauth.as_ref());
+                    ManagedServer {
+                        client: None,
+                        health: McpHealth::Degraded,
+                        diagnostic: Some(diagnostic.clone()),
+                        resolved_command: None,
+                        reconnect: Reconnect::after_failure(
+                            failure_park(&definition, &error, oauth.as_ref()),
+                            diagnostic,
+                        ),
+                        epoch: self.fresh_epoch(),
+                        reconnect_lock: Arc::new(Mutex::new(())),
+                        ui_views: HashMap::new(),
+                        oauth,
+                    }
+                }
+            }
+        } else {
+            ManagedServer {
+                client: None,
+                health: McpHealth::Disabled,
                 diagnostic: None,
-                resolved_command,
+                resolved_command: None,
                 reconnect: Reconnect::default(),
                 epoch: self.fresh_epoch(),
                 reconnect_lock: Arc::new(Mutex::new(())),
-                ui_views,
+                ui_views: HashMap::new(),
                 oauth: None,
-            },
-            Err(error) => {
-                tracing::warn!(
-                    server = %definition.name,
-                    "added MCP server did not connect: {error}"
-                );
-                let diagnostic = failure_diagnostic(&definition, &error, oauth.as_ref());
-                ManagedServer {
-                    client: None,
-                    health: McpHealth::Degraded,
-                    diagnostic: Some(diagnostic.clone()),
-                    resolved_command: None,
-                    reconnect: Reconnect::after_failure(
-                        failure_park(&definition, &error, oauth.as_ref()),
-                        diagnostic,
-                    ),
-                    epoch: self.fresh_epoch(),
-                    reconnect_lock: Arc::new(Mutex::new(())),
-                    ui_views: HashMap::new(),
-                    oauth,
-                }
             }
         };
+        self.persist_definitions(&candidate, &ids, &skipped).await?;
         let name = definition.name.clone();
-        let rosters = self.rosters().await;
+        let rosters = self.local_rosters().await;
+        let gateway_roster = self.gateway.entitled_app_catalogs().await;
         {
             let mut state = self.state.lock().await;
             state.definitions = candidate.into_iter().chain(plugin).collect();
             state.ids = ids;
             state.servers.insert(name.clone(), managed);
+            self.set_gateway_roster(gateway_roster);
             self.write_registry(&state, &rosters);
         }
         Ok(McpAddOutcome::Added {
@@ -1396,15 +1512,30 @@ impl McpRuntime {
     /// mounting — rather than resurrecting an endpoint the user turned off.
     pub async fn auto_mount_gateway_endpoints(&self, entitled: &[String]) -> Result<bool> {
         let _mutation = self.mutation.lock().await;
-        let mut servers = self.state.lock().await.definitions.clone();
+        let (mut servers, skipped) = {
+            let state = self.state.lock().await;
+            (state.definitions.clone(), state.skipped.clone())
+        };
         let unmounts = read_endpoint_unmounts(&*self.store).await?;
+        // A skipped record still holds its name and, for a gateway mount, its
+        // endpoint: mounting the endpoint again, or under that name, would
+        // fail the save, and with it every other mount in this pass.
         let mut configured: HashSet<String> = servers
             .iter()
             .filter_map(|definition| definition.gateway_endpoint.clone())
+            .chain(skipped.iter().filter_map(|skipped| {
+                skipped
+                    .record
+                    .definition
+                    .get("gateway_endpoint")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            }))
             .collect();
         let mut taken: HashSet<String> = servers
             .iter()
             .map(|definition| definition.name.clone())
+            .chain(skipped.iter().map(|skipped| skipped.record.name.clone()))
             .collect();
         let before = servers.len();
         for slug in entitled {
@@ -1894,10 +2025,7 @@ impl McpRuntime {
         state.definitions = configured.into_iter().chain(desired).collect();
         state.ids = ids;
         let registry = self.registry_for(&state).await;
-        *self
-            .tools
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+        self.store_registry(&state, registry);
         true
     }
 
@@ -1907,19 +2035,15 @@ impl McpRuntime {
         ids: BTreeMap<String, ConnectedAppId>,
         servers: HashMap<String, ManagedServer>,
     ) {
-        let rest = self.rest_roster().await;
-        let folders = self.folder_roster().await;
+        let rosters = self.local_rosters().await;
         let gateway = self.gateway.entitled_app_catalogs().await;
-        let registry = self.registry_with(&servers, &rest, &folders, &gateway);
         self.forget_stale_sign_ins(&definitions, &ids);
         let mut state = self.state.lock().await;
         state.definitions = definitions;
         state.ids = ids;
         state.servers = servers;
-        *self
-            .tools
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+        self.set_gateway_roster(gateway);
+        self.write_registry(&state, &rosters);
     }
 
     /// Republish the tool registry from the current state so the
@@ -1932,12 +2056,7 @@ impl McpRuntime {
     /// connected-apps CRUD surface calls this after every store write; MCP
     /// connections are untouched.
     pub async fn refresh_connected_app_roster(&self) {
-        let state = self.state.lock().await;
-        let registry = self.registry_for(&state).await;
-        *self
-            .tools
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+        self.republish().await;
     }
 
     /// Every stored `rest_api` connected app's roster inputs, read from the
@@ -1978,7 +2097,9 @@ impl McpRuntime {
         let rest = self.rest_roster().await;
         let folders = self.folder_roster().await;
         let gateway = self.gateway.entitled_app_catalogs().await;
-        self.registry_with(&state.servers, &rest, &folders, &gateway)
+        let registry = self.registry_with(&state.servers, &rest, &folders, &gateway);
+        self.set_gateway_roster(gateway);
+        registry
     }
 
     /// Every approved connected folder, for the roster's folders section.
@@ -2000,45 +2121,62 @@ impl McpRuntime {
     }
 
     /// The rosters this machine answers for itself: the stored REST apps and
-    /// the approved folders. The gateway's stays empty; see
-    /// [`rosters`](Self::rosters).
+    /// the approved folders. The gateway's comes from its last read; see
+    /// [`write_registry`](Self::write_registry).
     async fn local_rosters(&self) -> Rosters {
         Rosters {
             rest: self.rest_roster().await,
             folders: self.folder_roster().await,
-            gateway: Vec::new(),
         }
     }
 
-    /// Every roster, the gateway's included. That one is a network read while
-    /// a gateway session exists, so callers read it before they take the
-    /// state lock.
-    async fn rosters(&self) -> Rosters {
-        let mut rosters = self.local_rosters().await;
-        rosters.gateway = self.gateway.entitled_app_catalogs().await;
-        rosters
+    /// Replace the last-read gateway roster. Callers hold the state lock, so
+    /// every write after this one sees it.
+    fn set_gateway_roster(&self, gateway: Vec<GatewayRosterApp>) {
+        *self
+            .gateway_roster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = gateway;
     }
 
-    /// Build the registry from `state` and publish it. Callers hold the state
-    /// lock, so the registry never runs ahead of the state it describes.
+    /// Build the registry from `state`, the local rosters, and the gateway
+    /// roster as last read, and publish it. Callers hold the state lock, so
+    /// the registry never runs ahead of the state it describes.
     fn write_registry(&self, state: &RuntimeState, rosters: &Rosters) {
-        let registry = self.registry_with(
-            &state.servers,
-            &rosters.rest,
-            &rosters.folders,
-            &rosters.gateway,
-        );
+        let gateway = self
+            .gateway_roster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let registry =
+            self.registry_with(&state.servers, &rosters.rest, &rosters.folders, &gateway);
+        self.store_registry(state, registry);
+    }
+
+    /// Publish `registry` as the tool surface for new work, and tell the
+    /// watchers of [`tool_changes`](Self::tool_changes) when what it
+    /// advertises changed. Callers hold the state lock, which is what keeps
+    /// the fingerprint in step with [`tools_view`](Self::tools_view).
+    fn store_registry(&self, state: &RuntimeState, registry: ToolRegistry) {
+        let fingerprint = tool_fingerprint(&registry, &connecting_servers(state));
         *self
             .tools
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+        self.tool_changes.send_if_modified(|current| {
+            let changed = *current != fingerprint;
+            *current = fingerprint;
+            changed
+        });
     }
 
     /// Rebuild the registry with fresh rosters. They are read before the
     /// state lock, so a slow gateway never holds up a read of the server list.
     async fn republish(&self) {
-        let rosters = self.rosters().await;
+        let rosters = self.local_rosters().await;
+        let gateway = self.gateway.entitled_app_catalogs().await;
         let state = self.state.lock().await;
+        self.set_gateway_roster(gateway);
         self.write_registry(&state, &rosters);
     }
 
@@ -2699,10 +2837,7 @@ impl McpRuntime {
                 server.reconnect = Reconnect::default();
                 server.epoch = self.fresh_epoch();
                 let registry = self.registry_for(&state).await;
-                *self
-                    .tools
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+                self.store_registry(&state, registry);
                 Ok(self.info_locked(&state))
             }
             Err(error) => {
@@ -2733,10 +2868,7 @@ impl McpRuntime {
                     return Ok(self.info_locked(&state));
                 }
                 let registry = self.registry_for(&state).await;
-                *self
-                    .tools
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+                self.store_registry(&state, registry);
                 Err(AgentError::config(format!(
                     "external MCP server {name} failed to reconnect: {diagnostic}"
                 )))
@@ -2841,10 +2973,7 @@ impl McpRuntime {
             server.reconnect.backoff = backoff;
         }
         let registry = self.registry_for(&state).await;
-        *self
-            .tools
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+        self.store_registry(&state, registry);
     }
 
     fn fresh_epoch(&self) -> u64 {
@@ -2969,6 +3098,40 @@ fn unused_name(base: &str, taken: &HashSet<String>) -> String {
         }
     }
     unreachable!("some numeric suffix is always free")
+}
+
+/// The configured servers whose tools are missing only because their first
+/// connection is still running, in name order. A server that failed, or that
+/// retries after a failure, is not connecting in this sense: it is down.
+fn connecting_servers(state: &RuntimeState) -> Vec<String> {
+    let mut connecting: Vec<String> = state
+        .servers
+        .iter()
+        .filter(|(_, server)| server.client.is_none() && server.health == McpHealth::Initializing)
+        .map(|(name, _)| name.clone())
+        .collect();
+    connecting.sort();
+    connecting
+}
+
+/// A fingerprint of what an MCP client is offered: every mounted MCP tool's
+/// name, description, and schema, and the servers still connecting. It
+/// changes exactly when that offer does, so a client is asked to list its
+/// tools again only when there is something new to see.
+fn tool_fingerprint(registry: &ToolRegistry, connecting: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for spec in registry.specs() {
+        if !spec.name.starts_with("mcp__") {
+            continue;
+        }
+        spec.name.hash(&mut hasher);
+        spec.description.hash(&mut hasher);
+        spec.input_schema.to_string().hash(&mut hasher);
+    }
+    connecting.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Whether two server URLs name the same endpoint: the same scheme, host,
