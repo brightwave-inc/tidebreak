@@ -5,6 +5,7 @@ import { publishChatImage, publishCodeImage } from "./attachments";
 import { useComposerDrafts } from "./ComposerDrafts";
 import { hasLocalHostAuthority } from "./host";
 import {
+  heldImageAttachment,
   imageAttachmentName,
   imageAttachmentRejection,
   isTextDocumentAttachmentName,
@@ -39,6 +40,9 @@ export type ImageAttachmentControls = {
    */
   restore: (items: readonly ImageAttachment[]) => void;
 };
+
+/** Which conversation family the bytes are published into. */
+export type ImagePublishScope = "chat" | "code";
 
 const NO_IMAGES: ImageAttachment[] = [];
 
@@ -94,7 +98,8 @@ function releaseBacking(chatId: string): void {
 
 // A draft entry that disappears entirely — the chat was deleted, its composer
 // cleared from outside the route — takes its backing with it. Removals the
-// hook performs itself are forgotten one id at a time instead.
+// hook performs itself are forgotten one id at a time instead. A draft that
+// moved to another key took its backing along first, so nothing is lost.
 useComposerDrafts.subscribe((state, previous) => {
   for (const chatId of Object.keys(previous.attachments)) {
     if (!(chatId in state.attachments)) releaseBacking(chatId);
@@ -108,6 +113,235 @@ function setComposerImages(
   const current =
     useComposerDrafts.getState().attachments[chatId]?.images ?? [];
   useComposerDrafts.getState().setImages(chatId, change(current));
+}
+
+function readComposerImages(draftKey: string): readonly ImageAttachment[] {
+  return useComposerDrafts.getState().attachments[draftKey]?.images ?? [];
+}
+
+/**
+ * Move one file's bytes, by whichever route this build has.
+ *
+ * Under a native host the server mounts the image publish endpoint behind the
+ * client-executor token, so the renderer cannot post to it and the bytes go
+ * over IPC for the host to publish. In a browser — `pnpm dev`, and the UI
+ * tests — the same endpoint sits on the renderer's own bearer, and posting it
+ * directly is what gives the chip real byte progress.
+ *
+ * A window attached to a remote machine takes the browser route too. The
+ * host would publish into the store on this computer, where the conversation
+ * does not exist, so the bytes have to go to the machine that holds it.
+ */
+async function publishFile(
+  client: ApiClient,
+  scope: ImagePublishScope,
+  targetId: string,
+  file: File,
+  signal: AbortSignal,
+  onProgress: (uploadedBytes: number) => void,
+) {
+  if (!hasLocalHostAuthority()) {
+    return uploadImageAttachment(client, targetId, file, {
+      onProgress,
+      signal,
+      path:
+        scope === "code"
+          ? (id) => `/sessions/${encodeURIComponent(id)}/attachments/images`
+          : undefined,
+    });
+  }
+  // One IPC call with no cancellation seam, so a removal mid-flight is
+  // honoured on the way out instead of interrupting it. The bytes are
+  // published by then, but nothing references them, so the server's orphan
+  // sweep reclaims them.
+  const published =
+    scope === "code"
+      ? await publishCodeImage(targetId, file)
+      : await publishChatImage(targetId, file);
+  if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+  return published;
+}
+
+/**
+ * Upload one attachment of the composer `draftKey`, moving its chip through
+ * uploading to ready or failed. Resolves either way; the chip carries the
+ * outcome.
+ */
+async function uploadAttachment(
+  client: ApiClient,
+  draftKey: string,
+  id: string,
+  scope: ImagePublishScope,
+  target: () => Promise<string>,
+): Promise<void> {
+  const backing = backingFor(draftKey);
+  const file = backing.files.get(id);
+  if (!file) return;
+  const controller = new AbortController();
+  backing.aborts.set(id, controller);
+  const update = (
+    change: (current: readonly ImageAttachment[]) => ImageAttachment[],
+  ) => setComposerImages(draftKey, change);
+  update((current) => withUploadStarted(current, id));
+  try {
+    const targetId = await target();
+    const published = await publishFile(
+      client,
+      scope,
+      targetId,
+      file,
+      controller.signal,
+      (uploadedBytes) =>
+        update((current) => withUploadProgress(current, id, uploadedBytes)),
+    );
+    update((current) => withUploadPublished(current, id, published));
+  } catch (err) {
+    // A cancelled upload belongs to an attachment the reader already removed,
+    // so there is no chip left to carry the message.
+    if (err instanceof DOMException && err.name === "AbortError") return;
+    update((current) => withUploadFailed(current, id, failureText(err)));
+  } finally {
+    backing.aborts.delete(id);
+  }
+}
+
+/**
+ * Publish every image the composer `draftKey` holds to `targetId`.
+ *
+ * A held image was attached before its conversation existed. The send that
+ * creates the conversation calls this, so the chips show a real upload from
+ * that moment. Resolves once every held image is ready; rejects if one fails,
+ * leaving the failed chip in place for a retry.
+ */
+export async function publishHeldImages(
+  client: ApiClient,
+  draftKey: string,
+  targetId: string,
+  scope: ImagePublishScope,
+): Promise<void> {
+  const held = readComposerImages(draftKey).filter(
+    (item) => item.status === "held",
+  );
+  await Promise.all(
+    held.map((item) =>
+      uploadAttachment(client, draftKey, item.id, scope, async () => targetId),
+    ),
+  );
+  const failed = readComposerImages(draftKey).find(
+    (item) =>
+      held.some((heldItem) => heldItem.id === item.id) &&
+      item.status === "failed",
+  );
+  if (failed) {
+    throw new Error(failed.error ?? "An image could not be attached.");
+  }
+}
+
+/**
+ * Add image files to a composer as held images, without a mounted composer.
+ *
+ * Returns why the files were refused, or `null`. The new-workspace dialog and
+ * Uneff me put their images on the new session's composer this way before the
+ * send publishes them.
+ */
+export function holdComposerImages(
+  draftKey: string,
+  files: readonly File[],
+): string | null {
+  return addFiles(draftKey, files, heldImageAttachment);
+}
+
+/**
+ * Move the bytes behind one composer's chips to another composer, with the
+ * draft they belong to. The start surface hands its draft to the session it
+ * creates this way.
+ */
+export function moveImageBacking(from: string, to: string): void {
+  if (from === to) return;
+  const source = backingByChat.get(from);
+  if (!source) return;
+  backingByChat.delete(from);
+  const target = backingFor(to);
+  for (const [id, file] of source.files) target.files.set(id, file);
+  for (const [id, controller] of source.aborts)
+    target.aborts.set(id, controller);
+  for (const [id, url] of source.previews) target.previews.set(id, url);
+}
+
+/**
+ * Take the files behind a composer's held images, in chip order, and clear
+ * its strip. The new-workspace dialog hands them to the session it creates.
+ */
+export function takeHeldImageFiles(draftKey: string): File[] {
+  const backing = backingByChat.get(draftKey);
+  const files: File[] = [];
+  for (const item of readComposerImages(draftKey)) {
+    const file = backing?.files.get(item.id);
+    if (item.status === "held" && file) files.push(file);
+  }
+  for (const item of readComposerImages(draftKey)) {
+    forgetBacking(draftKey, item.id);
+  }
+  setComposerImages(draftKey, () => []);
+  return files;
+}
+
+/**
+ * Let go of the bytes behind chips a sent turn carried. Their previews and
+ * files are no longer needed once the server holds the images.
+ */
+export function forgetComposerImages(
+  draftKey: string,
+  ids: readonly string[],
+): void {
+  for (const id of ids) forgetBacking(draftKey, id);
+}
+
+/**
+ * Move a composer's whole draft — text, pasted text, and images with the
+ * bytes behind them — to another composer.
+ *
+ * The bytes move first. Removing the draft from `from` otherwise reads as a
+ * cleared composer and hands its previews and uploads back.
+ */
+export function moveComposerDraft(from: string, to: string): void {
+  if (from === to) return;
+  moveImageBacking(from, to);
+  useComposerDrafts.getState().moveDraft(from, to);
+}
+
+function addFiles(
+  draftKey: string,
+  files: readonly File[],
+  make: typeof queuedImageAttachment,
+): string | null {
+  const images = files.filter(
+    (file) => !isTextDocumentAttachmentName(file.name),
+  );
+  if (images.length === 0) return null;
+  const rejection = imageAttachmentRejection(
+    readComposerImages(draftKey),
+    images,
+  );
+  if (rejection) return rejection;
+  const backing = backingFor(draftKey);
+  const now = new Date();
+  const added = images.map((file) => {
+    const id = crypto.randomUUID();
+    backing.files.set(id, file);
+    const previewUrl =
+      typeof URL.createObjectURL === "function"
+        ? URL.createObjectURL(file)
+        : null;
+    if (previewUrl) backing.previews.set(id, previewUrl);
+    return make(id, {
+      name: imageAttachmentName(file, now),
+      byteLen: file.size,
+      previewUrl,
+    });
+  });
+  setComposerImages(draftKey, (current) => [...current, ...added]);
+  return null;
 }
 
 /**
@@ -132,12 +366,16 @@ function setComposerImages(
  *   draft's own key. Home attaches before its chat exists, so the target is
  *   resolved at the moment the bytes move rather than at mount, and creating
  *   the chat is part of resolving it.
+ * @param options.hold hold attached files instead of uploading them, for a
+ *   composer whose conversation does not exist yet and cannot be created on
+ *   attach. The send publishes them with {@link publishHeldImages}.
  */
 export function useImageAttachments(
   client: ApiClient,
   draftKey: string,
   publishTarget?: () => Promise<string>,
-  scope: "chat" | "code" = "chat",
+  scope: ImagePublishScope = "chat",
+  options: { hold?: boolean } = {},
 ): ImageAttachmentControls {
   const attachments = useComposerDrafts(
     (state) => state.attachments[draftKey]?.images ?? NO_IMAGES,
@@ -155,96 +393,31 @@ export function useImageAttachments(
     setComposerImages(draftKey, change);
   }
 
-  /**
-   * Move one file's bytes, by whichever route this build has.
-   *
-   * Under a native host the server mounts the image publish endpoint behind the
-   * client-executor token, so the renderer cannot post to it and the bytes go
-   * over IPC for the host to publish. In a browser — `pnpm dev`, and the UI
-   * tests — the same endpoint sits on the renderer's own bearer, and posting it
-   * directly is what gives the chip real byte progress.
-   *
-   * A window attached to a remote machine takes the browser route too. The
-   * host would publish into the store on this computer, where the conversation
-   * does not exist, so the bytes have to go to the machine that holds it.
-   */
-  async function publish(id: string, file: File, signal: AbortSignal) {
-    const chatId = publishTargetRef.current
-      ? await publishTargetRef.current()
-      : draftKey;
-    if (!hasLocalHostAuthority()) {
-      return uploadImageAttachment(client, chatId, file, {
-        onProgress: (uploadedBytes) =>
-          update((current) => withUploadProgress(current, id, uploadedBytes)),
-        signal,
-        path:
-          scope === "code"
-            ? (id) => `/sessions/${encodeURIComponent(id)}/attachments/images`
-            : undefined,
-      });
-    }
-    // One IPC call with no cancellation seam, so a removal mid-flight is
-    // honoured on the way out instead of interrupting it. The bytes are
-    // published by then, but nothing references them, so the server's orphan
-    // sweep reclaims them.
-    const published =
-      scope === "code"
-        ? await publishCodeImage(chatId, file)
-        : await publishChatImage(chatId, file);
-    if (signal.aborted)
-      throw new DOMException("Upload cancelled", "AbortError");
-    return published;
-  }
-
-  async function upload(id: string) {
-    const backing = backingFor(draftKey);
-    const file = backing.files.get(id);
-    if (!file) return;
-    const controller = new AbortController();
-    backing.aborts.set(id, controller);
-    update((current) => withUploadStarted(current, id));
-    try {
-      const published = await publish(id, file, controller.signal);
-      update((current) => withUploadPublished(current, id, published));
-    } catch (err) {
-      // A cancelled upload belongs to an attachment the reader already removed,
-      // so there is no chip left to carry the message.
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      update((current) => withUploadFailed(current, id, failureText(err)));
-    } finally {
-      backing.aborts.delete(id);
-    }
+  function upload(id: string) {
+    return uploadAttachment(client, draftKey, id, scope, async () =>
+      publishTargetRef.current ? publishTargetRef.current() : draftKey,
+    );
   }
 
   function attachFiles(files: readonly File[]) {
-    const images = files.filter(
-      (file) => !isTextDocumentAttachmentName(file.name),
+    if (files.every((file) => isTextDocumentAttachmentName(file.name))) return;
+    const before = new Set(readComposerImages(draftKey).map((item) => item.id));
+    const rejection = addFiles(
+      draftKey,
+      files,
+      options.hold ? heldImageAttachment : queuedImageAttachment,
     );
-    if (images.length === 0) return;
-    const rejection = imageAttachmentRejection(attachmentsRef.current, images);
     if (rejection) {
       setError(rejection);
       return;
     }
     setError(null);
-    const backing = backingFor(draftKey);
-    const now = new Date();
-    const queued = images.map((file) => {
-      const id = crypto.randomUUID();
-      backing.files.set(id, file);
-      const previewUrl =
-        typeof URL.createObjectURL === "function"
-          ? URL.createObjectURL(file)
-          : null;
-      if (previewUrl) backing.previews.set(id, previewUrl);
-      return queuedImageAttachment(id, {
-        name: imageAttachmentName(file, now),
-        byteLen: file.size,
-        previewUrl,
-      });
-    });
-    update((current) => [...current, ...queued]);
-    for (const attachment of queued) void upload(attachment.id);
+    if (options.hold) return;
+    for (const attachment of readComposerImages(draftKey)) {
+      if (!before.has(attachment.id) && attachment.status === "queued") {
+        void upload(attachment.id);
+      }
+    }
   }
 
   function adopt(published: readonly PickedImage[]) {

@@ -105,7 +105,6 @@ import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeContentRevision } from "./useLiveContent";
 import { useDirtyCodeFilePaths } from "./CodeFileDraftStore";
 import { useUnsavedFilesGuard } from "./useUnsavedFilesGuard";
-import { useReleaseStartupWhenTurnLands } from "./workspace/useReleaseStartupWhenTurnLands";
 import { useCodeUiStore } from "./CodeUiStore";
 import {
   useCodeUpdatesStore,
@@ -370,12 +369,6 @@ function CodeWorkspaceBody({
   );
   const workspaceStartup = useCodeUiStore(
     (state) => state.workspaceStartups[workspaceId] ?? null,
-  );
-  useReleaseStartupWhenTurnLands(
-    workspaceId,
-    session?.id ?? null,
-    client,
-    workspaceStartup !== null,
   );
 
   useEffect(() => {
@@ -761,25 +754,7 @@ function CodeWorkspaceBody({
                     client={client}
                     catalogModels={models}
                     defaultModelKey={defaultModelKey}
-                    onStart={(
-                      harness,
-                      mode,
-                      message,
-                      model,
-                      draft,
-                      reasoningEffort,
-                      fastMode,
-                    ) =>
-                      startSession(
-                        harness,
-                        mode,
-                        message,
-                        model,
-                        draft,
-                        reasoningEffort,
-                        fastMode,
-                      )
-                    }
+                    onStart={startSession}
                     workspaceFiles={
                       forkSource
                         ? {

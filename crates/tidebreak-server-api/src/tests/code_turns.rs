@@ -914,6 +914,62 @@ async fn a_recovered_session_accepts_a_turn() {
     assert_eq!(after_body["user_input"], "after orphan exit");
 }
 
+/// A send answers once the turn is accepted, not once the engine is done.
+///
+/// The engine here takes a minute per event, so a route that waited for the
+/// reply would still be waiting when the timeout below fires. The answer is
+/// the running turn, and the journal already holds its start, so a client
+/// that subscribes after the answer loses nothing.
+#[tokio::test]
+async fn a_send_answers_once_the_turn_is_accepted() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_delay(Duration::from_secs(60));
+    let engine = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        client
+            .post(format!("http://{addr}/sessions/{session}/turns"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "message": "take your time" }))
+            .send(),
+    )
+    .await
+    .expect("the send answers without waiting for the engine")
+    .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let turn: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(turn["status"], "running", "{turn}");
+    assert_eq!(turn["user_input"], "take your time");
+
+    let parsed: SessionId = session.parse().unwrap();
+    let events = journaled_events(&runtime.db, parsed).await;
+    assert!(
+        events
+            .iter()
+            .any(|framed| matches!(framed.event, Event::TurnStarted { .. })),
+        "the start is journaled before the send is answered"
+    );
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(row.lifecycle, SessionLifecycle::Running);
+    // The engine is still at work on the turn it was handed.
+    wait_until(|| engine.turn_inputs().len() == 1).await;
+}
+
 #[tokio::test]
 async fn a_failed_checkpoint_does_not_fail_the_turn() {
     let (router, token, runtime, dir) = code_app(plain_text_script()).await;

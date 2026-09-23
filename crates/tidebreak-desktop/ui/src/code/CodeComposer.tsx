@@ -22,15 +22,14 @@ import type {
   ReasoningEffort,
 } from "../api/types";
 import { useApp } from "@/AppContext";
-import { HttpError } from "../api/client";
 import { Composer, type ComposerWorkspaceFiles } from "../Composer";
-import { messageWithWorkspaceFiles } from "./fork";
-import { useComposerDraft, useComposerDrafts } from "../ComposerDrafts";
 import {
-  IMAGE_MEDIA_TYPES,
-  readyImageAttachmentIds,
-} from "../ImageAttachments";
-import { useImageAttachments } from "../useImageAttachments";
+  useComposerAttachments,
+  useComposerDraft,
+  useComposerDrafts,
+} from "../ComposerDrafts";
+import { IMAGE_MEDIA_TYPES } from "../ImageAttachments";
+import { moveComposerDraft, useImageAttachments } from "../useImageAttachments";
 import {
   messageWithPastedText,
   type PastedTextAttachment,
@@ -52,6 +51,16 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { ContextUsageReading } from "../ContextUsageIndicator";
 import type { CodeTurnSubmission } from "./parsers";
+import {
+  codeSendFailure,
+  seedCodeComposer,
+  sendCodeComposer,
+  sendCodeTurn,
+  useCodeComposerStatus,
+  setCodeComposerNotice,
+  useCodeComposerSendStatus,
+  type CodeTurnImage,
+} from "./CodeSessionSend";
 import { useCodeUiStore } from "./CodeUiStore";
 import {
   codeModelVendor,
@@ -92,14 +101,6 @@ function appendComposerPrompt(current: string, prompt: string): string {
     return current;
   }
   return `${existing}\n\n${offered}`;
-}
-
-function appendRecoveredDraft(current: string, recovered: string): string {
-  if (!current) return recovered;
-  if (current === recovered || current.endsWith(`\n\n${recovered}`)) {
-    return current;
-  }
-  return `${current.trimEnd()}\n\n${recovered}`;
 }
 
 export function PermissionModePicker({
@@ -666,6 +667,7 @@ export function CodeComposer({
   footerNote,
   promptScope,
   sessionId,
+  startSession,
   history,
   reasoningEffort = null,
   engineEfforts = [],
@@ -679,8 +681,6 @@ export function CodeComposer({
   slashCommands,
   searchPaths,
   workspaceFiles,
-  recovery,
-  onSubmitStart,
   onSend,
   onSteer,
   onInterrupt,
@@ -701,7 +701,14 @@ export function CodeComposer({
   footerNote?: ReactNode;
   /** Workspace identity used to route header actions to the matching composer. */
   promptScope?: string;
+  /** The session this composer sends to. Absent on the start surface. */
   sessionId?: string;
+  /**
+   * The start surface's way to create the session its first message goes
+   * to. The send creates it, hands this draft to that session's composer, and
+   * finishes there through the same path as any other message.
+   */
+  startSession?: () => Promise<string>;
   /** Prior user prompts, newest first, for Up/Down recall. */
   history?: readonly string[];
   /** The session's stored level. `null` is the engine's own default. */
@@ -735,16 +742,15 @@ export function CodeComposer({
    * message. A fork's transcript arrives this way.
    */
   workspaceFiles?: ComposerWorkspaceFiles;
-  /** A refused first turn restored after the start composer has unmounted. */
-  recovery?: {
-    id: string;
-    draft: string;
-  };
-  /** Capture the exact editable draft before workspace-file paths are added. */
-  onSubmitStart?: (draft: string) => void;
-  onSend: (
+  /**
+   * Post one message to `sessionId`, adding what the session view knows: a
+   * model or effort change, following the transcript. Absent, the message is
+   * posted as it is, which is what the start surface does with the session
+   * its send just created.
+   */
+  onSend?: (
     message: string,
-    attachments?: readonly { blob_id: string; media_type: string }[],
+    attachments?: readonly CodeTurnImage[],
   ) => Promise<CodeTurnSubmission | void> | void;
   /**
    * Redirect the in-flight turn. Absent when the harness cannot steer. The
@@ -755,12 +761,24 @@ export function CodeComposer({
   onInterrupt: () => Promise<void> | void;
 }) {
   const { client } = useApp();
+  const post = async (
+    message: string,
+    attachments: readonly CodeTurnImage[] | undefined,
+    target: string,
+  ) => {
+    if (!onSend) {
+      return sendCodeTurn({ client, sessionId: target, message, attachments });
+    }
+    return attachments ? onSend(message, attachments) : onSend(message);
+  };
   const composerPromptScope = promptScope ?? sessionId ?? "code";
-  // Settings unmounts this composer. Keep the unsent text in the same
-  // store chat uses, keyed by session so one draft cannot leak into another.
+  // The draft, pasted text, and images live in the same store chat uses,
+  // keyed by session so one draft cannot leak into another. Settings unmounts
+  // this composer, and a send outlives the start surface that began it.
   const draftKey = sessionId ?? composerPromptScope;
   const draft = useComposerDraft(draftKey);
-  const [pastedTexts, setPastedTexts] = useState<PastedTextAttachment[]>([]);
+  const pastedTexts = useComposerAttachments(draftKey).pastedTexts;
+  const { sending, notice } = useCodeComposerSendStatus(draftKey);
   const [selectedModel, setSelectedModel] = useState(model ?? "");
   // Optimistic: the picker moves on click and the session row catches up when
   // the route answers. A refusal is surfaced by the caller, which owns the
@@ -769,8 +787,6 @@ export function CodeComposer({
     reasoningEffort,
   );
   const [selectedFastMode, setSelectedFastMode] = useState(fastMode);
-  const [notice, setNotice] = useState<{ text: string } | null>(null);
-  const [submitPending, setSubmitPending] = useState(false);
   const [steerPending, setSteerPending] = useState(false);
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
@@ -784,20 +800,16 @@ export function CodeComposer({
     },
     [draftKey],
   );
-  const pastedTextsRef = useRef<PastedTextAttachment[]>([]);
-  const appliedRecoveryRef = useRef<{
-    id: string;
-    draft: string;
-  } | null>(null);
-  const mountedRef = useRef(true);
-  const submitPendingRef = useRef(false);
   const steerRequestRef = useRef(0);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  // With no session yet there is nothing to publish to, so attached images
+  // are held until the send creates one.
   const images = useImageAttachments(
     client,
-    sessionId ?? composerPromptScope,
+    draftKey,
     sessionId ? async () => sessionId : undefined,
     "code",
+    { hold: !sessionId },
   );
   const [pathItems, setPathItems] = useState<string[]>([]);
   const searchPathsRef = useRef(searchPaths);
@@ -842,56 +854,13 @@ export function CodeComposer({
       : undefined;
 
   const pendingPrompt = useCodeUiStore((state) => state.pendingComposerPrompt);
-  const recoveryId = recovery?.id;
-  const recoveryDraft = recovery?.draft;
 
   useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    const applied = appliedRecoveryRef.current;
-    if (!recoveryId || recoveryDraft === undefined) {
-      if (!applied) return;
-      appliedRecoveryRef.current = null;
-      setDraft((current) => {
-        if (current !== applied.draft) return current;
-        draftRef.current = "";
-        return "";
-      });
-      return;
-    }
-    setDraft((current) => {
-      // A remount already restored this composer's store draft. Re-appending
-      // the recovered prompt would duplicate it after you edit and leave.
-      if (current) return current;
-      const next = appendRecoveredDraft(current, recoveryDraft);
-      draftRef.current = next;
-      return next;
-    });
-    appliedRecoveryRef.current = { id: recoveryId, draft: recoveryDraft };
-    window.requestAnimationFrame(() => {
-      document
-        .querySelector<HTMLTextAreaElement>("[data-composer-input]")
-        ?.focus();
-    });
-  }, [recoveryDraft, recoveryId]);
-
-  function updatePastedTexts(
-    update: (
-      current: readonly PastedTextAttachment[],
-    ) => PastedTextAttachment[],
-  ) {
-    const next = update(pastedTextsRef.current);
-    pastedTextsRef.current = next;
-    setPastedTexts(next);
+  function setPastedTexts(items: PastedTextAttachment[]) {
+    useComposerDrafts.getState().setPastedTexts(draftKey, items);
   }
 
   useEffect(() => {
@@ -903,36 +872,21 @@ export function CodeComposer({
 
   useEffect(() => {
     if (!pendingPrompt || pendingPrompt.scope !== composerPromptScope) return;
-    if (pendingPrompt.sessionId && pendingPrompt.sessionId !== sessionId) {
-      return;
-    }
     const request = useCodeUiStore
       .getState()
-      .takeComposerPrompt(composerPromptScope, sessionId);
+      .takeComposerPrompt(composerPromptScope);
     if (!request) return;
     if (request.submit) {
       void submitOfferedPrompt(request.text);
       return;
     }
     setDraft((current) => appendComposerPrompt(current, request.text));
-    if (sessionId && request.images && request.images.length > 0) {
-      useCodeUiStore.getState().takeComposerImages(composerPromptScope);
-      images.attachFiles(request.images);
-    }
     window.requestAnimationFrame(() => {
       document
         .querySelector<HTMLTextAreaElement>("[data-composer-input]")
         ?.focus();
     });
   }, [composerPromptScope, pendingPrompt, sessionId]);
-
-  useEffect(() => {
-    if (!sessionId) return;
-    const files = useCodeUiStore
-      .getState()
-      .takeComposerImages(composerPromptScope);
-    if (files && files.length > 0) images.attachFiles(files);
-  }, [composerPromptScope, sessionId]);
 
   useEffect(() => {
     if (model) setSelectedModel(model);
@@ -951,104 +905,25 @@ export function CodeComposer({
   }, [fastMode, sessionId]);
 
   async function submit() {
-    if (submitPendingRef.current) return;
-    const submittedDraft = draft;
-    const submittedPastedTexts = pastedTextsRef.current;
-    const typed = messageWithPastedText(submittedDraft, submittedPastedTexts);
-    if (!typed || disabled) return;
-    // The chips ride out with the message: the engine reads the paths from
-    // its own working directory, so nothing is uploaded.
-    const message = messageWithWorkspaceFiles(
-      typed,
-      workspaceFiles?.items ?? [],
-    );
-    const pending = images.attachments.filter(
-      (item) => item.status === "queued" || item.status === "uploading",
-    );
-    if (pending.length > 0) {
-      setNotice({ text: "Wait for images to finish attaching." });
-      return;
-    }
-    if (images.attachments.some((item) => item.status === "failed")) {
-      setNotice({ text: "Remove or retry the images that failed to attach." });
-      return;
-    }
-    const attachments = readyImageAttachmentIds(images.attachments).map(
-      (blobId) => {
-        const item = images.attachments.find(
-          (attachment) => attachment.attachmentId === blobId,
-        );
-        return {
-          blob_id: blobId,
-          media_type: item?.mediaType ?? "image/png",
-        };
-      },
-    );
-    const held = images.attachments;
-    submitPendingRef.current = true;
-    setSubmitPending(true);
-    onSubmitStart?.(submittedDraft);
-    // Forget the draft as soon as this composer hands it to the send path. The
-    // send promise does not settle until the turn ends, so waiting for it
-    // leaves the last prompt in the persisted draft for a reload or turn
-    // boundary to throw back into the composer.
-    draftRef.current = "";
-    setDraft("");
-    pastedTextsRef.current = [];
-    setPastedTexts([]);
-    setNotice(null);
-    // Chips leave with the draft, not after the server answers. Waiting made
-    // a sent turn look like it had failed to take the images.
-    images.clear();
-    try {
-      // A queued outcome needs nothing here: the queue tray above the
-      // composer polls the durable queue and shows the row.
-      if (attachments.length > 0) {
-        await onSend(message, attachments);
-      } else {
-        await onSend(message);
-      }
-    } catch (err) {
-      if (mountedRef.current) {
-        images.restore(held);
-        updatePastedTexts((current) => [
-          ...submittedPastedTexts,
-          ...current.filter(
-            (item) =>
-              !submittedPastedTexts.some(
-                (submitted) => submitted.id === item.id,
-              ),
-          ),
-        ]);
-        setNotice({
-          text:
-            err instanceof HttpError && err.kind === "queue_full"
-              ? "The queue is full. Delete a queued message or wait for one to run."
-              : err instanceof Error
-                ? err.message
-                : "Could not send that turn",
-        });
-        setDraft((current) => {
-          if (current.length > 0) return current;
-          draftRef.current = submittedDraft;
-          return submittedDraft;
-        });
-      }
-      // A refresh can replace this composer while the turn request is still
-      // waiting for the engine to finish. The old response may then close
-      // without proving that the server refused the turn. Do not let that
-      // obsolete request repopulate the replacement composer's draft.
-      if (!mountedRef.current) return;
-    } finally {
-      submitPendingRef.current = false;
-      if (mountedRef.current) setSubmitPending(false);
-    }
+    if (disabled) return;
+    const session = sessionId ?? startSession;
+    if (!session) return;
+    // One send path for every code message. On the start surface it creates
+    // the session first and hands this draft to that session's composer.
+    await sendCodeComposer({
+      client,
+      key: draftKey,
+      session,
+      workspaceFiles: workspaceFiles?.items,
+      send: async (target, message, attachments) =>
+        post(message, attachments, target),
+    });
   }
 
   async function submitOfferedPrompt(text: string) {
     const message = text.trim();
     if (!message) return;
-    if (disabled) {
+    if (disabled || !(sessionId ?? startSession)) {
       setDraft((current) => appendComposerPrompt(current, message));
       useCodeUiStore.getState().finishComposerAction(composerPromptScope);
       window.requestAnimationFrame(() => {
@@ -1058,20 +933,17 @@ export function CodeComposer({
       });
       return;
     }
-    setNotice(null);
+    setCodeComposerNotice(draftKey, null);
     try {
+      if (!sessionId && startSession) {
+        await startSessionWithAction(message, startSession);
+        return;
+      }
       // Ran or queued, the prompt is on its way; the queue tray shows a
       // parked row.
-      await onSend(message);
+      await post(message, undefined, sessionId!);
     } catch (err) {
-      setNotice({
-        text:
-          err instanceof HttpError && err.kind === "queue_full"
-            ? "The queue is full. Delete a queued message or wait for one to run."
-            : err instanceof Error
-              ? err.message
-              : "Could not send that turn",
-      });
+      setCodeComposerNotice(draftKey, codeSendFailure(err));
       setDraft((current) => appendComposerPrompt(current, message));
       window.requestAnimationFrame(() => {
         document
@@ -1083,15 +955,40 @@ export function CodeComposer({
     }
   }
 
+  /**
+   * A one-click action on a workspace with no agent yet starts one, with the
+   * action as its first message. The action rides its own draft key, so a
+   * draft the reader had typed here stays where it is.
+   */
+  async function startSessionWithAction(
+    message: string,
+    create: () => Promise<string>,
+  ) {
+    const actionKey = `${draftKey}#action`;
+    seedCodeComposer(actionKey, message);
+    const sent = await sendCodeComposer({
+      client,
+      key: actionKey,
+      session: create,
+      send: async (target, text, attachments) =>
+        post(text, attachments, target),
+    });
+    // No session started: bring the action back where the reader can see it.
+    if (!sent && useComposerDrafts.getState().drafts[actionKey]) {
+      moveComposerDraft(actionKey, draftKey);
+      useCodeComposerStatus.getState().move(actionKey, draftKey);
+    }
+  }
+
   async function steer() {
     const submittedDraft = draftRef.current;
-    const submittedPastedTexts = pastedTextsRef.current;
+    const submittedPastedTexts = pastedTexts;
     const message = messageWithPastedText(submittedDraft, submittedPastedTexts);
     if (!message || disabled) return;
     if (!onSteer) {
       setSteerStatus(null);
       setSteerError(STEERING_UNAVAILABLE);
-      setNotice(null);
+      setCodeComposerNotice(draftKey, null);
       return;
     }
     const request = steerRequestRef.current + 1;
@@ -1099,17 +996,18 @@ export function CodeComposer({
     setSteerPending(true);
     setSteerError(null);
     setSteerStatus("Steering…");
-    setNotice(null);
+    setCodeComposerNotice(draftKey, null);
     try {
       await onSteer(message);
       if (steerRequestRef.current !== request) return;
+      const current = useComposerDrafts.getState();
       if (
-        draftRef.current === submittedDraft &&
-        pastedTextsRef.current === submittedPastedTexts
+        (current.drafts[draftKey] ?? "") === submittedDraft &&
+        (current.attachments[draftKey]?.pastedTexts ?? []) ===
+          submittedPastedTexts
       ) {
         draftRef.current = "";
         setDraft("");
-        pastedTextsRef.current = [];
         setPastedTexts([]);
       }
       setSteerStatus("Steer sent");
@@ -1129,7 +1027,7 @@ export function CodeComposer({
         busy={running}
         cancelError={null}
         cancelPending={false}
-        disabled={Boolean(disabled || (submitPending && !running))}
+        disabled={Boolean(disabled || (sending && !running))}
         draft={draft}
         history={history}
         harnessMenu={harnessMenu}
@@ -1190,38 +1088,34 @@ export function CodeComposer({
         contextUsage={contextUsage}
         pathMentions={pathMentions}
         slash={slash}
-        images={
-          sessionId
-            ? {
-                items: images.attachments,
-                error: images.error,
-                unsupportedModel: null,
-                onAttachFiles: images.attachFiles,
-                onRemove: images.remove,
-                onRetry: images.retry,
-              }
-            : undefined
-        }
-        files={
-          sessionId
-            ? {
-                items: [],
-                attaching: false,
-                onAttach: () => imageInputRef.current?.click(),
-                onRemove: () => undefined,
-              }
-            : undefined
-        }
+        images={{
+          items: images.attachments,
+          error: images.error,
+          unsupportedModel: null,
+          onAttachFiles: images.attachFiles,
+          onRemove: images.remove,
+          onRetry: images.retry,
+        }}
+        files={{
+          items: [],
+          attaching: false,
+          onAttach: () => imageInputRef.current?.click(),
+          onRemove: () => undefined,
+        }}
         pastedTexts={{
           items: pastedTexts,
           onPaste: (text) =>
-            updatePastedTexts((current) => [
-              ...current,
+            setPastedTexts([
+              ...(useComposerDrafts.getState().attachments[draftKey]
+                ?.pastedTexts ?? []),
               { id: crypto.randomUUID(), text },
             ]),
           onRemove: (id) =>
-            updatePastedTexts((current) =>
-              current.filter((item) => item.id !== id),
+            setPastedTexts(
+              (
+                useComposerDrafts.getState().attachments[draftKey]
+                  ?.pastedTexts ?? []
+              ).filter((item) => item.id !== id),
             ),
         }}
         workspaceFiles={workspaceFiles}
@@ -1252,27 +1146,25 @@ export function CodeComposer({
           </>
         }
       />
-      {sessionId && (
-        <input
-          ref={imageInputRef}
-          type="file"
-          accept={IMAGE_MEDIA_TYPES.join(",")}
-          multiple
-          className="hidden"
-          aria-label="Attach images"
-          onChange={(event) => {
-            const files = [...(event.target.files ?? [])];
-            event.target.value = "";
-            images.attachFiles(files);
-          }}
-        />
-      )}
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept={IMAGE_MEDIA_TYPES.join(",")}
+        multiple
+        className="hidden"
+        aria-label="Attach images"
+        onChange={(event) => {
+          const files = [...(event.target.files ?? [])];
+          event.target.value = "";
+          images.attachFiles(files);
+        }}
+      />
       {notice && (
         <p
           role="alert"
           className={cn(STATUS_TEXT.critical, "mx-auto max-w-3xl pt-1 text-xs")}
         >
-          {notice.text}
+          {notice}
         </p>
       )}
     </div>

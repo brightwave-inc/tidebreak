@@ -18,10 +18,11 @@ import {
   requiresHarnessModelIds,
 } from "./labels";
 import {
-  codeSessionAcceptedTurn,
-  waitForCodeSessionHydrated,
-} from "./CodeSessionRegistry";
-import { submitFirstCodeTurn } from "./publishCodeSessionImages";
+  seedCodeComposer,
+  sendCodeComposer,
+  sendCodeTurn,
+  useCodeComposerStatus,
+} from "./CodeSessionSend";
 import { confirmRepositoryTrust } from "./RepositoryTrustStore";
 
 /** What the first session of a workspace is created with. */
@@ -68,21 +69,20 @@ export async function resolveSessionModel(input: {
 }
 
 /**
- * Start a workspace's first agent and, when there is one, post its first
- * message, drawing the page-level handoff while that happens.
+ * Start a workspace's first agent and, when there is one, send its first
+ * message.
  *
  * The new-workspace dialog and Uneff me both end here. The handoff is keyed
  * by the workspace, so `reveal` runs first: the page the reader lands on is
- * the one carrying the steps. A failed session leaves the text with the
- * workspace composer, and a failed first turn does the same, so typed words
- * and pasted images are never dropped.
+ * the one carrying the steps.
  *
- * While a first message still has images to publish, the handoff stays up so
- * the session composer cannot send a second first turn with unpublished
- * ids. Once publication finishes, the handoff drops and the event socket
- * opens before `POST /turns`. That request does not return until the engine
- * finishes the reply. Leaving the handoff up, or starting the request first,
- * keeps the startup screen in front of a message that has already been sent.
+ * The handoff lasts until the session exists. The message and images then go
+ * on that session's composer and leave through its own send, the path every
+ * later message takes: the images publish to the new session with their
+ * upload status on the chips, and a refused send leaves the words and images
+ * in that composer to retry. When no session starts, the workspace's start
+ * composer holds them instead, so typed words and pasted images are never
+ * dropped.
  */
 export async function startFirstSession(input: {
   client: ApiClient;
@@ -95,11 +95,11 @@ export async function startFirstSession(input: {
   /** Heading, preparation steps, and target the handoff keeps showing. */
   startup?: Pick<WorkspaceStartup, "heading" | "preparation" | "target">;
   /**
-   * Keep the prompt in the workspace composer when no session could start.
-   * True for words the reader typed. False for a generated prompt that would
-   * land in a composer still belonging to another conversation. Once a
+   * Keep the prompt in the workspace's start composer when no session could
+   * start. True for words the reader typed. False for a generated prompt that
+   * would land in a composer still belonging to another conversation. Once a
    * session exists its composer is the empty one the reader now sees, so a
-   * failed first turn always holds the prompt there.
+   * refused first message always waits there.
    */
   holdPromptWithoutSession?: boolean;
   /** Open the workspace before its session starts. */
@@ -112,36 +112,24 @@ export async function startFirstSession(input: {
   const { client, workspace, settings } = input;
   const prompt = input.prompt.trim();
   const images = input.images ?? [];
-  const base: Omit<WorkspaceStartup, "phase" | "hasFirstMessage"> = {
-    ...input.startup,
-    harness: settings.harness,
-  };
   const setWorkspaceStartup = useCodeUiStore.getState().setWorkspaceStartup;
   const holdWithoutSession = input.holdPromptWithoutSession ?? true;
-  // Addressed to the session when there is one: the workspace's panes share
-  // a prompt scope, and the pane on screen may still be the old agent's.
-  const holdPrompt = (sessionId?: string) => {
-    if (prompt) {
-      useCodeUiStore
-        .getState()
-        .offerComposerPrompt(workspace.id, prompt, images, sessionId);
-    }
-  };
   // The copy has to match what the reader just watched happen.
   const created = input.startup?.target !== "this_workspace";
   const sessionFailed = created
     ? "Workspace created, but the session could not start."
     : "The session could not start.";
-  const turnFailed =
-    "Session started, but the first message could not be sent.";
   setWorkspaceStartup(workspace.id, {
-    ...base,
+    ...input.startup,
+    harness: settings.harness,
     hasFirstMessage: Boolean(prompt),
     phase: "starting_session",
   });
+  let session: CodeSessionSnapshot;
+  let posted: string | undefined;
   try {
     await input.reveal?.();
-    const posted = await resolveSessionModel({
+    posted = await resolveSessionModel({
       client,
       harness: settings.harness,
       requested: settings.model,
@@ -155,7 +143,7 @@ export async function startFirstSession(input: {
       workspace,
       harness: settings.harness,
     });
-    const session = await client.createCodeSession(workspace.id, {
+    session = await client.createCodeSession(workspace.id, {
       harness: settings.harness,
       permission_mode: settings.permissionMode,
       model: posted,
@@ -164,56 +152,37 @@ export async function startFirstSession(input: {
         : {}),
       ...(settings.fastMode ? { fast_mode: true } : {}),
     });
-    useCodeCatalogStore.getState().rememberSession(session);
-    input.onSessionCreated?.(session, posted);
-    if (prompt) {
-      // Keep the handoff while images publish so the new session's composer
-      // cannot race a second send with ids that are not yet reserved here.
-      if (images.length > 0) {
-        setWorkspaceStartup(workspace.id, {
-          ...base,
-          hasFirstMessage: true,
-          phase: "sending_message",
-        });
-      } else {
-        setWorkspaceStartup(workspace.id, null);
-      }
-      try {
-        await submitFirstCodeTurn({
-          client,
-          sessionId: session.id,
-          message: prompt,
-          images,
-          beforeTurn: async () => {
-            setWorkspaceStartup(workspace.id, null);
-            await waitForCodeSessionHydrated(session.id);
-          },
-        });
-      } catch (error) {
-        // A dropped request after the turn row exists is not a failed send.
-        // The socket already has the message; saying it was not sent invites
-        // a second first turn.
-        if (codeSessionAcceptedTurn(session.id)) return session;
-        // Never drop typed words or pasted images: the workspace composer
-        // holds them.
-        holdPrompt(session.id);
-        toast.error(
-          `${turnFailed} ${friendlyErrorMessage(error, "Send it from the workspace composer.")}`,
-        );
-      }
-    } else {
-      setWorkspaceStartup(workspace.id, null);
-    }
-    return session;
   } catch (error) {
-    // No session to send to; the workspace composer holds the text, images,
-    // and start-session on the workspace page picks them up.
-    if (holdWithoutSession) holdPrompt();
+    // No session to send to; the workspace's start composer holds the text
+    // and images, and starting a session there sends them.
+    if (holdWithoutSession && prompt) {
+      seedCodeComposer(workspace.id, prompt, images);
+    }
     toast.error(
       `${sessionFailed} ${friendlyErrorMessage(error, holdWithoutSession ? "Try again from the workspace." : "Try again from the workspace menu.")}`,
     );
     return null;
   } finally {
+    // The conversation takes over as soon as the session exists.
     setWorkspaceStartup(workspace.id, null);
   }
+  useCodeCatalogStore.getState().rememberSession(session);
+  input.onSessionCreated?.(session, posted);
+  if (!prompt) return session;
+  seedCodeComposer(session.id, prompt, images);
+  const sent = await sendCodeComposer({
+    client,
+    key: session.id,
+    session: session.id,
+    send: (sessionId, message, attachments) =>
+      sendCodeTurn({ client, sessionId, message, attachments }),
+  });
+  if (!sent) {
+    // The reader may be looking at another workspace, so say it here too.
+    const reason = useCodeComposerStatus.getState().byKey[session.id]?.notice;
+    toast.error(
+      `Session started, but the first message could not be sent. ${reason ?? "Send it from the workspace composer."}`,
+    );
+  }
+  return session;
 }

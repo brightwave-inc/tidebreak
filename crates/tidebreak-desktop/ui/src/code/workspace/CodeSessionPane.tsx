@@ -58,10 +58,9 @@ import {
 } from "../labels";
 import { followScrollBehavior } from "@/ChatScroll";
 import { forkTranscriptFile } from "../fork";
-import { submitAcceptedTurn } from "../CodeSessionSend";
+import { sendCodeTurn } from "../CodeSessionSend";
 import { toast } from "sonner";
 import { useCodeUpdatesStore, useSessionDigest } from "../CodeUpdatesStore";
-import { useRefreshSignals } from "@/RefreshSignals";
 import { useStreamStalled } from "@/useStreamStalled";
 import { useTranscriptFollow } from "@/useTranscriptFollow";
 
@@ -116,8 +115,10 @@ export function CodeSessionPane({
   const store = useRegisteredCodeSession(session.id, client);
   const firstTurnRecovery = useFirstTurnRecovery(client, session.id);
   const items = store((state) => state.items);
+  // The first accepted turn carried the fork's transcript, so the chip that
+  // waited beside a refused first message is done.
   useEffect(() => {
-    if (!firstTurnRecovery || firstTurnRecovery.status !== "sending") return;
+    if (!firstTurnRecovery) return;
     const sent = items.some((item) => item.kind === "user");
     if (!sent) return;
     clearFirstTurnRecovery(client, session.id, firstTurnRecovery.id);
@@ -480,31 +481,22 @@ export function CodeSessionPane({
     follow.requestSmoothFollow();
     // Outcome and refusal both belong to the composer: it says whether the
     // message ran or queued, and it holds the draft when the server refuses.
-    // A queued outcome needs no state here — the tray reads the durable queue
-    // on the signal below and shows the row.
-    return submitAcceptedTurn(store.getState().update, () =>
-      pendingReasoningEffort
-        ? client.submitCodeTurn(
-            session.id,
-            message,
-            requestedModel,
-            attachments,
-            pendingReasoningEffort.value,
-          )
-        : client.submitCodeTurn(
-            session.id,
-            message,
-            requestedModel,
-            attachments,
-          ),
-    ).then((outcome) => {
-      if (outcome.kind === "queued") {
-        useRefreshSignals.getState().signal("queuedTurns");
-      }
+    // The server answers once the message is accepted, so this settles long
+    // before the turn does.
+    return sendCodeTurn({
+      client,
+      sessionId: session.id,
+      message,
+      attachments,
+      model: requestedModel,
+      ...(pendingReasoningEffort
+        ? { reasoningEffort: pendingReasoningEffort.value }
+        : {}),
+    }).then((outcome) => {
       if (pendingReasoningEffortRef.current === pendingReasoningEffort) {
         pendingReasoningEffortRef.current = null;
       }
-      if (recoveryAtSend?.status === "failed") {
+      if (recoveryAtSend) {
         clearFirstTurnRecovery(client, session.id, recoveryAtSend.id);
       }
       return outcome;
@@ -653,7 +645,7 @@ export function CodeSessionPane({
             </div>
             <CodeComposer
               running={turnRunning}
-              disabled={disabled || firstTurnRecovery?.status === "sending"}
+              disabled={disabled}
               permissionMode={settings.permissionMode}
               availableModes={availableModes}
               reasoningEffort={settings.reasoningEffort}
@@ -690,14 +682,6 @@ export function CodeSessionPane({
                           firstTurnRecovery.id,
                           (current) => ({ ...current, forkSource: null }),
                         ),
-                    }
-                  : undefined
-              }
-              recovery={
-                firstTurnRecovery
-                  ? {
-                      id: firstTurnRecovery.id,
-                      draft: firstTurnRecovery.draft,
                     }
                   : undefined
               }
@@ -745,21 +729,6 @@ export function CodeSessionPane({
               onSteer={steeringSupported ? steer : undefined}
               onInterrupt={interrupt}
             />
-            {firstTurnRecovery && (
-              <p
-                role={
-                  firstTurnRecovery.status === "failed" ? "alert" : "status"
-                }
-                className={cn(
-                  "mx-auto w-full max-w-3xl px-2 pt-1 text-xs",
-                  firstTurnRecovery.status === "failed"
-                    ? STATUS_TEXT.critical
-                    : "text-muted-foreground",
-                )}
-              >
-                {firstTurnRecovery.message}
-              </p>
-            )}
           </>
         )}
     </div>

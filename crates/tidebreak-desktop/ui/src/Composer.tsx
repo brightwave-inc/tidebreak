@@ -1807,21 +1807,21 @@ function contextCountLabel(count: number, label: string): string | null {
   return `${count} ${label}${count === 1 ? "" : "s"}`;
 }
 
-/** The canonical image strip shared by every composer surface. */
+/**
+ * The canonical image strip shared by every composer surface.
+ *
+ * Each chip says where its own image stands. A held image, attached before a
+ * conversation exists to publish it to, shows no upload status until the
+ * send that publishes it starts.
+ */
 export function ImageAttachmentList({
   items,
   onRemove,
   onRetry,
-  showUploadStatus = true,
 }: {
   items: readonly ImageAttachment[];
   onRemove: (id: string) => void;
   onRetry?: (id: string) => void;
-  /**
-   * The chat composer publishes as soon as the file is attached, so the chip
-   * says so. A surface that only holds the file leaves this off.
-   */
-  showUploadStatus?: boolean;
 }) {
   if (items.length === 0) return null;
   return (
@@ -1835,7 +1835,6 @@ export function ImageAttachmentList({
           attachment={item}
           onRemove={() => onRemove(item.id)}
           onRetry={onRetry ? () => onRetry(item.id) : undefined}
-          showUploadStatus={showUploadStatus}
         />
       ))}
     </ul>
@@ -1853,18 +1852,16 @@ function ImageAttachmentChip({
   attachment,
   onRemove,
   onRetry,
-  showUploadStatus,
 }: {
   attachment: ImageAttachment;
   onRemove: () => void;
   onRetry?: () => void;
-  showUploadStatus: boolean;
 }) {
-  const inFlight =
+  const uploading =
     attachment.status === "queued" || attachment.status === "uploading";
-  const uploading = showUploadStatus && inFlight;
   const failed = attachment.status === "failed";
-  const showStatus = showUploadStatus || !inFlight;
+  // Nothing is moving for a held image, so it says nothing about uploading.
+  const showStatus = attachment.status !== "held";
   return (
     <li
       className={cn(

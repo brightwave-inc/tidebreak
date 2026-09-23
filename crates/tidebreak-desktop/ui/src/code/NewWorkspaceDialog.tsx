@@ -30,13 +30,12 @@ import type {
 import { HttpError } from "../api/client";
 import { useApp } from "@/AppContext";
 import { ImageAttachmentList, shouldSubmitComposerKey } from "../Composer";
+import { imageFilesFrom } from "../ImageAttachments";
 import {
-  imageAttachmentName,
-  imageAttachmentRejection,
-  imageFilesFrom,
-  queuedImageAttachment,
-  type ImageAttachment,
-} from "../ImageAttachments";
+  holdComposerImages,
+  takeHeldImageFiles,
+  useImageAttachments,
+} from "../useImageAttachments";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -200,10 +199,11 @@ type CreateAttempt = {
   namingComplete: boolean;
 };
 
-type HeldWorkspaceImage = {
-  attachment: ImageAttachment;
-  file: File;
-};
+/**
+ * The composer key the dialog's images are held under, in the same store and
+ * state machine as every code composer's images.
+ */
+export const NEW_WORKSPACE_IMAGES_KEY = "code-new-workspace";
 
 export function NewWorkspaceDialog({
   open,
@@ -245,9 +245,15 @@ export function NewWorkspaceDialog({
     null,
   );
   const [createMore, setCreateMore] = useState(false);
-  const [heldImages, setHeldImages] = useState<HeldWorkspaceImage[]>([]);
-  const [imageError, setImageError] = useState<string | null>(null);
-  const heldImagesRef = useRef<HeldWorkspaceImage[]>([]);
+  // Held, not uploaded: no session exists yet to publish them to. Create
+  // hands the files to the new session's composer, which publishes them.
+  const images = useImageAttachments(
+    client,
+    NEW_WORKSPACE_IMAGES_KEY,
+    undefined,
+    "code",
+    { hold: true },
+  );
   const [modelsByHarness, setModelsByHarness] = useState<
     Partial<Record<HarnessKind, string>>
   >({});
@@ -344,7 +350,8 @@ export function NewWorkspaceDialog({
         startingPrompt: retry.startingPrompt,
         title: retry.title,
       });
-      replaceHeldImages(retry.images);
+      takeHeldImageFiles(NEW_WORKSPACE_IMAGES_KEY);
+      holdComposerImages(NEW_WORKSPACE_IMAGES_KEY, retry.images);
     }
     setBaseRef(
       retry?.baseRef ??
@@ -418,22 +425,11 @@ export function NewWorkspaceDialog({
     selectedHarness && installed && !policyBlocksCreate,
   );
   const imageNeedsMessage =
-    heldImages.length > 0 && startingPrompt.trim().length === 0;
+    images.attachments.length > 0 && startingPrompt.trim().length === 0;
   const canCreate = Boolean(
     repoId && selectedRepo && engineReady && !imageNeedsMessage,
   );
   const installNote = install && (!install.done || install.error);
-
-  useEffect(
-    () => () => {
-      for (const image of heldImagesRef.current) {
-        if (image.attachment.previewUrl) {
-          URL.revokeObjectURL(image.attachment.previewUrl);
-        }
-      }
-    },
-    [],
-  );
 
   useEffect(() => {
     if (!open || !harness) return;
@@ -512,82 +508,11 @@ export function NewWorkspaceDialog({
     });
   }
 
-  function heldImagesFrom(files: readonly File[]): HeldWorkspaceImage[] {
-    const now = new Date();
-    return files.map((file) => {
-      const previewUrl =
-        typeof URL.createObjectURL === "function"
-          ? URL.createObjectURL(file)
-          : null;
-      return {
-        file,
-        attachment: queuedImageAttachment(crypto.randomUUID(), {
-          name: imageAttachmentName(file, now),
-          byteLen: file.size,
-          previewUrl,
-        }),
-      };
-    });
-  }
-
-  function replaceHeldImages(files: readonly File[]) {
-    for (const image of heldImagesRef.current) {
-      if (image.attachment.previewUrl) {
-        URL.revokeObjectURL(image.attachment.previewUrl);
-      }
-    }
-    const next = heldImagesFrom(files);
-    heldImagesRef.current = next;
-    setHeldImages(next);
-    setImageError(null);
-  }
-
-  function attachImages(files: readonly File[]) {
-    const rejection = imageAttachmentRejection(
-      heldImagesRef.current.map((image) => image.attachment),
-      files,
-    );
-    if (rejection) {
-      setImageError(rejection);
-      return;
-    }
-    const next = [...heldImagesRef.current, ...heldImagesFrom(files)];
-    heldImagesRef.current = next;
-    setHeldImages(next);
-    setImageError(null);
-  }
-
-  function removeImage(id: string) {
-    const removed = heldImagesRef.current.find(
-      (image) => image.attachment.id === id,
-    );
-    if (removed?.attachment.previewUrl) {
-      URL.revokeObjectURL(removed.attachment.previewUrl);
-    }
-    const next = heldImagesRef.current.filter(
-      (image) => image.attachment.id !== id,
-    );
-    heldImagesRef.current = next;
-    setHeldImages(next);
-    setImageError(null);
-  }
-
-  function clearImages() {
-    for (const image of heldImagesRef.current) {
-      if (image.attachment.previewUrl) {
-        URL.revokeObjectURL(image.attachment.previewUrl);
-      }
-    }
-    heldImagesRef.current = [];
-    setHeldImages([]);
-    setImageError(null);
-  }
-
   function onPromptPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
     const files = imageFilesFrom(event.clipboardData);
     if (files.length === 0) return;
     event.preventDefault();
-    attachImages(files);
+    images.attachFiles(files);
   }
 
   /** One picker open at a time; closing by chord puts focus back on the message. */
@@ -620,7 +545,7 @@ export function NewWorkspaceDialog({
       !engineReady ||
       !repo ||
       createLocked.current ||
-      (heldImagesRef.current.length > 0 && !startingPrompt.trim())
+      (images.attachments.length > 0 && !startingPrompt.trim())
     )
       return;
     createLocked.current = true;
@@ -638,11 +563,10 @@ export function NewWorkspaceDialog({
       fastMode: postedFastMode,
       fastModeByHarness: { ...fastByHarness },
       createMore,
-      images: heldImagesRef.current.map((image) => image.file),
+      images: takeHeldImageFiles(NEW_WORKSPACE_IMAGES_KEY),
       namingComplete: Boolean(title.trim()) || !startingPrompt.trim(),
     };
     useCodeUiStore.getState().setNewWorkspaceDraft(EMPTY_NEW_WORKSPACE_DRAFT);
-    clearImages();
     if (createMore) {
       focusPrompt();
       queueMicrotask(() => {
@@ -1146,17 +1070,15 @@ export function NewWorkspaceDialog({
               void create();
             }}
           />
-          {(heldImages.length > 0 || imageError) && (
+          {(images.attachments.length > 0 || images.error) && (
             <div className="grid gap-1.5 px-4 pb-2">
               <ImageAttachmentList
-                items={heldImages.map((image) => image.attachment)}
-                onRemove={removeImage}
-                // Held until create. Nothing is uploading yet.
-                showUploadStatus={false}
+                items={images.attachments}
+                onRemove={images.remove}
               />
-              {imageError && (
+              {images.error && (
                 <p className="text-critical text-xs" role="alert">
-                  {imageError}
+                  {images.error}
                 </p>
               )}
               {imageNeedsMessage && (

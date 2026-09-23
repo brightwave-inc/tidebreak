@@ -54,6 +54,7 @@ mod code_doctor;
 mod code_external;
 mod code_external_model;
 mod code_file_save;
+mod code_first_message;
 #[cfg(unix)]
 mod code_git;
 mod code_hosted_execution;

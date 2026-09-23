@@ -88,10 +88,11 @@ function createController(
     openSocket,
     getAfter: () => store.getState().lastSeq,
     onEvents: (frames, initialViewSettled) => {
-      // A turn the socket announces has no prompt bubble yet: submit answers
-      // only when the turn ends, and a queued follow-up is never answered
-      // with a turn at all. Pull the snapshot so the transcript shows what
-      // the engine is working on while it works.
+      // A turn the socket announces may have no prompt bubble yet: another
+      // client sent it, the send's answer has not landed, or a queued
+      // follow-up was promoted, which is never answered with a turn at all.
+      // Pull the snapshot so the transcript shows what the engine is working
+      // on while it works.
       const effects = store
         .getState()
         .applyEvents(frames, deps, initialViewSettled);
@@ -234,42 +235,6 @@ export function releaseCodeSession(sessionId: string): void {
   retainCodeSession(sessionId);
 }
 
-/**
- * Wait until the conversation pane has opened its event socket.
- *
- * `POST /turns` does not return until the engine finishes the reply. If the
- * request starts first, it can take the last connection, and the socket never
- * opens. The transcript then stays on the startup screen until a reload
- * aborts the request.
- *
- * Returns immediately when no view has acquired the session yet. Callers
- * still post the turn; the page drops the startup screen when the turn row
- * appears.
- */
-export function waitForCodeSessionHydrated(
-  sessionId: string,
-  timeoutMs = 1000,
-): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      const entry = peekCodeSession(sessionId);
-      if (!entry || entry.store.getState().hydrated) {
-        resolve();
-        return;
-      }
-      const timer = setTimeout(finish, timeoutMs);
-      const unsubscribe = entry.store.subscribe((state) => {
-        if (state.hydrated) finish();
-      });
-      function finish() {
-        clearTimeout(timer);
-        unsubscribe();
-        resolve();
-      }
-    }, 0);
-  });
-}
-
 async function loadPrompt(
   hydrateTurns: () => Promise<CodeTurnSnapshot[]>,
   store: ReturnType<typeof createCodeSessionStore>,
@@ -293,16 +258,6 @@ async function loadPrompt(
     if (delay === undefined) return false;
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
-}
-
-/** Whether this session already has an accepted turn, live or in the store. */
-export function codeSessionAcceptedTurn(sessionId: string): boolean {
-  const state = peekCodeSession(sessionId)?.store.getState();
-  if (!state) return false;
-  return (
-    state.journalTurnId !== null ||
-    state.items.some((item) => item.kind === "user")
-  );
 }
 
 export function peekCodeSession(

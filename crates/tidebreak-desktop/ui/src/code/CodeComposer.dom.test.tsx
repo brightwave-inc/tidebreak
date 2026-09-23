@@ -15,6 +15,7 @@ import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { CodeComposer, HarnessModelMenu } from "./CodeComposer";
+import { useCodeComposerStatus } from "./CodeSessionSend";
 import { useCodeUiStore } from "./CodeUiStore";
 import { HttpError } from "../api/client";
 import { useComposerDrafts } from "../ComposerDrafts";
@@ -22,9 +23,9 @@ import { readyImageAttachment } from "../ImageAttachments";
 import { OpenAIIcon, ProviderIcon } from "../ProviderIcons";
 import { useUiStore } from "../UiStore";
 
-function app(): AppContextValue {
+function app(client: unknown = {}): AppContextValue {
   return {
-    client: {} as never,
+    client: client as never,
     models: [],
     defaultModelKey: null,
     providers: [],
@@ -60,8 +61,10 @@ function app(): AppContextValue {
   };
 }
 
-function renderComposer(ui: ReactElement) {
-  return render(<AppContextProvider value={app()}>{ui}</AppContextProvider>);
+function renderComposer(ui: ReactElement, client?: unknown) {
+  return render(
+    <AppContextProvider value={app(client)}>{ui}</AppContextProvider>,
+  );
 }
 
 beforeEach(() => {
@@ -74,10 +77,10 @@ afterEach(() => {
   useUiStore.setState({ activeTurnSendMode: "queue" });
   useCodeUiStore.setState({
     pendingComposerPrompt: null,
-    pendingComposerImages: null,
     composerActionScope: null,
   });
   useComposerDrafts.setState({ drafts: {}, attachments: {} });
+  useCodeComposerStatus.setState({ byKey: {} });
   window.sessionStorage.clear();
 });
 
@@ -127,14 +130,17 @@ describe("CodeComposer", () => {
   });
 
   it("attaches a long first-session paste before sending it", async () => {
-    const onSend = vi.fn().mockResolvedValue(undefined);
+    const submitCodeTurn = vi.fn().mockResolvedValue(QUEUED);
+    const startSession = vi.fn().mockResolvedValue("sess-new");
     renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
-        onSend={onSend}
+        promptScope="ws-1"
+        startSession={startSession}
         onInterrupt={vi.fn()}
       />,
+      { submitCodeTurn },
     );
     const box = screen.getByRole("textbox", { name: "Message" });
     const pasted = `{
@@ -156,11 +162,16 @@ describe("CodeComposer", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 
+    // The session is created first, and the paste rides its first message.
     await waitFor(() =>
-      expect(onSend).toHaveBeenCalledWith(
+      expect(submitCodeTurn).toHaveBeenCalledWith(
+        "sess-new",
         `<pasted_text>\n${pasted}\n</pasted_text>`,
+        undefined,
+        undefined,
       ),
     );
+    expect(startSession).toHaveBeenCalledOnce();
   });
 
   it("inserts a pending inspector prompt into the draft", async () => {
@@ -182,63 +193,47 @@ describe("CodeComposer", () => {
     expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
   });
 
-  it("attaches files offered with a pending prompt", async () => {
-    const image = new File([new Uint8Array([1, 2, 3, 4])], "shot.png", {
-      type: "image/png",
-    });
-    useCodeUiStore
-      .getState()
-      .offerComposerPrompt("sess-1", "Review this screenshot", [image]);
+  it("holds a pasted image on the start surface without uploading it", async () => {
     renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
-        sessionId="sess-1"
-        onSend={vi.fn()}
+        promptScope="ws-1"
+        startSession={vi.fn()}
         onInterrupt={vi.fn()}
       />,
     );
-
-    expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
-      "Review this screenshot",
-    );
-    expect(await screen.findByLabelText("Attached images")).toBeInTheDocument();
-    expect(screen.getByText("shot.png")).toBeInTheDocument();
-    expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
-    expect(useCodeUiStore.getState().pendingComposerImages).toBeNull();
-  });
-
-  it("holds offered files until a session exists", async () => {
-    const image = new File([new Uint8Array([1, 2, 3, 4])], "shot.png", {
-      type: "image/png",
+    const box = screen.getByRole("textbox", { name: "Message" });
+    const paste = createEvent.paste(box, {
+      clipboardData: {
+        files: [
+          new File([new Uint8Array([1, 2, 3])], "shot.png", {
+            type: "image/png",
+          }),
+        ],
+        getData: () => "file:///Users/sam/Desktop/shot.png",
+      },
     });
-    useCodeUiStore
-      .getState()
-      .offerComposerPrompt("code", "Review this screenshot", [image]);
-    renderComposer(
-      <CodeComposer
-        running={false}
-        permissionMode="ask"
-        onSend={vi.fn()}
-        onInterrupt={vi.fn()}
-      />,
-    );
+    fireEvent(box, paste);
 
-    expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
-      "Review this screenshot",
-    );
-    expect(screen.queryByLabelText("Attached images")).toBeNull();
-    expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
-    expect(useCodeUiStore.getState().pendingComposerImages).toEqual({
-      scope: "code",
-      files: [image],
-    });
+    // Claimed, so the clipboard's file URL never lands in the draft.
+    expect(paste.defaultPrevented).toBe(true);
+    expect(box).toHaveValue("");
+    expect(screen.getByLabelText("Attached images")).toBeInTheDocument();
+    // No session exists to publish to, so nothing says it is uploading.
+    expect(screen.queryByText(/^Uploading/)).toBeNull();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(useComposerDrafts.getState().attachments["ws-1"]?.images).toEqual([
+      expect.objectContaining({ status: "held" }),
+    ]);
   });
 
   it("submits a one-click workspace action without replacing the draft", async () => {
     const onSend = vi.fn();
     renderComposer(
       <CodeComposer
+        sessionId="sess-1"
+        promptScope="code"
         running={false}
         permissionMode="ask"
         onSend={onSend}
@@ -310,6 +305,7 @@ describe("CodeComposer", () => {
     const onSend = vi.fn(() => pending);
     renderComposer(
       <CodeComposer
+        sessionId="sess-1"
         running={false}
         permissionMode="ask"
         promptScope="workspace-a"
@@ -427,6 +423,7 @@ describe("CodeComposer", () => {
     const onSend = vi.fn().mockResolvedValue(QUEUED);
     renderComposer(
       <CodeComposer
+        sessionId="sess-1"
         running
         permissionMode="ask"
         onSend={onSend}
@@ -569,6 +566,7 @@ describe("CodeComposer", () => {
     const onInterrupt = vi.fn();
     const view = renderComposer(
       <CodeComposer
+        sessionId="sess-1"
         running={false}
         permissionMode="ask"
         onSend={onSend}
@@ -584,6 +582,7 @@ describe("CodeComposer", () => {
     view.rerender(
       <AppContextProvider value={app()}>
         <CodeComposer
+          sessionId="sess-1"
           running
           permissionMode="ask"
           onSend={onSend}
@@ -690,6 +689,7 @@ describe("CodeComposer", () => {
     const onSend = vi.fn().mockResolvedValue(undefined);
     renderComposer(
       <CodeComposer
+        sessionId="sess-1"
         running={false}
         permissionMode="ask"
         onSend={onSend}
@@ -737,6 +737,7 @@ describe("CodeComposer", () => {
       );
     renderComposer(
       <CodeComposer
+        sessionId="sess-1"
         running
         permissionMode="ask"
         onSend={onSend}
@@ -762,6 +763,7 @@ describe("CodeComposer", () => {
     const onSend = vi.fn().mockRejectedValue(new Error("session is fenced"));
     renderComposer(
       <CodeComposer
+        sessionId="sess-1"
         running={false}
         permissionMode="plan"
         onSend={onSend}
@@ -785,6 +787,7 @@ describe("CodeComposer", () => {
     );
     renderComposer(
       <CodeComposer
+        sessionId="sess-1"
         running={false}
         permissionMode="ask"
         onSend={onSend}
@@ -1314,7 +1317,7 @@ describe("CodeComposer", () => {
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
   });
 
-  it("does not restore a submitted prompt after the composer remounts", async () => {
+  it("shows a refused send in the composer that replaced the one that sent it", async () => {
     let rejectSend!: (error: Error) => void;
     const onSend = vi.fn(
       () =>
@@ -1351,12 +1354,18 @@ describe("CodeComposer", () => {
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
 
     await act(async () => {
-      rejectSend(new Error("the old response closed"));
+      rejectSend(new Error("session is fenced"));
       await Promise.resolve();
     });
 
-    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
-    expect(useComposerDrafts.getState().drafts["sess-1"]).toBeFalsy();
+    // The send outlives the composer that started it. The server answers on
+    // acceptance, so a refusal is a refusal, and it lands where the reader
+    // now is, the way a first message refused after the start surface is
+    // gone lands in the session's composer.
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "already accepted",
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("session is fenced");
   });
 
   it("clears the persisted draft before the turn request settles", async () => {
@@ -1404,26 +1413,28 @@ describe("CodeComposer", () => {
     expect(useComposerDrafts.getState().drafts["sess-1"]).toBeFalsy();
   });
 
-  it("does not re-append first-turn recovery after a Settings remount", async () => {
-    const user = userEvent.setup();
-    const recovery = {
-      id: "rec-1",
-      draft: "Fix the exact failing test.",
-    };
+  it("keeps pasted text across a Settings remount", async () => {
+    const pasted = `First source line\n${"x".repeat(1_000)}`;
     const first = renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
         sessionId="sess-1"
-        recovery={recovery}
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
       />,
     );
     const box = screen.getByRole("textbox", { name: "Message" });
-    expect(box).toHaveValue("Fix the exact failing test.");
-    await user.type(box, " then retry");
-    expect(box).toHaveValue("Fix the exact failing test. then retry");
+    fireEvent(
+      box,
+      createEvent.paste(box, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) => (type === "text/plain" ? pasted : ""),
+        },
+      }),
+    );
+    expect(screen.getByText("Pasted text")).toBeInTheDocument();
     first.unmount();
 
     renderComposer(
@@ -1431,14 +1442,11 @@ describe("CodeComposer", () => {
         running={false}
         permissionMode="ask"
         sessionId="sess-1"
-        recovery={recovery}
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
       />,
     );
-    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
-      "Fix the exact failing test. then retry",
-    );
+    expect(screen.getByText("Pasted text")).toBeInTheDocument();
   });
 });
 

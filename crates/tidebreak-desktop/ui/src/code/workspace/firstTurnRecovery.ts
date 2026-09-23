@@ -2,13 +2,19 @@ import type { ApiClient } from "../../api/client";
 import type { CodeForkTranscript } from "../../api/types";
 import { useSyncExternalStore } from "react";
 
+/**
+ * A fork's transcript, waiting for the first message of the session it was
+ * forked into.
+ *
+ * The start surface names the transcript in that first message. If the send
+ * is refused, the message goes back to the new session's composer, and this
+ * keeps the transcript chip beside it, so a retry names the file again. The
+ * first accepted turn clears it.
+ */
 export type FirstTurnRecovery = {
   id: string;
   sessionId: string;
-  draft: string;
   forkSource: CodeForkTranscript | null;
-  message: string;
-  status: "sending" | "failed";
 };
 
 const firstTurnRecoveryByClient = new WeakMap<

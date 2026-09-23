@@ -76,7 +76,6 @@ type WorkspaceScenario =
   | "nested"
   | "start"
   | "workspace-starting"
-  | "workspace-sending-message"
   | "uneff-preparing"
   | "session-create-failure"
   | "first-turn-failure"
@@ -168,10 +167,7 @@ function isSetupFailedScenario(
 }
 
 function isWorkspaceStartupScenario(scenario: WorkspaceScenario): boolean {
-  return (
-    scenario === "workspace-starting" ||
-    scenario === "workspace-sending-message"
-  );
+  return scenario === "workspace-starting";
 }
 
 const repo: CodeRepoSnapshot = {
@@ -696,7 +692,6 @@ function storyClient(
   const sessions =
     scenario === "start" ||
     scenario === "workspace-starting" ||
-    scenario === "workspace-sending-message" ||
     scenario === "uneff-preparing" ||
     scenario === "session-create-failure" ||
     scenario === "first-turn-failure" ||
@@ -1138,17 +1133,11 @@ function WorkspacePageStory({
 }) {
   const [state] = useState(() => {
     resetStoryState(reviewOpen, sidebarCollapsed, storedInspectorLayout);
-    if (
-      scenario === "workspace-starting" ||
-      scenario === "workspace-sending-message"
-    ) {
+    if (scenario === "workspace-starting") {
       useCodeUiStore.getState().setWorkspaceStartup(workspace.id, {
         harness: "claude_code",
         hasFirstMessage: true,
-        phase:
-          scenario === "workspace-starting"
-            ? "starting_session"
-            : "sending_message",
+        phase: "starting_session",
       });
     }
     if (scenario === "uneff-preparing") {
@@ -1466,17 +1455,15 @@ export const UneffMePreparing: Story = {
   args: { scenario: "uneff-preparing", reviewOpen: false },
 };
 
-/** Once the agent exists, the same surface carries the first message into chat. */
-export const SendingFirstMessage: Story = {
-  args: { scenario: "workspace-sending-message", reviewOpen: false },
-};
-
 /** A creation failure leaves the start surface mounted and restores its draft. */
 export const FailedSessionCreation: Story = {
   args: { scenario: "session-create-failure", reviewOpen: false },
 };
 
-/** A failed first turn keeps the created session and restores the exact draft. */
+/**
+ * A failed first turn keeps the created session. The draft, its pasted text,
+ * and its images wait in that session's composer with the reason.
+ */
 export const FailedFirstMessage: Story = {
   args: { scenario: "first-turn-failure", reviewOpen: false },
 };
