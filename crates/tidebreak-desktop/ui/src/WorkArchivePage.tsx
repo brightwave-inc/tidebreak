@@ -5,6 +5,7 @@ import { Archive, ArchiveRestore, Trash2 } from "lucide-react";
 
 import type { Chat } from "./api";
 import { useApp } from "./AppContext";
+import { lastActivityAt, predatesListState } from "./chatListGroups";
 import { useChatListStore } from "./ChatListStore";
 import { useProjectListStore } from "./ProjectListStore";
 import { Loader } from "@/components/motion/loader";
@@ -21,7 +22,7 @@ import { friendlyErrorMessage } from "@/lib/utils";
 import { paneHeaderDragRegion } from "./WindowDragStrip";
 
 function archivedAgo(chat: Chat): string {
-  const at = Date.parse(chat.archived_at ?? chat.last_activity_at);
+  const at = Date.parse(chat.archived_at ?? lastActivityAt(chat));
   if (Number.isNaN(at)) return "";
   return `Archived ${formatDistanceToNowStrict(at, { addSuffix: true })}`;
 }
@@ -39,6 +40,7 @@ export function WorkArchivePage() {
   const archived = useChatListStore((state) => state.archivedChats);
   const loaded = useChatListStore((state) => state.archivedLoaded);
   const [error, setError] = useState<string | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,6 +48,13 @@ export function WorkArchivePage() {
       (chats) => {
         if (cancelled) return;
         setError(null);
+        // A server older than the archive does not know the question and
+        // answers with every conversation. None of those is archived, so none
+        // of them belongs here.
+        if (predatesListState(chats)) {
+          setUnavailable(true);
+          return;
+        }
         useChatListStore.getState().setArchivedChats(chats);
       },
       (err) => {
@@ -82,7 +91,12 @@ export function WorkArchivePage() {
           </p>
         </header>
         <div className="min-h-0 flex-1 overflow-auto">
-          <ArchiveBody archived={archived} loaded={loaded} error={error} />
+          <ArchiveBody
+            archived={archived}
+            loaded={loaded}
+            error={error}
+            unavailable={unavailable}
+          />
         </div>
       </div>
     </div>
@@ -93,11 +107,30 @@ function ArchiveBody({
   archived,
   loaded,
   error,
+  unavailable,
 }: {
   archived: Chat[];
   loaded: boolean;
   error: string | null;
+  /** The server is older than the archive. */
+  unavailable: boolean;
 }) {
+  if (unavailable) {
+    return (
+      <Empty className="min-h-80">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <Archive />
+          </EmptyMedia>
+          <EmptyTitle>The archive needs a newer server</EmptyTitle>
+          <EmptyDescription>
+            This window is attached to a server that predates the archive.
+            Update that server to archive work and bring it back.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
   if (error && !loaded) {
     return (
       <div

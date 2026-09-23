@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { Folder, X } from "lucide-react";
 
 import { useApp } from "./AppContext";
 import {
@@ -10,7 +11,7 @@ import {
 import { useChatListStore } from "./ChatListStore";
 import { Composer, type ComposerImages } from "./Composer";
 import {
-  HOME_DRAFT_KEY,
+  homeDraftKey,
   useComposerAttachments,
   useComposerDraft,
   useComposerDrafts,
@@ -27,6 +28,7 @@ import {
 } from "./NewChatSettings";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { pluginsApisFromClient } from "./plugins/pluginsApis";
+import { useProjectListStore } from "./ProjectListStore";
 import { useComposerPlugins } from "./plugins/useComposerPlugins";
 import { WelcomeState } from "./WelcomeState";
 import { PaneDragBand } from "./WindowDragStrip";
@@ -40,6 +42,7 @@ import {
   FirstTaskWalkthrough,
   shouldOfferFirstTaskWalkthrough,
 } from "./FirstTaskWalkthrough";
+import { Button } from "@/components/ui/button";
 
 const chatListActions = useChatListStore.getState();
 const composerDraftActions = useComposerDrafts.getState();
@@ -120,20 +123,39 @@ function isImportedDocument(result: {
   return result.status === "imported" || result.status === "already_present";
 }
 
-export function HomeRoute() {
+/**
+ * Where new work starts: the composer alone, and a conversation only once the
+ * first message goes.
+ *
+ * `projectId` starts the work inside a project. The conversation is filed
+ * there when it is created, and the draft is that project's own, so leaving to
+ * look something up and coming back through the project finds it again.
+ */
+export function HomeRoute({
+  projectId = null,
+}: {
+  projectId?: string | null;
+} = {}) {
   const navigate = useNavigate();
   const { client, models, defaultModelKey, providers } = useApp();
   const modelSettingsNav = useModelSettingsNav();
   const creatingChat = useChatListStore((state) => state.creatingChat);
-  const draft = useComposerDraft(HOME_DRAFT_KEY);
+  const project = useProjectListStore((state) =>
+    projectId
+      ? state.projects.find((candidate) => candidate.id === projectId)
+      : undefined,
+  );
+  const projectsLoaded = useProjectListStore((state) => state.projectsLoaded);
+  const draftKey = homeDraftKey(projectId);
+  const draft = useComposerDraft(draftKey);
   const composerPlugins = useComposerPlugins(client);
   const promptLibrary = useMemo(() => pluginsApisFromClient(client), [client]);
   const setDraft = (text: string) =>
-    composerDraftActions.setDraft(HOME_DRAFT_KEY, text);
+    composerDraftActions.setDraft(draftKey, text);
   const voice = useVoiceComposer(
     (audio) => client.transcribeVoice(audio),
     (transcript) => {
-      const current = useComposerDrafts.getState().drafts[HOME_DRAFT_KEY] ?? "";
+      const current = useComposerDrafts.getState().drafts[draftKey] ?? "";
       setDraft(appendTranscript(current, transcript));
     },
     undefined,
@@ -169,7 +191,7 @@ export function HomeRoute() {
   // chat exists on the server so files can upload, but the user stays on the
   // home page until they send. The id is part of the home draft: without it a
   // restored attachment strip would publish to a chat nobody remembers.
-  const attachments = useComposerAttachments(HOME_DRAFT_KEY);
+  const attachments = useComposerAttachments(draftKey);
   const pendingChatId = attachments.pendingChatId;
   const pendingImages = attachments.images;
   const pendingFiles = attachments.files;
@@ -183,10 +205,18 @@ export function HomeRoute() {
   // The same strip a conversation's composer has. Home's bytes are published
   // into the chat the attachment silently creates, which is why the target is
   // resolved per upload rather than being the draft's own key.
-  const images = useImageAttachments(client, HOME_DRAFT_KEY, ensurePendingChat);
+  const images = useImageAttachments(client, draftKey, ensurePendingChat);
 
   const chats = useChatListStore((state) => state.chats);
   const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
+
+  // A project that is gone — deleted in another window, or a stale link —
+  // cannot hold new work, so the composer starts outside it instead.
+  useEffect(() => {
+    if (projectId && projectsLoaded && !project) {
+      void navigate({ to: "/", replace: true });
+    }
+  }, [projectId, projectsLoaded, project, navigate]);
 
   // A restored home draft may point at a chat that no longer exists — deleted
   // in another window since the attachments were published to it. Those images
@@ -194,22 +224,22 @@ export function HomeRoute() {
   useEffect(() => {
     if (!chatsLoaded || !pendingChatId) return;
     if (chats.some((chat) => chat.id === pendingChatId)) return;
-    composerDraftActions.setPendingChatId(HOME_DRAFT_KEY, null);
-    composerDraftActions.setImages(HOME_DRAFT_KEY, []);
-    composerDraftActions.setFiles(HOME_DRAFT_KEY, []);
+    composerDraftActions.setPendingChatId(draftKey, null);
+    composerDraftActions.setImages(draftKey, []);
+    composerDraftActions.setFiles(draftKey, []);
   }, [chatsLoaded, chats, pendingChatId]);
 
   function setPendingFiles(
     update: (current: readonly ImportedDocument[]) => ImportedDocument[],
   ) {
     const current =
-      useComposerDrafts.getState().attachments[HOME_DRAFT_KEY]?.files ?? [];
-    composerDraftActions.setFiles(HOME_DRAFT_KEY, update(current));
+      useComposerDrafts.getState().attachments[draftKey]?.files ?? [];
+    composerDraftActions.setFiles(draftKey, update(current));
   }
 
   async function ensurePendingChat(): Promise<string> {
     const existing =
-      useComposerDrafts.getState().attachments[HOME_DRAFT_KEY]?.pendingChatId;
+      useComposerDrafts.getState().attachments[draftKey]?.pendingChatId;
     if (existing) return existing;
     // Images arrive in batches — a multi-file drop uploads every file at once,
     // and each upload asks for the chat to publish into. One in-flight creation
@@ -219,14 +249,18 @@ export function HomeRoute() {
   }
 
   async function createPendingChat(): Promise<string> {
-    const created = await client.createChat(newChat.model ?? undefined, null, {
-      reasoningEffort: newChat.reasoningEffort,
-      permissionMode: newChat.permissionMode,
-      networkPolicy: newChat.networkPolicy ?? undefined,
-    });
+    const created = await client.createChat(
+      newChat.model ?? undefined,
+      projectId,
+      {
+        reasoningEffort: newChat.reasoningEffort,
+        permissionMode: newChat.permissionMode,
+        networkPolicy: newChat.networkPolicy ?? undefined,
+      },
+    );
     chatListActions.prependChat(created);
     chatListActions.setChatsError(null);
-    composerDraftActions.setPendingChatId(HOME_DRAFT_KEY, created.id);
+    composerDraftActions.setPendingChatId(draftKey, created.id);
     return created.id;
   }
 
@@ -368,7 +402,7 @@ export function HomeRoute() {
       if (!chatId) {
         const created = await client.createChat(
           newChat.model ?? undefined,
-          null,
+          projectId,
           {
             reasoningEffort: newChat.reasoningEffort,
             permissionMode: newChat.permissionMode,
@@ -398,8 +432,16 @@ export function HomeRoute() {
       // the message lives only in the FirstMessage store with no composer
       // showing it — the draft has to stay where the reader can see and
       // resend it.
-      await navigate({ to: "/c/$chatId", params: { chatId } });
-      composerDraftActions.clearDraft(HOME_DRAFT_KEY);
+      if (projectId) {
+        useProjectListStore.getState().expandProject(projectId);
+        await navigate({
+          to: "/p/$projectId/c/$chatId",
+          params: { projectId, chatId },
+        });
+      } else {
+        await navigate({ to: "/c/$chatId", params: { chatId } });
+      }
+      composerDraftActions.clearDraft(draftKey);
     } catch (err) {
       setError(`Could not start work: ${String(err)}`);
     } finally {
@@ -480,6 +522,29 @@ export function HomeRoute() {
           </div>
 
           <div className="z-10 mx-auto w-full max-w-3xl pb-2">
+            {project && (
+              <div className="flex min-w-0 items-center gap-1.5 pt-1 pb-1.5 text-sm text-muted-foreground">
+                <Folder aria-hidden="true" className="size-3.5 shrink-0" />
+                {/* The project's name is what truncates, so a narrow pane
+                    still says where the work goes. */}
+                <span className="shrink-0">New work in</span>
+                <span className="min-w-0 truncate font-medium text-foreground">
+                  {project.title?.trim() || "Untitled project"}
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  className="shrink-0"
+                  aria-label="Start outside the project"
+                  title="Start outside the project"
+                  disabled={creatingChat}
+                  onClick={() => void navigate({ to: "/" })}
+                >
+                  <X />
+                </Button>
+              </div>
+            )}
             {error && <p className="pb-2 text-sm text-critical">{error}</p>}
             <Composer
               activeTurnId={null}
@@ -493,13 +558,13 @@ export function HomeRoute() {
                 options: composerPlugins.slashOptions,
                 invoked: pendingSkills,
                 onInvoke: (names) =>
-                  composerDraftActions.setSkills(HOME_DRAFT_KEY, [
+                  composerDraftActions.setSkills(draftKey, [
                     ...pendingSkills,
                     ...names,
                   ]),
                 onRemove: (name) =>
                   composerDraftActions.setSkills(
-                    HOME_DRAFT_KEY,
+                    draftKey,
                     pendingSkills.filter((skill) => skill !== name),
                   ),
                 loadPromptBody: composerPlugins.loadPromptBody,
@@ -528,19 +593,19 @@ export function HomeRoute() {
                 items: pendingPastedTexts,
                 onPaste: (text) => {
                   const current =
-                    useComposerDrafts.getState().attachments[HOME_DRAFT_KEY]
+                    useComposerDrafts.getState().attachments[draftKey]
                       ?.pastedTexts ?? [];
-                  composerDraftActions.setPastedTexts(HOME_DRAFT_KEY, [
+                  composerDraftActions.setPastedTexts(draftKey, [
                     ...current,
                     { id: crypto.randomUUID(), text },
                   ]);
                 },
                 onRemove: (id) => {
                   const current =
-                    useComposerDrafts.getState().attachments[HOME_DRAFT_KEY]
+                    useComposerDrafts.getState().attachments[draftKey]
                       ?.pastedTexts ?? [];
                   composerDraftActions.setPastedTexts(
-                    HOME_DRAFT_KEY,
+                    draftKey,
                     current.filter((item) => item.id !== id),
                   );
                 },
@@ -559,7 +624,7 @@ export function HomeRoute() {
                 />
               }
               attachError={attachError}
-              resetKey="home"
+              resetKey={draftKey}
               steerError={null}
               steerPending={false}
               steerStatus={null}

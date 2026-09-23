@@ -86,16 +86,33 @@ const workLayoutRoute = createRoute({
  */
 type ChatSearch = PanelSearch & { focus?: string; at?: string };
 
+/**
+ * Home's URL carries the layout params a conversation's does, and the project
+ * new work starts in when it was started from one.
+ */
+type HomeSearch = PanelSearch & { project?: string };
+
 const homeRoute = createRoute({
   getParentRoute: () => workLayoutRoute,
   path: "/",
   // Home hosts panels the way a conversation does — the Apps library opens
   // beside the composer — so it reads the same layout params. Which panel
   // types home actually accepts is decided by HomeRoute, not the URL parser.
-  validateSearch: (search: Record<string, unknown>): PanelSearch =>
-    panelSearchFrom(search),
-  component: HomeRoute,
+  validateSearch: (search: Record<string, unknown>): HomeSearch => ({
+    ...panelSearchFrom(search),
+    project: typeof search.project === "string" ? search.project : undefined,
+  }),
+  component: HomeRouteComponent,
 });
+
+/**
+ * Keyed on the project so new work in one project never inherits another's
+ * draft or the conversation its attachments created.
+ */
+function HomeRouteComponent() {
+  const { project } = homeRoute.useSearch();
+  return <HomeRoute key={project ?? "home"} projectId={project ?? null} />;
+}
 
 /**
  * The install-wide libraries, each a full page with the shared rail. They used

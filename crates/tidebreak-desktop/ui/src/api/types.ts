@@ -20,6 +20,7 @@ import {
   type AgentRunCancellationSnapshot,
   type AgentRunSnapshot,
   type AgentRunTaskPlan as WireAgentRunTaskPlan,
+  type Chat as WireChat,
   type ChatListing as WireChatListing,
   type ChatTranscript as WireChatTranscript,
   type CredentialRefusalReason as WireCredentialRefusalReason,
@@ -623,8 +624,13 @@ export type ManagedPolicySource = WireManagedPolicySource;
 /**
  * A conversation as the list of work shows it: the conversation, and where it
  * sits in the list. Every chat route answers with this shape.
+ *
+ * The list fields are optional here although the wire always sends them. A
+ * desktop can attach to a server older than the list of work, which answers
+ * with the bare conversation. `hasListState` in `chatListGroups` tells the two
+ * apart, and every reader falls back rather than assuming.
  */
-export type Chat = WireChatListing;
+export type Chat = WireChat & Partial<Omit<WireChatListing, keyof WireChat>>;
 
 /**
  * One visible, durable transcript entry in conversation order.

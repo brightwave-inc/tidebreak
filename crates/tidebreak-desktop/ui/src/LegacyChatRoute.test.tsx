@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import type { Chat } from "./api";
@@ -58,6 +58,18 @@ it("opens a conversation the list holds without asking the server", () => {
   expect(screen.getByText("Owner chat listed")).toBeTruthy();
   expect(mocks.client.getCodeSession).not.toHaveBeenCalled();
   expect(mocks.client.getChat).not.toHaveBeenCalled();
+});
+
+it("keeps the open conversation mounted when a refresh drops it", () => {
+  useChatListStore.setState({ chats: [chat("open")] });
+  render(<LegacyChatRoute chatId="open" />);
+  expect(screen.getByText("Owner chat open")).toBeTruthy();
+
+  // Archived from the command line: the next list no longer holds it.
+  act(() => useChatListStore.setState({ chats: [] }));
+  expect(screen.getByText("Owner chat open")).toBeTruthy();
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(mocks.client.getCodeSession).not.toHaveBeenCalled();
 });
 
 it("waits for the list before deciding a chat is absent", () => {

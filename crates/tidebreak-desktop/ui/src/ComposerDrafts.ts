@@ -16,6 +16,15 @@ const ATTACHMENTS_PREFIX = "composer_attachments_";
 /** The home composer's draft, written before a chat exists to hold it. */
 export const HOME_DRAFT_KEY = "home";
 
+/**
+ * The draft of new work that starts in a project. Each project keeps its own,
+ * so leaving one to look something up and starting its new work again finds
+ * the draft where it was left.
+ */
+export function homeDraftKey(projectId: string | null): string {
+  return projectId ? `${HOME_DRAFT_KEY}:project:${projectId}` : HOME_DRAFT_KEY;
+}
+
 function storageKeyFor(key: string): string {
   return `${KEY_PREFIX}${key}`;
 }
@@ -29,7 +38,10 @@ function attachmentsStorageKeyFor(key: string): string {
 export function composerKeyForRoute(route: string): string | null {
   const chatMatch = /\/c\/([^/?]+)/.exec(route);
   if (chatMatch) return chatMatch[1];
-  if (route === "/") return HOME_DRAFT_KEY;
+  const [path, query = ""] = route.split("?", 2);
+  if (path === "/") {
+    return homeDraftKey(new URLSearchParams(query).get("project"));
+  }
   return null;
 }
 

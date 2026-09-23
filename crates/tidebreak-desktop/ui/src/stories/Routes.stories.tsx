@@ -31,6 +31,7 @@ import {
 
 type RouteScenario =
   | "home"
+  | "home-project"
   | "inbox-loading"
   | "inbox-empty"
   | "inbox-dense"
@@ -69,7 +70,13 @@ function createRouteRouter(initialPath: string) {
   const homeRoute = createRoute({
     getParentRoute: () => workLayoutRoute,
     path: "/",
-    component: HomeRoute,
+    validateSearch: (search: Record<string, unknown>) => ({
+      project: typeof search.project === "string" ? search.project : undefined,
+    }),
+    component: () => {
+      const { project } = homeRoute.useSearch();
+      return <HomeRoute key={project ?? "home"} projectId={project ?? null} />;
+    },
   });
   const inboxRoute = createRoute({
     getParentRoute: () => workLayoutRoute,
@@ -186,6 +193,7 @@ function clientForScenario(scenario: RouteScenario): ApiClient {
 }
 
 function initialPathFor(scenario: RouteScenario): string {
+  if (scenario === "home-project") return "/?project=project-1";
   if (scenario.startsWith("inbox")) return "/inbox";
   if (scenario === "project-instructions") return "/p/project-1#instructions";
   if (scenario.startsWith("project")) return "/p/project-1";
@@ -254,6 +262,19 @@ type Story = StoryObj<typeof meta>;
 export const HomeDesktop: Story = {};
 
 export const HomeMinimumWindow: Story = {
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+};
+
+/**
+ * New work started from a project: the composer names the project the work
+ * will be filed in, and the conversation waits for the first message.
+ */
+export const HomeInProject: Story = {
+  args: { scenario: "home-project" },
+};
+
+export const HomeInProjectMinimumWindow: Story = {
+  args: { scenario: "home-project" },
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
 };
 

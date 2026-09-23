@@ -14,7 +14,9 @@ import { codeClientGeneration } from "./code/CodeClientGeneration";
  * another principal owns, or one that runs in code mode, and those go to the
  * code session page. A Work conversation of the reader's that the list does
  * not hold — an archived one opened from a link — is added to the store and
- * opened.
+ * opened. Once the conversation is open it stays open: a refresh that drops it
+ * from the list, such as an archive from the command line, is the chat route's
+ * to settle, and must not unmount it.
  */
 export function LegacyChatRoute({ chatId }: { chatId: string }) {
   const { client } = useApp();
@@ -36,9 +38,11 @@ function ResolveChatRoute({ chatId }: { chatId: string }) {
   );
   const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
   const [settled, setSettled] = useState(false);
+  const [opened, setOpened] = useState(false);
+  if ((known || settled) && !opened) setOpened(true);
 
   useEffect(() => {
-    if (known || !chatsLoaded || settled) return;
+    if (known || opened || !chatsLoaded || settled) return;
     let cancelled = false;
     void (async () => {
       const session = await client.getCodeSession(chatId).catch(() => null);
@@ -66,9 +70,9 @@ function ResolveChatRoute({ chatId }: { chatId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [client, chatId, known, chatsLoaded, settled, navigate]);
+  }, [client, chatId, known, opened, chatsLoaded, settled, navigate]);
 
-  if (known || settled) return <ChatRoute chatId={chatId} />;
+  if (known || settled || opened) return <ChatRoute chatId={chatId} />;
   // Inside the shared frame, so the rail stays put while this settles.
   return (
     <p role="status" className="text-muted-foreground p-6 text-sm">

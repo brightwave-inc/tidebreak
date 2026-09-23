@@ -13,6 +13,7 @@ import {
 
 import type { Chat } from "./api";
 import { useApp } from "./AppContext";
+import { hasListState } from "./chatListGroups";
 import { chatDebugDeps, copyChatDebug, saveChatDebug } from "./ChatDebugBundle";
 import { useChatListStore } from "./ChatListStore";
 import { hasLocalHostAuthority } from "./host";
@@ -49,6 +50,8 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
   } = useApp();
   const pinned = Boolean(chat.pinned_at);
   const archived = Boolean(chat.archived_at);
+  // A server older than the list of work cannot pin or archive.
+  const placeable = hasListState(chat);
   const renaming = useChatListStore(
     (state) => state.renamingChatId === chat.id,
   );
@@ -130,7 +133,7 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          {!archived && (
+          {placeable && !archived && (
             <DropdownMenuItem onSelect={() => togglePinChat(chat)}>
               {pinned ? <PinOff /> : <Pin />}
               {pinned ? "Unpin" : "Pin"}
@@ -162,17 +165,18 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
             </>
           )}
           <DropdownMenuSeparator />
-          {archived ? (
-            <DropdownMenuItem onSelect={() => unarchiveChat(chat)}>
-              <ArchiveRestore />
-              Unarchive
-            </DropdownMenuItem>
-          ) : (
-            <DropdownMenuItem onSelect={() => archiveChat(chat)}>
-              <Archive />
-              Archive
-            </DropdownMenuItem>
-          )}
+          {placeable &&
+            (archived ? (
+              <DropdownMenuItem onSelect={() => unarchiveChat(chat)}>
+                <ArchiveRestore />
+                Unarchive
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem onSelect={() => archiveChat(chat)}>
+                <Archive />
+                Archive
+              </DropdownMenuItem>
+            ))}
           <DropdownMenuItem
             variant="destructive"
             onSelect={() => deleteChat(chat)}

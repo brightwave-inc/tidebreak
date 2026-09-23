@@ -37,6 +37,32 @@ function timestamp(value: string | null | undefined): number {
 }
 
 /**
+ * Whether the server that sent this row knows the list of work: pins, the
+ * archive, unread marks, and turn counts. A server older than the list of work
+ * sends the bare conversation, and a desktop can be attached to one.
+ */
+export function hasListState(chat: Chat): boolean {
+  return chat.last_activity_at !== undefined;
+}
+
+/**
+ * Whether this list came from a server older than the list of work. An empty
+ * list cannot tell, so it counts as current: the archive it offers is empty
+ * either way.
+ */
+export function predatesListState(chats: readonly Chat[]): boolean {
+  return chats.length > 0 && !chats.some(hasListState);
+}
+
+/**
+ * When the conversation last moved. An older server sends no activity time,
+ * and its creation time is the best it has.
+ */
+export function lastActivityAt(chat: Chat): string {
+  return chat.last_activity_at ?? chat.created_at;
+}
+
+/**
  * The list's order: pinned first, most recently pinned on top, then the rest
  * by latest activity. The same order the server sends.
  */
@@ -44,7 +70,7 @@ export function compareChats(left: Chat, right: Chat): number {
   const pinned = timestamp(right.pinned_at) - timestamp(left.pinned_at);
   if (pinned !== 0) return pinned;
   const activity =
-    timestamp(right.last_activity_at) - timestamp(left.last_activity_at);
+    timestamp(lastActivityAt(right)) - timestamp(lastActivityAt(left));
   if (activity !== 0) return activity;
   const created = timestamp(right.created_at) - timestamp(left.created_at);
   if (created !== 0) return created;
@@ -60,10 +86,12 @@ export function sortChats(chats: readonly Chat[]): Chat[] {
  *
  * One nothing has happened in — no turn, no name, no pin — is a start the
  * reader has not made yet. It stays out of the list unless it is the one on
- * screen, so abandoning a new chat leaves nothing behind.
+ * screen, so abandoning a new chat leaves nothing behind. A server older than
+ * the list of work does not count turns, so every row it sends stays.
  */
 export function isListableChat(chat: Chat, activeChatId?: string | null) {
   return (
+    chat.turn_count === undefined ||
     chat.turn_count > 0 ||
     Boolean(chat.title?.trim()) ||
     Boolean(chat.pinned_at) ||
@@ -109,7 +137,7 @@ export function groupChats(chats: readonly Chat[], now: Date): ChatListGroup[] {
   for (const chat of sortChats(chats)) {
     const key: ChatListGroupKey = chat.pinned_at
       ? "pinned"
-      : activityGroup(chat.last_activity_at, now);
+      : activityGroup(lastActivityAt(chat), now);
     const bucket = buckets.get(key);
     if (bucket) bucket.push(chat);
     else buckets.set(key, [chat]);

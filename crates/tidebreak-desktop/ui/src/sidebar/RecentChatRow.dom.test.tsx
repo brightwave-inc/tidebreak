@@ -12,6 +12,8 @@ afterEach(cleanup);
 const chat = {
   id: "c1",
   title: "Fix login",
+  created_at: "2026-09-20T09:00:00Z",
+  last_activity_at: "2026-09-20T10:00:00Z",
   pinned_at: null,
   archived_at: null,
   running: false,
@@ -110,5 +112,25 @@ describe("RecentChatRow", () => {
       screen.getByRole("button", { name: "Actions for Fix login" }),
     );
     expect(screen.getByRole("menuitem", { name: "Unpin" })).toBeTruthy();
+  });
+
+  it("leaves pin and archive out for a server older than the list of work", async () => {
+    const user = userEvent.setup();
+    // The bare conversation such a server sends: no list fields at all.
+    renderRow({
+      last_activity_at: undefined,
+      pinned_at: undefined,
+      archived_at: undefined,
+      running: undefined,
+      unread: undefined,
+      turn_count: undefined,
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Fix login" }),
+    );
+    expect(screen.getByRole("menuitem", { name: "Rename" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Pin" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Archive" })).toBeNull();
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toBeTruthy();
   });
 });

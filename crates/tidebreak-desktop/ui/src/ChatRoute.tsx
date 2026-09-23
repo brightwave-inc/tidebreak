@@ -16,6 +16,7 @@ import { ChatStatusChip } from "./ChatStatusChip";
 import { useChatMemoryPresence } from "./chatMemoryPresence";
 import { useChatHydration } from "./useChatHydration";
 import { useChatListStore } from "./ChatListStore";
+import { useOpenChat } from "./useOpenChat";
 import { useComposerAttachments, useComposerDrafts } from "./ComposerDrafts";
 import { ChatSessionController } from "./ChatSessionController";
 import {
@@ -134,8 +135,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const modelSettingsNav = useModelSettingsNav();
   const { layout, openPanel, setLayout } = usePanelNav();
   const sourceNav = useStableSourceNav(openPanel);
-  const chats = useChatListStore((state) => state.chats);
-  const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const busy = useChatSessionStore((session) => session.busy);
   const lastTurnUsage = useChatSessionStore((session) => session.lastTurnUsage);
@@ -162,19 +161,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   // the only writer on this route.
   const draftRef = useRef(useComposerDrafts.getState().drafts[chatId] ?? "");
 
-  const archivedChats = useChatListStore((state) => state.archivedChats);
-  // An archived conversation still opens: archiving keeps everything.
-  const chat =
-    chats.find((candidate) => candidate.id === chatId) ??
-    archivedChats.find((candidate) => candidate.id === chatId) ??
-    null;
+  const chat = useOpenChat(client, chatId);
   const unread = chat?.unread ?? false;
   const windowVisible = useDocumentVisible();
 
-  // Looking at the conversation is what reads it. A turn that finishes while
-  // it is open marks it unread on the server, the list refresh that follows
-  // brings that here, and this clears it again. A hidden window has not seen
-  // anything, so the mark waits until the window is back.
+  // Looking at the conversation is what reads it. The server already keeps a
+  // turn that ends while this conversation's stream is open from marking it
+  // unread; this clears a mark left from before it was opened. A hidden window
+  // has not seen anything, so the mark waits until the window is back.
   useEffect(() => {
     if (!unread || !windowVisible) return;
     chatListActions.markChatRead(chatId);
@@ -226,15 +220,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const overlayOpen = usePortalOverlayOpen();
   const { browserTitles, browserInitialUrls, openBrowser, setBrowserTitle } =
     useForegroundBrowserTabs({ chatId, layout, setLayout, openPanel });
-
-  // A chat id that is not in the list — deleted in another window, or a stale
-  // deep link — should land somewhere real rather than on an empty frame. The
-  // gate is whether the list has been fetched, not whether it has rows: an
-  // account with no chats left is exactly the case that would otherwise sit on
-  // the loading frame forever.
-  useEffect(() => {
-    if (chatsLoaded && !chat) void navigate({ to: "/", replace: true });
-  }, [chatsLoaded, chat, navigate]);
 
   // A conversation opened from the home composer arrives with its first message
   // already written. Wait for the empty chat's authoritative snapshot before

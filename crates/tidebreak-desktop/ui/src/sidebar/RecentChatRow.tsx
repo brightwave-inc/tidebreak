@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import type { Chat, Project } from "@/api";
+import { hasListState } from "@/chatListGroups";
 import { useChatListStore } from "@/ChatListStore";
 import { useTypewriterOnce } from "@/useTypewriterOnce";
 import { Loader } from "@/components/motion/loader";
@@ -106,6 +107,8 @@ export function RecentChatRow({
   const displayTitle = useTypewriterOnce(title, justNamed);
   const state = chatRowState({ chat, active, needsAttention });
   const pinned = Boolean(chat.pinned_at);
+  // A server older than the list of work cannot pin or archive.
+  const placeable = hasListState(chat);
 
   if (renaming) {
     return (
@@ -168,10 +171,12 @@ export function RecentChatRow({
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" side="right">
-          <DropdownMenuItem onSelect={onTogglePin}>
-            {pinned ? <PinOff /> : <Pin />}
-            {pinned ? "Unpin" : "Pin"}
-          </DropdownMenuItem>
+          {placeable && (
+            <DropdownMenuItem onSelect={onTogglePin}>
+              {pinned ? <PinOff /> : <Pin />}
+              {pinned ? "Unpin" : "Pin"}
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem onSelect={onStartRename}>
             <Pencil />
             Rename
@@ -207,10 +212,12 @@ export function RecentChatRow({
             </DropdownMenuSub>
           )}
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={onArchive}>
-            <Archive />
-            Archive
-          </DropdownMenuItem>
+          {placeable && (
+            <DropdownMenuItem onSelect={onArchive}>
+              <Archive />
+              Archive
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem variant="destructive" onSelect={onDelete}>
             <Trash2 />
             Delete

@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { createComposerDraftStore, useComposerDrafts } from "./ComposerDrafts";
+import {
+  composerKeyForRoute,
+  createComposerDraftStore,
+  homeDraftKey,
+  useComposerDrafts,
+} from "./ComposerDrafts";
 import type { ImageAttachment } from "./ImageAttachments";
 
 const READY_IMAGE: ImageAttachment = {
@@ -94,5 +99,15 @@ describe("composer draft attachments", () => {
     const restored = createComposerDraftStore().getState();
     expect(restored.drafts["chat-1"]).toBeUndefined();
     expect(restored.attachments["chat-1"]).toBeUndefined();
+  });
+});
+
+describe("composerKeyForRoute", () => {
+  it("gives new work in a project its own draft", () => {
+    expect(composerKeyForRoute("/")).toBe(homeDraftKey(null));
+    expect(composerKeyForRoute("/?project=p1")).toBe(homeDraftKey("p1"));
+    expect(homeDraftKey("p1")).not.toBe(homeDraftKey(null));
+    expect(composerKeyForRoute("/c/chat-1?layout=x")).toBe("chat-1");
+    expect(composerKeyForRoute("/settings")).toBeNull();
   });
 });

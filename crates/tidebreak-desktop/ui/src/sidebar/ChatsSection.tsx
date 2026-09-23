@@ -16,6 +16,7 @@ import { useChatAttention } from "@/ChatAttention";
 import {
   groupChats,
   isListableChat,
+  predatesListState,
   type ChatListGroup,
 } from "@/chatListGroups";
 import { useChatListStore } from "@/ChatListStore";
@@ -181,6 +182,8 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
 
   const listed = listedChats(chats, query, activeChatId);
   const groups = groupChats(listed, new Date());
+  // A server older than the list of work has no archive to show.
+  const archiveAvailable = !predatesListState(chats);
   const activeListed = listed.some((chat) => chat.id === activeChatId);
 
   // The rail stays mounted while the pane changes, so the list keeps its
@@ -246,12 +249,14 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
               <ListFilter />
               {filtering ? "Hide filter" : "Filter work"}
             </DropdownMenuItem>
-            <DropdownMenuItem
-              onSelect={() => void navigate({ to: "/archive" })}
-            >
-              <Archive />
-              Archived work
-            </DropdownMenuItem>
+            {archiveAvailable && (
+              <DropdownMenuItem
+                onSelect={() => void navigate({ to: "/archive" })}
+              >
+                <Archive />
+                Archived work
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
         <button

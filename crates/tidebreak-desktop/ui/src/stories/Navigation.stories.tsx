@@ -46,7 +46,9 @@ type NavigationScenario =
   | "pinned"
   | "long-titles"
   | "archive"
-  | "archive-empty";
+  | "archive-empty"
+  | "older-server"
+  | "older-server-archive";
 
 function NavigationSurface() {
   const activeChatId = useActiveChatId();
@@ -191,6 +193,27 @@ const pinnedChats: Chat[] = [
   }),
 ];
 
+const LIST_FIELDS = new Set([
+  "last_activity_at",
+  "pinned_at",
+  "archived_at",
+  "running",
+  "unread",
+  "turn_count",
+]);
+
+/**
+ * A conversation as a server older than the list of work sends it: the bare
+ * conversation, without pins, the archive, unread marks, or turn counts.
+ */
+function fromOlderServer(chat: Chat): Chat {
+  return Object.fromEntries(
+    Object.entries(chat).filter(([key]) => !LIST_FIELDS.has(key)),
+  ) as Chat;
+}
+
+const olderServerChats = groupedRouteChats.slice(0, 6).map(fromOlderServer);
+
 const scenarioChats: Partial<Record<NavigationScenario, Chat[]>> = {
   grouped: groupedRouteChats,
   running: runningChats,
@@ -199,6 +222,8 @@ const scenarioChats: Partial<Record<NavigationScenario, Chat[]>> = {
   "long-titles": longTitleRouteChats,
   archive: groupedRouteChats.slice(0, 6),
   "archive-empty": groupedRouteChats.slice(0, 6),
+  "older-server": olderServerChats,
+  "older-server-archive": olderServerChats,
 };
 
 const scenarioPaths: Partial<Record<NavigationScenario, string>> = {
@@ -214,6 +239,8 @@ const scenarioPaths: Partial<Record<NavigationScenario, string>> = {
   "long-titles": "/c/long-2",
   archive: "/archive",
   "archive-empty": "/archive",
+  "older-server": `/c/${olderServerChats[1]?.id}`,
+  "older-server-archive": "/archive",
 };
 
 function NavigationStory({ scenario }: { scenario: NavigationScenario }) {
@@ -255,7 +282,13 @@ function NavigationStory({ scenario }: { scenario: NavigationScenario }) {
 
     return {
       client: storyClient(
-        scenario === "archive-empty" ? { listChats: async () => [] } : {},
+        scenario === "archive-empty"
+          ? { listChats: async () => [] }
+          : scenario === "older-server-archive"
+            ? // An older server ignores the archive question and answers
+              // with every conversation.
+              { listChats: async () => olderServerChats }
+            : {},
       ),
       router: createNavigationRouter(scenarioPaths[scenario] ?? "/"),
     };
@@ -362,6 +395,27 @@ export const ArchivedView: Story = {
 
 export const EmptyArchive: Story = {
   args: { scenario: "archive-empty" },
+};
+
+/**
+ * Attached to a server older than the list of work: every row stays, grouped
+ * by creation, and the row menu leaves out pin and archive.
+ */
+export const OlderServerRowMenu: Story = {
+  args: { scenario: "older-server" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", {
+        name: `Actions for ${olderServerChats[0]?.title}`,
+      }),
+    );
+  },
+};
+
+/** The archive page, reached by a link, on a server that predates it. */
+export const OlderServerArchive: Story = {
+  args: { scenario: "older-server-archive" },
 };
 
 /** A project's row menu, where Instructions opens the project's brief. */

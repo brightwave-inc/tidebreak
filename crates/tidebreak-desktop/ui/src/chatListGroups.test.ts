@@ -4,7 +4,9 @@ import type { Chat } from "./api";
 import {
   activityGroup,
   groupChats,
+  hasListState,
   isListableChat,
+  predatesListState,
   sortChats,
 } from "./chatListGroups";
 
@@ -102,5 +104,47 @@ describe("isListableChat", () => {
     expect(isListableChat({ ...empty, title: "   " })).toBe(false);
     expect(isListableChat({ ...empty, pinned_at: at(0) })).toBe(true);
     expect(isListableChat(empty, "empty")).toBe(true);
+  });
+});
+
+describe("a server older than the list of work", () => {
+  const LIST_FIELDS = new Set([
+    "last_activity_at",
+    "pinned_at",
+    "archived_at",
+    "running",
+    "unread",
+    "turn_count",
+  ]);
+
+  // The bare conversation such a server sends: none of the list fields.
+  function bare(id: string, fields: Partial<Chat> = {}): Chat {
+    return Object.fromEntries(
+      Object.entries(chat(id, fields)).filter(([key]) => !LIST_FIELDS.has(key)),
+    ) as Chat;
+  }
+
+  it("keeps every row, grouped by when it was created", () => {
+    const rows = [
+      bare("old", { created_at: at(30) }),
+      bare("untitled", { title: null, created_at: at(0) }),
+    ];
+    expect(predatesListState(rows)).toBe(true);
+    expect(hasListState(rows[0])).toBe(false);
+    expect(rows.every((row) => isListableChat(row))).toBe(true);
+    expect(
+      groupChats(rows, NOW).map((group) => [
+        group.label,
+        group.chats.map((c) => c.id),
+      ]),
+    ).toEqual([
+      ["Today", ["untitled"]],
+      ["Older", ["old"]],
+    ]);
+  });
+
+  it("cannot tell from an empty list, so it counts as current", () => {
+    expect(predatesListState([])).toBe(false);
+    expect(predatesListState([chat("current")])).toBe(false);
   });
 });

@@ -56,6 +56,7 @@ import {
   tryDeleteChat,
   waitForChatQuiescent,
 } from "./ChatDeletion";
+import { hasListState } from "./chatListGroups";
 import { useChatListStore } from "./ChatListStore";
 import { useChatSessionStore } from "./ChatSessionStore";
 import {
@@ -749,11 +750,11 @@ export function AppShell() {
   }, [client, info]);
 
   /**
-   * Create a named project and the first chat inside it.
+   * Create a named project and start new work inside it.
    *
-   * A project with no conversation is a folder the reader has to fill. The
-   * dialog already collected the name, so this does both writes and opens the
-   * chat rather than leaving an empty row in the rail.
+   * A project with no conversation is a folder the reader has to fill, so the
+   * reader lands on the composer with the project chosen. The conversation
+   * itself waits for the first message, like any new work.
    */
   async function onNewProject(title: string): Promise<boolean> {
     const trimmed = title.trim();
@@ -868,27 +869,17 @@ export function AppShell() {
     }
   }
 
-  /** Start a conversation inside a project and open it there. */
+  /**
+   * Start new work inside a project: the home composer, with the project
+   * chosen. Nothing is created until the first message goes, so a start the
+   * reader abandons leaves nothing behind, and its draft waits under the
+   * project for the next time.
+   */
   async function onNewChatInProject(projectId: string) {
-    if (!client || creationInFlightRef.current || deletionInFlightRef.current)
-      return;
-    creationInFlightRef.current = true;
-    chatListActions.setCreatingChat(true);
-    try {
-      const created = await client.createChat(undefined, projectId);
-      chatListActions.prependChat(created);
-      chatListActions.setChatsError(null);
-      projectListActions.expandProject(projectId);
-      await navigate({
-        to: "/p/$projectId/c/$chatId",
-        params: { projectId, chatId: created.id },
-      });
-    } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not create the work."));
-    } finally {
-      creationInFlightRef.current = false;
-      chatListActions.setCreatingChat(false);
-    }
+    projectListActions.expandProject(projectId);
+    await navigate({ to: "/", search: { project: projectId } });
+    // After the route settles, so the page heading does not take focus back.
+    window.requestAnimationFrame(focusComposer);
   }
 
   /** File a conversation under a project, or take it back out with `null`. */
@@ -934,7 +925,9 @@ export function AppShell() {
    * conversation behind.
    */
   async function onNewChat() {
-    if (router.state.location.pathname !== "/") {
+    const { pathname, search } = router.state.location;
+    // New work in a project is a different composer; plain new work leaves it.
+    if (pathname !== "/" || (search as { project?: string }).project) {
       await navigate({ to: "/" });
     }
     // After the route settles, so the page heading does not take focus back.
@@ -977,8 +970,8 @@ export function AppShell() {
     );
     // Archive is the gentler answer to "get this out of my list", so the
     // dialog offers it beside Delete, unless the conversation is archived
-    // already.
-    const offerArchive = !current.archived_at;
+    // already or the server is older than the archive.
+    const offerArchive = hasListState(current) && !current.archived_at;
     const confirmation = {
       title: `Delete ${label}?`,
       description: deletionDescription({
