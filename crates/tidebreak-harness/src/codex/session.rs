@@ -1082,7 +1082,7 @@ impl CodexSession {
             // is deprecated: 0.153.4 starts every thread paginated, then
             // answers a resume without `excludeTurns` with a deprecation
             // notice and the whole history on one line that grows with every
-            // turn. 0.147.0 accepts the field too.
+            // turn (captured). The 0.147.0 binary knows the field too.
             (
                 "thread/resume",
                 json!({ "threadId": resume, "excludeTurns": true }),
