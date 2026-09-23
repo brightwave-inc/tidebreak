@@ -143,7 +143,10 @@ export function CompactionPanel({ client }: { client: ApiClient }) {
       description="How long conversations run before the agent summarizes what is behind them."
       busy={form === null}
     >
-      <SettingsSection>
+      <SettingsSection
+        title="When conversations compact"
+        description="Where compaction starts, and how much of the conversation stays in full."
+      >
         <SettingsField
           label="Compact when the conversation reaches"
           hint="Percent of the model's context window. Below this, nothing is summarized. Type /compact in work to run it sooner."
@@ -156,6 +159,7 @@ export function CompactionPanel({ client }: { client: ApiClient }) {
             step="1"
             aria-label="Compaction threshold, percent of the context window"
             {...field("thresholdPercent")}
+            onBlur={() => void save()}
           />
         </SettingsField>
         <div className="flex flex-col gap-4">
@@ -182,6 +186,7 @@ export function CompactionPanel({ client }: { client: ApiClient }) {
                   step="1"
                   aria-label="Compaction target, percent of the context window"
                   {...field("targetPercent")}
+                  onBlur={() => void save()}
                 />
               </SettingsField>
               <SettingsField
@@ -196,18 +201,12 @@ export function CompactionPanel({ client }: { client: ApiClient }) {
                   step="1"
                   aria-label="Recent messages kept in full"
                   {...field("protectRecent")}
+                  onBlur={() => void save()}
                 />
               </SettingsField>
             </>
           )}
         </div>
-        <Button
-          type="button"
-          disabled={form === null || saving}
-          onClick={() => void save()}
-        >
-          {saving ? "Saving…" : "Save settings"}
-        </Button>
       </SettingsSection>
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>

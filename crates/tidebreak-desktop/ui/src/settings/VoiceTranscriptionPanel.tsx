@@ -127,17 +127,15 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
       description={`Choose how microphone recordings become editable message drafts. Recordings are transcribed on ${hostMachineLabel()}, and the audio stays there unless you pick a cloud model.`}
       busy={loading}
     >
-      <SettingsSection>
-        <SettingsStatus
-          tone={ready ? "ready" : "neutral"}
-          label={ready ? "Ready" : "Setup required"}
-          description={
-            ready
-              ? "The selected voice input model is ready to transcribe recordings."
-              : `Download a model that runs on ${hostMachineLabel()}, or configure a supported cloud provider.`
-          }
-        />
-      </SettingsSection>
+      <SettingsStatus
+        tone={ready ? "ready" : "neutral"}
+        label={ready ? "Ready" : "Setup required"}
+        description={
+          ready
+            ? "The selected voice input model is ready to transcribe recordings."
+            : `Download a model that runs on ${hostMachineLabel()}, or configure a supported cloud provider.`
+        }
+      />
 
       <SettingsSection
         title="Transcription model"

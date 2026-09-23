@@ -11,7 +11,6 @@ import {
   requiresManagedExecutionDisclosure,
 } from "../ExecDisclosure";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { hostMachineLabel } from "@/remoteMachine";
 import {
   ActiveProviderField,
@@ -44,6 +43,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
   >({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingKey, setSavingKey] = useState<ExecProviderKind | null>(null);
   const [removing, setRemoving] = useState<ExecProviderKind | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,46 +73,76 @@ export function ExecPanel({ client }: { client: ApiClient }) {
     };
   }, [client]);
 
-  const working = saving || removing !== null;
+  const working = saving || savingKey !== null || removing !== null;
   const state = codeExecutionState(config);
 
-  async function save() {
+  async function saveCredential(target: ExecProviderKind) {
+    const key = apiKeys[target]?.trim();
+    if (!key) return;
+    setSavingKey(target);
+    setError(null);
+    try {
+      await client.putExecCredential(target, key);
+      setApiKeys((current) => ({ ...current, [target]: "" }));
+      const nextCredentials = await client.listExecCredentials();
+      setCredentials(nextCredentials.credentials);
+      toast.success(`Saved the ${codeExecutionProviderLabel(target)} API key`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSavingKey(null);
+    }
+  }
+
+  async function persistConfig(next: {
+    provider: ExecProviderKind | "";
+    timeoutSeconds: string;
+  }) {
     const timeout = timeoutMsFromSeconds(
-      timeoutSeconds,
+      next.timeoutSeconds,
       MIN_CODE_EXECUTION_TIMEOUT_SECONDS,
       MAX_CODE_EXECUTION_TIMEOUT_SECONDS,
     );
     if ("error" in timeout) {
       setError(timeout.error);
-      return;
+      return false;
     }
-
     setSaving(true);
     setError(null);
     try {
-      // Keys go first so the newly active provider never lands
-      // selected-but-unusable when the caller supplied both in one pass.
-      for (const credential of credentials) {
-        const key = apiKeys[credential.provider]?.trim();
-        if (!key) continue;
-        await client.putExecCredential(credential.provider, key);
-        setApiKeys((current) => ({ ...current, [credential.provider]: "" }));
-      }
       const nextConfig = await client.putExecConfig({
-        provider: provider || null,
+        provider: next.provider || null,
         timeout_ms: timeout.timeoutMs,
       });
-      const nextCredentials = await client.listExecCredentials();
       setConfig(nextConfig);
-      setCredentials(nextCredentials.credentials);
       setProvider(nextConfig.provider ?? "");
       setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
       toast.success("Saved code-execution settings");
+      return true;
     } catch (err) {
       setError(String(err));
+      return false;
     } finally {
       setSaving(false);
     }
+  }
+
+  async function saveProvider(nextProvider: ExecProviderKind | "") {
+    if (nextProvider) {
+      const slot = credentials.find((row) => row.provider === nextProvider);
+      if (slot && !slot.has_credential) {
+        setError(
+          `${codeExecutionProviderLabel(nextProvider)} needs an API key before you can make it active.`,
+        );
+        return;
+      }
+    }
+    setProvider(nextProvider);
+    await persistConfig({ provider: nextProvider, timeoutSeconds });
+  }
+
+  async function saveTimeout() {
+    await persistConfig({ provider, timeoutSeconds });
   }
 
   async function removeCredential(target: ExecProviderKind) {
@@ -178,12 +208,14 @@ export function ExecPanel({ client }: { client: ApiClient }) {
                 value={apiKeys[credential.provider] ?? ""}
                 disabled={working}
                 removing={removing === credential.provider}
+                savingKey={savingKey === credential.provider}
                 onChange={(value) =>
                   setApiKeys((current) => ({
                     ...current,
                     [credential.provider]: value,
                   }))
                 }
+                onSave={() => void saveCredential(credential.provider)}
                 onRemove={() => void removeCredential(credential.provider)}
               />
             ))}
@@ -198,7 +230,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
             <ActiveProviderField
               value={provider}
               disabled={working}
-              onChange={setProvider}
+              onChange={(next) => void saveProvider(next)}
               options={config.providers.map((row) => ({
                 kind: row.provider,
                 label: row.available
@@ -214,6 +246,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
               value={timeoutSeconds}
               disabled={working}
               onChange={setTimeoutSeconds}
+              onBlur={() => void saveTimeout()}
             />
           </SettingsSection>
 
@@ -225,19 +258,6 @@ export function ExecPanel({ client }: { client: ApiClient }) {
               enforcement={config.egress.enforcement}
             />
           </SettingsSection>
-
-          {/* One save for the whole surface: it stores every key typed above
-              and the selection together, so a provider cannot go active in a
-              pass that failed to save its key. */}
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              disabled={working}
-              onClick={() => void save()}
-            >
-              {saving ? "Saving…" : "Save settings"}
-            </Button>
-          </div>
 
           <p className="text-sm leading-relaxed text-muted-foreground">
             Local execution confines writes to a private folder on this computer

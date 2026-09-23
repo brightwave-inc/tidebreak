@@ -120,7 +120,9 @@ function clientFor(
 afterEach(cleanup);
 
 describe("ExecPanel", () => {
-  it("saves a key per managed provider before the active selection", async () => {
+  it("saves each key beside its field and the timeout on blur", async () => {
+    const e2bKey = ["e2b", "key"].join("-");
+    const daytonaKey = ["daytona", "key"].join("-");
     const { client, putExecConfig, putExecCredential } = clientFor({
       provider: "e2b",
       timeout_ms: 20_000,
@@ -133,27 +135,31 @@ describe("ExecPanel", () => {
     render(<ExecPanel client={client} />);
 
     fireEvent.change(await screen.findByLabelText(/E2B API key/), {
-      target: { value: "  e2b-secret  " },
+      target: { value: `  ${e2bKey}  ` },
     });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save key" })[0]);
+    await waitFor(() =>
+      expect(putExecCredential).toHaveBeenCalledWith("e2b", e2bKey),
+    );
+
     fireEvent.change(screen.getByLabelText(/Daytona API key/), {
-      target: { value: "daytona-secret" },
+      target: { value: daytonaKey },
     });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save key" })[1]);
+    await waitFor(() =>
+      expect(putExecCredential).toHaveBeenCalledWith("daytona", daytonaKey),
+    );
+
     fireEvent.change(screen.getByLabelText(/Execution timeout/), {
       target: { value: "30" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    fireEvent.blur(screen.getByLabelText(/Execution timeout/));
 
     await waitFor(() =>
-      expect(putExecCredential).toHaveBeenCalledWith("e2b", "e2b-secret"),
-    );
-    expect(putExecCredential).toHaveBeenCalledWith("daytona", "daytona-secret");
-    expect(putExecConfig).toHaveBeenCalledWith({
-      provider: "e2b",
-      timeout_ms: 30_000,
-    });
-    // A provider must not go active in a pass that failed to store its key.
-    expect(putExecCredential.mock.invocationCallOrder[0]).toBeLessThan(
-      putExecConfig.mock.invocationCallOrder[0],
+      expect(putExecConfig).toHaveBeenCalledWith({
+        provider: "e2b",
+        timeout_ms: 30_000,
+      }),
     );
     expect(
       screen.queryByText(/Files staged for a run leave this computer/i),
@@ -245,7 +251,7 @@ describe("ExecPanel", () => {
     fireEvent.change(await screen.findByLabelText(/Execution timeout/), {
       target: { value: "500" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    fireEvent.blur(screen.getByLabelText(/Execution timeout/));
 
     await screen.findByRole("alert");
     expect(putExecConfig).not.toHaveBeenCalled();
