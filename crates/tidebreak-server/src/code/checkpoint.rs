@@ -537,7 +537,7 @@ pub async fn produce_diff(
         let paths = std::slice::from_ref(&path);
         let (raw, read_truncated) = git_bytes_with_literal_paths_bounded(
             worktree,
-            &["diff", "--find-renames", from, to, "--"],
+            &review_diff_args(from, to),
             paths,
             GIT_SNAPSHOT_TIMEOUT,
             OutputBudget::head(bounds.max_bytes, MAX_DIFF_LINES),
@@ -584,7 +584,7 @@ pub async fn produce_diff(
         .collect();
     let (raw, read_truncated) = git_bytes_with_literal_paths_bounded(
         worktree,
-        &["diff", "--find-renames", from, to, "--"],
+        &review_diff_args(from, to),
         &paths,
         GIT_SNAPSHOT_TIMEOUT,
         OutputBudget::head(bounds.max_bytes, MAX_DIFF_LINES),
@@ -621,7 +621,7 @@ pub async fn produce_diff_for_paths(
     }
     let (raw, _) = git_bytes_with_literal_paths_bounded(
         worktree,
-        &["diff", "--find-renames", from, to, "--"],
+        &review_diff_args(from, to),
         &paths,
         GIT_SNAPSHOT_TIMEOUT,
         OutputBudget::head(max_bytes, MAX_DIFF_LINES),
@@ -1108,16 +1108,8 @@ async fn collect_changes_inner(
     paths: Option<&[GitPath]>,
     output_budget: OutputBudget,
 ) -> Result<BoundedFiles, CheckpointError> {
-    let name_status_args = [
-        "diff",
-        "--name-status",
-        "-z",
-        "--find-renames",
-        from,
-        to,
-        "--",
-    ];
-    let numstat_args = ["diff", "--numstat", "-z", "--find-renames", from, to, "--"];
+    let name_status_args = review_name_status_args(from, to);
+    let numstat_args = review_numstat_args(from, to);
     let (name_status, name_truncated) = match paths {
         Some(paths) => {
             git_bytes_with_literal_paths_bounded(
@@ -1335,6 +1327,36 @@ fn truncate_notice(message: String) -> String {
     message.chars().take(MAX).collect()
 }
 
+/// Flags that keep review diffs parseable no matter the user's git config.
+const REVIEW_DIFF_FLAGS: &[&str] = &[
+    "--no-ext-diff",
+    "--no-color",
+    "--no-textconv",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+];
+
+fn review_diff_args<'a>(from: &'a str, to: &'a str) -> Vec<&'a str> {
+    let mut args = vec!["diff"];
+    args.extend_from_slice(REVIEW_DIFF_FLAGS);
+    args.extend_from_slice(&["--find-renames", from, to, "--"]);
+    args
+}
+
+fn review_name_status_args<'a>(from: &'a str, to: &'a str) -> Vec<&'a str> {
+    let mut args = vec!["diff"];
+    args.extend_from_slice(REVIEW_DIFF_FLAGS);
+    args.extend_from_slice(&["--name-status", "-z", "--find-renames", from, to, "--"]);
+    args
+}
+
+fn review_numstat_args<'a>(from: &'a str, to: &'a str) -> Vec<&'a str> {
+    let mut args = vec!["diff"];
+    args.extend_from_slice(REVIEW_DIFF_FLAGS);
+    args.extend_from_slice(&["--numstat", "-z", "--find-renames", from, to, "--"]);
+    args
+}
+
 async fn git_text(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, String> {
     git_text_env(cwd, args, &[], limit).await
 }
@@ -1446,6 +1468,8 @@ async fn git_bytes_with_literal_paths_bounded(
 fn git_command(cwd: &Path) -> Command {
     let mut command = git_runner::git_command(Some(cwd));
     command
+        .arg("-c")
+        .arg("core.quotePath=false")
         .env("GIT_AUTHOR_NAME", "Tidebreak")
         .env("GIT_AUTHOR_EMAIL", "tidebreak@localhost")
         .env("GIT_COMMITTER_NAME", "Tidebreak")
@@ -3116,5 +3140,59 @@ mod tests {
         .await
         .unwrap_err();
         assert!(!err.to_string().is_empty());
+    }
+
+    #[tokio::test]
+    async fn review_diff_stays_parseable_when_user_git_config_rewrites_output() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "user-diff-config");
+        std::fs::write(tree.join("f.sql"), "select 1;\n").unwrap();
+        run(&tree, &["git", "add", "f.sql"]);
+        run(&tree, &["git", "commit", "-m", "sql"]);
+        std::fs::write(tree.join("f.sql"), "-- keep\nselect 1;\n").unwrap();
+
+        let helper = tree.join("external-diff.sh");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\necho 'EXTERNAL DIFF REPLACED THE PATCH'\nexit 0\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = std::fs::metadata(&helper).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&helper, perms).unwrap();
+        }
+        run(&tree, &["git", "config", "diff.noprefix", "true"]);
+        run(
+            &tree,
+            &[
+                "git",
+                "config",
+                "diff.external",
+                helper.to_str().expect("utf-8 helper path"),
+            ],
+        );
+
+        let from = merge_base(&tree, "main").await.unwrap();
+        let to = snapshot_tree(&tree).await.unwrap();
+        let diff = produce_diff(&tree, &from, &to, Some("f.sql"), DiffBounds::default())
+            .await
+            .unwrap();
+        assert!(
+            diff.diff.contains("diff --git a/f.sql b/f.sql"),
+            "expected a/ b/ prefixes, got:\n{}",
+            diff.diff
+        );
+        assert!(
+            !diff.diff.contains("EXTERNAL DIFF"),
+            "external diff must not replace the patch:\n{}",
+            diff.diff
+        );
+        assert!(
+            diff.diff.contains("+-- keep"),
+            "the SQL comment addition must stay in the patch:\n{}",
+            diff.diff
+        );
     }
 }

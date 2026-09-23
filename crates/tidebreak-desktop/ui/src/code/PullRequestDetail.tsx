@@ -78,6 +78,7 @@ import {
 import { GithubAvatar } from "./GithubAvatar";
 import { PrCheckSummary } from "./PrCheckSummary";
 import { PrCommentCard } from "./PrCommentCard";
+import { groupUnifiedDiff, patchLineKind } from "./unifiedDiff";
 import {
   expandGithubEmojiShortcodes,
   fileStatusLabel,
@@ -2066,18 +2067,14 @@ function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
  * text fight the tint in both themes; the tint alone carries the meaning.
  */
 function DiffPatch({ patch }: { patch: string }) {
-  const lines = useMemo(() => patch.split("\n"), [patch]);
+  const lines = useMemo(
+    () => groupUnifiedDiff(patch).flatMap((group) => group.lines),
+    [patch],
+  );
   return (
     <pre className="overflow-x-auto py-1 font-mono text-xs leading-[1.45]">
       {lines.map((line, index) => {
-        const kind =
-          line.startsWith("+") && !line.startsWith("+++")
-            ? "add"
-            : line.startsWith("-") && !line.startsWith("---")
-              ? "remove"
-              : line.startsWith("@@")
-                ? "hunk"
-                : "context";
+        const kind = patchLineKind(line.kind);
         return (
           <code
             key={index}
@@ -2096,12 +2093,12 @@ function DiffPatch({ patch }: { patch: string }) {
                 <span
                   className={kind === "add" ? "text-success" : "text-critical"}
                 >
-                  {line[0]}
+                  {line.text[0]}
                 </span>
-                {line.slice(1)}
+                {line.text.slice(1)}
               </>
             ) : (
-              line || " "
+              line.text || " "
             )}
           </code>
         );

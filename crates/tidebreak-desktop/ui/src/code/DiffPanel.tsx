@@ -11,25 +11,18 @@ import { OpenInEditorButton } from "./OpenInEditorButton";
 import { DiffstatBadge } from "./TurnReviewCard";
 import { useLiveResource } from "./useLiveContent";
 import { HEADER_CAPTION, WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
+import type { DiffFileGroup, DiffLine } from "./unifiedDiff";
+import { groupUnifiedDiff } from "./unifiedDiff";
 
 /** Files longer than this start collapsed behind "Show diff". */
 export const DIFF_COLLAPSE_LINE_THRESHOLD = 400;
 
-export type DiffLineKind = "add" | "del" | "context" | "hunk" | "meta";
-
-export type DiffLine = {
-  kind: DiffLineKind;
-  oldNo: number | null;
-  newNo: number | null;
-  text: string;
-};
-
-export type DiffFileGroup = {
-  path: string;
-  lines: DiffLine[];
-};
-
-const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+export type {
+  DiffFileGroup,
+  DiffLine,
+  DiffLineKind,
+} from "./unifiedDiff";
+export { groupUnifiedDiff } from "./unifiedDiff";
 
 /**
  * Server-produced unified diff, grouped per file and tinted with the
@@ -350,87 +343,4 @@ function fileDiffstat(lines: readonly DiffLine[]): {
     else if (line.kind === "del") deletions += 1;
   }
   return { insertions, deletions };
-}
-
-/**
- * Split a unified diff into per-file groups of structured lines.
- *
- * Hunk headers drive the old/new counters. Rename and other git headers stay
- * `meta` so they never steal a gutter number from the patch they describe.
- */
-export function groupUnifiedDiff(diff: string): DiffFileGroup[] {
-  const groups: DiffFileGroup[] = [];
-  let current: DiffFileGroup | null = null;
-  let oldCursor = 0;
-  let newCursor = 0;
-  let inHunk = false;
-
-  function ensureGroup(path: string): DiffFileGroup {
-    if (current) return current;
-    current = { path, lines: [] };
-    groups.push(current);
-    return current;
-  }
-
-  for (const line of diff.split("\n")) {
-    const file = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-    if (file) {
-      current = { path: file[2] ?? file[1] ?? "file", lines: [] };
-      groups.push(current);
-      oldCursor = 0;
-      newCursor = 0;
-      inHunk = false;
-      continue;
-    }
-
-    if (line.length === 0) continue;
-
-    const group = ensureGroup("file");
-    const hunk = HUNK_HEADER.exec(line);
-    if (hunk) {
-      oldCursor = Number(hunk[1]);
-      newCursor = Number(hunk[3]);
-      inHunk = true;
-      group.lines.push({ kind: "hunk", oldNo: null, newNo: null, text: line });
-      continue;
-    }
-
-    if (line.startsWith("+") && !line.startsWith("+++")) {
-      group.lines.push({
-        kind: "add",
-        oldNo: null,
-        newNo: inHunk ? newCursor : null,
-        text: line,
-      });
-      if (inHunk) newCursor += 1;
-      continue;
-    }
-    if (line.startsWith("-") && !line.startsWith("---")) {
-      group.lines.push({
-        kind: "del",
-        oldNo: inHunk ? oldCursor : null,
-        newNo: null,
-        text: line,
-      });
-      if (inHunk) oldCursor += 1;
-      continue;
-    }
-    if (inHunk && line.startsWith(" ")) {
-      group.lines.push({
-        kind: "context",
-        oldNo: oldCursor,
-        newNo: newCursor,
-        text: line,
-      });
-      oldCursor += 1;
-      newCursor += 1;
-      continue;
-    }
-
-    group.lines.push({ kind: "meta", oldNo: null, newNo: null, text: line });
-  }
-
-  return groups.filter(
-    (group) => group.lines.length > 0 || groups.length === 1,
-  );
 }
