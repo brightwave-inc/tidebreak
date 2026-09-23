@@ -241,9 +241,24 @@ pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, Pro
     }
     if let Some(data_dir) = &host.data_dir {
         if let Some(kind) = kind_for_command(name) {
-            let binary = match host.harness_version(kind) {
+            let version = host.harness_version(kind);
+            let binary = match version {
                 Some(version) => crate::managed_binary_version(data_dir, kind, version),
                 None => crate::managed_binary(data_dir, kind),
+            };
+            // A Grok install from before Tidebreak unpacked its binary is
+            // unpacked here, once. That reads the install already on disk.
+            let binary = match binary {
+                Some(binary) => Some(binary),
+                None => {
+                    crate::pin::unpack_installed_binary(
+                        data_dir,
+                        kind,
+                        version,
+                        host.managed_node_root.as_deref(),
+                    )
+                    .await
+                }
             };
             if let Some(binary) = binary {
                 let node = host

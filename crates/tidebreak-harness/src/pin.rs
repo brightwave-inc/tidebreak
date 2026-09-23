@@ -200,6 +200,57 @@ fn binary_path(dir: &Path, pin: &HarnessPin) -> PathBuf {
     dir.join("node_modules").join(".bin").join(name)
 }
 
+/// The Grok home that belongs to one Grok install, beside its `node_modules`.
+///
+/// Grok's npm entrypoint does not run the binary it ships with. It runs
+/// `$GROK_HOME/bin/grok` when that file exists, and Grok's own updater keeps
+/// that file current, so the person's `~/.grok/bin/grok` can be any release:
+/// on one machine the 1.0.13 pin ran 1.0.40. Only when the file is missing
+/// does the entrypoint unpack its own binary, as `bin/grok-<version>`. Run
+/// with this directory as `GROK_HOME`, it unpacks the pinned binary here,
+/// and Tidebreak then runs that binary directly.
+///
+/// This home holds nothing but the binary. Sessions, the probe, and sign-in
+/// keep the person's own `GROK_HOME`, because Grok keeps sign-in
+/// (`auth.json`), settings (`config.toml`), and session history there.
+fn grok_home(dir: &Path) -> PathBuf {
+    dir.join("grok-home")
+}
+
+/// The pinned Grok binary the npm entrypoint unpacks into [`grok_home`].
+fn grok_native_binary(dir: &Path, version: &str) -> PathBuf {
+    let name = if cfg!(windows) {
+        format!("grok-{version}.exe")
+    } else {
+        format!("grok-{version}")
+    };
+    grok_home(dir).join("bin").join(name)
+}
+
+/// The file Tidebreak runs for one installed version: the npm entrypoint,
+/// except for Grok, whose entrypoint may run another release (see
+/// [`grok_home`]).
+fn engine_binary(dir: &Path, pin: &HarnessPin, version: &str) -> PathBuf {
+    match pin.kind {
+        HarnessKind::Grok => grok_native_binary(dir, version),
+        _ => binary_path(dir, pin),
+    }
+}
+
+/// Whether npm installed this exact version of the pinned package here: the
+/// marker names it and the entrypoint is executable.
+fn installed_tree(dir: &Path, pin: &HarnessPin, version: &str) -> bool {
+    let Some(marker) = std::fs::read_to_string(marker_path(dir))
+        .ok()
+        .and_then(|text| serde_json::from_str::<InstallMarker>(&text).ok())
+    else {
+        return false;
+    };
+    marker.package == pin.package
+        && marker.version == version
+        && is_absolute_executable(&binary_path(dir, pin))
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct InstallMarker {
     package: String,
@@ -215,6 +266,10 @@ pub fn managed_binary(data_dir: &Path, kind: HarnessKind) -> Option<PathBuf> {
 
 /// The managed binary for one exact version of `kind`, if its marker names
 /// that version of the pinned package and the file exists.
+///
+/// For Grok the file is the binary unpacked into the install's own Grok home
+/// ([`grok_home`]). An install from before that home existed has none until
+/// [`ensure_installed_version`] or [`unpack_installed_binary`] unpacks it.
 #[must_use]
 pub fn managed_binary_version(
     data_dir: &Path,
@@ -223,13 +278,24 @@ pub fn managed_binary_version(
 ) -> Option<PathBuf> {
     let pin = pin_for(kind)?;
     let dir = install_dir_for(data_dir, pin, version);
-    let marker: InstallMarker =
-        serde_json::from_str(&std::fs::read_to_string(marker_path(&dir)).ok()?).ok()?;
-    if marker.package != pin.package || marker.version != version {
+    if !installed_tree(&dir, pin, version) {
         return None;
     }
-    let binary = binary_path(&dir, pin);
+    let binary = engine_binary(&dir, pin, version);
     is_absolute_executable(&binary).then_some(binary)
+}
+
+/// Where the managed binary for one exact version of `kind` lives, whether or
+/// not anything is installed there yet. [`managed_binary_version`] answers
+/// whether it is ready to run.
+#[must_use]
+pub fn managed_binary_path(data_dir: &Path, kind: HarnessKind, version: &str) -> Option<PathBuf> {
+    let pin = pin_for(kind)?;
+    Some(engine_binary(
+        &install_dir_for(data_dir, pin, version),
+        pin,
+        version,
+    ))
 }
 
 /// Every version of `kind` installed under the data directory, newest first.
@@ -240,6 +306,28 @@ pub fn managed_binary_version(
 /// foreign tree is not a version.
 #[must_use]
 pub fn installed_versions(data_dir: &Path, kind: HarnessKind) -> Vec<String> {
+    installed(data_dir, kind, |version| {
+        managed_binary_version(data_dir, kind, version).is_some()
+    })
+}
+
+/// Every version of `kind` npm installed under the data directory, newest
+/// first, whether or not its binary is ready to run.
+///
+/// [`installed_versions`] leaves out a Grok install whose binary is not
+/// unpacked yet: one from before Tidebreak unpacked it. Removing superseded
+/// installs reads this list instead, so such an install still goes.
+#[must_use]
+pub fn installed_trees(data_dir: &Path, kind: HarnessKind) -> Vec<String> {
+    let Some(pin) = pin_for(kind) else {
+        return Vec::new();
+    };
+    installed(data_dir, kind, |version| {
+        installed_tree(&install_dir_for(data_dir, pin, version), pin, version)
+    })
+}
+
+fn installed(data_dir: &Path, kind: HarnessKind, counts: impl Fn(&str) -> bool) -> Vec<String> {
     let Some(pin) = pin_for(kind) else {
         return Vec::new();
     };
@@ -249,7 +337,7 @@ pub fn installed_versions(data_dir: &Path, kind: HarnessKind) -> Vec<String> {
     let mut versions: Vec<String> = entries
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|version| managed_binary_version(data_dir, kind, version).is_some())
+        .filter(|version| counts(version))
         .collect();
     versions.sort_by(|a, b| compare_versions(b, a));
     versions
@@ -424,7 +512,31 @@ pub async fn ensure_installed_version(
     if let Some(existing) = managed_binary_version(data_dir, kind, version) {
         return Ok(existing);
     }
-    tokio::fs::create_dir_all(&dir)
+    let spec = format!("{}@{}", pin.package, version);
+    // A tree npm already installed only lacks the unpacked Grok binary: an
+    // install from before Tidebreak unpacked it. It needs no second download.
+    if !installed_tree(&dir, pin, version) {
+        npm_install(data_dir, node_root, pin, &dir, version).await?;
+    }
+    if pin.kind == HarnessKind::Grok {
+        unpack_grok(&dir, pin, version, node_root).await?;
+    }
+    managed_binary_version(data_dir, kind, version).ok_or_else(|| {
+        format!(
+            "npm install {spec} finished but {} was not executable",
+            pin.bin
+        )
+    })
+}
+
+async fn npm_install(
+    data_dir: &Path,
+    node_root: &Path,
+    pin: &HarnessPin,
+    dir: &Path,
+    version: &str,
+) -> Result<(), String> {
+    tokio::fs::create_dir_all(dir)
         .await
         .map_err(|err| format!("could not create harness install dir: {err}"))?;
     let spec = format!("{}@{}", pin.package, version);
@@ -438,7 +550,13 @@ pub async fn ensure_installed_version(
             "--no-progress",
             &spec,
         ])
-        .current_dir(&dir);
+        .current_dir(dir);
+    if pin.kind == HarnessKind::Grok {
+        // Grok's install script unpacks its binary into `$GROK_HOME/bin` and
+        // writes `$GROK_HOME/config.toml`. Aimed at the install's own home,
+        // it leaves the person's `~/.grok` alone.
+        command.env("GROK_HOME", grok_home(dir));
+    }
     let child =
         spawn_process_tree(&mut command).map_err(|err| format!("npm install {spec}: {err}"))?;
     let output = timeout(INSTALL_TIMEOUT, child.wait_with_output())
@@ -457,17 +575,107 @@ pub async fn ensure_installed_version(
         version: version.to_owned(),
     };
     tokio::fs::write(
-        marker_path(&dir),
+        marker_path(dir),
         serde_json::to_vec_pretty(&marker).map_err(|err| err.to_string())?,
     )
     .await
-    .map_err(|err| format!("could not write harness install marker: {err}"))?;
-    managed_binary_version(data_dir, kind, version).ok_or_else(|| {
-        format!(
-            "npm install {spec} finished but {} was not executable",
-            pin.bin
-        )
-    })
+    .map_err(|err| format!("could not write harness install marker: {err}"))
+}
+
+/// Unpack the installed Grok binary into the install's own Grok home, when
+/// it is not there yet.
+///
+/// Grok's npm entrypoint unpacks its bundled binary when `$GROK_HOME/bin/grok`
+/// is missing, so this runs it once with [`grok_home`] as `GROK_HOME`. Its
+/// answer to `--version` has to name `version`: anything else means the
+/// entrypoint ran a binary this install did not ship.
+async fn unpack_grok(
+    dir: &Path,
+    pin: &HarnessPin,
+    version: &str,
+    node_root: &Path,
+) -> Result<(), String> {
+    if is_absolute_executable(&grok_native_binary(dir, version)) {
+        return Ok(());
+    }
+    let home = grok_home(dir);
+    tokio::fs::create_dir_all(&home)
+        .await
+        .map_err(|err| format!("could not create the Grok home: {err}"))?;
+    let mut command = Command::new(binary_path(dir, pin));
+    command
+        .arg("--version")
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", prepend_path(&managed_node_path_dir(node_root)))
+        // The entrypoint and the binary it starts both read these; nothing
+        // here may reach the person's own home.
+        .env("GROK_HOME", &home)
+        .env("HOME", &home)
+        .env(crate::grok::DISABLE_AUTOUPDATER_ENV, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = spawn_process_tree(&mut command)
+        .map_err(|err| format!("could not unpack Grok {version}: {err}"))?;
+    let output = timeout(LOOKUP_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| format!("unpacking Grok {version} timed out"))?
+        .map_err(|err| format!("could not unpack Grok {version}: {err}"))?;
+    let reported = String::from_utf8_lossy(&output.stdout);
+    let reported = reported
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty());
+    let named = reported.is_some_and(|line| {
+        line.split_whitespace()
+            .any(|word| word.trim_start_matches('v') == version)
+    });
+    if !output.status.success() || !named {
+        return Err(format!(
+            "Grok's installer did not unpack {version}: it reported {}",
+            reported.unwrap_or("nothing")
+        ));
+    }
+    if !is_absolute_executable(&grok_native_binary(dir, version)) {
+        return Err(format!(
+            "Grok's installer ran {version} but left no binary in {}",
+            home.display()
+        ));
+    }
+    Ok(())
+}
+
+/// The managed binary for `kind`, unpacking an installed Grok binary that is
+/// not unpacked yet.
+///
+/// Only the Grok install from before Tidebreak unpacked its binary needs
+/// this; it downloads nothing. `version` names the install the update
+/// channel drives, and `None` is the pin. Any other engine, a missing
+/// install, or a Node runtime Tidebreak has not verified answers
+/// [`managed_binary_version`]'s answer.
+pub async fn unpack_installed_binary(
+    data_dir: &Path,
+    kind: HarnessKind,
+    version: Option<&str>,
+    managed_node_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let pin = pin_for(kind)?;
+    let version = version.unwrap_or(pin.version);
+    if let Some(binary) = managed_binary_version(data_dir, kind, version) {
+        return Some(binary);
+    }
+    let node_root = verified_managed_node_root(managed_node_root)?;
+    let dir = install_dir_for(data_dir, pin, version);
+    if kind != HarnessKind::Grok || !installed_tree(&dir, pin, version) {
+        return None;
+    }
+    let lock = install_lock(&dir);
+    let _guard = lock.lock().await;
+    if let Err(err) = unpack_grok(&dir, pin, version, node_root).await {
+        tracing::warn!(%err, "could not unpack the installed Grok binary");
+    }
+    managed_binary_version(data_dir, kind, version)
 }
 
 /// The verified root when both platform-native Node and npm entrypoints exist.
@@ -513,6 +721,84 @@ fn prepend_path(bin: &Path) -> std::ffi::OsString {
     let mut paths = vec![bin.to_path_buf()];
     paths.extend(std::env::split_paths(&current));
     std::env::join_paths(paths).unwrap_or_else(|_| bin.as_os_str().to_os_string())
+}
+
+/// A Grok install the way npm leaves one from before Tidebreak unpacked its
+/// binary, beside a person whose own Grok is a newer release.
+#[cfg(all(test, unix))]
+pub(crate) struct FakeGrok {
+    pub(crate) data_dir: PathBuf,
+    pub(crate) node_root: PathBuf,
+    /// The person's home directory, whose `.grok/bin/grok` reports 1.0.40.
+    pub(crate) person_home: PathBuf,
+    /// One line per entrypoint run: the Grok home it resolved.
+    pub(crate) entrypoint_log: PathBuf,
+}
+
+/// Lay out a [`FakeGrok`] under `root`.
+///
+/// The entrypoint does what Grok's npm entrypoint does: it runs
+/// `$GROK_HOME/bin/grok`, where `GROK_HOME` defaults to `$HOME/.grok`, and
+/// unpacks the binary it shipped there as `grok-<version>` when that file is
+/// missing. The shipped binary reports the pin; the person's reports 1.0.40.
+#[cfg(all(test, unix))]
+pub(crate) fn fake_grok_install(root: &Path) -> FakeGrok {
+    use std::os::unix::fs::PermissionsExt;
+    let write_exec = |path: &Path, body: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let pin = pin_for(HarnessKind::Grok).unwrap();
+    let data_dir = root.join("data");
+    let dir = install_dir(&data_dir, pin);
+    let shipped = dir.join("node_modules/@xai-official/grok-platform/bin/grok");
+    write_exec(
+        &shipped,
+        &format!("#!/bin/sh\necho 'grok {} (shipped)'\n", pin.version),
+    );
+    let entrypoint_log = root.join("entrypoint.log");
+    write_exec(
+        &binary_path(&dir, pin),
+        &format!(
+            r#"#!/bin/sh
+home="${{GROK_HOME:-$HOME/.grok}}"
+printf '%s\n' "$home" >> '{log}'
+if [ ! -e "$home/bin/grok" ]; then
+  mkdir -p "$home/bin"
+  cp '{shipped}' "$home/bin/grok-{version}"
+  ln -s 'grok-{version}' "$home/bin/grok"
+fi
+exec "$home/bin/grok" "$@"
+"#,
+            log = entrypoint_log.display(),
+            shipped = shipped.display(),
+            version = pin.version,
+        ),
+    );
+    std::fs::write(
+        marker_path(&dir),
+        serde_json::to_vec(&InstallMarker {
+            package: pin.package.to_owned(),
+            version: pin.version.to_owned(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let person_home = root.join("person");
+    write_exec(
+        &person_home.join(".grok/bin/grok"),
+        "#!/bin/sh\necho 'grok 1.0.40 (updated by Grok)'\n",
+    );
+    let node_root = root.join("node");
+    write_exec(&managed_node_executable(&node_root), "#!/bin/sh\nexit 0\n");
+    write_exec(&managed_npm_executable(&node_root), "#!/bin/sh\nexit 1\n");
+    FakeGrok {
+        data_dir,
+        node_root,
+        person_home,
+        entrypoint_log,
+    }
 }
 
 #[cfg(test)]
@@ -807,6 +1093,73 @@ mod tests {
             .block_on(ensure_installed(tmp.path(), HarnessKind::ClaudeCode, None))
             .unwrap_err();
         assert!(err.contains("managed Node"), "{err}");
+    }
+
+    /// Grok's npm entrypoint runs the person's `~/.grok/bin/grok`, which
+    /// Grok's own updater keeps current, so the pinned install can run
+    /// another release. The install instead unpacks the binary it shipped
+    /// into its own Grok home, once, and Tidebreak runs that binary. The
+    /// unpack run names that home, and nothing lands in the person's.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn grok_unpacks_the_binary_it_shipped_into_its_own_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = super::fake_grok_install(tmp.path());
+        let pin = pin_for(HarnessKind::Grok).unwrap();
+        let home = grok_home(&install_dir(&fake.data_dir, pin));
+        assert_eq!(
+            managed_binary(&fake.data_dir, HarnessKind::Grok),
+            None,
+            "an install from before the unpack has no binary to run yet"
+        );
+        assert!(installed_versions(&fake.data_dir, HarnessKind::Grok).is_empty());
+        assert_eq!(
+            installed_trees(&fake.data_dir, HarnessKind::Grok),
+            [pin.version],
+            "removal still sees it"
+        );
+
+        let binary = ensure_installed(&fake.data_dir, HarnessKind::Grok, Some(&fake.node_root))
+            .await
+            .unwrap();
+        assert_eq!(
+            binary,
+            home.join("bin").join(format!("grok-{}", pin.version))
+        );
+        assert_eq!(
+            managed_bin_dir(&fake.data_dir, HarnessKind::Grok, None),
+            Some(home.join("bin"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(&fake.entrypoint_log).unwrap(),
+            format!("{}\n", home.display()),
+            "the entrypoint ran once, in the install's own Grok home"
+        );
+        assert!(!fake
+            .person_home
+            .join(format!(".grok/bin/grok-{}", pin.version))
+            .exists());
+
+        // Run the way sessions run it, in the person's own home: it still
+        // reports the pin, not the person's newer Grok.
+        let env = vec![
+            ("HOME".into(), fake.person_home.clone().into_os_string()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+        ];
+        let version = crate::observe_version(&binary, &env).await.unwrap();
+        assert_eq!(version, format!("grok {} (shipped)", pin.version));
+
+        // Already unpacked: nothing runs again.
+        ensure_installed(&fake.data_dir, HarnessKind::Grok, Some(&fake.node_root))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&fake.entrypoint_log)
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
     }
 
     /// The warm install and the create path's fallback can ask for one pin at

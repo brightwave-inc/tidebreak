@@ -452,6 +452,9 @@ pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, 
     env.retain(|(key, _)| {
         !BrowserChannelSpec::is_reserved_env_key_except(key, launch.relay_key_env) && key != "PWD"
     });
+    // Tidebreak drives one exact release. An update check in a session
+    // could replace the person's own Grok with another one.
+    crate::override_env(&mut env, crate::grok::DISABLE_AUTOUPDATER_ENV, "1");
     // Grok reads inference credentials from its auth file. Shell tools also
     // need the wired relay key to borrow forge credentials through the host.
     if let Some(auth) = launch.relay_auth {

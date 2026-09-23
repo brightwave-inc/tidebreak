@@ -346,7 +346,9 @@ impl CodeRuntime {
             return Vec::new();
         };
         let mut deletions = unfinished_removals(versions_dir);
-        let installed = tidebreak_harness::installed_versions(&self.data_dir, kind);
+        // Every tree npm left, so a Grok install that was never unpacked
+        // still goes when nothing drives it.
+        let installed = tidebreak_harness::installed_trees(&self.data_dir, kind);
         let binaries = self.worker_binaries();
         let (running, unused): (Vec<String>, Vec<String>) =
             superseded_installs(&installed, pin.version)
@@ -471,7 +473,8 @@ pub(in crate::code) mod test_support {
     use tidebreak_core::HarnessKind;
 
     /// Lay down a managed install of `version` for `kind` — an executable
-    /// stub and the marker that names it — and return the binary path.
+    /// stub and the marker that names it — and return the binary path. For
+    /// Grok that is the binary the install unpacks into its own Grok home.
     pub(in crate::code) fn write_install(
         data_dir: &Path,
         kind: HarnessKind,
@@ -486,13 +489,16 @@ pub(in crate::code) mod test_support {
         } else {
             pin.bin.to_owned()
         };
-        let binary = dir.join("node_modules").join(".bin").join(name);
-        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let entrypoint = dir.join("node_modules").join(".bin").join(name);
+        let binary = tidebreak_harness::pin::managed_binary_path(data_dir, kind, version).unwrap();
+        for file in [&entrypoint, &binary] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
         std::fs::write(
             dir.join("installed.json"),

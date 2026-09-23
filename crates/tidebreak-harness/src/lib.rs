@@ -46,9 +46,9 @@ pub use launch::{
     validate_launch_plan, validate_launch_plan_with, BypassFlagError, BypassPolicy, LaunchPlan,
 };
 pub use pin::{
-    compare_versions, ensure_installed, ensure_installed_version, installed_versions,
-    latest_published_version, managed_bin_dir, managed_binary, managed_binary_version, pin_for,
-    sign_in_args, sign_in_command, HarnessPin, PINS,
+    compare_versions, ensure_installed, ensure_installed_version, installed_trees,
+    installed_versions, latest_published_version, managed_bin_dir, managed_binary,
+    managed_binary_version, pin_for, sign_in_args, sign_in_command, HarnessPin, PINS,
 };
 pub use probe::{
     capture_login_env, display_model_label, env_value, filter_child_env, filter_engine_child_env,
