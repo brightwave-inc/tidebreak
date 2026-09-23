@@ -306,6 +306,11 @@ aspirational.
 
 ## Compose quickstart
 
+Published images live at `ghcr.io/brightwave-inc/tidebreak-server`. Tags are
+the version without the `v` (`0.114.0` for `v0.114.0`), plus `latest` for the
+current release. Pin a version tag, not `latest`. Prefer a digest if you need
+an immutable reference; every publish prints one.
+
 ```sh
 cd deploy/self-host
 
@@ -324,11 +329,20 @@ ANTHROPIC_API_KEY=<your key>
 EOF
 chmod 600 .env
 
-# 3. Build and start. The first build compiles the workspace and is slow.
-docker compose up -d --build
+# 3. Pull a published version. The stock compose file builds
+#    tidebreak-self-host:local; retag so `up` does not compile.
+docker pull ghcr.io/brightwave-inc/tidebreak-server:0.114.0
+docker tag ghcr.io/brightwave-inc/tidebreak-server:0.114.0 tidebreak-self-host:local
+docker compose up -d
 
 # 4. Confirm it is up.
 curl -fsS http://127.0.0.1:8080/healthz     # -> ok
+```
+
+Building from source remains the fallback when you cannot pull:
+
+```sh
+docker compose up -d --build
 ```
 
 This minimal Compose stack uses provider environment variables. To save
@@ -347,8 +361,9 @@ at all.
 
 The adapter is a shared, stateful service. It is not part of the server
 image. You run it next to a standalone machine when you want mentions and
-DMs in your own Slack app to drive sessions on that machine. The public
-image is `ghcr.io/brightwave-inc/tidebreak-slack-adapter` (tags `v<version>`).
+DMs in your own Slack app to drive sessions on that machine. The image is `ghcr.io/brightwave-inc/tidebreak-slack-adapter`
+(tags `v<version>`). An anonymous pull is refused; you need access to that
+package.
 It listens on 8080. It needs its own PostgreSQL (`DATABASE_URL`), a
 token-sealing key, Slack credentials, and a machine directory. It does not
 need Model Gateway variables. One adapter instance uses one Slack workspace's
@@ -809,9 +824,10 @@ Updating the snapshot date and the pins is therefore an explicit
 dependency-maintenance change rather than an incidental effect of rebuilding.
 
 The server applies its own schema migrations on boot. Take a database backup
-before an upgrade: Tidebreak is pre-1.0 and persisted formats may change
-between versions (see
-[decision record 2](decisions/0002-pre-v1-schema-and-persisted-format-mutability.md)).
+before an upgrade. Schema changes are appended migrations
+([decision record 61](decisions/0061-schema-changes-are-migrations.md));
+hosted PostgreSQL upgrades in place. Pre-1.0 still means you should not put
+irreplaceable data here without a backup.
 
 ## What is not supported yet
 

@@ -39,13 +39,13 @@ A **harness** is the coding-agent CLI Tidebreak drives. Four are supported:
 | Claude Code | The reference tier — the most complete integration |
 | Codex CLI | |
 | opencode | |
-| Grok CLI | Honors Auto and Allow only; see below |
+| Grok CLI | Pinned 1.0.13 uses ACP and structured approvals; see below |
 
-Tidebreak drives the harness you already have installed and signed in. It
-observes that authentication and never brokers it — your Claude or OpenAI
-subscription stays between you and the tool it belongs to. **Settings → Coding
-harnesses** runs a doctor that reports which harnesses it found and what is
-missing.
+Tidebreak downloads its own pinned copy of each engine the first time you pick
+it. Your PATH is not the engine. It still observes that engine's own login —
+your Claude or OpenAI subscription stays between you and the tool it belongs
+to. **Settings → Coding engines** runs a doctor that reports which engines are
+installed and what is missing.
 
 Each harness runs on the model you configured for it, so the model choices from
 [Models and providers](/models-and-providers) apply here too.
@@ -71,18 +71,19 @@ with the same meaning: how much the agent may do before it stops to ask. The
 selector sits in the composer, per session.
 
 <Callout type="warn">
-Grok CLI is the exception. It has no approval channel, and its plan and sandbox
-flags do not confine it, so only **Auto** and **Allow all** are offered. Auto is
-its unsupervised default. Tidebreak states this where you pick the mode rather
-than pretending the other two are available.
+Grok CLI on the pinned 1.0.13 ACP channel honors **Ask**, **Auto**, and
+**Allow all**. It still refuses **Plan**: the engine's own plan and sandbox
+flags do not confine writes. Older print-mode pins honor only Auto and Allow.
+Tidebreak states the modes that pin actually supports where you pick the mode.
 </Callout>
 
 ## Terminals
 
-Every workspace has a terminal, opened as a drawer at the bottom of the
-surface. It runs in that workspace's worktree, so you are always in the
-checkout the agent is working in. Use it for the things that are faster to type
-than to ask for — a test run, a git command, a quick look at a file.
+Every workspace has a terminal. It opens as a tab in the editor area, next to
+files, diffs, and the browser — not as a drawer. It runs in that workspace's
+worktree, so you are always in the checkout the agent is working in. Use it
+for the things that are faster to type than to ask for — a test run, a git
+command, a quick look at a file.
 
 ## Pull requests
 
@@ -104,9 +105,11 @@ out of scope for now:
   editor you write in.
 - Checkpoints are recorded, but there is no restore-from-checkpoint surface
   yet.
-- No remote execution — harnesses run on your machine, not in a managed
-  sandbox.
-- No mobile client for watching a run.
+
+Harnesses run on the machine that owns the session. On a laptop that is your
+computer. On a hosted machine (signed in through Model Gateway) the engine
+runs there, and you can watch from the desktop, the hosted web UI, or the
+mobile client.
 
 The longer-term direction is to drop the mode switch entirely: one conversation
 concept, where binding it to a workspace is what makes it behave like code
