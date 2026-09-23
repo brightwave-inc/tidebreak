@@ -7,23 +7,22 @@ use crate::code::{
     TurnParkWait, TurnStatus, WorkspaceId,
 };
 use crate::db::code::{
-    abandon_pending_approval, abandon_pending_approvals_for_stopped_session, append_event,
-    append_event_with_notification, begin_permission_mode_change, bump_spawn_epoch,
-    cancel_permission_mode_change, claim_approval, clear_session_harness_resume_ref,
-    confirm_permission_mode_change, delete_queued_turn, delete_session_queued_turns,
-    discard_permission_mode_change, enqueue_queued_turn, fence_permission_mode_change,
-    get_approval, get_open_turn, get_repo, get_repo_by_root_path, get_session, get_turn,
-    get_workspace, insert_approval, insert_approval_for_worker, insert_repo, insert_session,
-    insert_turn, insert_workspace, list_approvals, list_events,
+    abandon_pending_approval, abandon_pending_approvals_for_stopped_session,
+    adopt_workspace_pull_request, append_event, append_event_with_notification,
+    begin_permission_mode_change, bump_spawn_epoch, cancel_permission_mode_change, claim_approval,
+    clear_session_harness_resume_ref, confirm_permission_mode_change, delete_queued_turn,
+    delete_session_queued_turns, discard_permission_mode_change, enqueue_queued_turn,
+    fence_permission_mode_change, get_approval, get_open_turn, get_repo, get_repo_by_root_path,
+    get_session, get_turn, get_workspace, insert_approval, insert_approval_for_worker, insert_repo,
+    insert_session, insert_turn, insert_workspace, list_approvals, list_events,
     list_pending_permission_mode_changes, list_queued_turns, list_repos, list_sessions,
     list_turn_metrics, list_turns, mark_repo_removed, promote_queued_turn, queue_paused,
     queued_turn_head, recover_interrupted_session, replace_session_attention,
     replace_session_execution_settings, save_session, save_turn, save_workspace,
-    search_repo_transcripts, session_context, set_active_workspace_pull_request, set_queue_paused,
-    set_session_context, set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
-    set_turn_rewrite, set_workspace_title_if, settle_approval_claim, update_queued_turn,
-    ClaimedApprovalSettlement, CodeTranscriptSearchSource, JournalError, SessionExecutionSettings,
-    MAX_REPLAY_EVENTS,
+    search_repo_transcripts, session_context, set_queue_paused, set_session_context,
+    set_session_harness_resume_ref, set_session_subagents, set_turn_narrative, set_turn_rewrite,
+    set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
+    CodeTranscriptSearchSource, JournalError, SessionExecutionSettings, MAX_REPLAY_EVENTS,
 };
 use crate::db::entities;
 use crate::{
@@ -978,7 +977,7 @@ async fn pull_request_write_preserves_a_concurrent_workspace_rename() {
         in_merge_queue: Some(false),
     };
     assert!(
-        set_active_workspace_pull_request(&store, &owner, refresh_snapshot.id, &digest)
+        adopt_workspace_pull_request(&store, &owner, refresh_snapshot.id, &digest)
             .await
             .unwrap()
     );
@@ -988,6 +987,78 @@ async fn pull_request_write_preserves_a_concurrent_workspace_rename() {
         .unwrap();
     assert_eq!(stored.title, "Renamed while refresh waited");
     assert_eq!(stored.pr.as_ref(), Some(&digest));
+
+    // A column that already shows the pull request keeps what it holds: the
+    // light answer from a creation never replaces a fuller projection.
+    let light = PullRequestDigest {
+        title: None,
+        head_sha: None,
+        ..digest.clone()
+    };
+    assert!(
+        !adopt_workspace_pull_request(&store, &owner, workspace_id, &light)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        get_workspace(&store, &owner, workspace_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr,
+        Some(digest)
+    );
+}
+
+/// The reverse race: a rename saves the workspace snapshot it loaded before
+/// a pull-request read landed. The save must not put the older digest back.
+#[tokio::test]
+async fn a_workspace_save_keeps_a_concurrent_pull_request_column() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+    let workspace_id = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id
+        .expect("session has a workspace");
+    let mut stale = get_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stale.pr, None);
+    let digest = PullRequestDigest {
+        number: 42,
+        url: Some("https://github.com/acme/demo/pull/42".into()),
+        state: "open".into(),
+        title: Some("PR title".into()),
+        checks_summary: None,
+        check_counts: None,
+        checks: None,
+        draft: Some(false),
+        merged: Some(false),
+        review_decision: None,
+        mergeable: None,
+        merge_state_status: None,
+        head_branch: Some("feature".into()),
+        base_branch: Some("main".into()),
+        head_sha: Some("feedfeed".into()),
+        auto_merge_enabled: Some(false),
+        in_merge_queue: Some(false),
+    };
+    assert!(
+        adopt_workspace_pull_request(&store, &owner, workspace_id, &digest)
+            .await
+            .unwrap()
+    );
+    stale.title = "Renamed from a stale snapshot".into();
+    assert!(save_workspace(&store, &stale).await.unwrap());
+    let stored = get_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.title, "Renamed from a stale snapshot");
+    assert_eq!(stored.pr, Some(digest));
 }
 
 #[tokio::test]
@@ -4610,22 +4681,72 @@ async fn trigger_attention_acceptance_is_atomic_and_global() {
     );
 }
 
+/// The pull request object one read saw, at host version `version`.
+fn pull_request_object(
+    version: chrono::DateTime<Utc>,
+    head: &str,
+    title: &str,
+    observed_at: chrono::DateTime<Utc>,
+    etag: Option<&str>,
+) -> crate::code::PullRequestObjectRead {
+    crate::code::PullRequestObjectRead {
+        snapshot: crate::code::PullRequestSnapshot {
+            url: "https://github.com/acme/tools/pull/412".into(),
+            title: title.into(),
+            state: crate::code::CodePullRequestState::Open,
+            draft: false,
+            author: Some("octocat".into()),
+            head_branch: "feat/x".into(),
+            base_branch: "main".into(),
+            head_sha: Some(head.into()),
+            created_at: version,
+            updated_at: version,
+            merged_at: None,
+            closed_at: None,
+        },
+        mergeability: Some(crate::code::PullRequestMergeability {
+            mergeable: Some("conflicting".into()),
+            merge_state_status: Some("dirty".into()),
+        }),
+        auto_merge_enabled: Some(false),
+        observed_at,
+        etag: etag.map(ToOwned::to_owned),
+    }
+}
+
+fn pull_request_read(owner: &OwnerId) -> crate::code::PullRequestRead {
+    crate::code::PullRequestRead::new(owner.clone(), "github.com", "acme", "tools", 412)
+}
+
+/// A second active workspace for `owner`, showing `pr`.
+async fn another_workspace(
+    store: &crate::db::DbStore,
+    owner: &OwnerId,
+    like: WorkspaceId,
+    pr: Option<PullRequestDigest>,
+) -> WorkspaceId {
+    let mut workspace = get_workspace(store, owner, like).await.unwrap().unwrap();
+    workspace.id = WorkspaceId::new();
+    workspace.branch_name = format!("tidebreak/{}", workspace.id.0);
+    workspace.worktree_path = format!("/tmp/{}-worktree", workspace.id.0);
+    workspace.pr = pr;
+    insert_workspace(store, &workspace).await.unwrap();
+    workspace.id
+}
+
 /// Facts and attribution (decision 77): identity upsert, claim-once, and the
 /// contributed-to-authored promotion.
 #[tokio::test]
 async fn pull_request_facts_upsert_claim_and_promote() {
     use crate::code::{
-        CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact,
-        CodePullRequestId, CodePullRequestLiveState, CodePullRequestRelation, CodePullRequestState,
-        PullRequestCheck, PullRequestCheckBucket,
+        CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestRelation,
+        CodePullRequestState,
     };
     use crate::db::code::{
-        count_attributed_prs_for_workspace, get_pull_request_fact, get_pull_request_fetch_state,
+        apply_pull_request_read, count_attributed_prs_for_workspace, get_pull_request_fact,
         insert_pull_request_attribution, list_attributed_facts_for_workspace,
         list_fact_repo_identities_all_owners, promote_attribution_to_authored,
-        save_pull_request_fact, set_pull_request_fetch_state, set_pull_request_live_state,
-        set_pull_request_live_state_with, PullRequestFetchCondition,
-        PullRequestReviewDecisionWrite,
+        PullRequestReadOptions,
     };
 
     let (_dir, store) = temp_store().await;
@@ -4637,49 +4758,36 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         .unwrap()
         .workspace_id
         .expect("session has a workspace");
+    let mint = PullRequestReadOptions {
+        mint_row: true,
+        adopt: None,
+    };
 
     let first_seen = now();
-    let fact = CodePullRequestFact {
-        id: CodePullRequestId::new(),
-        owner: owner.clone(),
-        host: "github.com".into(),
-        repo_owner: "acme".into(),
-        repo_name: "tools".into(),
-        number: 412,
-        url: "https://github.com/acme/tools/pull/412".into(),
-        title: "First".into(),
-        state: CodePullRequestState::Open,
-        draft: true,
-        author: Some("octocat".into()),
-        head_branch: "feat/x".into(),
-        base_branch: "main".into(),
-        head_sha: Some("aaa111".into()),
-        created_at: first_seen,
-        updated_at: first_seen,
-        merged_at: None,
-        closed_at: None,
-        first_seen_at: first_seen,
-        last_seen_at: first_seen,
-        live: None,
-    };
-    let id = save_pull_request_fact(&store, &fact).await.unwrap();
+    let mut first = pull_request_read(&owner);
+    first.object = Some(pull_request_object(
+        first_seen, "aaa111", "First", first_seen, None,
+    ));
+    let created = apply_pull_request_read(&store, &first, mint)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(created.stored && created.changed);
+    let id = created.fact.id;
 
-    // Same identity, fresh snapshot: the id and first_seen_at hold, the
+    // Same identity, newer host version: the id and first_seen_at hold, the
     // snapshot and last_seen_at move.
     let later = now();
-    let refreshed = CodePullRequestFact {
-        id: CodePullRequestId::new(),
-        title: "First, retitled".into(),
-        state: CodePullRequestState::Merged,
-        draft: false,
-        head_sha: Some("bbb222".into()),
-        merged_at: Some(later),
-        first_seen_at: later,
-        last_seen_at: later,
-        ..fact.clone()
-    };
-    let same_id = save_pull_request_fact(&store, &refreshed).await.unwrap();
-    assert_eq!(id, same_id);
+    let mut refreshed = pull_request_read(&owner);
+    let mut object = pull_request_object(later, "bbb222", "First, retitled", later, None);
+    object.snapshot.state = CodePullRequestState::Merged;
+    object.snapshot.merged_at = Some(later);
+    refreshed.object = Some(object);
+    let applied = apply_pull_request_read(&store, &refreshed, mint)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(applied.fact.id, id);
     let stored = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
         .await
         .unwrap()
@@ -4690,179 +4798,6 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     assert_eq!(stored.head_sha.as_deref(), Some("bbb222"));
     assert_eq!(stored.first_seen_at, first_seen);
     assert_eq!(stored.last_seen_at, later);
-
-    assert!(set_pull_request_fetch_state(
-        &store,
-        &owner,
-        "github.com",
-        "acme",
-        "tools",
-        412,
-        Some(&refreshed),
-        PullRequestFetchCondition::Unconditional,
-        Some("W/\"pull-2\""),
-        Some("W/\"checks-2\""),
-        Some("W/\"reviews-2\""),
-    )
-    .await
-    .unwrap());
-    let fetch_state =
-        get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 412)
-            .await
-            .unwrap()
-            .unwrap();
-    assert_eq!(fetch_state.fact.title, "First, retitled");
-    assert_eq!(fetch_state.fact.head_sha.as_deref(), Some("bbb222"));
-    assert_eq!(fetch_state.pull_etag.as_deref(), Some("W/\"pull-2\""));
-    assert_eq!(fetch_state.checks_etag.as_deref(), Some("W/\"checks-2\""));
-    assert_eq!(fetch_state.reviews_etag.as_deref(), Some("W/\"reviews-2\""));
-
-    // The live tier (decision 66): the first write reports change, an
-    // identical write does not, and a snapshot upsert never blanks it.
-    let live = CodePullRequestLiveState {
-        checks_summary: Some("8 passing, 1 pending, 0 failing".into()),
-        checks: Some(vec![PullRequestCheck {
-            name: "ci".into(),
-            bucket: PullRequestCheckBucket::Pending,
-            detail: None,
-            url: None,
-        }]),
-        review_decision: Some("review_required".into()),
-        mergeable: Some("mergeable".into()),
-        merge_state_status: Some("blocked".into()),
-        auto_merge_enabled: Some(true),
-        in_merge_queue: Some(false),
-        observed_at: later,
-    };
-    let (live_id, changed, _) =
-        set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
-            .await
-            .unwrap()
-            .unwrap();
-    assert_eq!(live_id, id);
-    assert!(changed);
-    let (_, changed_again, _) =
-        set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
-            .await
-            .unwrap()
-            .unwrap();
-    assert!(!changed_again, "observed_at alone is not change");
-    // A read that never loaded checks (`checks: None`) keeps the row's
-    // rollup and does not count as change; one that loaded and found none
-    // (`Some(vec![])`) clears it.
-    let unloaded = CodePullRequestLiveState {
-        checks_summary: None,
-        checks: None,
-        ..live.clone()
-    };
-    let (_, changed_unloaded, stored_unloaded) = set_pull_request_live_state(
-        &store,
-        &owner,
-        "github.com",
-        "acme",
-        "tools",
-        412,
-        &unloaded,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(!changed_unloaded, "an unloaded rollup is not a change");
-    assert_eq!(stored_unloaded.checks.as_ref().map(Vec::len), Some(1));
-    assert_eq!(
-        stored_unloaded.checks_summary.as_deref(),
-        Some("8 passing, 1 pending, 0 failing")
-    );
-    let cleared = CodePullRequestLiveState {
-        checks_summary: Some("0 passing, 0 pending, 0 failing".into()),
-        checks: Some(Vec::new()),
-        ..live.clone()
-    };
-    let (_, changed_cleared, stored_cleared) =
-        set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &cleared)
-            .await
-            .unwrap()
-            .unwrap();
-    assert!(changed_cleared, "a loaded empty rollup clears the row");
-    assert_eq!(stored_cleared.checks.as_ref().map(Vec::len), Some(0));
-    set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
-        .await
-        .unwrap()
-        .unwrap();
-    let stored = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
-        .await
-        .unwrap()
-        .unwrap();
-    let stored_live = stored.live.as_ref().unwrap();
-    assert_eq!(stored_live.merge_state_status.as_deref(), Some("blocked"));
-    assert_eq!(stored_live.checks.as_ref().unwrap().len(), 1);
-    assert_eq!(stored_live.auto_merge_enabled, Some(true));
-    save_pull_request_fact(&store, &refreshed).await.unwrap();
-    let stored = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        stored.live.is_some(),
-        "a snapshot upsert must not blank the live tier"
-    );
-    // The tier decorates observations; it never mints a row.
-    assert!(
-        set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 999, &live)
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    // Preserve omits `review_decision` so a later REST write cannot stamp a
-    // stale pre-read (or `None` after a failed read) over an authoritative
-    // value. Replace with `None` still clears.
-    let mut rest_unknown = live.clone();
-    rest_unknown.review_decision = None;
-    let (_, preserve_changed, preserve_stored) = set_pull_request_live_state_with(
-        &store,
-        &owner,
-        "github.com",
-        "acme",
-        "tools",
-        412,
-        &rest_unknown,
-        PullRequestReviewDecisionWrite::Preserve,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(
-        !preserve_changed,
-        "preserving review_decision is not a change"
-    );
-    assert_eq!(
-        preserve_stored.review_decision.as_deref(),
-        Some("review_required")
-    );
-    let mut cleared_review = live.clone();
-    cleared_review.review_decision = None;
-    let (_, cleared_review_changed, cleared_review_stored) = set_pull_request_live_state(
-        &store,
-        &owner,
-        "github.com",
-        "acme",
-        "tools",
-        412,
-        &cleared_review,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(
-        cleared_review_changed,
-        "authoritative None clears the column"
-    );
-    assert_eq!(cleared_review_stored.review_decision, None);
-    set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
-        .await
-        .unwrap()
-        .unwrap();
 
     // Claim once: the second claim reports the row already exists and the
     // stored relation is untouched.
@@ -4935,161 +4870,288 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         .all(|(row_owner, _, _, _)| row_owner != stranger.as_str()));
 }
 
+/// Every group the merge orders by survives the database round trip, so a
+/// partial or stale read that lands after a reload still cannot erase what a
+/// fuller, newer read stored.
 #[tokio::test]
-async fn snapshot_upsert_invalidates_a_concurrent_fetch_validator() {
-    use crate::code::{CodePullRequestFact, CodePullRequestId, CodePullRequestState};
+async fn partial_and_stale_reads_keep_a_stored_full_read() {
+    use crate::code::{
+        PullRequestCheck, PullRequestCheckBucket, PullRequestChecksRead, PullRequestReviewRead,
+    };
     use crate::db::code::{
-        get_pull_request_fetch_state, save_pull_request_fact, set_pull_request_fetch_state,
-        PullRequestFetchCondition,
+        apply_pull_request_read, get_stored_pull_request, PullRequestReadOptions,
     };
 
     let (_dir, store) = temp_store().await;
     let owner = OwnerId::local();
-    let observed = now();
-    let stale = CodePullRequestFact {
-        id: CodePullRequestId::new(),
-        owner: owner.clone(),
-        host: "github.com".into(),
-        repo_owner: "acme".into(),
-        repo_name: "tools".into(),
-        number: 99,
-        url: "https://github.com/acme/tools/pull/99".into(),
-        title: "Stale".into(),
-        state: CodePullRequestState::Open,
-        draft: false,
-        author: None,
-        head_branch: "feature".into(),
-        base_branch: "main".into(),
-        head_sha: Some("old".into()),
-        created_at: observed,
-        updated_at: observed,
-        merged_at: None,
-        closed_at: None,
-        first_seen_at: observed,
-        last_seen_at: observed,
-        live: None,
+    let mint = PullRequestReadOptions {
+        mint_row: true,
+        adopt: None,
     };
-    save_pull_request_fact(&store, &stale).await.unwrap();
-
-    let fresh = CodePullRequestFact {
-        title: "Fresh".into(),
-        head_sha: Some("new".into()),
-        ..stale.clone()
-    };
-    assert!(set_pull_request_fetch_state(
-        &store,
-        &owner,
-        "github.com",
-        "acme",
-        "tools",
-        99,
-        Some(&fresh),
-        PullRequestFetchCondition::Unconditional,
-        Some("W/\"fresh\""),
-        None,
-        None,
-    )
-    .await
-    .unwrap());
-
-    save_pull_request_fact(&store, &stale).await.unwrap();
-
-    let stored = get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 99)
+    let version = now();
+    let fetched_at = version + chrono::Duration::seconds(10);
+    let mut full = pull_request_read(&owner);
+    full.object = Some(pull_request_object(
+        version,
+        "aaa111",
+        "Title",
+        fetched_at,
+        Some("W/\"pull-1\""),
+    ));
+    full.checks = Some(PullRequestChecksRead {
+        head_sha: Some("aaa111".into()),
+        checks: vec![PullRequestCheck {
+            name: "ci".into(),
+            bucket: PullRequestCheckBucket::Fail,
+            detail: None,
+            url: None,
+        }],
+        observed_at: fetched_at,
+        etag: Some("W/\"checks-1\"".into()),
+    });
+    full.review = Some(PullRequestReviewRead {
+        decision: Some("changes_requested".into()),
+        observed_at: fetched_at,
+        etag: Some("W/\"reviews-1\"".into()),
+    });
+    apply_pull_request_read(&store, &full, mint)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.fact.title, "Stale");
-    assert_eq!(stored.fact.head_sha.as_deref(), Some("old"));
-    assert_eq!(stored.pull_etag, None);
+    let stored = get_stored_pull_request(&store, &owner, "github.com", "acme", "tools", 412)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.observed.checks, Some(fetched_at));
+    assert_eq!(stored.observed.review, Some(fetched_at));
+    assert_eq!(stored.observed.mergeability, Some(fetched_at));
+    assert_eq!(stored.etags.pull.as_deref(), Some("W/\"pull-1\""));
+    assert_eq!(stored.etags.checks.as_deref(), Some("W/\"checks-1\""));
+    assert_eq!(stored.etags.reviews.as_deref(), Some("W/\"reviews-1\""));
+
+    // A hosted REST list read: the object without mergeability, no checks,
+    // no reviews. It confirms the snapshot and erases nothing.
+    let mut list = pull_request_read(&owner);
+    let mut object = pull_request_object(
+        version,
+        "aaa111",
+        "Title",
+        fetched_at + chrono::Duration::seconds(5),
+        None,
+    );
+    object.mergeability = None;
+    list.object = Some(object);
+    let applied = apply_pull_request_read(&store, &list, mint)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!applied.changed, "a confirmation is not a change");
+    let after_list = get_stored_pull_request(&store, &owner, "github.com", "acme", "tools", 412)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!after_list.visibly_differs(&stored));
+    let live = after_list.fact.live.as_ref().unwrap();
+    assert_eq!(live.review_decision.as_deref(), Some("changes_requested"));
+    assert_eq!(live.mergeable.as_deref(), Some("conflicting"));
+    assert_eq!(live.checks.as_ref().map(Vec::len), Some(1));
+    assert_eq!(after_list.etags, stored.etags);
+
+    // A stale read, from before the full one, changes nothing at all.
+    let mut stale = pull_request_read(&owner);
+    stale.object = Some(pull_request_object(
+        version - chrono::Duration::seconds(60),
+        "old000",
+        "Old title",
+        version - chrono::Duration::seconds(30),
+        None,
+    ));
+    stale.review = Some(PullRequestReviewRead {
+        decision: None,
+        observed_at: version - chrono::Duration::seconds(30),
+        etag: None,
+    });
+    apply_pull_request_read(&store, &stale, mint)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        get_stored_pull_request(&store, &owner, "github.com", "acme", "tools", 412)
+            .await
+            .unwrap()
+            .unwrap(),
+        after_list
+    );
+
+    // A 304 restated from the stored row before a newer head landed cannot
+    // roll the head back, and its validator no longer matches anything.
+    let not_modified = after_list.restate_object(fetched_at + chrono::Duration::seconds(6));
+    let mut pushed = pull_request_read(&owner);
+    let mut object = pull_request_object(
+        version + chrono::Duration::seconds(60),
+        "bbb222",
+        "Title",
+        fetched_at + chrono::Duration::seconds(7),
+        None,
+    );
+    object.mergeability = None;
+    pushed.object = Some(object);
+    apply_pull_request_read(&store, &pushed, mint)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut late = pull_request_read(&owner);
+    late.object = Some(not_modified);
+    apply_pull_request_read(&store, &late, mint)
+        .await
+        .unwrap()
+        .unwrap();
+    let after_push = get_stored_pull_request(&store, &owner, "github.com", "acme", "tools", 412)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_push.fact.head_sha.as_deref(), Some("bbb222"));
+    assert_eq!(after_push.etags.pull, None);
+    assert_eq!(after_push.etags.checks, None);
+    let live = after_push.fact.live.as_ref().unwrap();
+    assert_eq!(
+        live.checks, None,
+        "the old head's checks do not describe the new head"
+    );
+    assert_eq!(live.mergeable, None);
+    assert_eq!(live.review_decision.as_deref(), Some("changes_requested"));
 }
 
+/// The workspace column is a projection of the row: every active workspace
+/// showing the pull request takes it, the adopting workspace takes it, and
+/// nobody else does.
 #[tokio::test]
-async fn late_304_cannot_restore_an_invalidated_pull_validator() {
-    use crate::code::{CodePullRequestFact, CodePullRequestId, CodePullRequestState};
-    use crate::db::code::{
-        get_pull_request_fetch_state, save_pull_request_fact, set_pull_request_fetch_state,
-        PullRequestFetchCondition,
-    };
+async fn an_applied_read_projects_into_every_workspace_showing_it() {
+    use crate::db::code::{apply_pull_request_read, get_pull_request_fact, PullRequestReadOptions};
 
     let (_dir, store) = temp_store().await;
     let owner = OwnerId::local();
-    let observed = now();
-    let snapshot_a = CodePullRequestFact {
-        id: CodePullRequestId::new(),
-        owner: owner.clone(),
-        host: "github.com".into(),
-        repo_owner: "acme".into(),
-        repo_name: "tools".into(),
-        number: 100,
-        url: "https://github.com/acme/tools/pull/100".into(),
-        title: "Snapshot A".into(),
-        state: CodePullRequestState::Open,
-        draft: false,
-        author: None,
-        head_branch: "feature".into(),
-        base_branch: "main".into(),
-        head_sha: Some("aaa".into()),
-        created_at: observed,
-        updated_at: observed,
-        merged_at: None,
-        closed_at: None,
-        first_seen_at: observed,
-        last_seen_at: observed,
-        live: None,
-    };
-    save_pull_request_fact(&store, &snapshot_a).await.unwrap();
-    assert!(set_pull_request_fetch_state(
-        &store,
-        &owner,
-        "github.com",
-        "acme",
-        "tools",
-        100,
-        Some(&snapshot_a),
-        PullRequestFetchCondition::Unconditional,
-        Some("W/\"snapshot-a\""),
-        Some("W/\"checks-a\""),
-        Some("W/\"reviews-a\""),
-    )
-    .await
-    .unwrap());
-
-    let refresh = get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 100)
+    let (session_id, _turn_id) = seed_owner(&store, &owner, "projection").await;
+    let adopting = get_session(&store, &owner, session_id)
         .await
         .unwrap()
-        .unwrap();
-    let snapshot_c = CodePullRequestFact {
-        title: "Snapshot C".into(),
-        head_sha: Some("ccc".into()),
-        ..snapshot_a.clone()
+        .unwrap()
+        .workspace_id
+        .expect("session has a workspace");
+    let shown = |number: u64, title: &str| PullRequestDigest {
+        number,
+        url: Some(format!("https://github.com/acme/tools/pull/{number}")),
+        state: "open".into(),
+        title: Some(title.into()),
+        checks_summary: None,
+        check_counts: None,
+        checks: None,
+        draft: None,
+        merged: None,
+        review_decision: None,
+        mergeable: None,
+        merge_state_status: None,
+        head_branch: None,
+        base_branch: None,
+        head_sha: None,
+        auto_merge_enabled: None,
+        in_merge_queue: None,
     };
-    save_pull_request_fact(&store, &snapshot_c).await.unwrap();
+    let showing = another_workspace(&store, &owner, adopting, Some(shown(412, "light"))).await;
+    let elsewhere = another_workspace(&store, &owner, adopting, Some(shown(99, "other"))).await;
 
-    assert!(!set_pull_request_fetch_state(
+    let at = now();
+    let mut read = pull_request_read(&owner);
+    read.object = Some(pull_request_object(at, "aaa111", "Projected", at, None));
+
+    // No row and no minting: nothing is stored, and only the adopting
+    // workspace shows the read.
+    let unstored = apply_pull_request_read(
         &store,
-        &owner,
-        "github.com",
-        "acme",
-        "tools",
-        100,
-        None,
-        PullRequestFetchCondition::PullEtag(refresh.pull_etag.as_deref()),
-        refresh.pull_etag.as_deref(),
-        Some("W/\"late-checks\""),
-        Some("W/\"late-reviews\""),
+        &read,
+        PullRequestReadOptions {
+            mint_row: false,
+            adopt: Some(adopting),
+        },
     )
     .await
-    .unwrap());
+    .unwrap()
+    .unwrap();
+    assert!(!unstored.stored);
+    assert_eq!(unstored.workspaces, vec![adopting]);
+    assert!(
+        get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let column = |id: WorkspaceId| {
+        let store = &store;
+        let owner = &owner;
+        async move { get_workspace(store, owner, id).await.unwrap().unwrap().pr }
+    };
+    assert_eq!(
+        column(showing).await.and_then(|pr| pr.title),
+        Some("light".into())
+    );
 
-    let stored = get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 100)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.fact.title, "Snapshot C");
-    assert_eq!(stored.fact.head_sha.as_deref(), Some("ccc"));
-    assert_eq!(stored.pull_etag, None);
-    assert_eq!(stored.checks_etag.as_deref(), Some("W/\"checks-a\""));
-    assert_eq!(stored.reviews_etag.as_deref(), Some("W/\"reviews-a\""));
+    // Minted: every workspace showing the pull request takes the projection.
+    let minted = apply_pull_request_read(
+        &store,
+        &read,
+        PullRequestReadOptions {
+            mint_row: true,
+            adopt: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(minted.stored);
+    assert_eq!(minted.workspaces, vec![showing]);
+    let projection = minted.fact.digest();
+    assert_eq!(column(showing).await, Some(projection.clone()));
+    assert_eq!(column(adopting).await, Some(projection));
+    assert_eq!(
+        column(elsewhere).await.and_then(|pr| pr.title),
+        Some("other".into())
+    );
+
+    // The same read again changes nothing and rewrites nothing.
+    let replayed = apply_pull_request_read(
+        &store,
+        &read,
+        PullRequestReadOptions {
+            mint_row: true,
+            adopt: Some(adopting),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!replayed.changed);
+    assert!(replayed.workspaces.is_empty());
+
+    // A read of checks alone never mints a row.
+    let mut checks_only =
+        crate::code::PullRequestRead::new(owner.clone(), "github.com", "acme", "tools", 500);
+    checks_only.checks = Some(crate::code::PullRequestChecksRead {
+        head_sha: Some("aaa111".into()),
+        checks: Vec::new(),
+        observed_at: now(),
+        etag: None,
+    });
+    assert!(apply_pull_request_read(
+        &store,
+        &checks_only,
+        PullRequestReadOptions {
+            mint_row: true,
+            adopt: None,
+        },
+    )
+    .await
+    .unwrap()
+    .is_none());
 }
 
 /// A whole-row turn save cannot blank a recap that landed while it was held.

@@ -5,9 +5,15 @@
 
 mod caps;
 mod event;
+mod pull_request_read;
 mod remote_task;
 pub mod supervisor_tools;
 
+pub use pull_request_read::{
+    merge_pull_request_read, PullRequestChecksRead, PullRequestEtags, PullRequestMergeability,
+    PullRequestObjectRead, PullRequestObservedTimes, PullRequestQueueRead, PullRequestRead,
+    PullRequestReviewRead, PullRequestSnapshot, StoredPullRequest,
+};
 pub use remote_task::RemoteWorkspaceTask;
 
 pub use caps::{CapLevel, HarnessCaps, HarnessCommand, HarnessTier};

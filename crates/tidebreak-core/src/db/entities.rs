@@ -1375,6 +1375,11 @@ pub mod code_pull_request {
         pub pull_etag: Option<String>,
         pub checks_etag: Option<String>,
         pub reviews_etag: Option<String>,
+        pub checks_observed_at: Option<DateTimeUtc>,
+        pub review_observed_at: Option<DateTimeUtc>,
+        pub mergeability_observed_at: Option<DateTimeUtc>,
+        pub auto_merge_observed_at: Option<DateTimeUtc>,
+        pub queue_observed_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

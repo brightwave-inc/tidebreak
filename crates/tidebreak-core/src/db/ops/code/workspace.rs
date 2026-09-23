@@ -1,4 +1,6 @@
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+};
 
 use crate::code::{CodeWorkspace, CodeWorkspaceStatus, PullRequestDigest, RepoId, WorkspaceId};
 use crate::error::{AgentError, Result};
@@ -240,7 +242,15 @@ pub async fn complete_workspace_release(
     Ok(result.rows_affected == 1)
 }
 
-/// Persist mutable workspace fields. `id`, `repo_id`, and `created_at` stay as stored.
+/// Persist mutable workspace fields. `id`, `repo_id`, and `created_at` stay as
+/// stored.
+///
+/// The pull-request column stays as stored too. It is a projection of the
+/// pull request's row, written only by
+/// [`super::pull_request::apply_pull_request_read`] and
+/// [`adopt_workspace_pull_request`]. A caller saves a workspace snapshot it
+/// loaded before some wait, and writing that snapshot's digest back would
+/// undo every pull-request read that landed in the meantime.
 pub async fn save_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Result<bool> {
     let result = entities::code_workspace::Entity::update_many()
         .col_expr(
@@ -262,13 +272,6 @@ pub async fn save_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Resul
         .col_expr(
             entities::code_workspace::Column::Status,
             sea_orm::sea_query::Expr::value(workspace.status.as_str().to_owned()),
-        )
-        .col_expr(
-            entities::code_workspace::Column::Pr,
-            sea_orm::sea_query::Expr::value(match &workspace.pr {
-                Some(pr) => Some(serde_json::to_value(pr)?),
-                None => None,
-            }),
         )
         .col_expr(
             entities::code_workspace::Column::ArchivedAt,
@@ -298,31 +301,68 @@ pub async fn save_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Resul
     Ok(result.rows_affected == 1)
 }
 
-/// Write only the pull-request compatibility column of an active workspace.
+/// Point an active workspace's pull-request column at a pull request it does
+/// not show yet.
 ///
-/// Background refreshes hold their workspace snapshot across host I/O. A
-/// full-row save from that snapshot could erase a title or other field a
-/// concurrent request changed; this targeted write leaves every unrelated
-/// column untouched and loses cleanly if the workspace left the active tier.
-pub async fn set_active_workspace_pull_request(
+/// Creating a pull request uses this: the new pull request has no stored row
+/// to project, and the column needs its URL so the next refresh can find it.
+/// A column that already shows the same pull request keeps what it holds,
+/// because that is a projection of the merged row and never older than a
+/// creation answer. The write touches no other column and loses cleanly if
+/// the workspace left the active tier. Returns whether the column changed.
+pub async fn adopt_workspace_pull_request(
     store: &DbStore,
     owner: &OwnerId,
     id: WorkspaceId,
     pull_request: &PullRequestDigest,
 ) -> Result<bool> {
     let encoded = serde_json::to_value(pull_request)?;
-    let result = entities::code_workspace::Entity::update_many()
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let active =
+        || entities::code_workspace::Column::Status.eq(CodeWorkspaceStatus::Active.as_str());
+    // A no-op update takes PostgreSQL's row lock, so a concurrent projection
+    // cannot land between the check and the write.
+    let locked = entities::code_workspace::Entity::update_many()
+        .col_expr(
+            entities::code_workspace::Column::Title,
+            sea_orm::sea_query::Expr::col(entities::code_workspace::Column::Title).into(),
+        )
+        .filter(entities::code_workspace::Column::Id.eq(id.0))
+        .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
+        .filter(active())
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    let row = if locked.rows_affected == 1 {
+        entities::code_workspace::Entity::find_by_id(id.0)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+    } else {
+        None
+    };
+    let shows_it = row.as_ref().is_some_and(|row| {
+        super::pull_request::digest_url(row.pr.as_ref())
+            .zip(pull_request.url.as_deref())
+            .is_some_and(|(shown, url)| shown.eq_ignore_ascii_case(url))
+    });
+    if row.is_none() || shows_it {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    entities::code_workspace::Entity::update_many()
         .col_expr(
             entities::code_workspace::Column::Pr,
             sea_orm::sea_query::Expr::value(Some(encoded)),
         )
         .filter(entities::code_workspace::Column::Id.eq(id.0))
         .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_workspace::Column::Status.eq(CodeWorkspaceStatus::Active.as_str()))
-        .exec(&store.conn)
+        .filter(active())
+        .exec(&transaction)
         .await
         .map_err(store_err)?;
-    Ok(result.rows_affected == 1)
+    transaction.commit().await.map_err(store_err)?;
+    Ok(true)
 }
 
 /// Set a workspace's title only while it still reads `expected`.
