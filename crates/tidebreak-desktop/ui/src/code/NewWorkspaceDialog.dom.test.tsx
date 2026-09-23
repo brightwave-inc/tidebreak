@@ -1197,6 +1197,9 @@ describe("NewWorkspaceDialog", () => {
     expect(message).toHaveValue("");
     expect(screen.getByLabelText("Attached images")).toBeInTheDocument();
     expect(screen.getByText(/pasted-image-/)).toBeInTheDocument();
+    // The file stays on this machine until create. Nothing is uploading yet.
+    expect(screen.queryByText(/^Uploading/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
     expect(
       screen.getByText("Add a message to send the image with the first turn."),
