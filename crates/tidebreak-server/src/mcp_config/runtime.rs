@@ -1679,8 +1679,12 @@ impl McpRuntime {
             }
         }
         // The stored session is what the next connection presents. A failure
-        // here lands on the server's own health and diagnostic.
-        let _ = self.reconnect(&name).await;
+        // here lands on the server's own health and diagnostic. The reconnect
+        // runs as its own task: a newer Connect aborts this one, and an abort
+        // mid-reconnect would leave the server showing `reconnecting`.
+        tokio::spawn(async move {
+            let _ = self.reconnect(&name).await;
+        });
     }
 
     /// Record why a sign-in stopped. See [`Self::record_sign_in_stop`].

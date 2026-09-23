@@ -27,6 +27,10 @@ use super::types::McpServerDefinition;
 /// server how to authorize.
 pub(super) const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The most asking a server how to authorize may add to a failed connection.
+/// A server that takes longer keeps its `401`, and the next attempt asks again.
+const DETECTION_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The shared reason for an HTTP server that has no OAuth sign-in to run.
 pub(super) const NO_OAUTH: &str = "This server does not ask for an OAuth sign-in.";
 
@@ -94,14 +98,20 @@ pub(super) struct OAuthAccess {
 /// `401` stays an ordinary authentication failure.
 pub(super) async fn detect(url: &str, client: &McpOAuthClient) -> Option<OAuthNeed> {
     let resource = url::Url::parse(url).ok()?;
-    let challenge = tidebreak_mcp::authorization_challenge(url, CHALLENGE_TIMEOUT)
+    let ask = async {
+        let challenge = tidebreak_mcp::authorization_challenge(url, CHALLENGE_TIMEOUT)
+            .await
+            .ok()
+            .flatten();
+        match client.discover(&resource, challenge.as_deref()).await? {
+            Discovery::Supported(_) => Some(OAuthNeed::SignIn),
+            Discovery::Unsupported(reason) => Some(OAuthNeed::Unsupported(reason)),
+        }
+    };
+    tokio::time::timeout(DETECTION_TIMEOUT, ask)
         .await
         .ok()
-        .flatten();
-    match client.discover(&resource, challenge.as_deref()).await? {
-        Discovery::Supported(_) => Some(OAuthNeed::SignIn),
-        Discovery::Unsupported(reason) => Some(OAuthNeed::Unsupported(reason)),
-    }
+        .flatten()
 }
 
 /// One server's sign-in while it runs, and after it fails.

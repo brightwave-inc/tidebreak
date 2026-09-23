@@ -58,6 +58,11 @@ pub const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Short so a missing expiry never becomes "never expires".
 const DEFAULT_ACCESS_TTL_SECONDS: u64 = 300;
 
+/// The most one discovery, registration, or token request may take.
+/// Discovery runs inside a failed connection and refresh inside a tool call,
+/// so a server that never answers must not hold either open.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Secret-store key holding one server's registered OAuth client (RFC 7591).
 ///
 /// A public client carries no secret, but the assigned `client_id` — and any
@@ -606,6 +611,7 @@ impl McpOAuthClient {
     pub fn new() -> Result<Self> {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|error| {
                 AgentError::config(format!(
@@ -625,6 +631,7 @@ impl McpOAuthClient {
     pub fn admitting_loopback_for_tests() -> Result<Self> {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .timeout(REQUEST_TIMEOUT)
             .no_proxy()
             .build()
             .map_err(|error| {
