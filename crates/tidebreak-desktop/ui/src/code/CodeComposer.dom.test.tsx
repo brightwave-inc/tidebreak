@@ -1469,6 +1469,57 @@ describe("HarnessModelMenu", () => {
       screen.queryByRole("menuitem", { name: /Claude Sonnet 4/ }),
     ).toBeNull();
   });
+
+  it("filters a gateway catalog by search and by vendor tab", async () => {
+    const gatewayOptions = [
+      {
+        id: "model-gateway-model-gateway/gpt-5.6-luna",
+        label: "GPT 5.6 Luna",
+        source: "Grok CLI · model-gateway",
+      },
+      {
+        id: "model-gateway-model-gateway/claude-fable-5",
+        label: "Claude Fable 5",
+        source: "Grok CLI · model-gateway",
+      },
+      {
+        id: "model-gateway-model-gateway/grok-4.7",
+        label: "Grok 4.7",
+        source: "Grok CLI · model-gateway",
+      },
+    ];
+    renderComposer(
+      <HarnessModelMenu
+        harness="grok"
+        options={gatewayOptions}
+        value={gatewayOptions[2].id}
+        onChange={() => {}}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Model: Grok 4.7" }));
+    await user.keyboard("Grok");
+
+    expect(
+      screen.getByRole("searchbox", { name: "Search models" }),
+    ).toHaveValue("Grok");
+    expect(screen.getByRole("menuitem", { name: /Grok 4.7/ })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /GPT 5.6 Luna/ })).toBeNull();
+    expect(
+      screen.queryByRole("menuitem", { name: /Claude Fable 5/ }),
+    ).toBeNull();
+
+    await user.click(screen.getByRole("tab", { name: "OpenAI" }));
+    expect(
+      screen.getByRole("searchbox", { name: "Search models" }),
+    ).toHaveValue("");
+    expect(screen.getByRole("menuitem", { name: /GPT 5.6 Luna/ })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /Grok 4.7/ })).toBeNull();
+    expect(
+      screen.queryByRole("menuitem", { name: /Claude Fable 5/ }),
+    ).toBeNull();
+  });
 });
 
 function pasteOn(target: Element, files: File[]) {
