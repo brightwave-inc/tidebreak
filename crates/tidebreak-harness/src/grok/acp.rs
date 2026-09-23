@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::{json, Value};
 use tidebreak_core::{ApprovalKind, HarnessNoticeLevel, MAX_NOTICE_CHARS};
+
+use crate::oversized::{CutLine, CutStep};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::time::timeout;
@@ -67,22 +69,29 @@ fn valid_rpc_id(value: &Value) -> bool {
 struct Reader {
     stdout: ChildStdout,
     lines: StreamLineBuffer,
-    ready: VecDeque<String>,
+    ready: VecDeque<StreamLine>,
+}
+
+/// One JSON-RPC frame from the engine.
+struct Frame {
+    value: Value,
+    /// Where the size limit cut the frame, when it did. The value is then
+    /// closed around what arrived (see [`CutLine`]).
+    cut: Option<CutLine>,
 }
 
 impl Reader {
-    async fn next(&mut self) -> Result<Value, HarnessError> {
+    async fn next(&mut self) -> Result<Frame, HarnessError> {
         let budget = StreamBudget {
             max_partial_line: MAX_RPC_LINE,
             ..StreamBudget::default()
         };
         loop {
             if let Some(line) = self.ready.pop_front() {
-                if line.trim().is_empty() {
+                if line.text.trim().is_empty() {
                     continue;
                 }
-                return serde_json::from_str(&line)
-                    .map_err(|_| HarnessError::Other("Grok ACP returned invalid JSON".into()));
+                return read_frame(&line);
             }
             let mut chunk = vec![0; budget.chunk_size];
             let n = self.stdout.read(&mut chunk).await?;
@@ -92,14 +101,38 @@ impl Reader {
                 ));
             }
             let tick = self.lines.push(&chunk[..n], budget);
-            if tick.overflow_chunks > 0 {
-                return Err(HarnessError::Other(
-                    "Grok ACP exceeded the message size limit".into(),
-                ));
-            }
             self.ready.extend(tick.lines);
         }
     }
+}
+
+/// Decode one line. A frame over the size limit keeps the part that arrived:
+/// a tool update carrying a huge image still settles its tool card, where
+/// failing the whole turn would lose everything after it.
+fn read_frame(line: &StreamLine) -> Result<Frame, HarnessError> {
+    if !line.cut {
+        return serde_json::from_str(&line.text)
+            .map(|value| Frame { value, cut: None })
+            .map_err(|_| HarnessError::Other("Grok ACP returned invalid JSON".into()));
+    }
+    let cut = CutLine::recover(&line.text)
+        .ok_or_else(|| HarnessError::Other("Grok ACP sent a message over the size limit".into()))?;
+    let method = cut
+        .value
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    tracing::warn!(
+        target: "tidebreak_harness::grok",
+        method = method.as_str(),
+        max_bytes = MAX_RPC_LINE,
+        "engine frame exceeded the parse budget; kept the part that arrived"
+    );
+    Ok(Frame {
+        value: cut.value.clone(),
+        cut: Some(cut),
+    })
 }
 
 impl Control {
@@ -461,7 +494,8 @@ impl GrokSession {
                     .await?;
             }
             loop {
-                let value = reader.next().await?;
+                let frame = reader.next().await?;
+                let value = &frame.value;
                 if value.get("id").and_then(Value::as_i64) == Some(id)
                     && value.get("method").is_none()
                 {
@@ -479,7 +513,7 @@ impl GrokSession {
                         HarnessError::Other("Grok ACP response has no result".into())
                     });
                 }
-                self.handle_acp_frame(value, parser, setup).await?;
+                self.handle_acp_frame(frame, parser, setup).await?;
             }
         };
         if setup {
@@ -499,12 +533,17 @@ impl GrokSession {
 
     async fn handle_acp_frame(
         &self,
-        value: Value,
+        frame: Frame,
         parser: &mut GrokStreamParser,
         setup: bool,
     ) -> Result<(), HarnessError> {
+        let Frame { value, cut } = frame;
         match value.get("method").and_then(Value::as_str) {
-            Some("session/request_permission") => self.request_acp_permission(value).await,
+            // A cut request no longer shows the whole tool it asks about, so
+            // it is never shown for consent.
+            Some("session/request_permission") => {
+                self.request_acp_permission(value, cut.is_some()).await
+            }
             Some("session/update") => {
                 let params = &value["params"];
                 let mut state = self.acp.lock().await;
@@ -533,7 +572,11 @@ impl GrokSession {
                 drop(state);
                 let mapped = map_update(update);
                 if let Some(mapped) = mapped {
-                    for event in parser.push_line(&mapped.to_string()) { self.spec.sink.emit(event).await; }
+                    let events = match cut.and_then(|cut| update_cut(cut, mapped.clone())) {
+                        Some(cut) => parser.push_recovered(cut),
+                        None => parser.push_line(&mapped.to_string()),
+                    };
+                    for event in events { self.spec.sink.emit(event).await; }
                 }
                 Ok(())
             }
@@ -544,7 +587,7 @@ impl GrokSession {
         }
     }
 
-    async fn request_acp_permission(&self, value: Value) -> Result<(), HarnessError> {
+    async fn request_acp_permission(&self, value: Value, cut: bool) -> Result<(), HarnessError> {
         let Some(id) = value.get("id").filter(|id| valid_rpc_id(id)).cloned() else {
             self.spec.sink.emit(HarnessEvent::HarnessNotice {
                 level: HarnessNoticeLevel::Warning,
@@ -555,7 +598,9 @@ impl GrokSession {
         let mut state = self.acp.lock().await;
         state.stopped |= *self.acp_stop.borrow();
         let unique = state.seen.insert(id.to_string());
-        let permission = unique.then(|| parse_permission(&value, &state)).flatten();
+        let permission = (unique && !cut)
+            .then(|| parse_permission(&value, &state))
+            .flatten();
         let Some(permission) = permission else {
             // A duplicate request cannot leave a stale approval card behind.
             let stale: Vec<_> = state
@@ -716,6 +761,20 @@ fn usage_fields(usage: &Value) -> Value {
     let number = |key| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
     // ACP inputTokens includes cached reads; the print parser counts them separately.
     json!({"input_tokens":number("inputTokens").saturating_sub(number("cachedReadTokens")).saturating_sub(number("cacheCreationTokens")),"output_tokens":number("outputTokens"),"cache_read_input_tokens":number("cachedReadTokens"),"cache_creation_input_tokens":number("cacheCreationTokens"),"reasoning_tokens":number("reasoningTokens")})
+}
+
+/// The cut, restated against the mapped update rather than the whole frame,
+/// when it landed inside the update.
+fn update_cut(cut: CutLine, mapped: Value) -> Option<CutLine> {
+    let inside = matches!(
+        cut.cut_at.as_slice(),
+        [CutStep::Key(params), CutStep::Key(update), ..] if params == "params" && update == "update"
+    );
+    inside.then(|| CutLine {
+        value: mapped,
+        cut_at: cut.cut_at[2..].to_vec(),
+        cut_text: cut.cut_text,
+    })
 }
 
 fn map_update(update: &Value) -> Option<Value> {

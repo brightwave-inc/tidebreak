@@ -727,7 +727,7 @@ impl OpencodeSession {
                             return;
                         }
                         for line in tick.lines {
-                            if let Some(event) = sse_data_line(&line) {
+                            if let Some(event) = sse_data_line(&line.text) {
                                 if events.send(event).await.is_err() {
                                     return;
                                 }

@@ -23,8 +23,8 @@ use crate::grok::parse::GrokStreamParser;
 use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
     spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError,
-    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
-    TurnInput, TurnOutcome,
+    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLine,
+    StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::{HarnessKind, PermissionMode, ReasoningEffort};
 use uuid::Uuid;
@@ -790,8 +790,7 @@ impl GrokSession {
             }
             tokio::task::yield_now().await;
         }
-        if !lines.pending().is_empty() {
-            let pending = lines.pending().into_owned();
+        if let Some(pending) = lines.pending_line() {
             if emit_parsed(&self.spec, &mut parser, &self.resume_ref, &pending).await {
                 saw_terminal = true;
             }
@@ -838,10 +837,15 @@ async fn emit_parsed(
     spec: &SessionSpec,
     parser: &mut GrokStreamParser,
     resume_ref: &Mutex<Option<String>>,
-    line: &str,
+    line: &StreamLine,
 ) -> bool {
     let mut terminal = false;
-    for event in parser.push_line(line) {
+    let events = if line.cut {
+        parser.push_cut_line(&line.text)
+    } else {
+        parser.push_line(&line.text)
+    };
+    for event in events {
         if let HarnessEvent::SessionStarted {
             resume_ref: Some(resume),
             ..

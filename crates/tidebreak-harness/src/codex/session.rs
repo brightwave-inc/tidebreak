@@ -20,8 +20,8 @@ use crate::codex::parse::CodexStreamParser;
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::{
     spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError,
-    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
-    TurnInput, TurnOutcome,
+    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLine,
+    StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::{PermissionMode, ReasoningEffort, MAX_NOTICE_CHARS};
 
@@ -1168,10 +1168,10 @@ impl CodexSession {
             }
             let mut seen = false;
             for line in lines {
-                if line_is_rpc_id(&line, rpc_id) {
+                if !line.cut && line_is_rpc_id(&line.text, rpc_id) {
                     seen = true;
                 }
-                self.emit_parsed(&line).await;
+                self.emit_line(&line).await;
             }
             if seen {
                 return Ok(());
@@ -1232,7 +1232,7 @@ impl CodexSession {
                 return Err(HarnessError::Other(message.into()));
             }
             for line in lines {
-                for event in self.emit_parsed(&line).await {
+                for event in self.emit_line(&line).await {
                     if matches!(
                         event,
                         HarnessEvent::TurnCompleted { .. }
@@ -1246,7 +1246,7 @@ impl CodexSession {
         }
     }
 
-    async fn read_lines(&self) -> Result<Vec<String>, HarnessError> {
+    async fn read_lines(&self) -> Result<Vec<StreamLine>, HarnessError> {
         self.read_lines_with_budget(
             StreamBudget {
                 max_partial_line: RPC_MAX_PARTIAL_LINE,
@@ -1261,7 +1261,7 @@ impl CodexSession {
         &self,
         budget: StreamBudget,
         reject_overflow: bool,
-    ) -> Result<Vec<String>, HarnessError> {
+    ) -> Result<Vec<StreamLine>, HarnessError> {
         let Some(stdout) = self.stdout.lock().expect("codex stdout").clone() else {
             return Err(HarnessError::Other("engine child has no stdout".into()));
         };
@@ -1293,8 +1293,25 @@ impl CodexSession {
         }
     }
 
+    /// Parse one complete line the reader took.
+    async fn emit_line(&self, line: &StreamLine) -> Vec<HarnessEvent> {
+        self.emit_text(&line.text, line.cut).await
+    }
+
+    /// Parse one line that arrived whole.
+    #[cfg(test)]
     async fn emit_parsed(&self, line: &str) -> Vec<HarnessEvent> {
-        let value = serde_json::from_str::<Value>(line).ok();
+        self.emit_text(line, false).await
+    }
+
+    /// A cut line is not JSON, so it answers no control request; the parser
+    /// recovers what event it was from the part that arrived.
+    async fn emit_text(&self, line: &str, cut: bool) -> Vec<HarnessEvent> {
+        let value = if cut {
+            None
+        } else {
+            serde_json::from_str::<Value>(line).ok()
+        };
         let mut admitted_turn_id = None;
         if let Some(value) = value.as_ref() {
             if is_rpc_response(value) {
@@ -1333,7 +1350,11 @@ impl CodexSession {
         }
         let (events, rejected_elicitations) = {
             let mut parser = self.parser.lock().expect("codex parser");
-            let events = parser.push_line(line);
+            let events = if cut {
+                parser.push_cut_line(line)
+            } else {
+                parser.push_line(line)
+            };
             (events, parser.take_rejected_elicitations())
         };
         for reply in rejected_elicitations {

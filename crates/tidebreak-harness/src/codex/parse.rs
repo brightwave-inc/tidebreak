@@ -16,6 +16,7 @@ use tidebreak_core::{
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 
+use crate::oversized::{CutLine, OVERSIZED_PAYLOAD};
 use crate::{ApprovalDecision, HarnessApprovalRef, HarnessEvent};
 
 mod elicitation;
@@ -37,6 +38,9 @@ pub struct CodexStreamParser {
     started_subagents: HashSet<String>,
     /// Child thread ids whose synthetic `Task` span has settled.
     settled_subagents: HashSet<String>,
+    /// Item id → the child thread it started on. A completion the line
+    /// buffer cut loses its `threadId`, which follows the item.
+    item_threads: HashMap<String, String>,
     /// Best display detail observed for each child thread.
     subagent_details: HashMap<String, ToolDetail>,
     /// The containing `Task` for nested child threads. Top-level children map
@@ -146,18 +150,117 @@ impl CodexStreamParser {
             self.count_unrecognized("unparseable-line", line);
             return Vec::new();
         };
+        self.push_value(&value)
+    }
+
+    fn push_value(&mut self, value: &Value) -> Vec<HarnessEvent> {
         if let (Some(dir), Some(msg)) = (value.get("dir").and_then(Value::as_str), value.get("msg"))
         {
             return match dir {
                 "out" => self.push_outbound(msg),
                 "in" => self.push_inbound(msg),
                 other => {
-                    self.count_unrecognized(&format!("frame/{other}"), &value);
+                    self.count_unrecognized(&format!("frame/{other}"), value);
                     Vec::new()
                 }
             };
         }
-        self.push_inbound(&value)
+        self.push_inbound(value)
+    }
+
+    /// Parse one line the line buffer cut at its cap.
+    ///
+    /// The part that arrived still names the notification and the item. A
+    /// completed item settles its tool card with [`OVERSIZED_PAYLOAD`] in
+    /// place of the output the cut took.
+    pub fn push_cut_line(&mut self, line: &str) -> Vec<HarnessEvent> {
+        let Some(cut) = CutLine::recover(line) else {
+            self.count_unrecognized("oversized-line", line);
+            return Vec::new();
+        };
+        // Captures frame each message as `{"dir", "msg"}`; the live stream
+        // sends the message alone.
+        let framed = cut.value.get("dir").is_some();
+        let inside = |path: &[&str]| {
+            if framed {
+                let mut framed_path = vec!["msg"];
+                framed_path.extend_from_slice(path);
+                cut.cut_within(&framed_path)
+            } else {
+                cut.cut_within(path)
+            }
+        };
+        let item_cut = inside(&["params", "item"]);
+        let text_cut = inside(&["params", "item", "text"]);
+        let CutLine {
+            mut value,
+            cut_text,
+            ..
+        } = cut;
+        let message = if framed {
+            value.get_mut("msg")
+        } else {
+            Some(&mut value)
+        };
+        let Some(message) = message else {
+            self.count_unrecognized("oversized-line", line);
+            return Vec::new();
+        };
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        tracing::info!(
+            target: "tidebreak_harness::codex",
+            kind = method.as_str(),
+            "engine line exceeded the parse budget; kept the part that arrived"
+        );
+        let mut cut_item = None;
+        if item_cut && matches!(method.as_str(), "item/started" | "item/completed") {
+            let item_id = message
+                .pointer("/params/item/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if let Some(params) = message.get_mut("params").and_then(Value::as_object_mut) {
+                // `threadId` follows the item, so a child's item would
+                // otherwise land on the parent.
+                if !params.contains_key("threadId") {
+                    if let Some(thread) = item_id.as_ref().and_then(|id| self.item_threads.get(id))
+                    {
+                        params.insert("threadId".into(), Value::String(thread.clone()));
+                    }
+                }
+                if let Some(item) = params.get_mut("item").and_then(Value::as_object_mut) {
+                    if text_cut {
+                        item.insert("text".into(), Value::String(cut_text));
+                    }
+                    // A file change states its status after the diff. The
+                    // engine completes an item only once it has finished, and
+                    // the card needs an outcome to settle.
+                    if method == "item/completed" && !item.contains_key("status") {
+                        item.insert("status".into(), Value::String("completed".into()));
+                    }
+                }
+            }
+            if method == "item/completed" && !text_cut {
+                cut_item = item_id;
+            }
+        }
+        let mut events = self.push_value(&value);
+        if let Some(item_id) = cut_item {
+            for event in &mut events {
+                if let HarnessEvent::ToolCompleted {
+                    call_id, preview, ..
+                } = event
+                {
+                    if *call_id == item_id {
+                        OVERSIZED_PAYLOAD.clone_into(preview);
+                    }
+                }
+            }
+        }
+        events
     }
 
     /// Parse a whole captured framed NDJSON document.
@@ -364,6 +467,12 @@ impl CodexStreamParser {
         let parent_call_id = self.parent_call_id(params);
         if parent_call_id.is_some() && !self.parent_turn_active {
             return Vec::new();
+        }
+        if let (Some(thread), Some(id)) = (
+            parent_call_id.as_ref(),
+            item.get("id").and_then(Value::as_str),
+        ) {
+            self.item_threads.insert(id.to_owned(), thread.clone());
         }
         match item.get("type").and_then(Value::as_str) {
             Some("commandExecution") => self.emit_tool_started(&item, parent_call_id),
@@ -2286,6 +2395,80 @@ mod tests {
             event,
             HarnessEvent::ToolStarted { call_id, .. } if call_id == "late-command"
         )));
+    }
+
+    /// Cut `line` where a small budget cuts it. The parser never sees the
+    /// cap, so a small one keeps the test light.
+    fn cut(line: &str) -> String {
+        let cut = crate::oversized::through_the_line_buffer(line, 4 * 1_024);
+        assert!(cut.cut, "the line must outgrow the budget");
+        cut.text
+    }
+
+    /// A child's command output over the line budget used to fail to parse
+    /// and vanish, leaving the card running. `threadId` and `exitCode`
+    /// follow the output, so the recovered completion also has to keep the
+    /// child it ran under.
+    #[test]
+    fn a_completed_item_over_the_line_budget_settles_its_card_under_its_thread() {
+        let setup = r#"
+{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}
+{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"parent","cliVersion":"0.153.4"}}}}
+{"method":"turn/started","params":{"threadId":"parent","turn":{"id":"parent-turn","status":"inProgress"}}}
+{"method":"item/started","params":{"threadId":"child","turnId":"child-turn","item":{"type":"commandExecution","id":"child-command","command":"tail big.log","cwd":"/workspace","status":"inProgress"}}}
+"#;
+        let mut parser = CodexStreamParser::new();
+        for line in setup.lines() {
+            parser.push_line(line);
+        }
+        // Written out rather than built with `json!`, which sorts keys: the
+        // engine's own order is what decides what survives the cut.
+        let line = format!(
+            r#"{{"method":"item/completed","params":{{"item":{{"type":"commandExecution","id":"child-command","command":"tail big.log","cwd":"/workspace","status":"completed","aggregatedOutput":"{}","exitCode":0}},"threadId":"child","turnId":"child-turn"}}}}"#,
+            "x".repeat(8 * 1_024)
+        );
+        let events = parser.push_cut_line(&cut(&line));
+        assert_eq!(
+            events,
+            vec![HarnessEvent::ToolCompleted {
+                call_id: "child-command".into(),
+                outcome: ToolOutcome::Succeeded,
+                preview: OVERSIZED_PAYLOAD.into(),
+                detail: Some(ToolDetail::Command {
+                    cmd: "tail big.log".into(),
+                    cwd: "/workspace".into(),
+                }),
+                parent_call_id: Some("child".into()),
+            }]
+        );
+        assert_eq!(parser.unrecognized(), 0);
+    }
+
+    /// A file change states its status after its diff. A completion the cut
+    /// took that far still settles its card rather than counting as drift.
+    #[test]
+    fn a_file_change_whose_status_was_cut_still_settles() {
+        let line = format!(
+            r#"{{"method":"item/completed","params":{{"item":{{"type":"fileChange","id":"edit-1","changes":[{{"path":"big.txt","kind":"add","diff":"{}"}}],"status":"completed"}}}}}}"#,
+            "+".repeat(8 * 1_024)
+        );
+        let mut parser = CodexStreamParser::new();
+        let events = parser.push_cut_line(&cut(&line));
+        assert!(matches!(
+            events.as_slice(),
+            [
+                HarnessEvent::ToolStarted { call_id, .. },
+                HarnessEvent::ToolCompleted { call_id: completed, outcome: ToolOutcome::Succeeded, preview, .. },
+            ] if call_id == "edit-1" && completed == "edit-1" && preview == OVERSIZED_PAYLOAD
+        ));
+        assert_eq!(parser.unrecognized(), 0);
+    }
+
+    #[test]
+    fn a_cut_line_that_is_not_json_is_counted() {
+        let mut parser = CodexStreamParser::new();
+        assert!(parser.push_cut_line("garbage").is_empty());
+        assert_eq!(parser.unrecognized(), 1);
     }
 
     #[test]

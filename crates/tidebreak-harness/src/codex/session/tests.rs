@@ -444,12 +444,13 @@ async fn read_lines_preserves_large_browser_mcp_results() {
         .expect("the browser result should arrive before the deadline")
         .unwrap();
     assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0].len(), frame.len());
+    assert!(!lines[0].cut, "a frame under the cap arrives whole");
+    assert_eq!(lines[0].text.len(), frame.len());
     assert!(
-        lines[0] == frame,
+        lines[0].text == frame,
         "the reader must preserve the full JSON frame"
     );
-    let events = session.emit_parsed(&lines[0]).await;
+    let events = session.emit_parsed(&lines[0].text).await;
     assert!(events.iter().any(|event| matches!(
         event,
         HarnessEvent::ToolCompleted {
@@ -484,8 +485,9 @@ printf '\nfollowing event\n'
     })
     .await
     .expect("an oversized event must not block later lines");
-    assert_eq!(lines[0].len(), RPC_MAX_PARTIAL_LINE);
-    assert_eq!(lines[1], "following event");
+    assert_eq!(lines[0].text.len(), RPC_MAX_PARTIAL_LINE);
+    assert!(lines[0].cut, "the reader marks the line it cut");
+    assert_eq!(lines[1], StreamLine::whole("following event"));
     let stdout = session.stdout.lock().unwrap().clone().unwrap();
     assert!(stdout.lock().await.lines.overflow_chunks > 0);
     assert!(child.wait().await.unwrap().success());

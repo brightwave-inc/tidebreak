@@ -29,13 +29,14 @@ pub mod codex;
 pub mod grok;
 pub mod launch;
 pub mod opencode;
+pub mod oversized;
 pub mod pin;
 pub mod probe;
 pub mod project_config;
 mod text;
 pub mod wiring;
 
-pub use budget::{BudgetTick, StreamBudget, StreamLineBuffer};
+pub use budget::{BudgetTick, StreamBudget, StreamLine, StreamLineBuffer};
 pub use child::{
     current_process_identity, spawn_process_tree, spawned_process_identity,
     terminate_recorded_process, BoundedOutput, BoundedProcessOutput, ChildPid, OutputBudget,

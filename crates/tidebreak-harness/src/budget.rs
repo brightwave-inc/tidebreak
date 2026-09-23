@@ -1,6 +1,8 @@
 //! Bounded stream-parse budgets.
 //!
-//! Parsing is O(new bytes). Overflow is counted, never silently dropped.
+//! Parsing is O(new bytes). Overflow is counted, never silently dropped: a
+//! line longer than the cap arrives marked as cut, so the parser can recover
+//! what the line started with instead of discarding the whole event.
 
 use std::borrow::Cow;
 
@@ -32,11 +34,32 @@ impl Default for StreamBudget {
     }
 }
 
+/// One complete line taken from the buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamLine {
+    /// The line without its newline. A cut line holds only the bytes before
+    /// the cap.
+    pub text: String,
+    /// Whether the line outgrew the cap and lost everything after it.
+    pub cut: bool,
+}
+
+impl StreamLine {
+    /// A line that arrived whole.
+    #[must_use]
+    pub fn whole(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cut: false,
+        }
+    }
+}
+
 /// Outcome of pushing one chunk into the line buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BudgetTick {
     /// Complete lines extracted this tick, already stripped of `\n`.
-    pub lines: Vec<String>,
+    pub lines: Vec<StreamLine>,
     /// Number of overflow chunks this tick (bytes that did not fit).
     pub overflow_chunks: u64,
 }
@@ -61,10 +84,11 @@ impl StreamLineBuffer {
 
     /// Push `bytes` and take complete lines, decoding only at line boundaries.
     ///
-    /// A line longer than `budget.max_partial_line` is emitted truncated at
-    /// its cap once its newline arrives, and the bytes beyond the cap are
-    /// counted as overflow. The stream keeps flowing either way: one oversized
-    /// line must never stop later lines from being delivered.
+    /// A line longer than `budget.max_partial_line` is emitted cut at its cap
+    /// once its newline arrives, marked [`StreamLine::cut`], and the bytes
+    /// beyond the cap are counted as overflow. The stream keeps flowing either
+    /// way: one oversized line must never stop later lines from being
+    /// delivered.
     pub fn push(&mut self, bytes: &[u8], budget: StreamBudget) -> BudgetTick {
         let mut rest = bytes;
         let mut lines = Vec::new();
@@ -104,7 +128,10 @@ impl StreamLineBuffer {
                     if line.ends_with(b"\r") {
                         line.pop();
                     }
-                    lines.push(String::from_utf8_lossy(&line).into_owned());
+                    lines.push(StreamLine {
+                        text: String::from_utf8_lossy(&line).into_owned(),
+                        cut: self.overflowing,
+                    });
                     self.overflowing = false;
                     rest = tail;
                 }
@@ -123,21 +150,37 @@ impl StreamLineBuffer {
     pub fn pending(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(&self.pending)
     }
+
+    /// The remaining partial line as a line the stream ended on, marked cut
+    /// when it had already outgrown the cap. `None` when nothing is pending.
+    #[must_use]
+    pub fn pending_line(&self) -> Option<StreamLine> {
+        (!self.pending.is_empty()).then(|| StreamLine {
+            text: self.pending().into_owned(),
+            cut: self.overflowing,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn texts(tick: &BudgetTick) -> Vec<&str> {
+        tick.lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
     #[test]
     fn splits_complete_lines_and_keeps_partial() {
         let mut buf = StreamLineBuffer::new();
         let tick = buf.push(b"one\ntwo\nthr", StreamBudget::default());
-        assert_eq!(tick.lines, ["one", "two"]);
+        assert_eq!(texts(&tick), ["one", "two"]);
+        assert!(tick.lines.iter().all(|line| !line.cut));
         assert_eq!(buf.pending(), "thr");
         let tick = buf.push(b"ee\n", StreamBudget::default());
-        assert_eq!(tick.lines, ["three"]);
+        assert_eq!(texts(&tick), ["three"]);
         assert!(buf.pending().is_empty());
+        assert_eq!(buf.pending_line(), None);
     }
 
     #[test]
@@ -149,7 +192,7 @@ mod tests {
             .lines
             .is_empty());
         let tick = buf.push(&[emoji[2], emoji[3], b'\n'], StreamBudget::default());
-        assert_eq!(tick.lines, ["🙂"]);
+        assert_eq!(texts(&tick), ["🙂"]);
     }
 
     #[test]
@@ -164,6 +207,14 @@ mod tests {
         assert!(tick.overflow_chunks >= 1);
         assert_eq!(buf.overflow_chunks, tick.overflow_chunks);
         assert!(buf.pending().len() <= 8);
+        // A stream that ends on the oversized line still says it was cut.
+        assert_eq!(
+            buf.pending_line(),
+            Some(StreamLine {
+                text: "abcdefgh".into(),
+                cut: true
+            })
+        );
     }
 
     #[test]
@@ -179,13 +230,35 @@ mod tests {
         assert!(buf.push(b"aaaaaaaaaabbbb", budget).lines.is_empty());
         assert!(buf.push(b"cccccccccc", budget).lines.is_empty());
         let tick = buf.push(b"dddd\nnormal\n", budget);
-        assert_eq!(tick.lines, ["aaaaaaaa", "normal"]);
+        assert_eq!(
+            tick.lines,
+            [
+                StreamLine {
+                    text: "aaaaaaaa".into(),
+                    cut: true
+                },
+                StreamLine::whole("normal"),
+            ]
+        );
         assert!(buf.overflow_chunks >= 1);
         assert!(buf.pending().is_empty());
 
         // And the buffer keeps working afterwards.
         let tick = buf.push(b"after\n", budget);
-        assert_eq!(tick.lines, ["after"]);
+        assert_eq!(tick.lines, [StreamLine::whole("after")]);
+    }
+
+    #[test]
+    fn a_line_exactly_at_the_cap_is_not_cut() {
+        let budget = StreamBudget {
+            chunk_size: 8,
+            max_chunks_per_tick: 1,
+            max_partial_line: 8,
+        };
+        let mut buf = StreamLineBuffer::new();
+        let tick = buf.push(b"abcdefgh\n", budget);
+        assert_eq!(tick.lines, [StreamLine::whole("abcdefgh")]);
+        assert_eq!(tick.overflow_chunks, 0);
     }
 
     #[test]
@@ -198,6 +271,7 @@ mod tests {
         };
         let mut buf = StreamLineBuffer::new();
         let tick = buf.push("ééé\nplain\n".as_bytes(), budget);
-        assert_eq!(tick.lines, ["éé", "plain"]);
+        assert_eq!(texts(&tick), ["éé", "plain"]);
+        assert!(tick.lines[0].cut);
     }
 }
