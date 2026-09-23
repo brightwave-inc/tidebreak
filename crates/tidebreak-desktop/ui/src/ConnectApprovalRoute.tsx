@@ -3,7 +3,7 @@ import { useParams } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
 import { HttpError, type CodeConnectPage } from "./api";
-import { Logomark } from "./Logomark";
+import { BootBrand } from "./Logomark";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -126,10 +126,7 @@ export function ConnectApprovalView({
   // page must say whose it is before it asks "is this you?".
   return (
     <div className="boot" aria-label="Connect approval">
-      <div className="boot-brand">
-        <Logomark />
-        <h1>Tidebreak</h1>
-      </div>
+      <BootBrand />
       <Card className="w-full max-w-md p-6 text-left">
         {phase === "loading" ? (
           <p className="text-sm text-muted-foreground" role="status">

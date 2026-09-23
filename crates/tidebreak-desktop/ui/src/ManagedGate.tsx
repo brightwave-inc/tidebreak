@@ -4,7 +4,7 @@ import { ExternalLink, Laptop, RefreshCw } from "lucide-react";
 import type { ApiClient, GatewayStatus, ManagedPolicy } from "./api";
 import { Button } from "@/components/ui/button";
 import { HostedSignIn } from "./HostedSignIn";
-import { Logomark } from "./Logomark";
+import { BootBrand } from "./Logomark";
 import { ManagedPolicyContext } from "./managedPolicy";
 import { hasNativeHost, onPairingChanged } from "./host";
 import { composerKeyForRoute, useComposerDrafts } from "./ComposerDrafts";
@@ -402,12 +402,9 @@ export function ManagedGate({
       return (
         <div className="boot" aria-label="Machine unavailable">
           <WindowDragStrip />
-          <div className="boot-brand">
-            <Logomark />
-            <h1>Tidebreak</h1>
-          </div>
+          <BootBrand />
           <div className="welcome-copy">
-            <h2>That machine is not answering</h2>
+            <h1>That machine is not answering</h1>
             <p>
               This window works on{" "}
               <code className="font-medium">{attachedMachine}</code>, and that
@@ -462,12 +459,9 @@ export function ManagedGate({
     return (
       <div className="boot" aria-label="Managed policy unavailable">
         <WindowDragStrip />
-        <div className="boot-brand">
-          <Logomark />
-          <h1>Tidebreak</h1>
-        </div>
+        <BootBrand />
         <div className="welcome-copy">
-          <h2>Managed policy unavailable</h2>
+          <h1>Managed policy unavailable</h1>
           <p>
             This device&apos;s managed policy is misconfigured. Contact your
             administrator.
@@ -528,14 +522,11 @@ export function ManagedGate({
       aria-label={pairing ? "Gateway pairing requested" : "Sign in required"}
     >
       <WindowDragStrip />
-      <div className="boot-brand">
-        <Logomark />
-        <h1>Tidebreak</h1>
-      </div>
+      <BootBrand />
       <div className="welcome-copy">
         {pairing ? (
           <>
-            <h2>Connect to your model gateway</h2>
+            <h1>Connect to your model gateway</h1>
             <p>
               Sign in to connect Tidebreak to the gateway below, which will
               manage this device.
@@ -549,7 +540,7 @@ export function ManagedGate({
           </>
         ) : (
           <>
-            <h2>Sign in to continue</h2>
+            <h1>Sign in to continue</h1>
             <p>
               This device is managed by your organization. Sign in to get
               started.
@@ -649,11 +640,8 @@ function BootScreen({ children }: { children: ReactNode }) {
   return (
     <div className="boot">
       <WindowDragStrip />
-      <div className="boot-brand">
-        <Logomark />
-        <h1>Tidebreak</h1>
-      </div>
-      <p>{children}</p>
+      <BootBrand />
+      <h1>{children}</h1>
     </div>
   );
 }

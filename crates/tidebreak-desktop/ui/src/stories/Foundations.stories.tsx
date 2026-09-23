@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { ArrowRight, Trash2 } from "lucide-react";
+import { expect, userEvent, within } from "storybook/test";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -71,3 +72,26 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Catalog: Story = {};
+
+/** Confirms Button's outline-none utility beats the base focus-visible outline. */
+export const FocusOutlineLayering: Story = {
+  render: () => (
+    <div className="flex flex-wrap items-center gap-2 p-4">
+      <Button>Continue</Button>
+      <button type="button">Native</button>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const designed = canvas.getByRole("button", { name: "Continue" });
+    const native = canvas.getByRole("button", { name: "Native" });
+
+    await userEvent.tab();
+    await expect(designed).toHaveFocus();
+    await expect(getComputedStyle(designed).outlineStyle).toBe("none");
+
+    await userEvent.tab();
+    await expect(native).toHaveFocus();
+    await expect(getComputedStyle(native).outlineStyle).toBe("solid");
+  },
+};

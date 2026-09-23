@@ -465,6 +465,7 @@ export function ModelMenu({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
+  const pickedModel = useRef(false);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(() =>
     pickerGroupForSelection(rail, known ?? usableDefault),
   );
@@ -490,6 +491,7 @@ export function ModelMenu({
     if (pillModel && pillModel.provider !== model.provider) {
       warnAboutPromptCacheChange();
     }
+    pickedModel.current = true;
     void onChange(model.key);
   }
 
@@ -567,6 +569,16 @@ export function ModelMenu({
         collisionPadding={12}
         className="model-menu-content w-80 p-0"
         data-first-task-target="model-menu"
+        onCloseAutoFocus={(event) => {
+          if (!pickedModel.current) return;
+          pickedModel.current = false;
+          const composer = document.querySelector<HTMLTextAreaElement>(
+            "[data-composer-input]",
+          );
+          if (!composer) return;
+          event.preventDefault();
+          composer.focus();
+        }}
         onEscapeKeyDown={guided.onEscapeKeyDown}
         onKeyDownCapture={(event) => {
           if (event.target === searchInput.current) return;

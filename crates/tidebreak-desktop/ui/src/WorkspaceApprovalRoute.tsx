@@ -4,7 +4,7 @@ import { useParams } from "@tanstack/react-router";
 import { useApp } from "./AppContext";
 import { type CodeConnectPage } from "./api";
 import { connectPageFailurePhase, channelLabel } from "./ConnectApprovalRoute";
-import { Logomark } from "./Logomark";
+import { BootBrand } from "./Logomark";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
@@ -93,10 +93,7 @@ export function WorkspaceApprovalView({
 }) {
   return (
     <div className="boot" aria-label="Workspace grant approval">
-      <div className="boot-brand">
-        <Logomark />
-        <h1>Tidebreak</h1>
-      </div>
+      <BootBrand />
       <Card className="w-full max-w-md p-6 text-left">
         {phase === "loading" ? (
           <p className="text-sm text-muted-foreground" role="status">

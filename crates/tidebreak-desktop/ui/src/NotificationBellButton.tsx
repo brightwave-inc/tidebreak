@@ -19,6 +19,7 @@ import {
 import { cn } from "./lib/utils";
 import { notificationHref } from "./useAgentNotifications";
 import { useNotifications } from "./NotificationStore";
+import { Button } from "@/components/ui/button";
 import { SidebarButton } from "./sidebar/primitives";
 
 export function NotificationBellButton({
@@ -88,13 +89,15 @@ export function NotificationBellButton({
         <div className="flex items-center justify-between gap-2 border-b border-border-subtle px-3 py-2">
           <p className="text-sm font-medium">Notifications</p>
           {unread > 0 && (
-            <button
+            <Button
               type="button"
-              className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+              variant="ghost"
+              size="xs"
+              className="text-muted-foreground"
               onClick={() => void markAll()}
             >
               Mark all read
-            </button>
+            </Button>
           )}
         </div>
         {notifications.length === 0 ? (

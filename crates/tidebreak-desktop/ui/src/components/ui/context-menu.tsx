@@ -52,7 +52,8 @@ const contextMenuItemVariants = cva(
   {
     variants: {
       variant: {
-        default: "focus:bg-accent focus:text-accent-foreground",
+        default:
+          "focus:bg-accent focus:text-accent-foreground focus:ring-1 focus:ring-inset focus:ring-ring",
         // `--destructive` on `--critical-background` is 3.9:1 in the light
         // theme and 1.9:1 in the dark one — the row goes nearly blank at the
         // moment the reader lands on the most dangerous item in the menu. The
@@ -101,7 +102,7 @@ const ContextMenuCheckboxItem = React.forwardRef<
     ref={ref}
     checked={checked}
     className={cn(
-      "relative flex cursor-default items-center rounded-sm py-1.5 pr-2 pl-8 text-sm outline-hidden transition-colors select-none focus:bg-accent focus:text-accent-foreground data-disabled:pointer-events-none data-disabled:opacity-50",
+      "relative flex cursor-default items-center rounded-sm py-1.5 pr-2 pl-8 text-sm outline-hidden transition-colors select-none focus:bg-accent focus:text-accent-foreground focus:ring-1 focus:ring-inset focus:ring-ring data-disabled:pointer-events-none data-disabled:opacity-50",
       className,
     )}
     {...props}
@@ -126,7 +127,7 @@ const ContextMenuSubTrigger = React.forwardRef<
   <ContextMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "focus:bg-accent data-[state=open]:bg-accent flex cursor-default items-center gap-4 rounded-sm px-2 py-1.5 text-sm outline-hidden select-none [&_svg]:size-4 [&_svg]:shrink-0",
+      "focus:bg-accent focus:ring-1 focus:ring-inset focus:ring-ring data-[state=open]:bg-accent flex cursor-default items-center gap-4 rounded-sm px-2 py-1.5 text-sm outline-hidden select-none [&_svg]:size-4 [&_svg]:shrink-0",
       inset && "pl-8",
       className,
     )}

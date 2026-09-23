@@ -530,6 +530,30 @@ type Story = StoryObj<typeof meta>;
 
 export const Controls: Story = {};
 
+/** Open menu so the keyboard highlight ring is visible on a focused row. */
+export const MenuKeyboardHighlight: Story = {
+  render: () => (
+    <div className="p-8">
+      <DropdownMenu open>
+        <DropdownMenuTrigger asChild>
+          <Button variant="outline">
+            View options <ChevronDown aria-hidden="true" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-52">
+          <DropdownMenuItem data-highlighted="">
+            <Settings2 aria-hidden="true" /> Configure tools
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem variant="destructive">
+            <Trash2 aria-hidden="true" /> Clear history
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  ),
+};
+
 export const FeedbackAndDisclosure: Story = {
   render: () => <FeedbackCatalog />,
 };

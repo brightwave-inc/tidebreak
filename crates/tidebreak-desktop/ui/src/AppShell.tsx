@@ -92,7 +92,7 @@ import {
 } from "./host";
 import { friendlyErrorMessage } from "./lib/utils";
 import { useInterfaceZoom } from "./InterfaceZoom";
-import { Logomark } from "./Logomark";
+import { BootBrand } from "./Logomark";
 import { ManagedGate } from "./ManagedGate";
 import { resolvedRoleKey } from "./ModelSelection";
 import { SidebarExpandStrip } from "./sidebar/SidebarExpandStrip";
@@ -1165,11 +1165,8 @@ export function AppShell() {
     return (
       <div className="boot">
         <WindowDragStrip />
-        <div className="boot-brand">
-          <Logomark />
-          <h1>Tidebreak</h1>
-        </div>
-        <p>{status}</p>
+        <BootBrand />
+        <h1>{status}</h1>
       </div>
     );
   }
