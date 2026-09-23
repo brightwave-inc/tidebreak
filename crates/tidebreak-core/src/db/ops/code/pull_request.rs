@@ -6,7 +6,7 @@
 //! to a pull request it authored or contributed to (decision 77). GitHub
 //! stays authoritative; these rows record what was observed and when.
 //!
-//! Every write of pull-request state goes through [`apply_pull_request_read`]:
+//! Every write of pull-request state goes through [`save_pull_request_read`]:
 //! one transaction that locks the row, merges the read into it with
 //! [`merge_pull_request_read`], writes the result, and rewrites the
 //! pull-request column of every active workspace that shows it. The column is
@@ -29,7 +29,7 @@ use crate::OwnerId;
 
 use super::super::super::{entities, store_err, DbStore};
 
-/// How [`apply_pull_request_read`] treats a pull request with no row yet, and
+/// How [`save_pull_request_read`] treats a pull request with no row yet, and
 /// which workspace takes the result.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PullRequestReadOptions {
@@ -72,7 +72,7 @@ pub struct AppliedPullRequestRead {
 /// when [`PullRequestReadOptions::mint_row`] allows. Otherwise the read's own
 /// first sighting goes to the adopting workspace's column only, and nothing
 /// is stored. `Ok(None)` when there is no row and the read cannot make one.
-pub async fn apply_pull_request_read(
+pub async fn save_pull_request_read(
     store: &DbStore,
     read: &PullRequestRead,
     options: PullRequestReadOptions,

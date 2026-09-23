@@ -4743,10 +4743,9 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         CodePullRequestState,
     };
     use crate::db::code::{
-        apply_pull_request_read, count_attributed_prs_for_workspace, get_pull_request_fact,
-        insert_pull_request_attribution, list_attributed_facts_for_workspace,
-        list_fact_repo_identities_all_owners, promote_attribution_to_authored,
-        PullRequestReadOptions,
+        count_attributed_prs_for_workspace, get_pull_request_fact, insert_pull_request_attribution,
+        list_attributed_facts_for_workspace, list_fact_repo_identities_all_owners,
+        promote_attribution_to_authored, save_pull_request_read, PullRequestReadOptions,
     };
 
     let (_dir, store) = temp_store().await;
@@ -4768,7 +4767,7 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     first.object = Some(pull_request_object(
         first_seen, "aaa111", "First", first_seen, None,
     ));
-    let created = apply_pull_request_read(&store, &first, mint)
+    let created = save_pull_request_read(&store, &first, mint)
         .await
         .unwrap()
         .unwrap();
@@ -4783,7 +4782,7 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     object.snapshot.state = CodePullRequestState::Merged;
     object.snapshot.merged_at = Some(later);
     refreshed.object = Some(object);
-    let applied = apply_pull_request_read(&store, &refreshed, mint)
+    let applied = save_pull_request_read(&store, &refreshed, mint)
         .await
         .unwrap()
         .unwrap();
@@ -4879,7 +4878,7 @@ async fn partial_and_stale_reads_keep_a_stored_full_read() {
         PullRequestCheck, PullRequestCheckBucket, PullRequestChecksRead, PullRequestReviewRead,
     };
     use crate::db::code::{
-        apply_pull_request_read, get_stored_pull_request, PullRequestReadOptions,
+        get_stored_pull_request, save_pull_request_read, PullRequestReadOptions,
     };
 
     let (_dir, store) = temp_store().await;
@@ -4914,7 +4913,7 @@ async fn partial_and_stale_reads_keep_a_stored_full_read() {
         observed_at: fetched_at,
         etag: Some("W/\"reviews-1\"".into()),
     });
-    apply_pull_request_read(&store, &full, mint)
+    save_pull_request_read(&store, &full, mint)
         .await
         .unwrap()
         .unwrap();
@@ -4941,7 +4940,7 @@ async fn partial_and_stale_reads_keep_a_stored_full_read() {
     );
     object.mergeability = None;
     list.object = Some(object);
-    let applied = apply_pull_request_read(&store, &list, mint)
+    let applied = save_pull_request_read(&store, &list, mint)
         .await
         .unwrap()
         .unwrap();
@@ -4971,7 +4970,7 @@ async fn partial_and_stale_reads_keep_a_stored_full_read() {
         observed_at: version - chrono::Duration::seconds(30),
         etag: None,
     });
-    apply_pull_request_read(&store, &stale, mint)
+    save_pull_request_read(&store, &stale, mint)
         .await
         .unwrap()
         .unwrap();
@@ -4996,13 +4995,13 @@ async fn partial_and_stale_reads_keep_a_stored_full_read() {
     );
     object.mergeability = None;
     pushed.object = Some(object);
-    apply_pull_request_read(&store, &pushed, mint)
+    save_pull_request_read(&store, &pushed, mint)
         .await
         .unwrap()
         .unwrap();
     let mut late = pull_request_read(&owner);
     late.object = Some(not_modified);
-    apply_pull_request_read(&store, &late, mint)
+    save_pull_request_read(&store, &late, mint)
         .await
         .unwrap()
         .unwrap();
@@ -5022,12 +5021,171 @@ async fn partial_and_stale_reads_keep_a_stored_full_read() {
     assert_eq!(live.review_decision.as_deref(), Some("changes_requested"));
 }
 
+/// Sixteen reads of pull request 7: versions one to four, the head moving at
+/// version three and never coming back, and every group observed at its own
+/// time. Their keys do not follow their order in the list.
+fn converging_reads(owner: &OwnerId, repo_name: &str) -> Vec<crate::code::PullRequestRead> {
+    use crate::code::{
+        CodePullRequestState, PullRequestCheck, PullRequestCheckBucket, PullRequestChecksRead,
+        PullRequestMergeability, PullRequestObjectRead, PullRequestRead, PullRequestReviewRead,
+        PullRequestSnapshot,
+    };
+    use chrono::TimeZone;
+
+    let base = Utc.with_ymd_and_hms(2026, 9, 1, 12, 0, 0).unwrap();
+    let at = |seconds: i64| base + chrono::Duration::seconds(seconds);
+    (0..16i64)
+        .map(|index| {
+            let version = 1 + index % 4;
+            let head = if version >= 3 { "bbb222" } else { "aaa111" };
+            let mut read = PullRequestRead::new(owner.clone(), "github.com", "acme", repo_name, 7);
+            read.object = Some(PullRequestObjectRead {
+                snapshot: PullRequestSnapshot {
+                    url: format!("https://github.com/acme/{repo_name}/pull/7"),
+                    title: format!("Version {version}"),
+                    state: CodePullRequestState::Open,
+                    draft: false,
+                    author: Some("octocat".into()),
+                    head_branch: "feature".into(),
+                    base_branch: "main".into(),
+                    head_sha: Some(head.into()),
+                    created_at: at(0),
+                    updated_at: at(version),
+                    merged_at: None,
+                    closed_at: None,
+                },
+                mergeability: (index % 3 != 1).then(|| PullRequestMergeability {
+                    mergeable: Some(
+                        if index % 2 == 0 {
+                            "mergeable"
+                        } else {
+                            "conflicting"
+                        }
+                        .into(),
+                    ),
+                    merge_state_status: Some(if index % 2 == 0 { "clean" } else { "dirty" }.into()),
+                }),
+                auto_merge_enabled: Some(index % 5 == 0),
+                observed_at: at(1_000 + (index * 5) % 16),
+                etag: None,
+            });
+            read.checks = (index % 2 == 0).then(|| PullRequestChecksRead {
+                head_sha: Some(head.into()),
+                checks: vec![PullRequestCheck {
+                    name: "ci".into(),
+                    bucket: if (index / 4) % 2 == 0 {
+                        PullRequestCheckBucket::Pass
+                    } else {
+                        PullRequestCheckBucket::Fail
+                    },
+                    detail: None,
+                    url: None,
+                }],
+                observed_at: at(2_000 + (index * 7) % 16),
+                etag: None,
+            });
+            read.review = (index % 3 != 2).then(|| PullRequestReviewRead {
+                decision: (index % 3 == 1).then(|| "changes_requested".to_owned()),
+                observed_at: at(3_000 + (index * 3) % 16),
+                etag: None,
+            });
+            read
+        })
+        .collect()
+}
+
+/// Reads of one pull request land at once. The writer takes them one
+/// transaction at a time, racing first sightings merge instead of failing,
+/// and the row ends where the same reads applied in any order put it.
+#[tokio::test]
+async fn concurrent_pull_request_reads_converge() {
+    use crate::code::{
+        merge_pull_request_read, CodePullRequestId, PullRequestSnapshot, StoredPullRequest,
+    };
+    use crate::db::code::{
+        adopt_workspace_pull_request, get_stored_pull_request, save_pull_request_read,
+        PullRequestReadOptions,
+    };
+
+    let (_dir, store) = super::temp_store_with_max_connections(4).await;
+    let owner = OwnerId::local();
+    let (session_id, _turn_id) = seed_owner(&store, &owner, "converge").await;
+    let workspace_id = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id
+        .expect("session has a workspace");
+    let shown: PullRequestDigest = serde_json::from_value(serde_json::json!({
+        "number": 7,
+        "url": "https://github.com/acme/converge/pull/7",
+        "state": "open"
+    }))
+    .unwrap();
+    assert!(
+        adopt_workspace_pull_request(&store, &owner, workspace_id, &shown)
+            .await
+            .unwrap()
+    );
+
+    let reads = converging_reads(&owner, "converge");
+    let landed: Vec<_> = reads
+        .iter()
+        .cloned()
+        .map(|read| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                save_pull_request_read(
+                    &store,
+                    &read,
+                    PullRequestReadOptions {
+                        mint_row: true,
+                        adopt: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap()
+            })
+        })
+        .collect();
+    for applied in landed {
+        assert!(applied.await.unwrap().stored);
+    }
+
+    let expected = reads.iter().fold(
+        StoredPullRequest::first_sighting(&reads[0], CodePullRequestId::new()).unwrap(),
+        |state, read| merge_pull_request_read(&state, read),
+    );
+    let stored = get_stored_pull_request(&store, &owner, "github.com", "acme", "converge", 7)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        PullRequestSnapshot::of_fact(&stored.fact),
+        PullRequestSnapshot::of_fact(&expected.fact)
+    );
+    assert_eq!(stored.fact.head_sha.as_deref(), Some("bbb222"));
+    assert_eq!(stored.fact.last_seen_at, expected.fact.last_seen_at);
+    assert_eq!(stored.fact.live, expected.fact.live);
+    assert_eq!(stored.observed, expected.observed);
+    assert_eq!(
+        get_workspace(&store, &owner, workspace_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr,
+        Some(stored.fact.digest()),
+        "the workspace column is the projection of the row"
+    );
+}
+
 /// The workspace column is a projection of the row: every active workspace
 /// showing the pull request takes it, the adopting workspace takes it, and
 /// nobody else does.
 #[tokio::test]
 async fn an_applied_read_projects_into_every_workspace_showing_it() {
-    use crate::db::code::{apply_pull_request_read, get_pull_request_fact, PullRequestReadOptions};
+    use crate::db::code::{get_pull_request_fact, save_pull_request_read, PullRequestReadOptions};
 
     let (_dir, store) = temp_store().await;
     let owner = OwnerId::local();
@@ -5066,7 +5224,7 @@ async fn an_applied_read_projects_into_every_workspace_showing_it() {
 
     // No row and no minting: nothing is stored, and only the adopting
     // workspace shows the read.
-    let unstored = apply_pull_request_read(
+    let unstored = save_pull_request_read(
         &store,
         &read,
         PullRequestReadOptions {
@@ -5096,7 +5254,7 @@ async fn an_applied_read_projects_into_every_workspace_showing_it() {
     );
 
     // Minted: every workspace showing the pull request takes the projection.
-    let minted = apply_pull_request_read(
+    let minted = save_pull_request_read(
         &store,
         &read,
         PullRequestReadOptions {
@@ -5118,7 +5276,7 @@ async fn an_applied_read_projects_into_every_workspace_showing_it() {
     );
 
     // The same read again changes nothing and rewrites nothing.
-    let replayed = apply_pull_request_read(
+    let replayed = save_pull_request_read(
         &store,
         &read,
         PullRequestReadOptions {
@@ -5141,7 +5299,7 @@ async fn an_applied_read_projects_into_every_workspace_showing_it() {
         observed_at: now(),
         etag: None,
     });
-    assert!(apply_pull_request_read(
+    assert!(save_pull_request_read(
         &store,
         &checks_only,
         PullRequestReadOptions {

@@ -1189,7 +1189,7 @@ impl CodeRuntime {
         read: &tidebreak_core::PullRequestRead,
         options: tidebreak_core::db::code::PullRequestReadOptions,
     ) -> Option<tidebreak_core::db::code::AppliedPullRequestRead> {
-        match tidebreak_core::db::code::apply_pull_request_read(&self.db, read, options).await {
+        match tidebreak_core::db::code::save_pull_request_read(&self.db, read, options).await {
             Ok(Some(applied)) => {
                 self.publish_pull_request_read(&read.owner, &applied).await;
                 Some(applied)

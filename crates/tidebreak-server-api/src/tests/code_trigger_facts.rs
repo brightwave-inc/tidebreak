@@ -14,8 +14,8 @@ use std::sync::Arc;
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::db::code::{
-    apply_pull_request_read, arm_trigger, get_pull_request_fact, insert_repo, insert_workspace,
-    list_fires_for_workspace, list_triggers_for_repo, trigger_fire_heads_for_pr,
+    arm_trigger, get_pull_request_fact, insert_repo, insert_workspace, list_fires_for_workspace,
+    list_triggers_for_repo, save_pull_request_read, trigger_fire_heads_for_pr,
     PullRequestReadOptions,
 };
 use tidebreak_core::{
@@ -369,7 +369,7 @@ async fn pr_updated_baselines_then_fires_on_a_new_head() {
     fact.head_sha = Some("bbb999".into());
     fact.updated_at += chrono::Duration::seconds(60);
     fact.live = None;
-    apply_pull_request_read(
+    save_pull_request_read(
         &db,
         &PullRequestRead::observing_fact(&fact, chrono::Utc::now()),
         PullRequestReadOptions {

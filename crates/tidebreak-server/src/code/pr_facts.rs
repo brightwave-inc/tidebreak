@@ -20,8 +20,8 @@ use serde_json::Value;
 use tracing::debug;
 
 use tidebreak_core::db::code::{
-    apply_pull_request_read, get_turn, get_workspace, insert_pull_request_attribution,
-    list_recent_events, promote_attribution_to_authored, AppliedPullRequestRead,
+    get_turn, get_workspace, insert_pull_request_attribution, list_recent_events,
+    promote_attribution_to_authored, save_pull_request_read, AppliedPullRequestRead,
     PullRequestReadOptions,
 };
 use tidebreak_core::{
@@ -595,7 +595,7 @@ pub(crate) async fn record_confirmed_read(
 ) -> Option<AppliedPullRequestRead> {
     let owner = &read.owner;
     let now = Utc::now();
-    let applied = match apply_pull_request_read(
+    let applied = match save_pull_request_read(
         db,
         read,
         PullRequestReadOptions {

@@ -247,7 +247,7 @@ pub async fn complete_workspace_release(
 ///
 /// The pull-request column stays as stored too. It is a projection of the
 /// pull request's row, written only by
-/// [`super::pull_request::apply_pull_request_read`] and
+/// [`super::pull_request::save_pull_request_read`] and
 /// [`adopt_workspace_pull_request`]. A caller saves a workspace snapshot it
 /// loaded before some wait, and writing that snapshot's digest back would
 /// undo every pull-request read that landed in the meantime.

@@ -753,3 +753,169 @@ async fn postgres_managed_human_decisions_serialize_answers_and_cancellation() {
         1
     );
 }
+
+/// Sixteen reads of pull request 7: versions one to four, the head moving at
+/// version three and never coming back, and every group observed at its own
+/// time. Their keys do not follow their order in the list.
+fn converging_reads(owner: &OwnerId, repo_name: &str) -> Vec<tidebreak_core::PullRequestRead> {
+    use chrono::TimeZone;
+    use tidebreak_core::{
+        CodePullRequestState, PullRequestCheck, PullRequestCheckBucket, PullRequestChecksRead,
+        PullRequestMergeability, PullRequestObjectRead, PullRequestRead, PullRequestReviewRead,
+        PullRequestSnapshot,
+    };
+
+    let base = Utc.with_ymd_and_hms(2026, 9, 1, 12, 0, 0).unwrap();
+    let at = |seconds: i64| base + chrono::Duration::seconds(seconds);
+    (0..16i64)
+        .map(|index| {
+            let version = 1 + index % 4;
+            let head = if version >= 3 { "bbb222" } else { "aaa111" };
+            let mut read = PullRequestRead::new(owner.clone(), "github.com", "acme", repo_name, 7);
+            read.object = Some(PullRequestObjectRead {
+                snapshot: PullRequestSnapshot {
+                    url: format!("https://github.com/acme/{repo_name}/pull/7"),
+                    title: format!("Version {version}"),
+                    state: CodePullRequestState::Open,
+                    draft: false,
+                    author: Some("octocat".into()),
+                    head_branch: "feature".into(),
+                    base_branch: "main".into(),
+                    head_sha: Some(head.into()),
+                    created_at: at(0),
+                    updated_at: at(version),
+                    merged_at: None,
+                    closed_at: None,
+                },
+                mergeability: (index % 3 != 1).then(|| PullRequestMergeability {
+                    mergeable: Some(
+                        if index % 2 == 0 {
+                            "mergeable"
+                        } else {
+                            "conflicting"
+                        }
+                        .into(),
+                    ),
+                    merge_state_status: Some(if index % 2 == 0 { "clean" } else { "dirty" }.into()),
+                }),
+                auto_merge_enabled: Some(index % 5 == 0),
+                observed_at: at(1_000 + (index * 5) % 16),
+                etag: None,
+            });
+            read.checks = (index % 2 == 0).then(|| PullRequestChecksRead {
+                head_sha: Some(head.into()),
+                checks: vec![PullRequestCheck {
+                    name: "ci".into(),
+                    bucket: if (index / 4) % 2 == 0 {
+                        PullRequestCheckBucket::Pass
+                    } else {
+                        PullRequestCheckBucket::Fail
+                    },
+                    detail: None,
+                    url: None,
+                }],
+                observed_at: at(2_000 + (index * 7) % 16),
+                etag: None,
+            });
+            read.review = (index % 3 != 2).then(|| PullRequestReviewRead {
+                decision: (index % 3 == 1).then(|| "changes_requested".to_owned()),
+                observed_at: at(3_000 + (index * 3) % 16),
+                etag: None,
+            });
+            read
+        })
+        .collect()
+}
+
+/// Reads of one pull request land at once on the backend a shared deployment
+/// runs, where writers really are concurrent. The row lock serializes them, a
+/// racing first sighting merges instead of failing on the unique identity,
+/// and the row ends where the same reads applied in any order put it.
+#[tokio::test]
+async fn postgres_concurrent_pull_request_reads_converge() {
+    use tidebreak_core::db::code::{
+        adopt_workspace_pull_request, get_stored_pull_request, save_pull_request_read,
+        PullRequestReadOptions,
+    };
+    use tidebreak_core::{
+        merge_pull_request_read, CodePullRequestId, PullRequestDigest, PullRequestSnapshot,
+        StoredPullRequest,
+    };
+
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("TIDEBREAK_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("TIDEBREAK_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("TIDEBREAK_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let owner = OwnerId::new(&format!("merger-{run}")).unwrap();
+    let (_repo, workspace_id, _session, _turn) =
+        seed_owner(&store, &owner, &format!("merger-{run}")).await;
+    let repo_name = format!("tools-{run}");
+    let shown: PullRequestDigest = serde_json::from_value(serde_json::json!({
+        "number": 7,
+        "url": format!("https://github.com/acme/{repo_name}/pull/7"),
+        "state": "open"
+    }))
+    .unwrap();
+    assert!(
+        adopt_workspace_pull_request(&store, &owner, workspace_id, &shown)
+            .await
+            .unwrap()
+    );
+
+    let reads = converging_reads(&owner, &repo_name);
+    let landed: Vec<_> = reads
+        .iter()
+        .cloned()
+        .map(|read| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                save_pull_request_read(
+                    &store,
+                    &read,
+                    PullRequestReadOptions {
+                        mint_row: true,
+                        adopt: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap()
+            })
+        })
+        .collect();
+    for applied in landed {
+        assert!(applied.await.unwrap().stored);
+    }
+
+    let expected = reads.iter().fold(
+        StoredPullRequest::first_sighting(&reads[0], CodePullRequestId::new()).unwrap(),
+        |state, read| merge_pull_request_read(&state, read),
+    );
+    let stored = get_stored_pull_request(&store, &owner, "github.com", "acme", &repo_name, 7)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        PullRequestSnapshot::of_fact(&stored.fact),
+        PullRequestSnapshot::of_fact(&expected.fact)
+    );
+    assert_eq!(stored.fact.head_sha.as_deref(), Some("bbb222"));
+    assert_eq!(stored.fact.last_seen_at, expected.fact.last_seen_at);
+    assert_eq!(stored.fact.live, expected.fact.live);
+    assert_eq!(stored.observed, expected.observed);
+    assert_eq!(
+        get_workspace(&store, &owner, workspace_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr,
+        Some(stored.fact.digest()),
+        "the workspace column is the projection of the row"
+    );
+}
