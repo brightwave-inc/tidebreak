@@ -29,6 +29,10 @@ describe("settings in the command palette", () => {
       ["docker", "code-execution"],
       ["slack", "channels"],
       ["voice", "voice-transcription"],
+      ["custom instructions", "instructions"],
+      ["system prompt", "instructions"],
+      ["preferences", "instructions"],
+      ["style", "instructions"],
     ];
     for (const [query, section] of expected) {
       expect(firstSettingsMatch(query), query).toBe(`settings:${section}`);
@@ -38,6 +42,7 @@ describe("settings in the command palette", () => {
   it("still finds a section by its own name first", () => {
     expect(firstSettingsMatch("models")).toBe("settings:models");
     expect(firstSettingsMatch("memory")).toBe("settings:memory");
+    expect(firstSettingsMatch("instructions")).toBe("settings:instructions");
   });
 
   it("offers a managed profile only the sections it can open", () => {

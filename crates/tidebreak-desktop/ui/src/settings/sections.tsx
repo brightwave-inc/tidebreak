@@ -473,6 +473,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "instructions",
     label: "Instructions",
+    keywords:
+      "custom instructions personal project preferences system prompt style tone",
     group: "application",
     icon: ScrollText,
     iconClass: "text-icon-amber",
