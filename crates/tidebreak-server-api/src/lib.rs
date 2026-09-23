@@ -394,6 +394,29 @@ pub fn app(state: AppState) -> Router {
             "/code/harnesses/check-updates",
             post(routes::code::check_harness_updates),
         )
+        // An engine's sign-in writes the machine's own engine credentials,
+        // which every principal's sessions read, so it sits beside Download.
+        // The terminal it runs belongs to whoever started it.
+        .route(
+            "/code/harnesses/{kind}/sign-in",
+            post(routes::code::start_harness_sign_in),
+        )
+        .route(
+            "/code/harnesses/{kind}/sign-in/{tid}",
+            axum::routing::delete(routes::code::close_harness_sign_in),
+        )
+        .route(
+            "/code/harnesses/{kind}/sign-in/{tid}/read",
+            get(routes::code::read_harness_sign_in),
+        )
+        .route(
+            "/code/harnesses/{kind}/sign-in/{tid}/write",
+            post(routes::code::write_harness_sign_in),
+        )
+        .route(
+            "/code/harnesses/{kind}/sign-in/{tid}/resize",
+            post(routes::code::resize_harness_sign_in),
+        )
         .route(
             "/code/repos/clone-defaults",
             get(routes::code::clone_defaults),

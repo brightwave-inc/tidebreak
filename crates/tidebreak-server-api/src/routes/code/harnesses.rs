@@ -12,36 +12,28 @@ use crate::code::harness_label;
 use crate::obo_gateway::GatewayCompatModel;
 use tidebreak_core::{CapLevel, HarnessKind};
 
-/// The engine CLI's own sign-in command, named the way `gh auth login` is
-/// named on the GitHub doctor path. `None` for engines that have no login.
-fn sign_in_command(kind: HarnessKind) -> Option<&'static str> {
-    match kind {
-        HarnessKind::ClaudeCode => Some("claude login"),
-        HarnessKind::Codex => Some("codex login"),
-        HarnessKind::Opencode => Some("opencode auth login"),
-        HarnessKind::Grok => Some("grok login"),
-        HarnessKind::Internal => None,
-    }
-}
-
+/// What a signed-out engine's doctor row tells the reader.
+///
+/// Tidebreak drives its own pinned engine binaries (decision 41), which are
+/// not on the reader's `PATH`: a person who pressed Download has no `claude`
+/// in their own terminal. Settings > Coding engines runs the pinned binary's
+/// own sign-in, and Tidebreak's terminals put the pins on `PATH`, so both
+/// places this names reach the engine sessions use. The command comes from
+/// the pin table, which a test holds to each pin's captured `--help`.
 fn signed_out_remediation(label: &str, kind: HarnessKind) -> String {
-    match sign_in_command(kind) {
-        Some(command) => {
-            format!("Sign in to {label} in your own terminal with `{command}`, then re-check.")
-        }
-        None => format!("Sign in to {label} in your own terminal, then re-check."),
+    match tidebreak_harness::sign_in_command(kind) {
+        Some(command) => format!(
+            "Sign in to {label} from Settings > Coding engines, or run `{command}` in a Tidebreak terminal, then re-check."
+        ),
+        None => format!("Sign in to {label}, then re-check."),
     }
 }
 
 fn unverified_remediation(label: &str, kind: HarnessKind) -> String {
-    match sign_in_command(kind) {
-        Some(command) => format!(
-            "Tidebreak could not verify the {label} sign-in. Sign in to {label} in your own terminal with `{command}`, then re-check."
-        ),
-        None => format!(
-            "Tidebreak could not verify the {label} sign-in. Sign in to {label} in your own terminal, then re-check."
-        ),
-    }
+    format!(
+        "Tidebreak could not confirm the {label} sign-in. {}",
+        signed_out_remediation(label, kind)
+    )
 }
 
 /// The doctor surface, served from the memoized probes (decision 0034).
@@ -342,6 +334,13 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
                 managed_version: release.managed_version,
                 latest_version: release.latest_version,
                 update_available: release.update_available,
+                // A hosted machine's engines ride the relay and refuse a
+                // sign-in, so they offer none.
+                sign_in_command: if hosted {
+                    None
+                } else {
+                    tidebreak_harness::sign_in_command(*kind)
+                },
             }
         })
     }))
@@ -464,23 +463,30 @@ mod tests {
         );
     }
 
+    /// The command named is the pinned binary's own. `claude login` is not a
+    /// Claude Code command, and "your own terminal" has no engine in it when
+    /// Tidebreak downloaded the pin.
     #[test]
-    fn signed_out_remediation_names_the_engine_login() {
-        assert!(
-            super::signed_out_remediation("Claude Code", HarnessKind::ClaudeCode)
-                .contains("`claude login`")
-        );
-        assert!(
-            super::signed_out_remediation("Codex CLI", HarnessKind::Codex)
-                .contains("`codex login`")
-        );
-        assert!(
-            super::signed_out_remediation("opencode", HarnessKind::Opencode)
-                .contains("`opencode auth login`")
-        );
-        assert!(
-            super::signed_out_remediation("Grok CLI", HarnessKind::Grok).contains("`grok login`")
-        );
+    fn signed_out_remediation_names_the_pinned_sign_in() {
+        for (label, kind, command) in [
+            (
+                "Claude Code",
+                HarnessKind::ClaudeCode,
+                "`claude auth login`",
+            ),
+            ("Codex CLI", HarnessKind::Codex, "`codex login`"),
+            ("opencode", HarnessKind::Opencode, "`opencode auth login`"),
+            ("Grok CLI", HarnessKind::Grok, "`grok login`"),
+        ] {
+            let remediation = super::signed_out_remediation(label, kind);
+            assert!(remediation.contains(command), "{remediation}");
+            assert!(
+                remediation.contains("Settings > Coding engines"),
+                "{remediation}"
+            );
+            assert!(!remediation.contains("your own terminal"), "{remediation}");
+            assert!(super::unverified_remediation(label, kind).contains(command));
+        }
         assert!(!super::signed_out_remediation("Tidebreak", HarnessKind::Internal).contains('`'));
     }
 }

@@ -70,9 +70,95 @@ describe("DoctorList", () => {
     );
 
     expect(
+      screen.getByText("No engine is ready yet. Sign in to one below."),
+    ).toBeInTheDocument();
+  });
+
+  // The engine Tidebreak runs is not on the reader's PATH, so a signed-out
+  // row runs its sign-in rather than naming a terminal command.
+  it("offers Sign in on a signed-out or unconfirmed row and says what it runs", async () => {
+    const onSignIn = vi.fn();
+    render(
+      <DoctorList
+        onSignIn={onSignIn}
+        report={{
+          harnesses: [
+            {
+              ...notDownloaded,
+              kind: "claude_code",
+              found: true,
+              authenticated: false,
+              sign_in_command: "claude auth login",
+              remediation:
+                "Sign in to Claude Code from Settings > Coding engines, then re-check.",
+            },
+            {
+              ...notDownloaded,
+              kind: "opencode",
+              found: true,
+              sign_in_command: "opencode auth login",
+            },
+            {
+              ...notDownloaded,
+              kind: "codex",
+              found: true,
+              authenticated: true,
+              sign_in_command: "codex login",
+            },
+            {
+              ...notDownloaded,
+              kind: "grok",
+              sign_in_command: "grok login",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("claude auth login").tagName).toBe("CODE");
+    expect(
       screen.getByText(
-        "No engine is ready yet. Sign in to one below, then re-check.",
+        "Tidebreak could not confirm the sign-in. You can still pick it.",
       ),
+    ).toBeInTheDocument();
+    // Ready and not-downloaded rows have nothing to sign in to.
+    expect(
+      screen.queryByRole("button", { name: "Sign in to Codex CLI" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Sign in to Grok CLI" }),
+    ).toBeNull();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Sign in to Claude Code" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Sign in to opencode" }),
+    );
+    expect(onSignIn.mock.calls).toEqual([["claude_code"], ["opencode"]]);
+  });
+
+  it("keeps the server's directions where no client can run a sign-in", () => {
+    render(
+      <DoctorList
+        report={{
+          harnesses: [
+            {
+              ...notDownloaded,
+              kind: "claude_code",
+              found: true,
+              authenticated: false,
+              sign_in_command: "claude auth login",
+              remediation:
+                "Sign in to Claude Code from Settings > Coding engines, or run `claude auth login` in a Tidebreak terminal, then re-check.",
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /Sign in/ })).toBeNull();
+    expect(
+      screen.getByText(/or run `claude auth login` in a Tidebreak terminal/),
     ).toBeInTheDocument();
   });
 
@@ -182,12 +268,10 @@ describe("DoctorList", () => {
     ).toHaveLength(2);
     expect(screen.getByText("2 of 2 engines ready.")).toBeInTheDocument();
     expect(
-      screen.queryByText(
-        "No engine is ready yet. Sign in to one below, then re-check.",
-      ),
+      screen.queryByText("No engine is ready yet. Sign in to one below."),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByText("Sign in via your terminal, then re-check."),
+      screen.queryByText("Sign in, then re-check."),
     ).not.toBeInTheDocument();
   });
   it("names a gateway-managed engine instead of demanding a sign-in", async () => {
@@ -215,7 +299,7 @@ describe("DoctorList", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("1 of 1 engine ready.")).toBeInTheDocument();
     expect(
-      screen.queryByText("Sign in via your terminal, then re-check."),
+      screen.queryByText("Sign in, then re-check."),
     ).not.toBeInTheDocument();
     expect(screen.queryByText("Signed out")).toBeNull();
 

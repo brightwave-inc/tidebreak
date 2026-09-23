@@ -495,6 +495,10 @@ mod tests {
         generate::collect_from::<crate::routes::code::CodeWorkspaceDiff>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalRead>(&cfg, &mut out);
+        // An engine's sign-in terminal: the same cursor-pull reads, outside
+        // any workspace.
+        generate::collect_from::<crate::routes::code::HarnessSignInTerminal>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::HarnessSignInRead>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::SessionDigest>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::UpdateNotice>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::ApprovalSnapshot>(&cfg, &mut out);

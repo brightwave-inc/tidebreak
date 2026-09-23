@@ -4,6 +4,7 @@ import {
   Check,
   CircleSlash,
   GitFork,
+  LogIn,
   MoreHorizontal,
   TriangleAlert,
 } from "lucide-react";
@@ -20,6 +21,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
+import { openEngineSignIn } from "./EngineSignIn";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 
 /**
@@ -159,7 +161,6 @@ export function TurnReviewCard({
   );
 }
 
-/** Recovery for the revoked credential that belongs to Codex CLI. */
 /**
  * The way out of a failure the reader cannot fix: hand the session to Uneff
  * me, which asks what happened and files an issue or a fix.
@@ -178,6 +179,15 @@ export function FileIssueButton({ onClick }: { onClick: () => void }) {
   );
 }
 
+/**
+ * Recovery for the revoked credential that belongs to Codex CLI.
+ *
+ * `codex login status` still reports this credential as signed in, so the
+ * doctor has no Sign in to offer. The card runs the sign-in itself. Codex
+ * clears the rejected credential before it starts a new login, so one
+ * sign-in replaces it; nothing needs `codex logout` first, and the Codex
+ * Tidebreak runs is not on the reader's own `PATH` for them to type it.
+ */
 function CodexLoginRecovery() {
   return (
     <div className="flex flex-col gap-2">
@@ -185,22 +195,18 @@ function CodexLoginRecovery() {
         Codex CLI rejected its saved sign-in. Tidebreak&apos;s account sign-in
         does not reset Codex CLI.
       </p>
-      <div className="flex flex-col gap-1">
-        <p>Run these commands in your terminal:</p>
-        <ol className="list-decimal space-y-1 pl-5">
-          <li>
-            <code className="font-mono">codex logout</code>
-          </li>
-          <li>
-            <code className="font-mono">codex login</code>
-          </li>
-        </ol>
+      <p>Sign in to Codex CLI again to replace it, then send the turn again.</p>
+      <div>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => openEngineSignIn("codex")}
+        >
+          <LogIn aria-hidden="true" />
+          Sign in to Codex CLI
+        </Button>
       </div>
-      <p>
-        Then open{" "}
-        <CodingHarnessesLink>Settings → Coding engines</CodingHarnessesLink> and
-        select <strong>Re-check</strong>.
-      </p>
     </div>
   );
 }

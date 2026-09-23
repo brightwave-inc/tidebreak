@@ -11,6 +11,8 @@
   probed shell environment minus Tidebreak-internal variables; hosted
   engines receive injected relay credentials, so Tidebreak does inject
   harness credentials on that path. The rest of this record stands.
+- Amended below (2026-09-23): Tidebreak may run an engine's own sign-in
+  command, by the pinned binary's path, in a terminal the user types into.
 
 ## Context
 
@@ -145,3 +147,31 @@ Tidebreak to *verify* rather than merely observe harness configuration.
 - A plausible wrong implementation resolves the binary with the GUI
   process's own PATH and passes on developer machines; the probe tests must
   run resolution through the shim shell to fail it.
+
+## Amendment (2026-09-23): the engine's own sign-in, run in Tidebreak
+
+Decision 41 made Tidebreak drive pinned engine binaries that live under the
+data directory, not on the user's `PATH`. The remediation this record called
+for, sending the user to the engine's login flow "in their terminal", stopped
+working: a person who pressed Download has no `claude` or `codex` command, and
+the doctor named `claude login`, which the pinned Claude Code reads as a
+prompt rather than a command.
+
+The exclusion of "any Tidebreak-mediated harness sign-in flow" gains one
+scoped exception. Tidebreak may run an engine's own sign-in command in a
+terminal the user types into:
+
+- The command is the pin's own, run by the pinned binary's absolute path. The
+  pin table names the arguments (`claude auth login`, `codex login`,
+  `opencode auth login`, `grok login`), and a test holds each one to the
+  captured `--help` of that exact release.
+- The engine runs the whole flow and writes its own credential files.
+  Tidebreak does not read, store, or relay what the user types; the terminal's
+  bytes are the ephemeral ring of decision 36.
+- The child gets the environment that engine's sessions get, so the sign-in
+  lands where a session looks for it.
+- When the command exits, Tidebreak observes the sign-in again the way this
+  record already describes.
+
+Credentials stay observed and never brokered. A gateway-hosted machine offers
+no sign-in at all: the relay carries its turns (decision 71).

@@ -1,0 +1,11 @@
+Usage: claude auth login [options]
+
+Sign in to your Anthropic account
+
+Options:
+  --claudeai       Use Claude subscription (default)
+  --console        Use Anthropic Console (API usage billing) instead of Claude
+                   subscription
+  --email <email>  Pre-populate email address on the login page
+  -h, --help       Display help for command
+  --sso            Force SSO login flow

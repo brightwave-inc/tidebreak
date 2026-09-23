@@ -164,6 +164,128 @@ impl CodeRuntime {
 
     pub(crate) fn invalidate_probes(&self) {
         self.probes.lock().expect("harness probes").clear();
+        // The doctor's Re-check is also how a changed shell profile reaches
+        // the next terminal, the same way it reaches the next probe.
+        *self.login_env.lock().expect("login env") = None;
+    }
+
+    /// The user's login environment, captured the way the probes capture
+    /// theirs (decision 34), or `None` when the shell would not answer.
+    async fn login_env(&self) -> Option<CapturedEnv> {
+        if let Some(cached) = self.login_env.lock().expect("login env").clone() {
+            return cached;
+        }
+        let captured = tidebreak_harness::capture_login_env(&self.host)
+            .await
+            .ok()
+            .map(Arc::new);
+        *self.login_env.lock().expect("login env") = Some(captured.clone());
+        captured
+    }
+
+    /// The directory of each engine binary Tidebreak drives, in pin order:
+    /// the embedding environment's declared binary where there is one, else
+    /// the managed install the update channel selects. An engine not on disk
+    /// has no directory, so a terminal never lists a missing one.
+    async fn engine_bin_dirs(&self) -> Vec<PathBuf> {
+        let selected = self.selected_harness_versions().await;
+        tidebreak_harness::PINS
+            .iter()
+            .filter_map(|pin| {
+                if let Some(declared) = self.host.declared(pin.kind) {
+                    return declared.path.parent().map(Path::to_path_buf);
+                }
+                let version = selected
+                    .iter()
+                    .find(|(kind, _)| *kind == pin.kind)
+                    .map(|(_, version)| version.as_str());
+                tidebreak_harness::managed_bin_dir(&self.data_dir, pin.kind, version)
+            })
+            .collect()
+    }
+
+    /// The managed Node runtime's `bin` directory when it is already
+    /// installed. Never installs: opening a terminal must not start a
+    /// download.
+    async fn managed_node_bin_dir(&self) -> Option<PathBuf> {
+        let root = match self.host_tool_broker.as_deref() {
+            Some(broker) => {
+                broker
+                    .managed_root(tidebreak_code_execution::HostDep::Node)
+                    .await
+            }
+            None => tidebreak_managed_node::managed_node_root(&self.data_dir),
+        }?;
+        Some(tidebreak_managed_node::managed_node_path_dir(&root))
+    }
+
+    /// What a workspace terminal in `cwd` runs: the user's shell, with the
+    /// engines Tidebreak drives on `PATH` after the user's own directories.
+    /// See [`crate::code::terminal::shell_environment`].
+    pub(crate) async fn shell_launch(&self, cwd: &Path) -> crate::code::terminal::TerminalLaunch {
+        let (base, captured) = match self.login_env().await {
+            Some(env) => (env.as_ref().clone(), true),
+            None => (std::env::vars_os().collect(), false),
+        };
+        let engine_dirs = self.engine_bin_dirs().await;
+        let node_dir = self.managed_node_bin_dir().await;
+        crate::code::terminal::TerminalLaunch::shell(
+            cwd,
+            crate::code::terminal::shell_environment(base, &engine_dirs, node_dir.as_deref()),
+            captured,
+        )
+    }
+
+    /// What `kind`'s sign-in terminal runs: the engine's own sign-in command,
+    /// by the absolute path of the binary its sessions use, in the
+    /// environment those sessions get.
+    ///
+    /// Refused on a gateway-hosted machine, where the relay carries every
+    /// turn (decision 71) and a sign-in would authenticate nothing a session
+    /// uses, and for an engine that is not on disk yet.
+    pub(crate) async fn sign_in_launch(
+        &self,
+        kind: HarnessKind,
+    ) -> Result<crate::code::terminal::TerminalLaunch, ServerError> {
+        let label = crate::code::harness_label(kind);
+        if self.harness_llm.is_some() {
+            return Err(ServerError::unprocessable_kind(
+                "sign_in_not_needed",
+                format!(
+                    "{label} runs as you through the Model Gateway here, so it needs no sign-in"
+                ),
+            ));
+        }
+        let sign_in = tidebreak_harness::sign_in_args(kind).ok_or_else(|| {
+            ServerError::unprocessable_kind(
+                "sign_in_unavailable",
+                format!("{label} has no sign-in command"),
+            )
+        })?;
+        let adapter = self.adapter(kind)?;
+        let probe = self.probe(adapter.as_ref()).await;
+        let binary = probe
+            .binary_path
+            .as_deref()
+            .filter(|_| probe.found)
+            .ok_or_else(|| {
+                ServerError::unprocessable_kind(
+                    "harness_not_found",
+                    format!("Download {label} before you sign in to it"),
+                )
+            })?;
+        let home = ["HOME", "USERPROFILE"]
+            .into_iter()
+            .filter_map(|key| tidebreak_harness::env_value(&probe.env, std::ffi::OsStr::new(key)))
+            .map(PathBuf::from)
+            .find(|dir| dir.is_absolute() && dir.is_dir())
+            .unwrap_or_else(|| self.data_dir.clone());
+        Ok(crate::code::terminal::TerminalLaunch::sign_in(
+            binary,
+            sign_in,
+            &home,
+            crate::code::terminal::sign_in_environment(kind, &probe.env),
+        ))
     }
 
     /// Drop the memoized probe for `kind` only when the install it was taken

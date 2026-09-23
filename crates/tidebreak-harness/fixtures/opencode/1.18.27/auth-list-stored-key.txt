@@ -1,0 +1,5 @@
+┌  Credentials [90m~/.local/share/opencode/auth.json
+│
+●  Anthropic [90mapi
+│
+└  1 credentials

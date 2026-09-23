@@ -124,6 +124,8 @@ import type {
   CodeProjectConfigFile,
   CodeRepoTrust,
   CodeRepoTrustSnapshot,
+  HarnessSignInRead,
+  HarnessSignInTerminal,
 } from "../api/types";
 import { parseToolActionPreview } from "../api/parsers";
 import type {
@@ -138,6 +140,8 @@ import type {
   QueuedTurn as WireQueuedCodeTurn,
   CodeTerminalRead as WireCodeTerminalRead,
   CodeTerminalSnapshot as WireCodeTerminalSnapshot,
+  HarnessSignInRead as WireHarnessSignInRead,
+  HarnessSignInTerminal as WireHarnessSignInTerminal,
   CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   CodeWorkspaceFiles as WireCodeWorkspaceFiles,
   CodeWorkspaceHistorySearchMatch as WireCodeWorkspaceHistorySearchMatch,
@@ -3767,6 +3771,76 @@ export function parseCodeTerminalList(
   return terminals;
 }
 
+export function parseHarnessSignInTerminal(
+  value: unknown,
+): HarnessSignInTerminal | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireHarnessSignInTerminal>(value, [
+      "id",
+      "kind",
+      "command",
+      "cols",
+      "rows",
+      "ended",
+      "created_at",
+    ]) ||
+    !wireId(value.id) ||
+    !isMember(value.kind, HARNESS_KINDS) ||
+    !lineText(value.command) ||
+    !isFiniteNumber(value.cols) ||
+    !isFiniteNumber(value.rows) ||
+    typeof value.ended !== "boolean" ||
+    !timestamp(value.created_at)
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    kind: value.kind,
+    command: value.command,
+    cols: value.cols,
+    rows: value.rows,
+    ended: value.ended,
+    created_at: value.created_at,
+  };
+}
+
+export function parseHarnessSignInRead(
+  value: unknown,
+): HarnessSignInRead | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireHarnessSignInRead>(value, [
+      "id",
+      "kind",
+      "bytes",
+      "cursor",
+      "overflow",
+      "truncated",
+      "ended",
+    ]) ||
+    !wireId(value.id) ||
+    !isMember(value.kind, HARNESS_KINDS) ||
+    !rawText(value.bytes) ||
+    !isFiniteNumber(value.cursor) ||
+    typeof value.overflow !== "boolean" ||
+    typeof value.truncated !== "boolean" ||
+    typeof value.ended !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    kind: value.kind,
+    bytes: value.bytes,
+    cursor: value.cursor,
+    overflow: value.overflow,
+    truncated: value.truncated,
+    ended: value.ended,
+  };
+}
+
 export function parseCodeTerminalRead(value: unknown): CodeTerminalRead | null {
   if (
     !isRecord(value) ||
@@ -3920,10 +3994,12 @@ export function parseHarnessDoctorEntry(
       "managed_version",
       "latest_version",
       "update_available",
+      "sign_in_command",
     ]) ||
     !isMember(value.kind, HARNESS_KINDS) ||
     typeof value.found !== "boolean" ||
     !optionalLine(value.path) ||
+    !optionalLine(value.sign_in_command) ||
     !optionalLine(value.version) ||
     !optionalLine(value.pinned_version) ||
     !optionalLine(value.managed_version) ||
@@ -3981,6 +4057,10 @@ export function parseHarnessDoctorEntry(
       : {}),
     ...(value.authenticated !== undefined
       ? { authenticated: value.authenticated }
+      : {}),
+    // A server that predates the Sign in action offers none.
+    ...(value.sign_in_command
+      ? { sign_in_command: value.sign_in_command }
       : {}),
   };
 }

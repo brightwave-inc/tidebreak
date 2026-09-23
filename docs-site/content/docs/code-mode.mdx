@@ -59,10 +59,13 @@ A **harness** is the coding-agent CLI Tidebreak drives. Four are supported:
 | Grok CLI | Pinned 1.0.13 uses ACP and structured approvals; see below |
 
 Tidebreak downloads its own pinned copy of each engine the first time you pick
-it. Your PATH is not the engine. It still observes that engine's own login —
-your Claude or OpenAI subscription stays between you and the tool it belongs
-to. **Settings → Coding engines** runs a doctor that reports which engines are
-installed and what is missing.
+it. Your PATH is not the engine, and the downloaded copy still needs its own
+sign-in. **Settings → Coding engines** runs a doctor that reports which engines
+are ready and what is missing. **Sign in** on an engine's row runs that
+engine's own sign-in command, such as `claude auth login`, in a terminal inside
+Tidebreak, then checks the sign-in again when the command finishes. Tidebreak
+observes that login and never brokers it — your Claude or OpenAI subscription
+stays between you and the tool it belongs to.
 
 Each harness runs on the model you configured for it, so the model choices from
 [Models and providers](/models-and-providers) apply here too.
@@ -101,6 +104,11 @@ files, diffs, and the browser — not as a drawer. It runs in that workspace's
 worktree, so you are always in the checkout the agent is working in. Use it
 for the things that are faster to type than to ask for — a test run, a git
 command, a quick look at a file.
+
+The terminal starts with your login shell's environment. Tidebreak adds the
+engines it downloaded to the end of its `PATH`, so `claude`, `codex`,
+`opencode`, and `grok` work there even if you never installed them. If you
+installed an engine yourself, your copy runs instead.
 
 ## Pull requests
 

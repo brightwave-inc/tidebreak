@@ -191,8 +191,11 @@ export function harnessNeedsDownload(entry: {
 
 /**
  * Why a picker row is not selectable. Ready rows return null, and so does a
- * row that only needs downloading — see [`harnessNeedsDownload`].
- * Versions, paths, and capability names stay on the doctor.
+ * row that only needs downloading — see [`harnessNeedsDownload`] — and a row
+ * whose sign-in Tidebreak could not confirm, which may still work: opencode
+ * can run a local model with no sign-in at all, and the server refuses only
+ * a confirmed sign-out. Versions, paths, and capability names stay on the
+ * doctor.
  */
 export function harnessUnusableReason(entry: {
   found: boolean;
@@ -207,14 +210,74 @@ export function harnessUnusableReason(entry: {
   // A relay-covered engine needs no sign-in on a hosted machine, and a
   // gateway-managed one holds credentials its login check cannot see, so the
   // local probe observation is not a gate in either case.
-  if (mode === "local_sign_in") {
-    if (entry.authenticated === false) return "Sign in via your terminal";
-    if (entry.found && entry.authenticated === undefined) {
-      return "Unverified — sign in via your terminal";
-    }
+  if (mode === "local_sign_in" && entry.authenticated === false) {
+    return "Needs a sign-in";
   }
   if (!harnessHonorsAnyCreateMode(entry)) return "Not available yet";
   return null;
+}
+
+/**
+ * True when a Sign in action belongs on this engine's row: it is on disk,
+ * signs in locally, and is signed out or unconfirmed. The server names the
+ * command when it has one to run, and names none on a hosted machine.
+ */
+export function harnessNeedsSignIn(entry: {
+  found: boolean;
+  authenticated?: boolean;
+  auth_mode?: HarnessAuthMode;
+  sign_in_command?: string;
+}): boolean {
+  return (
+    entry.found &&
+    (entry.auth_mode ?? "local_sign_in") === "local_sign_in" &&
+    entry.authenticated !== true &&
+    Boolean(entry.sign_in_command)
+  );
+}
+
+/** The quiet line under an engine's name in a picker, when it needs one. */
+export function harnessPickerNote(entry: {
+  found: boolean;
+  installable: boolean;
+  authenticated?: boolean;
+  auth_mode?: HarnessAuthMode;
+  remediation?: string;
+  caps: ModeCaps;
+}): string | null {
+  const reason = harnessUnusableReason(entry);
+  if (reason) return reason;
+  if (harnessNeedsDownload(entry)) return "Downloads on first use";
+  if (
+    entry.found &&
+    (entry.auth_mode ?? "local_sign_in") === "local_sign_in" &&
+    entry.authenticated === undefined
+  ) {
+    return "Sign-in not confirmed";
+  }
+  return null;
+}
+
+/**
+ * True when nothing but a download stands between this engine and its first
+ * turn.
+ *
+ * A downloaded engine qualifies when it can start: signed in, or with a
+ * sign-in Tidebreak could not confirm either way. One not downloaded yet
+ * qualifies only when the machine carries its credentials, since a local
+ * sign-in is usually the next step after the download.
+ */
+export function harnessNeedsNoSignIn(entry: {
+  found: boolean;
+  installable: boolean;
+  authenticated?: boolean;
+  auth_mode?: HarnessAuthMode;
+  remediation?: string;
+  caps: ModeCaps;
+}): boolean {
+  if (harnessUnusableReason(entry)) return false;
+  const mode = entry.auth_mode ?? "local_sign_in";
+  return entry.found || mode !== "local_sign_in";
 }
 
 /** True when this engine can be started right now, with nothing to wait for. */

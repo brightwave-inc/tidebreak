@@ -20,18 +20,20 @@ import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { DoctorList } from "./DoctorList";
 import { RepositorySettingsDialog } from "./RepositorySettingsDialog";
+import { openEngineSignIn } from "./EngineSignIn";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
-import { harnessUnusableReason, workspaceHarnesses } from "./labels";
+import { harnessNeedsNoSignIn, workspaceHarnesses } from "./labels";
 import { middleTruncate } from "./workspaceCards";
 
 /**
- * `/code` home: the doctor when no engine can be started or downloaded,
- * otherwise repo registration and the registered list.
+ * `/code` home: the doctor until some engine can run a first turn, then repo
+ * registration and the registered list.
  *
- * A machine with nothing downloaded yet is not blocked: picking an engine in
- * the New Workspace dialog fetches it. The doctor only takes the page when
- * every engine is signed out, unverified, or unsupported, which is the one
- * case a reader cannot resolve by starting a workspace.
+ * Downloading an engine is not the whole setup. The pin Tidebreak downloads
+ * still needs its own sign-in, and a reader sent straight to a workspace
+ * found that out when the first turn failed. So the doctor takes the page
+ * until an engine is signed in, or could be without a sign-in: one whose
+ * sign-in Tidebreak could not confirm, or one a gateway carries.
  */
 
 export function CodeHome() {
@@ -65,10 +67,10 @@ function CodeHomeBody() {
     void refresh(client);
   }, [client, refresh]);
 
-  // Startable now, or one download away. Either way the reader can get to
-  // work from here, so the register form is what the page owes them.
+  // Nothing but a download stands between some engine and its first turn,
+  // so the register form is what the page owes the reader.
   const usable = workspaceHarnesses(doctor?.harnesses ?? []).some(
-    (entry) => !harnessUnusableReason(entry),
+    harnessNeedsNoSignIn,
   );
   const showRepos = loaded && repos.length > 0;
   const showEmpty = loaded && repos.length === 0 && usable;
@@ -162,16 +164,15 @@ function CodeHomeBody() {
       {showDoctor && doctor && (
         <section className="flex flex-col gap-3">
           <h2 className="text-lg font-semibold">Set up a coding engine</h2>
-          <p className="text-muted-foreground text-sm">
-            No engine can start yet. Sign in to one from your own terminal, then
-            re-check.
-          </p>
+          {/* The list's own verdict says what is left: a download, a
+              sign-in, or both. */}
           <DoctorList
             report={doctor}
             onRefresh={() => void onRefresh()}
             refreshing={refreshing}
             onInstall={(kind) => void install(kind)}
             installs={installs}
+            onSignIn={openEngineSignIn}
           />
         </section>
       )}

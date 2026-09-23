@@ -370,6 +370,7 @@
           "pinned_version": "2.1.259",
           "relaunch_composes_permission_mode": true,
           "remediation": "",
+          "sign_in_command": "claude auth login",
           "stderr": "",
           "tier": "reference",
           "unrecognized_event_count": 0,

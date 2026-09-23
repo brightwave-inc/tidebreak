@@ -10,6 +10,7 @@ import type {
 } from "../api/types";
 import { DoctorList } from "@/code/DoctorList";
 import { useCodeUpdatesStore } from "@/code/CodeUpdatesStore";
+import { openEngineSignIn, useEngineSignInStore } from "@/code/EngineSignIn";
 import { hasLocalHostAuthority, pickCodeDirectory } from "@/host";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { hostMachineLabel } from "@/remoteMachine";
@@ -33,11 +34,11 @@ import { Switch } from "@/components/ui/switch";
 /**
  * Settings: the coding-harness doctor, and where workspaces land on disk.
  *
- * Every engine's state, and the control that downloads one, live here so a
- * reader can get an engine working without opening a workspace. Downloads run
- * one engine at a time and report on the same live bus the pickers watch, so
- * starting one here and then opening the New Workspace dialog shows the same
- * progress in both places.
+ * Every engine's state, and the controls that download one and sign in to
+ * it, live here so a reader can get an engine working without opening a
+ * workspace. Downloads run one engine at a time and report on the same live
+ * bus the pickers watch, so starting one here and then opening the New
+ * Workspace dialog shows the same progress in both places.
  *
  * The update channel sits right under the engines. On `pinned`, every engine
  * is the version this build was captured against. On `latest`, Check for
@@ -124,6 +125,17 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
   }, [client]);
 
   const installs = useCodeUpdatesStore((state) => state.harnessInstalls);
+
+  // A sign-in's re-check refreshes the doctor the code surfaces share. This
+  // page holds its own copy, so it reads the fresh answer too.
+  const signInChecks = useEngineSignInStore((state) => state.checks);
+  useEffect(() => {
+    if (signInChecks === 0) return;
+    void client
+      .getHarnessDoctor()
+      .then(setReport)
+      .catch(() => {});
+  }, [client, signInChecks]);
 
   async function install(kind: HarnessKind) {
     try {
@@ -235,6 +247,7 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
           installs={installs}
           onCheckUpdates={() => void checkUpdates()}
           checkingUpdates={checkingUpdates}
+          onSignIn={openEngineSignIn}
         />
       )}
       <SettingsSection

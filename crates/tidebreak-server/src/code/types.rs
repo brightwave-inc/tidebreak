@@ -832,6 +832,12 @@ pub struct HarnessDoctorEntry {
     /// to it.
     #[serde(default)]
     pub update_available: bool,
+    /// The engine's own sign-in command, the way a person types it
+    /// (`claude auth login`). Absent for an engine with nothing to sign in
+    /// to. The Sign in action runs it with the pinned binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sign_in_command: Option<String>,
 }
 
 /// One model row offered for a harness session.
@@ -1940,6 +1946,37 @@ pub struct CodeTerminalRead {
     pub ended: bool,
 }
 
+/// A terminal running one engine's own sign-in command, outside any
+/// workspace. Bytes live only in the process ring, like a workspace
+/// terminal's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct HarnessSignInTerminal {
+    pub id: CodeTerminalId,
+    pub kind: HarnessKind,
+    /// The command it runs, the way a person types it.
+    pub command: String,
+    pub cols: u16,
+    pub rows: u16,
+    /// The command has exited. Nothing more can be typed at it.
+    pub ended: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Cursor-pull response for
+/// `GET /code/harnesses/{kind}/sign-in/{tid}/read`. Fields mean what they
+/// mean on [`CodeTerminalRead`]; `ended` is true once every byte the command
+/// wrote has been read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct HarnessSignInRead {
+    pub id: CodeTerminalId,
+    pub kind: HarnessKind,
+    pub bytes: String,
+    pub cursor: u64,
+    pub overflow: bool,
+    pub truncated: bool,
+    pub ended: bool,
+}
+
 /// Cheap per-session digest on `/updates`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
@@ -2318,5 +2355,12 @@ pub struct TerminalResizeBody {
 #[derive(Debug, Deserialize)]
 pub struct WorkspaceTerminalPath {
     pub id: WorkspaceId,
+    pub tid: CodeTerminalId,
+}
+
+/// Path of one engine's sign-in terminal.
+#[derive(Debug, Deserialize)]
+pub struct HarnessSignInPath {
+    pub kind: HarnessKind,
     pub tid: CodeTerminalId,
 }

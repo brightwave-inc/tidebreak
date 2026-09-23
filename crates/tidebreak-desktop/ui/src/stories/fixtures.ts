@@ -598,6 +598,14 @@ export const codexSlashCommands: HarnessDoctorEntry["commands"] = [
   },
 ];
 
+/** The sign-in each pin runs, as the server names it. */
+const SIGN_IN_COMMANDS: Partial<Record<HarnessKind, string>> = {
+  claude_code: "claude auth login",
+  codex: "codex login",
+  opencode: "opencode auth login",
+  grok: "grok login",
+};
+
 function doctorEntry(
   overrides: Partial<HarnessDoctorEntry> & Pick<HarnessDoctorEntry, "kind">,
 ): HarnessDoctorEntry {
@@ -614,8 +622,14 @@ function doctorEntry(
     unrecognized_event_count: 0,
     relaunch_composes_permission_mode: true,
     update_available: false,
+    sign_in_command: SIGN_IN_COMMANDS[overrides.kind],
     ...overrides,
   };
+}
+
+/** The server's directions for a signed-out engine, for clients with no Sign in. */
+function signedOutRemediation(label: string, command: string): string {
+  return `Sign in to ${label} from Settings > Coding engines, or run \`${command}\` in a Tidebreak terminal, then re-check.`;
 }
 
 /** The live matrix: every engine present, honest capability differences. */
@@ -653,7 +667,7 @@ export const harnessDoctor: HarnessDoctorReport = {
       version: "grok 1.0.5",
       tier: "best_effort",
       authenticated: false,
-      remediation: "Sign in to grok in your own terminal, then re-check.",
+      remediation: signedOutRemediation("Grok CLI", "grok login"),
       caps: {
         ...fullCaps,
         mid_turn_steering: "unsupported",
@@ -712,19 +726,37 @@ export const harnessDoctorDegraded: HarnessDoctorReport = {
       version: "2.1.234 (Claude Code)",
       path: "~/.local/share/tidebreak/tools/harnesses/claude_code",
       authenticated: undefined,
-      remediation:
-        "Tidebreak could not verify the Claude Code sign-in. Sign in to Claude Code in your own terminal with `claude login`, then re-check.",
+      remediation: `Tidebreak could not confirm the Claude Code sign-in. ${signedOutRemediation("Claude Code", "claude auth login")}`,
     }),
     doctorEntry({
       kind: "codex",
       version: "codex-cli 0.147.0",
       tier: "secondary",
       authenticated: false,
-      remediation:
-        "Sign in to Codex CLI in your own terminal with `codex login`, then re-check.",
+      remediation: signedOutRemediation("Codex CLI", "codex login"),
       caps: { ...fullCaps, mid_turn_steering: "supported" },
     }),
   ],
+};
+
+/**
+ * Engines downloaded but none signed in, and opencode never fetched. Nothing
+ * here can run a first turn, so Code home keeps the doctor up.
+ */
+export const harnessDoctorSignedOut: HarnessDoctorReport = {
+  harnesses: harnessDoctor.harnesses.map((entry) => {
+    if (entry.kind === "internal") return entry;
+    if (entry.kind === "opencode") {
+      return {
+        ...entry,
+        found: false,
+        authenticated: undefined,
+        path: undefined,
+        version: undefined,
+      };
+    }
+    return { ...entry, authenticated: false, remediation: "" };
+  }),
 };
 
 /** A fresh machine: nothing downloaded, and every engine one click away. */
@@ -770,6 +802,7 @@ export const harnessDoctorHosted: HarnessDoctorReport = {
       path: "~/.local/share/tidebreak/tools/harnesses/claude_code",
       authenticated: false,
       auth_mode: "gateway_relay",
+      sign_in_command: undefined,
     }),
     doctorEntry({
       kind: "codex",
@@ -777,6 +810,7 @@ export const harnessDoctorHosted: HarnessDoctorReport = {
       tier: "secondary",
       authenticated: false,
       auth_mode: "gateway_relay",
+      sign_in_command: undefined,
       caps: {
         ...fullCaps,
         mid_turn_steering: "supported",
@@ -789,6 +823,7 @@ export const harnessDoctorHosted: HarnessDoctorReport = {
       tier: "tertiary",
       authenticated: false,
       auth_mode: "gateway_relay",
+      sign_in_command: undefined,
       remediation: "opencode is not available on hosted machines yet.",
       caps: { ...fullCaps, allow_mode: "unknown", reasoning_levels: "unknown" },
     }),
@@ -798,6 +833,7 @@ export const harnessDoctorHosted: HarnessDoctorReport = {
       tier: "best_effort",
       authenticated: false,
       auth_mode: "gateway_relay",
+      sign_in_command: undefined,
       remediation: "Grok CLI is not available on hosted machines yet.",
       caps: {
         ...fullCaps,
@@ -848,7 +884,7 @@ export const harnessDoctorGatewayManaged: HarnessDoctorReport = {
       version: "grok 1.0.5",
       tier: "best_effort",
       authenticated: false,
-      remediation: "Sign in to Grok CLI in your own terminal, then re-check.",
+      remediation: signedOutRemediation("Grok CLI", "grok login"),
       caps: {
         ...fullCaps,
         mid_turn_steering: "unsupported",

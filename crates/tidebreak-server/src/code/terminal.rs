@@ -3,8 +3,15 @@
 //! Bytes are ephemeral. They are not journaled, not persisted, and vanish
 //! when this process does. The harness crate has no PTY dependency; this
 //! module is the only place one is used.
+//!
+//! The same machinery runs one other kind of terminal: an engine's own
+//! sign-in command, outside any workspace ([`SignInTerminals`]). Tidebreak
+//! drives pinned engine binaries that are not on the user's `PATH`, so a
+//! person who pressed Download has no `claude` in their own terminal to sign
+//! in with.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -28,7 +35,7 @@ use chrono::{DateTime, Utc};
 use portable_pty::PtySize;
 #[cfg(unix)]
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty};
-use tidebreak_core::{CodeTerminalId, OwnerId, WorkspaceId};
+use tidebreak_core::{CodeTerminalId, HarnessKind, OwnerId, WorkspaceId};
 use tokio::sync::broadcast;
 
 /// Cap on live shells per workspace. A terminal is a convenience, not a data plane.
@@ -180,14 +187,14 @@ impl TerminalHub {
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
-        cwd: &Path,
+        launch: &TerminalLaunch,
         cols: Option<u16>,
         rows: Option<u16>,
     ) -> Result<TerminalSnapshot, TerminalError> {
         let cols = clamp_size(cols.unwrap_or(DEFAULT_COLS))?;
         let rows = clamp_size(rows.unwrap_or(DEFAULT_ROWS))?;
         let reservation = self.reserve_slot(workspace_id)?;
-        let spawned = spawn_pty(cwd, cols, rows)?;
+        let spawned = spawn_pty(launch, cols, rows)?;
         let id = CodeTerminalId::new();
         let live = LiveTerminal {
             id,
@@ -615,8 +622,275 @@ struct Spawned {
     tree: Arc<ProcessTree>,
 }
 
+/// What a terminal runs: a program, its arguments, where it starts, and the
+/// environment it starts with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalLaunch {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+    pub cwd: PathBuf,
+    /// The environment the program starts with. On Unix it is the whole
+    /// environment. Windows lays it over the process environment, which is
+    /// already the signed-in user's there.
+    pub env: Vec<(OsString, OsString)>,
+}
+
+impl TerminalLaunch {
+    /// A workspace shell: the user's `$SHELL`, in `cwd`.
+    ///
+    /// With `captured_login`, `env` is the login environment the harness
+    /// probe captured (decision 34), and the shell starts interactive but not
+    /// as a login shell. A login shell would rerun `/etc/profile`, which on
+    /// Debian resets `PATH` outright and drops the engine directories appended
+    /// to it. Without a capture, the shell loads the login profile itself, so
+    /// an app started from Finder still gets the `PATH` a person's own
+    /// terminal has.
+    pub fn shell(cwd: &Path, env: Vec<(OsString, OsString)>, captured_login: bool) -> Self {
+        let args = if captured_login || cfg!(windows) {
+            Vec::new()
+        } else {
+            vec![OsString::from("-l")]
+        };
+        Self {
+            program: user_shell(),
+            args,
+            cwd: cwd.to_path_buf(),
+            env,
+        }
+    }
+
+    /// An engine's own sign-in command, run by the pinned binary's absolute
+    /// path rather than by a name the user's `PATH` may not know.
+    pub fn sign_in(
+        binary: &Path,
+        sign_in: &[&str],
+        cwd: &Path,
+        env: Vec<(OsString, OsString)>,
+    ) -> Self {
+        let (program, args) = sign_in_argv(binary, sign_in, cfg!(windows));
+        Self {
+            program,
+            args,
+            cwd: cwd.to_path_buf(),
+            env,
+        }
+    }
+}
+
+/// The program and arguments that run `binary` with `sign_in`.
+///
+/// On Windows the pinned binary is npm's `.cmd` shim, which `CreateProcessW`
+/// does not start by itself. PowerShell runs it, the same shell the embedded
+/// terminal opens there, and exits with the engine's own code.
+fn sign_in_argv(binary: &Path, sign_in: &[&str], windows: bool) -> (PathBuf, Vec<OsString>) {
+    if !windows {
+        return (
+            binary.to_path_buf(),
+            sign_in.iter().map(OsString::from).collect(),
+        );
+    }
+    // A single-quoted PowerShell string is literal except for a quote, which
+    // doubles. The sign-in arguments are fixed words from the pin table.
+    let quoted = binary.to_string_lossy().replace('\'', "''");
+    let script = format!("& '{quoted}' {}; exit $LASTEXITCODE", sign_in.join(" "));
+    (
+        PathBuf::from("powershell.exe"),
+        ["-NoLogo", "-NoProfile", "-Command", script.as_str()]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+    )
+}
+
+/// The environment a workspace shell starts with.
+///
+/// `base` is the user's captured login environment, or the process
+/// environment when there is none. `PATH` keeps the user's own directories
+/// first, then each engine's pinned `bin` directory, then the managed Node
+/// directory. A `claude`, `codex`, `opencode`, or `grok` the person installed
+/// themselves keeps winning, the same way their own `node` and `npm` do, so
+/// Tidebreak never shadows their tools. A person who never installed an
+/// engine still finds the one Tidebreak downloaded (decision 41), and Codex
+/// and Grok, which start through `#!/usr/bin/env node`, still find a Node.
+/// Sign-in does not rely on this order: it runs the pinned binary by path.
+pub fn shell_environment(
+    base: Vec<(OsString, OsString)>,
+    engine_dirs: &[PathBuf],
+    node_dir: Option<&Path>,
+) -> Vec<(OsString, OsString)> {
+    let mut env = base;
+    let prior = take_env(&mut env, "PATH");
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let candidates = prior
+        .iter()
+        .flat_map(std::env::split_paths)
+        .chain(engine_dirs.iter().cloned())
+        .chain(node_dir.map(Path::to_path_buf));
+    for dir in candidates {
+        if !dir.as_os_str().is_empty() && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    // A directory holding the separator cannot join. Keep the path the
+    // person already had rather than lose it.
+    match std::env::join_paths(&dirs) {
+        Ok(path) => env.push((OsString::from("PATH"), path)),
+        Err(_) => {
+            if let Some(prior) = prior {
+                env.push((OsString::from("PATH"), prior));
+            }
+        }
+    }
+    with_terminal_vars(env)
+}
+
+/// The environment an engine's sign-in command runs with: the one that
+/// engine's sessions get, so the sign-in lands where a session looks for it.
+pub fn sign_in_environment(
+    kind: HarnessKind,
+    probe_env: &[(OsString, OsString)],
+) -> Vec<(OsString, OsString)> {
+    with_terminal_vars(tidebreak_harness::filter_engine_child_env(
+        kind,
+        probe_env.iter().cloned(),
+    ))
+}
+
+/// Replace the terminal identity variables with the ones xterm.js needs.
+fn with_terminal_vars(mut env: Vec<(OsString, OsString)>) -> Vec<(OsString, OsString)> {
+    for (key, value) in embedded_terminal_env() {
+        take_env(&mut env, key);
+        env.push((OsString::from(key), OsString::from(value)));
+    }
+    env
+}
+
+/// Remove every entry named `key` and return the last value it had. Names
+/// compare without case on Windows, where `Path` and `PATH` are one variable.
+fn take_env(env: &mut Vec<(OsString, OsString)>, key: &str) -> Option<OsString> {
+    let mut taken = None;
+    env.retain(|(name, value)| {
+        let matches = if cfg!(windows) {
+            name.to_string_lossy().eq_ignore_ascii_case(key)
+        } else {
+            name == key
+        };
+        if matches {
+            taken = Some(value.clone());
+        }
+        !matches
+    });
+    taken
+}
+
+/// Terminals that run one engine's own sign-in command, outside any workspace.
+///
+/// They reuse the workspace terminal machinery — the PTY, the ring, the
+/// cursor-pull reads — in a hub of their own, keyed by a scope per owner and
+/// engine. Nobody reads another person's sign-in, and because nothing
+/// subscribes to this hub's notices, a sign-in never shows up as workspace
+/// terminal activity on `/updates`.
+pub struct SignInTerminals {
+    hub: TerminalHub,
+    scopes: Mutex<HashMap<(OwnerId, HarnessKind), WorkspaceId>>,
+}
+
+impl SignInTerminals {
+    pub fn new() -> Self {
+        Self {
+            hub: TerminalHub::new(),
+            scopes: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The hub key for one owner's sign-in to one engine: a fresh random id
+    /// the first time, the same one after. It never leaves this process.
+    fn scope(&self, owner: &OwnerId, kind: HarnessKind) -> WorkspaceId {
+        *self
+            .scopes
+            .lock()
+            .expect("sign-in terminal scopes")
+            .entry((owner.clone(), kind))
+            .or_default()
+    }
+
+    /// Start `launch` for this owner's sign-in to `kind`, or return the one
+    /// still running.
+    ///
+    /// A second press of Sign in, or a dialog opened again, lands on the
+    /// sign-in in progress rather than a second login flow racing it. A
+    /// finished one is cleared first, so pressing again runs the command
+    /// again. Blocking: closing a finished terminal joins its threads.
+    pub fn start(
+        &self,
+        owner: &OwnerId,
+        kind: HarnessKind,
+        launch: &TerminalLaunch,
+        cols: Option<u16>,
+        rows: Option<u16>,
+    ) -> Result<TerminalSnapshot, TerminalError> {
+        let scope = self.scope(owner, kind);
+        let existing = self.hub.list(scope);
+        if let Some(running) = existing.iter().find(|terminal| !terminal.ended) {
+            return Ok(running.clone());
+        }
+        for finished in existing {
+            self.hub.close(scope, finished.id)?;
+        }
+        self.hub.open(owner, scope, launch, cols, rows)
+    }
+
+    pub fn read(
+        &self,
+        owner: &OwnerId,
+        kind: HarnessKind,
+        id: CodeTerminalId,
+        cursor: u64,
+    ) -> TerminalRead {
+        self.hub.read(self.scope(owner, kind), id, cursor)
+    }
+
+    pub fn write(
+        &self,
+        owner: &OwnerId,
+        kind: HarnessKind,
+        id: CodeTerminalId,
+        bytes: &[u8],
+    ) -> Result<(), TerminalError> {
+        self.hub.write(self.scope(owner, kind), id, bytes)
+    }
+
+    pub fn resize(
+        &self,
+        owner: &OwnerId,
+        kind: HarnessKind,
+        id: CodeTerminalId,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TerminalSnapshot, TerminalError> {
+        self.hub.resize(self.scope(owner, kind), id, cols, rows)
+    }
+
+    /// Stop the command and drop its terminal. Blocking, like
+    /// [`TerminalHub::close`].
+    pub fn close(
+        &self,
+        owner: &OwnerId,
+        kind: HarnessKind,
+        id: CodeTerminalId,
+    ) -> Result<(), TerminalError> {
+        self.hub.close(self.scope(owner, kind), id)
+    }
+}
+
+impl Default for SignInTerminals {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(unix)]
-fn spawn_pty(cwd: &Path, cols: u16, rows: u16) -> Result<Spawned, TerminalError> {
+fn spawn_pty(launch: &TerminalLaunch, cols: u16, rows: u16) -> Result<Spawned, TerminalError> {
     let system = native_pty_system();
     let pair = system
         .openpty(PtySize {
@@ -626,9 +900,11 @@ fn spawn_pty(cwd: &Path, cols: u16, rows: u16) -> Result<Spawned, TerminalError>
             pixel_height: 0,
         })
         .map_err(|err| TerminalError::Spawn(err.to_string()))?;
-    let mut cmd = CommandBuilder::new(user_shell());
-    cmd.cwd(cwd);
-    for (key, value) in embedded_terminal_env() {
+    let mut cmd = CommandBuilder::new(&launch.program);
+    cmd.args(&launch.args);
+    cmd.cwd(&launch.cwd);
+    cmd.env_clear();
+    for (key, value) in &launch.env {
         cmd.env(key, value);
     }
     let mut child = pair
@@ -675,9 +951,16 @@ fn spawn_pty(cwd: &Path, cols: u16, rows: u16) -> Result<Spawned, TerminalError>
 }
 
 #[cfg(windows)]
-fn spawn_pty(cwd: &Path, cols: u16, rows: u16) -> Result<Spawned, TerminalError> {
-    let spawned = windows::spawn(&user_shell(), cwd, cols, rows, &embedded_terminal_env())
-        .map_err(|error| TerminalError::Spawn(error.to_string()))?;
+fn spawn_pty(launch: &TerminalLaunch, cols: u16, rows: u16) -> Result<Spawned, TerminalError> {
+    let spawned = windows::spawn(
+        &launch.program,
+        &launch.args,
+        &launch.cwd,
+        cols,
+        rows,
+        &launch.env,
+    )
+    .map_err(|error| TerminalError::Spawn(error.to_string()))?;
     Ok(Spawned {
         master: spawned.master,
         writer: spawned.writer,
@@ -1086,8 +1369,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let hub = TerminalHub::new();
         let workspace = workspace();
+        let launch = TerminalLaunch::shell(
+            root.path(),
+            shell_environment(std::env::vars_os().collect(), &[], None),
+            true,
+        );
         let snapshot = hub
-            .open(&OwnerId::local(), workspace, root.path(), None, None)
+            .open(&OwnerId::local(), workspace, &launch, None, None)
             .unwrap();
         let handle = handle_of(&hub, snapshot.id);
         hub.write(
@@ -1376,5 +1664,277 @@ mod tests {
             }
         }
         walk(root, needle);
+    }
+
+    fn os_env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs
+            .iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn path_of(env: &[(OsString, OsString)]) -> Vec<PathBuf> {
+        let paths: Vec<_> = env.iter().filter(|(key, _)| key == "PATH").collect();
+        assert_eq!(paths.len(), 1, "exactly one PATH: {env:?}");
+        std::env::split_paths(&paths[0].1).collect()
+    }
+
+    fn value_of<'a>(env: &'a [(OsString, OsString)], key: &str) -> Option<&'a OsString> {
+        env.iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
+
+    /// The person's own directories come first, then the pinned engines, then
+    /// managed Node, so nothing Tidebreak adds shadows a tool they installed.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_keeps_the_users_path_ahead_of_the_pinned_engines_and_node() {
+        let env = shell_environment(
+            os_env(&[
+                ("PATH", "/opt/homebrew/bin:/usr/bin:/bin"),
+                ("HOME", "/Users/person"),
+                ("TERM", "dumb"),
+            ]),
+            &[
+                PathBuf::from("/data/tools/harnesses/claude_code/2.1.259/node_modules/.bin"),
+                PathBuf::from("/data/tools/harnesses/codex/0.153.4/node_modules/.bin"),
+            ],
+            Some(Path::new("/data/tools/node/20.20.2/bin")),
+        );
+        assert_eq!(
+            path_of(&env),
+            [
+                "/opt/homebrew/bin",
+                "/usr/bin",
+                "/bin",
+                "/data/tools/harnesses/claude_code/2.1.259/node_modules/.bin",
+                "/data/tools/harnesses/codex/0.153.4/node_modules/.bin",
+                "/data/tools/node/20.20.2/bin",
+            ]
+            .map(PathBuf::from)
+        );
+        // Everything else the login shell resolved rides along untouched.
+        assert_eq!(
+            value_of(&env, "HOME"),
+            Some(&OsString::from("/Users/person"))
+        );
+        // xterm.js is the renderer, whatever the capture said.
+        assert_eq!(value_of(&env, "TERM"), Some(&OsString::from(EMBEDDED_TERM)));
+        assert_eq!(env.iter().filter(|(key, _)| key == "TERM").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_already_on_path_keeps_its_first_place() {
+        let env = shell_environment(
+            os_env(&[("PATH", "/managed/node:/usr/bin:/pinned/bin")]),
+            &[PathBuf::from("/pinned/bin")],
+            Some(Path::new("/managed/node")),
+        );
+        assert_eq!(
+            path_of(&env),
+            ["/managed/node", "/usr/bin", "/pinned/bin"].map(PathBuf::from)
+        );
+        // No PATH at all still yields the engines.
+        let bare = shell_environment(Vec::new(), &[PathBuf::from("/pinned/bin")], None);
+        assert_eq!(path_of(&bare), [PathBuf::from("/pinned/bin")]);
+    }
+
+    /// Only a shell with no captured login environment loads the profile
+    /// itself; one with a capture must not rerun `/etc/profile` over it.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_logs_in_only_without_a_captured_environment() {
+        let root = Path::new("/workspace");
+        assert!(TerminalLaunch::shell(root, Vec::new(), true)
+            .args
+            .is_empty());
+        assert_eq!(
+            TerminalLaunch::shell(root, Vec::new(), false).args,
+            [OsString::from("-l")]
+        );
+    }
+
+    #[test]
+    fn sign_in_runs_the_pinned_binary_by_absolute_path() {
+        let (program, args) = sign_in_argv(
+            Path::new("/data/tools/harnesses/claude_code/2.1.259/node_modules/.bin/claude"),
+            &["auth", "login"],
+            false,
+        );
+        assert_eq!(
+            program,
+            PathBuf::from("/data/tools/harnesses/claude_code/2.1.259/node_modules/.bin/claude")
+        );
+        assert_eq!(args, [OsString::from("auth"), OsString::from("login")]);
+
+        let (program, args) = sign_in_argv(
+            Path::new(r"C:\Users\O'Neil\AppData\tools\codex\node_modules\.bin\codex.cmd"),
+            &["login"],
+            true,
+        );
+        assert_eq!(program, PathBuf::from("powershell.exe"));
+        assert_eq!(
+            args.last(),
+            Some(&OsString::from(
+                r"& 'C:\Users\O''Neil\AppData\tools\codex\node_modules\.bin\codex.cmd' login; exit $LASTEXITCODE"
+            ))
+        );
+    }
+
+    /// The sign-in writes credentials where that engine's sessions read
+    /// them, and sees nothing a session of it would not.
+    #[test]
+    fn sign_in_gets_the_engines_session_environment() {
+        let env = sign_in_environment(
+            HarnessKind::ClaudeCode,
+            &os_env(&[
+                ("PATH", "/managed/node:/usr/bin"),
+                ("HOME", "/Users/person"),
+                ("ANTHROPIC_BASE_URL", "https://gateway.example"),
+                ("GITHUB_TOKEN", "ghp_unrelated"),
+                ("OPENAI_API_KEY", "sk-another-engine"),
+            ]),
+        );
+        assert_eq!(
+            value_of(&env, "HOME"),
+            Some(&OsString::from("/Users/person"))
+        );
+        assert_eq!(
+            value_of(&env, "ANTHROPIC_BASE_URL"),
+            Some(&OsString::from("https://gateway.example"))
+        );
+        assert_eq!(value_of(&env, "GITHUB_TOKEN"), None);
+        assert_eq!(value_of(&env, "OPENAI_API_KEY"), None);
+        assert_eq!(value_of(&env, "TERM"), Some(&OsString::from(EMBEDDED_TERM)));
+    }
+
+    #[cfg(unix)]
+    fn write_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn read_until_ended(read: impl Fn(u64) -> TerminalRead, what: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut cursor = 0;
+        let mut output = Vec::new();
+        loop {
+            let page = read(cursor);
+            output.extend_from_slice(&page.data);
+            cursor = page.next_cursor;
+            if page.ended {
+                return String::from_utf8_lossy(&output).into_owned();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{what} never ended: {}",
+                String::from_utf8_lossy(&output)
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A terminal built from [`shell_environment`] runs the person's own
+    /// engine and Node where they installed one, and the pinned engine where
+    /// they did not. An engine directory placed ahead of the person's own
+    /// fails the first assertion: their `claude` would lose to the pin.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_prefers_the_users_engines_and_falls_back_to_the_pins() {
+        let root = tempfile::tempdir().unwrap();
+        let pinned = root.path().join("pinned");
+        let user = root.path().join("user");
+        let managed_node = root.path().join("managed-node");
+        for dir in [&pinned, &user, &managed_node] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        write_script(
+            &pinned.join("claude"),
+            "#!/bin/sh\necho \"pinned claude $*\"\n",
+        );
+        write_script(
+            &pinned.join("codex"),
+            "#!/bin/sh\necho \"pinned codex $*\"\n",
+        );
+        write_script(&user.join("claude"), "#!/bin/sh\necho \"user claude $*\"\n");
+        write_script(&user.join("node"), "#!/bin/sh\necho user node\n");
+        write_script(&managed_node.join("node"), "#!/bin/sh\necho managed node\n");
+        let base = vec![(
+            OsString::from("PATH"),
+            std::env::join_paths([user.as_path(), Path::new("/usr/bin"), Path::new("/bin")])
+                .unwrap(),
+        )];
+        let launch = TerminalLaunch {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), "claude auth login; codex login; node".into()],
+            cwd: root.path().to_path_buf(),
+            env: shell_environment(base, &[pinned], Some(&managed_node)),
+        };
+        let hub = TerminalHub::new();
+        let ws = workspace();
+        let snap = hub
+            .open(&OwnerId::local(), ws, &launch, None, None)
+            .unwrap();
+        let output = read_until_ended(|cursor| hub.read(ws, snap.id, cursor), "the terminal");
+        assert!(output.contains("user claude auth login"), "{output}");
+        assert!(!output.contains("pinned claude"), "{output}");
+        assert!(output.contains("pinned codex login"), "{output}");
+        assert!(output.contains("user node"), "{output}");
+        assert!(!output.contains("managed node"), "{output}");
+    }
+
+    /// A sign-in belongs to one person and one engine. Another person reading
+    /// the same terminal id sees nothing, and a finished sign-in is replaced
+    /// when it is started again rather than returned.
+    #[cfg(unix)]
+    #[test]
+    fn sign_in_terminals_are_scoped_to_one_owner_and_engine() {
+        let root = tempfile::tempdir().unwrap();
+        let engine = root.path().join("claude");
+        write_script(&engine, "#!/bin/sh\necho \"signing in with $*\"\n");
+        let launch = TerminalLaunch::sign_in(
+            &engine,
+            &["auth", "login"],
+            root.path(),
+            sign_in_environment(
+                HarnessKind::ClaudeCode,
+                &os_env(&[("PATH", "/usr/bin:/bin")]),
+            ),
+        );
+        let terminals = SignInTerminals::new();
+        let owner = OwnerId::local();
+        let first = terminals
+            .start(&owner, HarnessKind::ClaudeCode, &launch, None, None)
+            .unwrap();
+        let output = read_until_ended(
+            |cursor| terminals.read(&owner, HarnessKind::ClaudeCode, first.id, cursor),
+            "the sign-in",
+        );
+        assert!(output.contains("signing in with auth login"), "{output}");
+
+        let stranger = OwnerId::new("someone-else").unwrap();
+        let theirs = terminals.read(&stranger, HarnessKind::ClaudeCode, first.id, 0);
+        assert!(theirs.ended && theirs.data.is_empty());
+        let other_engine = terminals.read(&owner, HarnessKind::Codex, first.id, 0);
+        assert!(other_engine.ended && other_engine.data.is_empty());
+        assert!(matches!(
+            terminals.write(&stranger, HarnessKind::ClaudeCode, first.id, b"x"),
+            Err(TerminalError::NotFound)
+        ));
+
+        let again = terminals
+            .start(&owner, HarnessKind::ClaudeCode, &launch, None, None)
+            .unwrap();
+        assert_ne!(again.id, first.id);
+        let gone = terminals.read(&owner, HarnessKind::ClaudeCode, first.id, 0);
+        assert!(gone.ended && gone.data.is_empty());
+        terminals
+            .close(&owner, HarnessKind::ClaudeCode, again.id)
+            .unwrap();
     }
 }

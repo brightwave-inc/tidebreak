@@ -252,6 +252,8 @@ import {
   type HarnessDoctorEntry as WireHarnessDoctorEntry,
   type HarnessDoctorReport as WireHarnessDoctorReport,
   type HarnessKind as WireHarnessKind,
+  type HarnessSignInRead as WireHarnessSignInRead,
+  type HarnessSignInTerminal as WireHarnessSignInTerminal,
   type HarnessNoticeLevel as WireHarnessNoticeLevel,
   type HarnessTier as WireHarnessTier,
   type HarnessUpdateChannel as WireHarnessUpdateChannel,
@@ -1366,6 +1368,9 @@ export type CodePrMergeMethod = WireCodePrMergeMethod;
 export type MergeCodePrBody = WireMergeCodePrBody;
 export type CodeTerminalSnapshot = WireCodeTerminalSnapshot;
 export type CodeTerminalRead = WireCodeTerminalRead;
+/** A terminal running one engine's own sign-in command. */
+export type HarnessSignInTerminal = WireHarnessSignInTerminal;
+export type HarnessSignInRead = WireHarnessSignInRead;
 export type CodeSessionDigest = WireCodeSessionDigest;
 export type CodeUpdateNotice = WireCodeUpdateNotice;
 export type CodeCloneDefaults = WireCodeCloneDefaults;

@@ -155,7 +155,8 @@ function toHex(r: string, g: string, b: string): string {
   return `#${byte(r)}${byte(g)}${byte(b)}`;
 }
 
-type TerminalClient = Pick<
+/** What the pane asks of a terminal server, keyed by the scope it opened in. */
+export type TerminalClient = Pick<
   ApiClient,
   | "listCodeTerminals"
   | "createCodeTerminal"
@@ -219,6 +220,9 @@ export function TerminalPane({
   terminalId,
   onAttach,
   hideHeader = false,
+  startingText = "Opening a shell in the worktree…",
+  showEndedNotice = true,
+  onEnded,
 }: {
   client: TerminalClient;
   workspaceId: string;
@@ -228,6 +232,15 @@ export function TerminalPane({
   onAttach?: (terminalId: string) => void;
   /** The drawer already names this surface. */
   hideHeader?: boolean;
+  /** What the pane says while the process starts. */
+  startingText?: string;
+  /**
+   * Whether the pane offers a new shell once this one ends. A surface that
+   * runs one command and says itself what comes next turns it off.
+   */
+  showEndedNotice?: boolean;
+  /** Called once each time the process ends and every byte it wrote is read. */
+  onEnded?: () => void;
 }) {
   const renderIdentityRef = useRef<RenderTerminalIdentity | null>(null);
   let renderIdentity = renderIdentityRef.current;
@@ -258,6 +271,8 @@ export function TerminalPane({
   const startFreshRef = useRef(false);
   const onAttachRef = useRef(onAttach);
   onAttachRef.current = onAttach;
+  const onEndedRef = useRef(onEnded);
+  onEndedRef.current = onEnded;
   const cursorRef = useRef(0);
   const pendingRef = useRef("");
   const rafRef = useRef<number | null>(null);
@@ -280,6 +295,12 @@ export function TerminalPane({
   const [writeFailure, setWriteFailure] = useState<TerminalWriteFailure | null>(
     null,
   );
+
+  // `ended` turns true only once the process is gone and its last bytes are
+  // read, so a caller that acts on it sees the whole output first.
+  useEffect(() => {
+    if (ended) onEndedRef.current?.();
+  }, [ended]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -319,8 +340,8 @@ export function TerminalPane({
         editable: true,
         modalOpen: false,
         command,
-        // The terminal only exists inside a workspace, so the chords reaching
-        // it are always code mode's.
+        // The terminal lives in a workspace or in an engine's sign-in, and
+        // both take code mode's chords.
         mode: "code",
       });
       if (!def) return;
@@ -791,7 +812,7 @@ export function TerminalPane({
           Output was truncated.
         </p>
       )}
-      {ended && (
+      {ended && showEndedNotice && (
         <div
           className="flex items-center gap-2 px-3 py-2 text-xs"
           data-testid="terminal-ended"
@@ -900,7 +921,7 @@ export function TerminalPane({
             data-testid="terminal-starting"
             className="text-muted-foreground pointer-events-none absolute inset-x-3 top-2 text-xs"
           >
-            Opening a shell in the worktree…
+            {startingText}
           </p>
         )}
       </div>
