@@ -198,6 +198,13 @@ not treated as degraded. **Reconnect and refresh tools** explicitly starts a
 fresh session and rediscovers its tool list. The runtime does the same after the
 server emits `notifications/tools/list_changed`.
 
+Two failures stop the automatic retries, because retrying cannot fix them. A
+gateway mount without a gateway session waits for the next sign-in. A server
+whose parent environment variable is missing waits for a settings change or a
+manual reconnect. Either way the server stays `degraded` with its diagnostic,
+and **Reconnect and refresh tools** still tries at once. The log records a
+reconnect failure when it first happens or changes, not on every retry.
+
 Saving a candidate connects every enabled server before replacing the current
 set. If validation or initialization fails, the previous set remains active.
 Each running turn holds an immutable registry snapshot, so a configuration or

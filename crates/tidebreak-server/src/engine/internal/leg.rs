@@ -2328,10 +2328,6 @@ impl LegDriver {
                                 if let Some(event) = renderer_event {
                                     self.publish(turn.chat_id, event);
                                 }
-                                // The call is durable now. Wake the native
-                                // executors so they pick it up at once rather
-                                // than on their next safety sweep.
-                                self.events.notify_client_execution_pending();
                                 checkpoint_heartbeat.abort_and_wait().await;
                                 if let Some(session_ids) = child_session_wait {
                                     return Ok(LegDriverOutcome::WaitingForChildSessions {
@@ -2348,6 +2344,10 @@ impl LegDriver {
                                         call_id: request.id,
                                     });
                                 }
+                                // A native executor runs this call, and it
+                                // sleeps between slow safety sweeps. Wake it
+                                // now that the call is durable.
+                                self.events.notify_client_execution_pending();
                                 return Ok(LegDriverOutcome::WaitingForClient {
                                     turn_id: turn.id,
                                     call_id: request.id,
