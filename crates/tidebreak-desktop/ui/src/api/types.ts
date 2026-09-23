@@ -73,8 +73,13 @@ import {
   type DiscoveredModels as WireDiscoveredModels,
   type McpHealth as WireMcpHealth,
   type McpCuration as WireMcpCuration,
+  type McpDirectory as WireMcpDirectory,
+  type McpDirectoryAdded as WireMcpDirectoryAdded,
+  type McpDirectoryEntry as WireMcpDirectoryEntry,
+  type McpDirectorySignIn as WireMcpDirectorySignIn,
   type McpOAuthStatus as WireMcpOAuthStatus,
   type McpServerDefinition as WireMcpServerDefinition,
+  type McpSkippedServer as WireMcpSkippedServer,
   type McpViewSession,
   type GatewayApps as WireGatewayApps,
   type GatewayAppInfo as WireGatewayAppInfo,
@@ -588,6 +593,24 @@ export type McpServersInfo = WireMcpServersInfo;
  * Tidebreak has driven the server end to end; absent is the community tier.
  */
 export type McpCuration = WireMcpCuration;
+
+/**
+ * The directory of well-known remote MCP servers Settings offers to add:
+ * each entry's endpoint as its vendor publishes it, and how it signs in.
+ */
+export type McpDirectory = WireMcpDirectory;
+export type McpDirectoryEntry = WireMcpDirectoryEntry;
+export type McpDirectorySignIn = WireMcpDirectorySignIn;
+
+/** The name an added directory server was saved under, and the servers
+ * after the add. */
+export type McpDirectoryAdded = WireMcpDirectoryAdded;
+
+/**
+ * A saved MCP server record Tidebreak could not load: its name and why. It
+ * stays on file, unused, until it is removed.
+ */
+export type McpSkippedServer = WireMcpSkippedServer;
 
 /**
  * Where an HTTP MCP server's OAuth sign-in stands. `POST

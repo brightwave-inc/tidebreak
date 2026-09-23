@@ -1064,10 +1064,10 @@ impl McpRuntime {
             .await;
         if let (Err(error), Some(need)) = (&result, &oauth) {
             if !need.saves() {
-                return Err(AgentError::config(format!(
-                    "external MCP server {} failed to start: {}",
-                    definition.name,
-                    failure_diagnostic(&definition, error, Some(need))
+                return Err(AgentError::config(failure_diagnostic(
+                    &definition,
+                    error,
+                    Some(need),
                 )));
             }
         }

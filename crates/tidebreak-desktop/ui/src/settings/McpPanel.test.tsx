@@ -19,6 +19,7 @@ import {
 } from "../api";
 import { McpPanel } from "./McpPanel";
 import { setAttachedRemotely } from "@/host";
+import { mcpDirectoryServer, mcpDirectoryServers } from "../stories/fixtures";
 
 const { openInBrowser, toast } = vi.hoisted(() => ({
   openInBrowser: vi.fn(async (_url: string) => {}),
@@ -121,6 +122,10 @@ function api(
     disconnectMcpServer: vi.fn().mockResolvedValue(result),
     getGatewayStatus: vi.fn().mockResolvedValue(signedOut),
     getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
+    getMcpDirectory: vi
+      .fn()
+      .mockResolvedValue({ servers: mcpDirectoryServers }),
+    addMcpDirectoryServer: vi.fn(),
     ...overrides,
   } as unknown as ApiClient;
 }
@@ -1247,5 +1252,349 @@ describe("McpPanel OAuth sign-in", () => {
       url: "https://mcp.vercel.com",
       oauth: false,
     });
+  });
+});
+
+/** The directory entry with this id, from the shared fixture. */
+function directoryEntry(id: string) {
+  const entry = mcpDirectoryServers.find((server) => server.id === id);
+  if (!entry) throw new Error(`no directory fixture ${id}`);
+  return entry;
+}
+
+/** The directory row that names `name`. */
+async function directoryRow(name: string): Promise<HTMLElement> {
+  const list = await screen.findByRole("list", { name: "MCP directory" });
+  const row = within(list).getByText(name).closest("li");
+  if (!row) throw new Error(`no directory row for ${name}`);
+  return row;
+}
+
+describe("McpPanel directory", () => {
+  it("lists servers with how each signs in, and searches them", async () => {
+    const user = userEvent.setup();
+    render(<McpPanel client={api({ servers: [] })} />);
+
+    const github = await directoryRow("GitHub");
+    expect(
+      within(github).getByText("GITHUB_PERSONAL_ACCESS_TOKEN"),
+    ).toBeInTheDocument();
+    expect(within(github).getByText("api.githubcopilot.com")).toHaveClass(
+      "font-mono",
+    );
+    expect(
+      within(await directoryRow("Linear")).getByText(
+        /Sign in with your browser/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(await directoryRow("Cloudflare Docs")).getByText(/No sign-in/),
+    ).toBeInTheDocument();
+    // No entry claims a tier the curated list did not grant.
+    expect(screen.queryByText("Tested")).not.toBeInTheDocument();
+
+    const search = screen.getByRole("searchbox", {
+      name: "Search the MCP directory",
+    });
+    await user.type(search, "issues");
+    const list = screen.getByRole("list", { name: "MCP directory" });
+    expect(within(list).getByText("Linear")).toBeInTheDocument();
+    expect(within(list).getByText("Atlassian")).toBeInTheDocument();
+    expect(within(list).queryByText("Stripe")).not.toBeInTheDocument();
+
+    await user.clear(search);
+    await user.type(search, "no such server");
+    expect(
+      screen.queryByRole("list", { name: "MCP directory" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/No server in the directory matches “no such server”/),
+    ).toBeInTheDocument();
+  });
+
+  it("marks a server already configured at the same address as added", async () => {
+    const linear = directoryEntry("linear");
+    render(
+      <McpPanel
+        client={api({
+          servers: [
+            mcpDirectoryServer(linear, {
+              name: "work_linear",
+              url: `${linear.url}/`,
+            }),
+          ],
+        })}
+      />,
+    );
+
+    const row = await directoryRow("Linear");
+    expect(within(row).getByText("Added")).toBeInTheDocument();
+    expect(
+      within(row).queryByRole("button", { name: "Add Linear" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(await directoryRow("Notion")).getByRole("button", {
+        name: "Add Notion",
+      }),
+    ).toBeEnabled();
+  });
+
+  it("adds a server and starts its sign-in when it asks for one", async () => {
+    const linear = directoryEntry("linear");
+    const page = "https://mcp.linear.app/authorize?client_id=tidebreak-1";
+    const needsSignIn = mcpDirectoryServer(linear, {
+      health: "degraded",
+      tool_count: 0,
+      diagnostic:
+        "This server needs you to sign in. Select Connect to sign in with your browser.",
+      oauth_status: { state: "not_connected", sign_in_host: "mcp.linear.app" },
+    });
+    let finishAdd: (value: unknown) => void = () => {};
+    const addMcpDirectoryServer = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finishAdd = resolve;
+        }),
+    );
+    const connectMcpServer = vi.fn().mockResolvedValue({
+      state: "authorizing",
+      pending_authorization_url: page,
+      sign_in_host: "mcp.linear.app",
+    });
+    const user = userEvent.setup();
+    render(
+      <McpPanel
+        client={api(
+          { servers: [] },
+          {
+            addMcpDirectoryServer,
+            connectMcpServer,
+            listMcpServers: vi
+              .fn()
+              .mockResolvedValueOnce({ servers: [] })
+              .mockResolvedValue({ servers: [needsSignIn] }),
+          },
+        )}
+      />,
+    );
+
+    await user.click(
+      within(await directoryRow("Linear")).getByRole("button", {
+        name: "Add Linear",
+      }),
+    );
+    expect(addMcpDirectoryServer).toHaveBeenCalledWith("linear");
+    // While the add runs, its row says so and no other add can start.
+    const adding = within(await directoryRow("Linear")).getByRole("button", {
+      name: "Add Linear",
+    });
+    expect(adding).toHaveTextContent("Adding…");
+    expect(adding).toBeDisabled();
+    expect(
+      within(await directoryRow("Notion")).getByRole("button", {
+        name: "Add Notion",
+      }),
+    ).toBeDisabled();
+
+    await act(async () => {
+      finishAdd({ name: "linear", servers: [needsSignIn] });
+    });
+    await waitFor(() =>
+      expect(connectMcpServer).toHaveBeenCalledWith("linear"),
+    );
+    await waitFor(() => expect(openInBrowser).toHaveBeenCalledWith(page));
+    expect(toast.message).toHaveBeenCalledWith(
+      "Finish signing in to linear in your browser",
+    );
+    expect(
+      within(await directoryRow("Linear")).getByText("Added"),
+    ).toBeInTheDocument();
+  });
+
+  it("adds a server that needs no sign-in without opening a browser", async () => {
+    const docs = directoryEntry("cloudflare_docs");
+    const addMcpDirectoryServer = vi.fn().mockResolvedValue({
+      name: "cloudflare_docs",
+      servers: [mcpDirectoryServer(docs, { tool_count: 2 })],
+    });
+    const connectMcpServer = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <McpPanel
+        client={api(
+          { servers: [] },
+          { addMcpDirectoryServer, connectMcpServer },
+        )}
+      />,
+    );
+
+    await user.click(
+      within(await directoryRow("Cloudflare Docs")).getByRole("button", {
+        name: "Add Cloudflare Docs",
+      }),
+    );
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Added Cloudflare Docs"),
+    );
+    expect(connectMcpServer).not.toHaveBeenCalled();
+    expect(openInBrowser).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText("2 tools available to new turns."),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves the sign-in to the row when attached to another machine", async () => {
+    setAttachedRemotely(true);
+    const linear = directoryEntry("linear");
+    const needsSignIn = mcpDirectoryServer(linear, {
+      health: "degraded",
+      tool_count: 0,
+      oauth_status: { state: "not_connected", sign_in_host: "mcp.linear.app" },
+    });
+    const connectMcpServer = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <McpPanel
+        client={api(
+          { servers: [] },
+          {
+            connectMcpServer,
+            addMcpDirectoryServer: vi
+              .fn()
+              .mockResolvedValue({ name: "linear", servers: [needsSignIn] }),
+          },
+        )}
+      />,
+    );
+
+    await user.click(
+      within(await directoryRow("Linear")).getByRole("button", {
+        name: "Add Linear",
+      }),
+    );
+    expect(await screen.findByText("Sign in required")).toBeInTheDocument();
+    expect(connectMcpServer).not.toHaveBeenCalled();
+    expect(openInBrowser).not.toHaveBeenCalled();
+  });
+
+  it("says why an add failed beside the directory", async () => {
+    const user = userEvent.setup();
+    render(
+      <McpPanel
+        client={api(
+          { servers: [] },
+          {
+            addMcpDirectoryServer: vi
+              .fn()
+              .mockRejectedValue(
+                new HttpError(
+                  400,
+                  "400: This server asks you to sign in, but Tidebreak cannot complete its sign-in.",
+                ),
+              ),
+          },
+        )}
+      />,
+    );
+
+    await user.click(
+      within(await directoryRow("Stripe")).getByRole("button", {
+        name: "Add Stripe",
+      }),
+    );
+    // The status prefix comes off, so the reason reads as a sentence.
+    expect(
+      await screen.findByText(
+        "Could not add Stripe: This server asks you to sign in, but Tidebreak cannot complete its sign-in.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(await directoryRow("Stripe")).getByRole("button", {
+        name: "Add Stripe",
+      }),
+    ).toBeEnabled();
+  });
+
+  it("keeps unsaved edits when a directory add lands", async () => {
+    const docs = directoryEntry("cloudflare_docs");
+    const putMcpServers = vi.fn().mockResolvedValue(healthy);
+    const addMcpDirectoryServer = vi.fn().mockResolvedValue({
+      name: "cloudflare_docs",
+      servers: [...healthy.servers, mcpDirectoryServer(docs)],
+    });
+    const user = userEvent.setup();
+    render(
+      <McpPanel
+        client={api(healthy, { addMcpDirectoryServer, putMcpServers })}
+      />,
+    );
+
+    const namespace = await screen.findByDisplayValue("private_docs");
+    await user.clear(namespace);
+    await user.type(namespace, "renamed_docs");
+    await user.click(
+      within(await directoryRow("Cloudflare Docs")).getByRole("button", {
+        name: "Add Cloudflare Docs",
+      }),
+    );
+    await waitFor(() => expect(addMcpDirectoryServer).toHaveBeenCalled());
+    expect(await screen.findByDisplayValue("cloudflare_docs")).toBeVisible();
+    expect(screen.getByDisplayValue("renamed_docs")).toBeVisible();
+
+    // The next save keeps both the edit and the added server.
+    await user.click(screen.getByRole("button", { name: "Save and verify" }));
+    await waitFor(() => expect(putMcpServers).toHaveBeenCalledTimes(1));
+    const names = (putMcpServers.mock.calls[0][0] as { name: string }[]).map(
+      (server) => server.name,
+    );
+    expect(names).toEqual(["renamed_docs", "cloudflare_docs"]);
+  });
+});
+
+describe("McpPanel after Tidebreak starts", () => {
+  it("says a saved server is connecting and follows it until it is up", async () => {
+    const linear = directoryEntry("linear");
+    const connecting = mcpDirectoryServer(linear, {
+      health: "initializing",
+      tool_count: 0,
+    });
+    const up = mcpDirectoryServer(linear, { tool_count: 5 });
+    const listMcpServers = vi
+      .fn()
+      .mockResolvedValueOnce({ servers: [connecting] })
+      .mockResolvedValue({ servers: [up] });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(
+      <McpPanel client={api({ servers: [connecting] }, { listMcpServers })} />,
+    );
+
+    expect(await screen.findByText("Connecting")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Tidebreak is connecting to this server/),
+    ).toBeInTheDocument();
+    // A saved server is not an unsaved row: it never asks to be saved.
+    expect(screen.queryByText("Not verified")).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_100);
+    });
+    expect(await screen.findByText("Healthy")).toBeInTheDocument();
+    expect(
+      screen.getByText("5 tools available to new turns."),
+    ).toBeInTheDocument();
+    const reads = listMcpServers.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+    });
+    expect(listMcpServers).toHaveBeenCalledTimes(reads);
+  });
+
+  it("still calls a new, unsaved row not verified", async () => {
+    const user = userEvent.setup();
+    render(<McpPanel client={api({ servers: [] })} />);
+
+    await user.click(await screen.findByRole("button", { name: "Add server" }));
+    expect(screen.getByText("Not verified")).toBeInTheDocument();
+    expect(screen.queryByText("Connecting")).not.toBeInTheDocument();
   });
 });

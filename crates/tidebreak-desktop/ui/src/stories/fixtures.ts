@@ -27,7 +27,9 @@ import type {
   ReasoningEffort,
   GatewayApps,
   GatewayStatus,
+  McpDirectoryEntry,
   McpServerInfo,
+  McpSkippedServer,
   MemoryRecord,
   RemoteMachineState,
   TaskPlan,
@@ -2679,3 +2681,128 @@ export function mcpSignInServer(
     ...overrides,
   };
 }
+
+/** One directory entry as `GET /mcp/directory` lists it. */
+function directoryEntry(
+  id: string,
+  name: string,
+  url: string,
+  sign_in: McpDirectoryEntry["sign_in"],
+  description: string,
+  docs_url: string,
+): McpDirectoryEntry {
+  return { id, name, url, description, sign_in, docs_url, curated: null };
+}
+
+/**
+ * A slice of the MCP directory, copied from the server's data file: every
+ * sign-in kind, in the file's name order. No entry is tested, so none shows
+ * a tier.
+ */
+export const mcpDirectoryServers: McpDirectoryEntry[] = [
+  directoryEntry(
+    "atlassian",
+    "Atlassian",
+    "https://mcp.atlassian.com/v2/mcp",
+    { kind: "oauth" },
+    "Search and update Jira issues and Confluence pages.",
+    "https://support.atlassian.com/atlassian-ai-gateway/docs/get-started-with-the-atlassian-remote-mcp-server/",
+  ),
+  directoryEntry(
+    "cloudflare_docs",
+    "Cloudflare Docs",
+    "https://docs.mcp.cloudflare.com/mcp",
+    { kind: "none" },
+    "Search Cloudflare developer documentation.",
+    "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/",
+  ),
+  directoryEntry(
+    "github",
+    "GitHub",
+    "https://api.githubcopilot.com/mcp/",
+    { kind: "token", variable: "GITHUB_PERSONAL_ACCESS_TOKEN" },
+    "Read and manage GitHub repositories, issues, and pull requests.",
+    "https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp-in-your-ide/set-up-the-github-mcp-server",
+  ),
+  directoryEntry(
+    "linear",
+    "Linear",
+    "https://mcp.linear.app/mcp",
+    { kind: "oauth" },
+    "Search, create, and update Linear issues and projects.",
+    "https://linear.app/docs/mcp",
+  ),
+  directoryEntry(
+    "notion",
+    "Notion",
+    "https://mcp.notion.com/mcp",
+    { kind: "oauth" },
+    "Search, read, and edit Notion pages and databases.",
+    "https://developers.notion.com/guides/mcp/get-started-with-mcp",
+  ),
+  directoryEntry(
+    "sentry",
+    "Sentry",
+    "https://mcp.sentry.dev/mcp",
+    { kind: "oauth" },
+    "Search Sentry issues, errors, and traces, and triage problems.",
+    "https://docs.sentry.io/product/sentry-mcp/",
+  ),
+  directoryEntry(
+    "stripe",
+    "Stripe",
+    "https://mcp.stripe.com",
+    { kind: "oauth" },
+    "Work with Stripe customers, payments, and invoices, and search docs.",
+    "https://docs.stripe.com/mcp",
+  ),
+  directoryEntry(
+    "zapier",
+    "Zapier",
+    "https://mcp.zapier.com/api/v1/connect",
+    { kind: "token", variable: "ZAPIER_MCP_TOKEN" },
+    "Run actions in the apps connected to your Zapier account.",
+    "https://docs.zapier.com/mcp/overview/how-connections-work",
+  ),
+];
+
+/**
+ * A server added from the directory, as `GET /mcp/servers` lists it in the
+ * state `health` names: connecting right after it is saved or after
+ * Tidebreak starts, or waiting on a sign-in once the server answers `401`.
+ */
+export function mcpDirectoryServer(
+  entry: McpDirectoryEntry,
+  overrides: Partial<McpServerInfo> = {},
+): McpServerInfo {
+  return {
+    name: entry.id,
+    command: null,
+    args: [],
+    env: [],
+    env_from: [],
+    cwd: null,
+    url: entry.url,
+    bearer_token_env:
+      entry.sign_in.kind === "token" ? entry.sign_in.variable : null,
+    oauth: false,
+    gateway_endpoint: null,
+    request_timeout_ms: 60_000,
+    enabled: true,
+    plugin: null,
+    health: "healthy",
+    tool_count: 4,
+    diagnostic: null,
+    curated: null,
+    ...overrides,
+  };
+}
+
+/** A saved record written by a newer Tidebreak, with the reason the server
+ * gives for skipping it. */
+export const mcpSkippedRecord: McpSkippedServer = {
+  id: "0d3c9b1e-7f10-4a8e-9d51-6b2f0c4e8a17",
+  name: "research_notes",
+  reason:
+    'It has a setting this version of Tidebreak does not know, "transport". A newer version of Tidebreak may have saved it.',
+};

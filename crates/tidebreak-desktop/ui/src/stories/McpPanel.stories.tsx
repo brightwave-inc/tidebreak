@@ -2,8 +2,11 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import type { ApiClient, GatewayStatus, McpServerInfo } from "@/api";
 import { McpPanel } from "@/settings/McpPanel";
 import {
+  mcpDirectoryServer,
+  mcpDirectoryServers,
   mcpOauthAuthorizing,
   mcpOauthNotConnected,
+  mcpSignInDiagnostic,
   mcpSignInServer,
 } from "./fixtures";
 
@@ -51,6 +54,8 @@ function stubClient(servers: McpServerInfo[]): ApiClient {
     disconnectMcpServer: async () => mcpOauthNotConnected,
     getGatewayStatus: async () => signedOut,
     getGatewayApps: async () => ({ supported: true, apps: [] }),
+    getMcpDirectory: async () => ({ servers: mcpDirectoryServers }),
+    addMcpDirectoryServer: async (id: string) => ({ name: id, servers }),
   } as unknown as ApiClient;
 }
 
@@ -120,5 +125,39 @@ export const RemoteServerNeedsSignIn: Story = {
 /** The same server while the person finishes signing in in the browser. */
 export const RemoteServerWaitingForSignIn: Story = {
   args: { client: stubClient([mcpSignInServer(mcpOauthAuthorizing)]) },
+  parameters: { layout: "padded" },
+};
+
+const linear = mcpDirectoryServers.find((server) => server.id === "linear");
+if (linear === undefined) throw new Error("the directory fixture lists Linear");
+
+/** Right after Tidebreak starts, a saved server is still making its first
+ * connection. It reads as connecting, not as an unsaved row, and the panel
+ * reads the list again until it is up. */
+export const SavedServerConnecting: Story = {
+  args: {
+    client: stubClient([
+      mcpDirectoryServer(linear, { health: "initializing", tool_count: 0 }),
+    ]),
+  },
+  parameters: { layout: "padded" },
+};
+
+/** Linear, just added from the directory: the directory marks it added, and
+ * its row asks for the sign-in the server wants, on the host Connect opens. */
+export const AddedServerNeedsSignIn: Story = {
+  args: {
+    client: stubClient([
+      mcpDirectoryServer(linear, {
+        health: "degraded",
+        tool_count: 0,
+        diagnostic: mcpSignInDiagnostic,
+        oauth_status: {
+          state: "not_connected",
+          sign_in_host: "mcp.linear.app",
+        },
+      }),
+    ]),
+  },
   parameters: { layout: "padded" },
 };
