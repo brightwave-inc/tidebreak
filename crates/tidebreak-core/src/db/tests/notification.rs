@@ -38,6 +38,11 @@ fn a_body_is_the_first_line_with_words_in_plain_text() {
         notification_body_line("#3521 is merged").as_deref(),
         Some("#3521 is merged")
     );
+    // A direction override would show the banner's words out of order.
+    assert_eq!(
+        notification_body_line("Removed \u{202E}sgol\u{202C} and\u{200B} caches").as_deref(),
+        Some("Removed sgol and caches")
+    );
     assert_eq!(notification_body_line("  \n```\n```\n"), None);
 }
 

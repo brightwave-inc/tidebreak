@@ -347,6 +347,7 @@ fn plain_line(line: &str) -> String {
         .replace("__", "")
         .replace('`', "")
         .chars()
+        .filter(|character| !is_invisible_format(*character))
         .map(|character| {
             if character.is_control() {
                 ' '
@@ -356,6 +357,21 @@ fn plain_line(line: &str) -> String {
         })
         .collect::<String>();
     words.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Characters that reorder or hide the text around them: direction marks,
+/// embeddings, overrides, isolates, and zero-width marks. A banner drops
+/// them, so it shows what the agent wrote, in the order it wrote it.
+fn is_invisible_format(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
 }
 
 /// `1. Step` becomes `Step`; anything else is returned unchanged.
