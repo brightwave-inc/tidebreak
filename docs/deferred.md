@@ -241,11 +241,14 @@ purpose:
   began under one mode must not have it changed underneath it, so the change
   is refused with `turn_running`. Reconsider only with a reason to let a
   running turn's approvals change shape mid-flight.
-- **An in-app code editor.** Code mode reviews server-produced diffs and reads
-  files through a read-only Monaco viewer; it hands editing to the user's
-  editor via the worktree path. Making that viewer writable is a product
-  surface of its own — save, conflict, and undo against a tree an agent is
-  also editing — and it needs demand evidence first.
+- **An in-app code editor beyond saving text files.** The file viewer now
+  edits and saves one existing text file at a time, against the hash it
+  loaded, so a save does not overwrite an agent's change nobody has seen
+  ([code mode](code-mode.md#editing-files)). What stays deferred: creating,
+  renaming, and deleting files; editing in a sandbox workspace, where the
+  checkout lives in the sandbox; multi-file find and replace; and editing
+  inside the diff panel. Each is a product surface of its own. Reconsider one
+  when people ask for it.
 - **Chat–code convergence.** The plan of record is
   [decision 48](decisions/0048-one-interaction-model.md): five independently
   useful steps, with code-mode structures as the merge survivor and chat

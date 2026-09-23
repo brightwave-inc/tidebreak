@@ -201,6 +201,8 @@ import {
   type CodeWorkspaceSearchMatch as WireCodeWorkspaceSearchMatch,
   type CodeWorkspaceTree as WireCodeWorkspaceTree,
   type CodeWorkspaceBlob as WireCodeWorkspaceBlob,
+  type CodeWorkspaceFileSaved as WireCodeWorkspaceFileSaved,
+  type SaveWorkspaceFileBody as WireSaveWorkspaceFileBody,
   type CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
   type CodeTriggerAction as WireCodeTriggerAction,
   type CodeTriggerCondition as WireCodeTriggerCondition,
@@ -1351,6 +1353,8 @@ export type CodeWorkspaceSearch = WireCodeWorkspaceSearch;
 export type CodeWorkspaceSearchMatch = WireCodeWorkspaceSearchMatch;
 export type CodeWorkspaceTree = WireCodeWorkspaceTree;
 export type CodeWorkspaceBlob = WireCodeWorkspaceBlob;
+export type CodeWorkspaceFileSaved = WireCodeWorkspaceFileSaved;
+export type SaveCodeWorkspaceFileBody = WireSaveWorkspaceFileBody;
 export type CodeWorkspaceDiff = WireCodeWorkspaceDiff;
 export type CodeWorkspacePrSnapshot = WireCodeWorkspacePrSnapshot;
 /** One durable watch task on a workspace's pull request. */

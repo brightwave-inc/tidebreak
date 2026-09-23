@@ -70,8 +70,10 @@ export type LiveResource<T> = {
  *
  * Reloading never blanks what is on screen: `data` only changes on a
  * successful load, so a refresh shows the stale value until the new one
- * arrives. Overlapping loads are collapsed — a revision that lands mid-flight
- * queues exactly one more load rather than stacking requests.
+ * arrives. A new `key` starts empty from its first render, so one key's value
+ * is never shown as another's. Overlapping loads are collapsed — a revision
+ * that lands mid-flight queues exactly one more load rather than stacking
+ * requests.
  */
 export function useLiveResource<T>({
   key,
@@ -91,9 +93,15 @@ export function useLiveResource<T>({
   enabled?: boolean;
 }): LiveResource<T> {
   const [data, setData] = useState<T | null>(null);
+  // Which key `data` was loaded under. For the one render between a key
+  // change and the reset below, `data` still holds the old key's value, and
+  // a caller must not take one file's contents for another's.
+  const [dataKey, setDataKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(true);
 
+  const keyRef = useRef(key);
+  keyRef.current = key;
   const loadRef = useRef(load);
   loadRef.current = load;
   const errorMessageRef = useRef(errorMessage);
@@ -120,12 +128,14 @@ export function useLiveResource<T>({
       return inFlight.promise;
     }
     const generation = generationRef.current;
+    const loadKey = keyRef.current;
     setRefreshing(true);
     const promise = (async () => {
       try {
         const next = await loadRef.current();
         if (generation !== generationRef.current) return;
         setData(next);
+        setDataKey(loadKey);
         setError(null);
       } catch (err) {
         if (generation !== generationRef.current) return;
@@ -150,6 +160,7 @@ export function useLiveResource<T>({
     inFlightRef.current = null;
     pendingRef.current = false;
     setData(value);
+    setDataKey(keyRef.current);
     setError(null);
     setRefreshing(false);
   }, []);
@@ -159,6 +170,7 @@ export function useLiveResource<T>({
     inFlightRef.current = null;
     pendingRef.current = false;
     setData(null);
+    setDataKey(null);
     setError(null);
     setRefreshing(enabled);
     if (enabled) void run();
@@ -191,5 +203,11 @@ export function useLiveResource<T>({
     };
   }, [key, revision, debounceMs, run, enabled]);
 
-  return { data, error, refreshing, refresh: run, adopt };
+  return {
+    data: dataKey === key ? data : null,
+    error,
+    refreshing,
+    refresh: run,
+    adopt,
+  };
 }

@@ -1771,6 +1771,83 @@ async fn shared_session_workspace_reads_preserve_ownership_and_revocation() {
     }
 }
 
+/// A reader of a shared session sees the workspace's files, and a save from
+/// them gets the answer a stranger gets. Saving is a workspace write, gated
+/// the way commit and push are.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shared_session_reader_cannot_save_a_workspace_file() {
+    let (router, _dir, repo) = two_user_code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let (_repo, workspace) = register_and_workspace(&client, addr, ALICE_TOKEN, &repo).await;
+    let sessions = create_sibling_sessions(&client, addr, ALICE_TOKEN, &workspace, 1).await;
+    let worktree = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    let path = format!("/code/workspaces/{}", workspace["id"].as_str().unwrap());
+    let save = |token: &'static str, base: String| {
+        let client = client.clone();
+        let url = format!("http://{addr}{path}/file");
+        async move {
+            client
+                .put(url)
+                .bearer_auth(token)
+                .json(&serde_json::json!({
+                    "path": "README.md",
+                    "content": format!("saved by {token}\n"),
+                    "base_hash": base,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    let base = crate::code::worktree::content_hash(b"hello\n");
+
+    assert_eq!(
+        save(BOB_TOKEN, base.clone()).await,
+        reqwest::StatusCode::NOT_FOUND,
+        "a stranger cannot save"
+    );
+    for level in ["view", "contribute"] {
+        grant_access(
+            &client,
+            addr,
+            ALICE_TOKEN,
+            &sessions[0],
+            "principal:user:bob",
+            level,
+        )
+        .await;
+        let blob: serde_json::Value = client
+            .get(format!("http://{addr}{path}/blob?path=README.md"))
+            .bearer_auth(BOB_TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(blob["hash"], base, "a {level} reader still reads the file");
+        assert_eq!(
+            save(BOB_TOKEN, base.clone()).await,
+            reqwest::StatusCode::NOT_FOUND,
+            "a {level} reader cannot manage the workspace, so cannot save"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("README.md")).unwrap(),
+            "hello\n"
+        );
+    }
+
+    assert_eq!(save(ALICE_TOKEN, base).await, reqwest::StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("README.md")).unwrap(),
+        format!("saved by {ALICE_TOKEN}\n")
+    );
+}
+
 const SLACK_TOKEN: &str = "slack-service-token-for-workspace-management";
 
 #[tokio::test(flavor = "multi_thread")]

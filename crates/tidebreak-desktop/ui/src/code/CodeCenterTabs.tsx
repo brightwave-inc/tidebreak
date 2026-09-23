@@ -74,6 +74,7 @@ export function conversationTabId(sessionId: string | null): string {
 export type CenterTabRegion = "primary" | "secondary";
 
 const NO_CONVERSATIONS: readonly CodeConversationTab[] = [];
+const NO_DIRTY_FILES: ReadonlySet<string> = new Set();
 
 /**
  * One agent's tab in the center strip.
@@ -131,6 +132,7 @@ export function CodeCenterTabs({
   browserTitles = {},
   terminalLabels = {},
   region = "primary",
+  dirtyFilePaths = NO_DIRTY_FILES,
   onMoveEditorToOtherGroup,
   onMoveEditor,
   onSplitActive,
@@ -175,6 +177,8 @@ export function CodeCenterTabs({
   /** Each open shell's tab label, so several shells stay tellable apart. */
   terminalLabels?: Readonly<Record<string, string>>;
   region?: CenterTabRegion;
+  /** File paths whose buffers hold unsaved changes; their tabs carry a dot. */
+  dirtyFilePaths?: ReadonlySet<string>;
   onMoveEditorToOtherGroup?: (index: number) => void;
   /**
    * Reorder within this strip. Dragging does the same thing, so this is the
@@ -366,6 +370,7 @@ export function CodeCenterTabs({
               tabCount={editorTabs.length}
               browserTitles={browserTitles}
               terminalLabels={terminalLabels}
+              dirty={panel.type === "file" && dirtyFilePaths.has(panel.path)}
               tabRef={(node) => {
                 tabRefs.current[index + tabOffset] = node;
               }}
@@ -506,6 +511,7 @@ function EditorTab({
   tabCount,
   browserTitles,
   terminalLabels,
+  dirty,
   tabRef,
   onSelect,
   onKeyDown: onTabKeyDown,
@@ -525,6 +531,8 @@ function EditorTab({
   tabCount: number;
   browserTitles: Readonly<Record<string, string>>;
   terminalLabels: Readonly<Record<string, string>>;
+  /** The file's buffer holds unsaved changes. */
+  dirty: boolean;
   tabRef: (node: HTMLButtonElement | null) => void;
   onSelect: () => void;
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
@@ -572,7 +580,7 @@ function EditorTab({
             type="button"
             role="tab"
             id={editorTabId(region, index)}
-            aria-label={label}
+            aria-label={dirty ? `${label}, unsaved changes` : label}
             aria-selected={active}
             aria-controls={panelId}
             tabIndex={active ? 0 : -1}
@@ -595,6 +603,13 @@ function EditorTab({
               {/* The suffix stays outside the truncating name. */}
               {suffix && <span className="shrink-0">{suffix}</span>}
             </span>
+            {dirty && (
+              <span
+                className="bg-foreground size-1.5 shrink-0 rounded-full"
+                aria-hidden
+                data-testid="unsaved-dot"
+              />
+            )}
           </button>
           <span
             role="presentation"

@@ -1455,9 +1455,11 @@ fn render_update(notice: &UpdateNotice) {
                 attention_label(attention)
             );
         }
-        // Progress, delivery, and rewrite notices drive desktop surfaces the
-        // watch does not render. Terminal activity is coalesced noise here.
+        // Progress, delivery, rewrite, and file-save notices drive desktop
+        // surfaces the watch does not render. Terminal activity is coalesced
+        // noise here.
         UpdateNotice::TerminalActivity { .. }
+        | UpdateNotice::FilesChanged { .. }
         | UpdateNotice::CloneProgress { .. }
         | UpdateNotice::HarnessInstall { .. }
         | UpdateNotice::Delivery

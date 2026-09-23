@@ -141,6 +141,12 @@ pub enum CodeLiveUpdate {
     /// the id: a reader re-reads what it may see, which is what drops a
     /// session it no longer holds and adds one it just gained.
     AccessChanged(SessionId),
+    /// Someone saved a file in this workspace from the file viewer. An
+    /// agent's edit reaches readers through its session's journal; a save
+    /// belongs to no turn, so this is what tells the file list, the diff,
+    /// and the changed-file count to re-read the worktree. Not restated on
+    /// connect.
+    FilesChanged(WorkspaceId),
 }
 
 /// Progress of one background rewrite of a completed turn's closing message.

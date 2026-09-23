@@ -1,19 +1,22 @@
 import type {
   CodeWorkspaceBlob,
+  CodeWorkspaceFileSaved,
   CodeWorkspaceFiles,
   CodeWorkspaceSearch,
   CodeWorkspaceTree,
   FileDownloadProgress,
+  SaveCodeWorkspaceFileBody,
 } from "../types";
 import {
   parseCodeWorkspaceBlob,
+  parseCodeWorkspaceFileSaved,
   parseCodeWorkspaceFiles,
   parseCodeWorkspaceSearch,
   parseCodeWorkspaceTree,
 } from "../../code/parsers";
 import { type Constructor, HttpCore, requireParsed } from "./http";
 
-/** Workspace tree, search, file listing, and blobs. */
+/** Workspace tree, search, file listing, blobs, and file saves. */
 export function withCodeFilesApi<TBase extends Constructor<HttpCore>>(
   Base: TBase,
 ) {
@@ -92,6 +95,33 @@ export function withCodeFilesApi<TBase extends Constructor<HttpCore>>(
           ),
         ),
         "code workspace blob",
+      );
+    }
+
+    /**
+     * Save one text file from the file viewer.
+     *
+     * `base_hash` is the `hash` the viewer loaded. When the file moved on
+     * disk since, the server answers `409 file_changed`, and the error's body
+     * names the hash on disk now as `current_hash`. Writes are one attempt,
+     * never retried: the server may have taken the first.
+     */
+    async saveCodeWorkspaceFile(
+      workspaceId: string,
+      body: SaveCodeWorkspaceFileBody,
+    ): Promise<CodeWorkspaceFileSaved> {
+      return requireParsed(
+        parseCodeWorkspaceFileSaved(
+          await this.json(
+            `/code/workspaces/${encodeURIComponent(workspaceId)}/file`,
+            {
+              method: "PUT",
+              headers: this.headers(true),
+              body: JSON.stringify(body),
+            },
+          ),
+        ),
+        "code workspace file save",
       );
     }
 

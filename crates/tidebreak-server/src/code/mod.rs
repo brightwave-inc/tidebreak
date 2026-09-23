@@ -18,6 +18,7 @@ pub mod ci_logs;
 pub mod clone;
 pub mod conversation_tools;
 pub mod delivery;
+pub mod file_save;
 pub mod forge_rest;
 pub mod fork;
 pub mod gh;

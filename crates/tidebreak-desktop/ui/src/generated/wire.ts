@@ -1659,7 +1659,13 @@ export type CodeWatchState = "watching" | "fixing" | "blocked" | "done" | "stopp
 /**
  * One worktree file's text for the center viewer.
  */
-export type CodeWorkspaceBlob = { path: string, content: string, truncated: boolean, binary: boolean, revision?: WorkspaceContentRevision, revision_ref?: string,
+export type CodeWorkspaceBlob = { path: string, content: string, truncated: boolean, binary: boolean,
+/**
+ * SHA-256 of the file's bytes, as lowercase hex. Present only when
+ * `content` is the whole file as exact UTF-8 in a local worktree: the
+ * files the editor can save. A save names it as the version it replaces.
+ */
+hash?: string, revision?: WorkspaceContentRevision, revision_ref?: string,
 /**
  * When the checkpoint named by `revision_ref` was pushed.
  */
@@ -1673,6 +1679,15 @@ export type CodeWorkspaceDiff = { diff: string, truncated: boolean, stat: Diffst
  * When the checkpoint named by `revision_ref` was pushed.
  */
 revision_saved_at?: string, };
+
+/**
+ * Result of `PUT /code/workspaces/{id}/file`.
+ */
+export type CodeWorkspaceFileSaved = { path: string,
+/**
+ * Hash of the saved text: the base for the next save.
+ */
+hash: string, };
 
 /**
  * Bounded changed-file list for `GET /code/workspaces/{id}/files`.
@@ -4967,6 +4982,25 @@ error: string, };
 export type RootAttachmentOrigin = "project_default" | "conversation";
 
 /**
+ * Body of `PUT /code/workspaces/{id}/file`: replace one existing text file.
+ */
+export type SaveWorkspaceFileBody = {
+/**
+ * Worktree-relative path, resolved the way `GET /blob` resolves it.
+ */
+path: string,
+/**
+ * The file's new text, written byte for byte.
+ */
+content: string,
+/**
+ * The `hash` of the version the editor loaded. When the file on disk no
+ * longer has it, the save answers `409` with kind `file_changed` and the
+ * hash on disk now as `current_hash`.
+ */
+base_hash: string, };
+
+/**
  * One event on the per-session WebSocket.
  */
 export type SequencedEventFrame = {
@@ -6115,7 +6149,7 @@ parent_session?: SessionId,
 /**
  * Authoritative parent wait, never inferred from running children.
  */
-wait?: SessionTreeWait, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: SessionId, turn_id: TurnId, state: TurnRewriteState, rewrite?: string, };
+wait?: SessionTreeWait, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "files_changed", workspace_id: WorkspaceId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: SessionId, turn_id: TurnId, state: TurnRewriteState, rewrite?: string, };
 
 /**
  * One bounded question shown to the user.

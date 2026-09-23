@@ -938,6 +938,14 @@
   },
   {
     "kind": "update_notice",
+    "name": "updates: files changed",
+    "value": {
+      "type": "files_changed",
+      "workspace_id": "00000000-0000-0000-0000-000000000002"
+    }
+  },
+  {
+    "kind": "update_notice",
     "name": "updates: clone progress",
     "value": {
       "done": false,

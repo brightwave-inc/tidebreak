@@ -103,9 +103,15 @@ import { toast } from "sonner";
 import { useApp } from "@/AppContext";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeContentRevision } from "./useLiveContent";
+import { useDirtyCodeFilePaths } from "./CodeFileDraftStore";
+import { useUnsavedFilesGuard } from "./useUnsavedFilesGuard";
 import { useReleaseStartupWhenTurnLands } from "./workspace/useReleaseStartupWhenTurnLands";
 import { useCodeUiStore } from "./CodeUiStore";
-import { useCodeUpdatesStore, useSessionDigest } from "./CodeUpdatesStore";
+import {
+  useCodeUpdatesStore,
+  useSessionDigest,
+  useWorkspaceFileRevision,
+} from "./CodeUpdatesStore";
 import { useBrowserTabs } from "./workspace/useBrowserTabs";
 import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
 import { useEditorTabs } from "./workspace/useEditorTabs";
@@ -349,7 +355,13 @@ function CodeWorkspaceBody({
   const setViewedWorkspace = useCodeUpdatesStore(
     (state) => state.setViewedWorkspace,
   );
-  const contentRevision = useCodeContentRevision(session?.id ?? null, client);
+  // An agent's edit moves its session's revision; a save from the file
+  // viewer moves the workspace's. Views that read the worktree follow both.
+  const contentRevision =
+    useCodeContentRevision(session?.id ?? null, client) +
+    useWorkspaceFileRevision(workspaceId);
+  const unsavedFilesDialog = useUnsavedFilesGuard(workspaceId, layout);
+  const dirtyFilePaths = useDirtyCodeFilePaths(workspaceId);
   const prResource = useCodeWorkspacePr(
     client,
     workspaceId,
@@ -500,6 +512,11 @@ function CodeWorkspaceBody({
               workspaceId={workspaceId}
               path={panel.path}
               contentRevision={contentRevision}
+              readOnlyReason={
+                isRemoteWorktreePath(workspace?.worktree_path)
+                  ? "Sandbox files are read-only"
+                  : undefined
+              }
               revealLine={
                 fileReveal?.path === panel.path ? fileReveal.line : undefined
               }
@@ -602,6 +619,7 @@ function CodeWorkspaceBody({
         editorTabs={editorTabs}
         browserTitles={browserTitles}
         terminalLabels={terminalLabels}
+        dirtyFilePaths={dirtyFilePaths}
         editorActiveIndex={chrome.editors.activeIndex}
         conversationFocused={showingChat}
         conversations={conversationTabs}
@@ -837,6 +855,7 @@ function CodeWorkspaceBody({
         editorTabs={splitEditorTabs}
         browserTitles={browserTitles}
         terminalLabels={terminalLabels}
+        dirtyFilePaths={dirtyFilePaths}
         editorActiveIndex={chrome.splitEditors.activeIndex}
         conversationFocused={false}
         onSelectEditor={(index) =>
@@ -943,6 +962,7 @@ function CodeWorkspaceBody({
       onOpenInApp={canNewBrowser ? (url) => openBrowser(url) : undefined}
     >
       {dialogs}
+      {unsavedFilesDialog}
       <CodeQuickOpen
         client={client}
         workspaceId={workspaceId}
