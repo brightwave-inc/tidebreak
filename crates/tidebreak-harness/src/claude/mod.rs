@@ -20,6 +20,7 @@ use crate::{HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, SessionS
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 const COMMAND_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+const HELP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Claude Code adapter. Capabilities below are for the captured version
 /// 2.1.233: verified flags are `Supported`/`Unsupported`; anything not
@@ -37,6 +38,11 @@ impl ClaudeCodeAdapter {
 
 /// The ladder `claude --effort` takes on the pinned Claude Code version, plus
 /// the rung the engine's own picker appends above it.
+///
+/// The probe reads the choices from the running engine's own `--help`
+/// ([`effort_choices_from_help`]). This table is the fallback when it cannot,
+/// and a test holds it to the pinned release's captured help
+/// (`fixtures/claude-code/<pin>/help.txt`).
 ///
 /// `--effort` itself accepts `low, medium, high, xhigh, max`. `Ultra` is
 /// ultracode, which Claude Code presents as the top of the same slider even
@@ -186,7 +192,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "claude").await {
             Ok(capture) => {
-                let (version, authenticated, commands) = tokio::join!(
+                let (version, authenticated, commands, reported_efforts) = tokio::join!(
                     async {
                         match host.declared_version(HarnessKind::ClaudeCode) {
                             Some(declared) => Some(declared.to_owned()),
@@ -195,6 +201,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
                     },
                     observe_auth(&capture.binary, &capture.env),
                     observe_commands(&capture.binary, &capture.env),
+                    observe_effort_ladder(&capture.binary, &capture.env),
                 );
                 HarnessProbe {
                     found: true,
@@ -204,6 +211,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
                     stderr: capture.stderr,
                     env: capture.env,
                     commands,
+                    reported_efforts,
                 }
             }
             Err(err) => HarnessProbe {
@@ -214,6 +222,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
                 stderr: err.to_string(),
                 env: Vec::new(),
                 commands: Vec::new(),
+                reported_efforts: None,
             },
         }
     }
@@ -256,24 +265,32 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         // Off the captured 2.1 line — a declared newer engine, say — the
         // stream contract and permission flags are stable documented
         // surface, but the flags read off one pin's `--help` and fixtures
-        // drop back to Unknown (decision 31 rule 3).
+        // drop back to Unknown (decision 31 rule 3). An engine whose own
+        // `--help` listed its `--effort` choices at probe time keeps the
+        // control: that is the running engine speaking, not the pin.
         if crate::probe::off_pinned_line(probe.version.as_deref(), (2, 1)) {
-            caps.reasoning_levels = CapLevel::Unknown;
+            if reported_effort_ladder(probe).is_none() {
+                caps.reasoning_levels = CapLevel::Unknown;
+            }
             caps.image_input = CapLevel::Unknown;
         }
         caps
     }
 
     fn reasoning_efforts(&self, probe: &HarnessProbe) -> Vec<ReasoningEffort> {
-        // The ladder reads off the pinned Claude Code version `--help`. When
-        // `capabilities` degrades `reasoning_levels` for an engine off that
-        // line, session create refuses every level, so advertising the
-        // pinned ladder would offer a control that only fails. The empty
-        // ladder hides the picker instead.
-        if self.capabilities(probe).reasoning_levels == CapLevel::Supported {
-            EFFORT_LADDER.to_vec()
-        } else {
-            Vec::new()
+        // When `capabilities` degrades `reasoning_levels` for an engine off
+        // the pinned line, session create refuses every level, so advertising
+        // a ladder would offer a control that only fails. The empty ladder
+        // hides the picker instead.
+        if self.capabilities(probe).reasoning_levels != CapLevel::Supported {
+            return Vec::new();
+        }
+        // The engine's own `--effort` choices, with ultracode on top where
+        // `xhigh` carries it. The table is the fallback for a probe that
+        // could not read them.
+        match reported_effort_ladder(probe) {
+            Some(reported) => with_ultracode(reported),
+            None => EFFORT_LADDER.to_vec(),
         }
     }
 
@@ -323,6 +340,89 @@ fn auth_status_from_json(stdout: &[u8]) -> Option<bool> {
         .ok()?
         .get("loggedIn")?
         .as_bool()
+}
+
+/// The `--effort` choices the probed engine reported, when it listed any.
+fn reported_effort_ladder(probe: &HarnessProbe) -> Option<&[ReasoningEffort]> {
+    probe
+        .reported_efforts
+        .as_ref()
+        .map(|reported| reported.engine.as_slice())
+        .filter(|levels| !levels.is_empty())
+}
+
+/// A reported `--effort` ladder with ultracode's rung on top.
+///
+/// Ultracode is not an `--effort` choice: it runs at `xhigh` with the
+/// keyword in the prompt ([`session::ULTRACODE_KEYWORD`]), so it exists
+/// wherever `xhigh` does.
+fn with_ultracode(levels: &[ReasoningEffort]) -> Vec<ReasoningEffort> {
+    let mut ladder = levels.to_vec();
+    if ladder.contains(&ReasoningEffort::XHigh) {
+        ladder.push(ReasoningEffort::Ultra);
+    }
+    ladder
+}
+
+/// `claude --help` names the levels `--effort` takes. Reading them from the
+/// running engine keeps the picker right when a release adds or drops one,
+/// where a table only changes when someone notices.
+async fn observe_effort_ladder(
+    binary: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Option<crate::ReportedEfforts> {
+    let mut command = Command::new(binary);
+    command
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let neutral = tempfile::tempdir().ok()?;
+    command.current_dir(neutral.path());
+    command.env_clear();
+    for (key, value) in crate::filter_child_env(env.iter().cloned()) {
+        command.env(key, value);
+    }
+    let child = crate::spawn_process_tree(&mut command).ok()?;
+    let output = timeout(HELP_TIMEOUT, child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
+    let engine = effort_choices_from_help(&String::from_utf8_lossy(&output.stdout))?;
+    Some(crate::ReportedEfforts {
+        engine,
+        models: std::collections::BTreeMap::new(),
+    })
+}
+
+/// The levels `--effort` takes, from `claude --help`.
+///
+/// The help prints the flag and then, possibly wrapped onto following lines,
+/// its description ending in the choices: `(low, medium, high, xhigh, max)`.
+/// `None` when the help lists no such flag or names no level Tidebreak can
+/// send.
+pub(crate) fn effort_choices_from_help(help: &str) -> Option<Vec<ReasoningEffort>> {
+    let mut lines = help.lines().map(str::trim);
+    let first = lines.find(|line| line.starts_with("--effort "))?;
+    let mut entry = first.to_owned();
+    for line in lines {
+        if line.is_empty() || line.starts_with('-') {
+            break;
+        }
+        entry.push(' ');
+        entry.push_str(line);
+    }
+    let open = entry.rfind('(')?;
+    let close = open + entry[open..].find(')')?;
+    let mut levels: Vec<ReasoningEffort> = entry[open + 1..close]
+        .split(',')
+        .filter_map(|token| {
+            serde_json::from_value(serde_json::Value::String(token.trim().to_owned())).ok()
+        })
+        .collect();
+    levels.sort_unstable();
+    levels.dedup();
+    (!levels.is_empty()).then_some(levels)
 }
 
 /// `/context` is handled locally: its stream init frame lists the commands
@@ -397,15 +497,26 @@ pub(crate) mod tests {
     use std::path::PathBuf;
 
     fn fixture_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code/2.1.233")
+        version_dir("2.1.233")
+    }
+
+    fn version_dir(version: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/claude-code")
+            .join(version)
     }
 
     fn replay(name: &str) -> (Vec<HarnessEvent>, u64) {
-        let path = fixture_dir().join(format!("{name}.ndjson"));
+        replay_at("2.1.233", name)
+    }
+
+    fn replay_at(version: &str, name: &str) -> (Vec<HarnessEvent>, u64) {
+        let directory = version_dir(version);
+        let path = directory.join(format!("{name}.ndjson"));
         let input = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("missing fixture {}: {err}", path.display()));
         let out = ClaudeStreamParser::parse_ndjson(&input);
-        let expected_path = fixture_dir().join(format!("{name}.expected.json"));
+        let expected_path = directory.join(format!("{name}.expected.json"));
         if std::env::var_os("UPDATE_HARNESS_FIXTURES").is_some() {
             let rendered = format!("{}\n", serde_json::to_string_pretty(&out.events).unwrap());
             std::fs::write(&expected_path, rendered).unwrap();
@@ -425,6 +536,117 @@ pub(crate) mod tests {
             );
         }
         (out.events, out.unrecognized)
+    }
+
+    /// Captured on 2.1.259: a long foreground command, a background command,
+    /// a commit, and a pull request, with the task, heartbeat, commit, and
+    /// pull-request lines the engine sends around them.
+    ///
+    /// Each command already has its card, so those lines add nothing but the
+    /// one fact the transcript would otherwise miss: the background command's
+    /// real end. Its card settled at once with a placeholder, and the engine
+    /// reports the end only as a notification, after the turn's result.
+    #[test]
+    fn fixture_replay_background_tasks() {
+        let (events, unrecognized) = replay_at("2.1.259", "background-tasks");
+        assert_eq!(unrecognized, 0);
+        let started = events
+            .iter()
+            .filter(
+                |event| matches!(event, HarnessEvent::ToolStarted { name, .. } if name == "Bash"),
+            )
+            .count();
+        let completed = events
+            .iter()
+            .filter(|event| matches!(event, HarnessEvent::ToolCompleted { .. }))
+            .count();
+        assert_eq!((started, completed), (4, 4));
+        let notices: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::HarnessNotice { level, message } => Some((*level, message.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            notices,
+            [(
+                tidebreak_core::HarnessNoticeLevel::Info,
+                "Background command \"Run a short background job\" completed (exit code 0)"
+            )],
+            "only the background command's end is news; the long foreground \
+             command's own result reports its end"
+        );
+        let first_result = events
+            .iter()
+            .position(|event| matches!(event, HarnessEvent::TurnCompleted { .. }))
+            .unwrap();
+        let notice = events
+            .iter()
+            .position(|event| matches!(event, HarnessEvent::HarnessNotice { .. }))
+            .unwrap();
+        assert!(first_result < notice);
+    }
+
+    /// Captured on 2.1.259: the engine names its subagent tool `Agent`, and
+    /// the span every adapter emits for a subagent is `Task`, which the rail
+    /// and the transcript look for. The subagent's own calls attach to it.
+    ///
+    /// Run in the background, the call settles at once with a placeholder
+    /// while the subagent works on; its end arrives as a notification after
+    /// the turn's result, and reaches the transcript as a notice naming it.
+    /// Run in the foreground, its own tool result reports its end.
+    #[test]
+    fn fixture_replay_subagent_tasks() {
+        for (name, background) in [("subagent-task", true), ("subagent-task-foreground", false)] {
+            let (events, unrecognized) = replay_at("2.1.259", name);
+            assert_eq!(unrecognized, 0, "{name}");
+            let span = events
+                .iter()
+                .find_map(|event| match event {
+                    HarnessEvent::ToolStarted {
+                        call_id,
+                        name,
+                        detail,
+                        parent_call_id: None,
+                    } if name == "Task" => Some((call_id.clone(), detail.clone())),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name}: the Agent call opens a Task span"));
+            assert_eq!(
+                span.1,
+                tidebreak_core::ToolDetail::Other {
+                    summary: "Inspect the fixture (general-purpose)".into()
+                },
+                "{name}"
+            );
+            let children = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        HarnessEvent::ToolStarted { parent_call_id: Some(parent), .. }
+                            if *parent == span.0
+                    )
+                })
+                .count();
+            assert_eq!(
+                children, 2,
+                "{name}: both subagent commands attach to the span"
+            );
+            let notices: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    HarnessEvent::HarnessNotice { message, .. } => Some(message.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if background {
+                assert_eq!(notices, ["Subagent \"Inspect the fixture\" finished."]);
+            } else {
+                assert!(notices.is_empty(), "{name}: {notices:?}");
+            }
+        }
     }
 
     #[test]
@@ -574,6 +796,7 @@ pub(crate) mod tests {
             stderr: String::new(),
             env: vec![("HOME".into(), shell_home.path().as_os_str().to_owned())],
             commands: Vec::new(),
+            reported_efforts: None,
         };
         let models = ClaudeCodeAdapter::new().list_models(&probe).await;
 
@@ -932,6 +1155,7 @@ pub(crate) mod tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         });
         assert_eq!(caps.resume, CapLevel::Supported);
         assert_eq!(caps.streaming_deltas, CapLevel::Supported);
@@ -960,6 +1184,7 @@ pub(crate) mod tests {
                 name: "compact".into(),
                 description: String::new(),
             }],
+            reported_efforts: None,
         };
         assert_eq!(
             ClaudeCodeAdapter::new().capabilities(&probe).slash_commands,
@@ -977,6 +1202,7 @@ pub(crate) mod tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         });
         assert_eq!(caps.structured_approvals, CapLevel::Supported);
         assert_eq!(caps.allow_mode, CapLevel::Supported);
@@ -992,6 +1218,7 @@ pub(crate) mod tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         });
         assert_eq!(caps.reasoning_levels, CapLevel::Unknown);
         assert_eq!(caps.image_input, CapLevel::Unknown);
@@ -1026,6 +1253,7 @@ pub(crate) mod tests {
             stderr: String::new(),
             env: vec![("HOME".into(), home.path().as_os_str().to_owned())],
             commands: Vec::new(),
+            reported_efforts: None,
         };
         let adapter = ClaudeCodeAdapter::new();
 
@@ -1045,6 +1273,105 @@ pub(crate) mod tests {
         assert!(models
             .iter()
             .all(|model| model.reasoning_efforts.is_empty()));
+    }
+
+    /// The fallback ladder is exactly what the pinned release's own `--help`
+    /// offers, plus ultracode. A pin bump points this at the new release's
+    /// capture, so a release that adds or drops a level fails here first.
+    #[test]
+    fn the_fallback_effort_ladder_is_the_pinned_help() {
+        let pin = crate::pin_for(HarnessKind::ClaudeCode).unwrap();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/claude-code")
+            .join(pin.version)
+            .join("help.txt");
+        let help = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            panic!(
+                "capture `claude --help` from the {} pin into {}",
+                pin.version,
+                path.display()
+            )
+        });
+        let choices = effort_choices_from_help(&help).expect("the pinned help lists --effort");
+        assert_eq!(
+            choices,
+            [
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+            ]
+        );
+        assert_eq!(with_ultracode(&choices), EFFORT_LADDER);
+    }
+
+    #[test]
+    fn effort_choices_come_from_the_flag_entry_even_when_it_wraps() {
+        let help = "\
+  --debug-file <path>                   Write debug logs
+  --effort <level>                      Effort level for the current session
+                                        (low, medium, high,
+                                        xhigh, max, turbo)
+  --environment <environment_id>        Create a cloud session (ccpool_...).
+";
+        assert_eq!(
+            effort_choices_from_help(help),
+            Some(vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+            ]),
+            "an unknown level is left out and the next flag is not read"
+        );
+        assert_eq!(effort_choices_from_help("  --model <model>  Model\n"), None);
+        assert_eq!(
+            effort_choices_from_help("  --effort <level>  Effort level (turbo)\n"),
+            None
+        );
+    }
+
+    /// The running engine's own `--effort` choices win over the table, and
+    /// keep the control on a release the pin never captured.
+    #[test]
+    fn a_reported_effort_ladder_wins_over_the_table_on_any_release() {
+        let probe = |version: &str| HarnessProbe {
+            found: true,
+            binary_path: None,
+            version: Some(version.to_owned()),
+            authenticated: None,
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: Vec::new(),
+            reported_efforts: Some(crate::ReportedEfforts {
+                engine: vec![
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                ],
+                models: std::collections::BTreeMap::new(),
+            }),
+        };
+        let adapter = ClaudeCodeAdapter::new();
+        for version in ["2.1.259 (Claude Code)", "3.0.1 (Claude Code)"] {
+            let probe = probe(version);
+            assert_eq!(
+                adapter.capabilities(&probe).reasoning_levels,
+                CapLevel::Supported,
+                "{version}"
+            );
+            assert_eq!(
+                adapter.reasoning_efforts(&probe),
+                [
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High
+                ],
+                "no xhigh, so no ultracode either ({version})"
+            );
+        }
     }
 
     #[test]

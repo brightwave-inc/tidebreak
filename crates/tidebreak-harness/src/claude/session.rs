@@ -28,7 +28,7 @@ use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
     spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError,
     HarnessEvent, HarnessSession, ProcessTreeChild, ProjectConfig, SessionSpec, StreamBudget,
-    StreamLineBuffer, TurnInput, TurnOutcome,
+    StreamLine, StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::{PermissionMode, ReasoningEffort};
 
@@ -893,9 +893,13 @@ impl ClaudeSession {
             }
             let mut acknowledgement = None;
             for line in tick.lines {
-                if let Some(result) = Self::permission_mode_acknowledgement(&line, request_id) {
-                    acknowledgement.get_or_insert(result);
-                    continue;
+                if !line.cut {
+                    if let Some(result) =
+                        Self::permission_mode_acknowledgement(&line.text, request_id)
+                    {
+                        acknowledgement.get_or_insert(result);
+                        continue;
+                    }
                 }
                 emit_parsed(self, &mut reader.parser, &self.resume_ref, &line).await;
             }
@@ -1086,9 +1090,11 @@ impl ClaudeSession {
             }
             tokio::task::yield_now().await;
         }
-        if eof && !reader.lines.pending().is_empty() {
-            let pending = reader.lines.pending().into_owned();
-            saw_terminal |= emit_parsed(self, &mut reader.parser, &self.resume_ref, &pending).await;
+        if eof {
+            if let Some(pending) = reader.lines.pending_line() {
+                saw_terminal |=
+                    emit_parsed(self, &mut reader.parser, &self.resume_ref, &pending).await;
+            }
         }
         if eof {
             self.fail_pending_interrupt(
@@ -1361,12 +1367,19 @@ async fn emit_parsed(
     session: &ClaudeSession,
     parser: &mut ClaudeStreamParser,
     resume_ref: &Mutex<Option<String>>,
-    line: &str,
+    line: &StreamLine,
 ) -> bool {
-    session.observe_control_response(line);
+    // A cut line is not JSON and answers no control request. The parser
+    // recovers what event it was from the part that arrived.
+    let events = if line.cut {
+        parser.push_cut_line(&line.text)
+    } else {
+        session.observe_control_response(&line.text);
+        parser.push_line(&line.text)
+    };
     let mut terminal = false;
     let mut interrupted = false;
-    for event in parser.push_line(line) {
+    for event in events {
         if let HarnessEvent::SessionStarted {
             resume_ref: Some(resume),
             ..

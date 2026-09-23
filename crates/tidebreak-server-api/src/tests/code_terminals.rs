@@ -269,6 +269,7 @@ impl tidebreak_harness::HarnessAdapter for SignInEngine {
                 ("GITHUB_TOKEN".into(), "ghp_not_for_the_engine".into()),
             ],
             commands: Vec::new(),
+            reported_efforts: None,
         }
     }
 

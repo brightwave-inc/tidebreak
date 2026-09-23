@@ -226,6 +226,7 @@ mod tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         };
         let session = SessionId::new();
         assert!(HarnessIdentity::from_probe(session, HarnessKind::ClaudeCode, &probe).is_some());

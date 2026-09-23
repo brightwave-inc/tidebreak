@@ -14,6 +14,7 @@ use tidebreak_core::{
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
 };
 
+use crate::oversized::{CutLine, OVERSIZED_PAYLOAD};
 use crate::HarnessEvent;
 
 /// Longest unrecognized payload kept for the debug log.
@@ -130,6 +131,73 @@ impl GrokStreamParser {
         self.push_value(&value)
     }
 
+    /// Parse one line the line buffer cut at its cap.
+    ///
+    /// The part that arrived still says what the line was. A tool update
+    /// settles its call with [`OVERSIZED_PAYLOAD`] in place of the output the
+    /// cut took, so the tool card stops running.
+    pub fn push_cut_line(&mut self, line: &str) -> Vec<HarnessEvent> {
+        match CutLine::recover(line) {
+            Some(cut) => self.push_recovered(cut),
+            None => {
+                self.count_unrecognized("oversized-line", line);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Parse a line closed around a cut. See [`Self::push_cut_line`].
+    pub(crate) fn push_recovered(&mut self, cut: CutLine) -> Vec<HarnessEvent> {
+        let kind = cut
+            .value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        tracing::info!(
+            target: "tidebreak_harness::grok",
+            kind = kind.as_str(),
+            "engine line exceeded the parse budget; kept the part that arrived"
+        );
+        // Text a person reads keeps what arrived, bounded like any other.
+        let text_cut = matches!(kind.as_str(), "text" | "thought") && cut.cut_within(&["data"]);
+        let lost_output = kind == "tool_call_update"
+            && (cut.cut_within(&["content"]) || cut.cut_within(&["rawOutput"]));
+        if cut.cut_within(&["toolCallId"]) {
+            // Part of a call id names no call.
+            self.count_unrecognized(&format!("oversized-line/{kind}"), "call id cut");
+            return Vec::new();
+        }
+        let CutLine {
+            mut value,
+            cut_text,
+            ..
+        } = cut;
+        if text_cut {
+            value["data"] = Value::String(cut_text);
+        }
+        let call_id = value
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut events = self.push_value(&value);
+        if let (true, Some(call_id)) = (lost_output, call_id) {
+            for event in &mut events {
+                if let HarnessEvent::ToolCompleted {
+                    call_id: completed,
+                    preview,
+                    ..
+                } = event
+                {
+                    if *completed == call_id {
+                        OVERSIZED_PAYLOAD.clone_into(preview);
+                    }
+                }
+            }
+        }
+        events
+    }
+
     /// Parse a whole captured NDJSON document.
     pub fn parse_ndjson(input: &str) -> ParseOutcome {
         let mut parser = Self::new();
@@ -163,7 +231,15 @@ impl GrokStreamParser {
                 // does not belong in the normalized transcript.
                 Vec::new()
             }
-            "plan" | "max_turns_reached" => {
+            "plan" => {
+                // The whole todo list, restated after each `todo_write` call
+                // and once more, all done, when the turn ends (captured over
+                // ACP on 1.0.13). Each `todo_write` already has its own tool
+                // card showing the list, as Claude's `TodoWrite` does, so the
+                // restatement adds nothing to the transcript.
+                Vec::new()
+            }
+            "max_turns_reached" => {
                 self.count_unrecognized(kind, value);
                 Vec::new()
             }
@@ -711,6 +787,17 @@ fn tool_preview(value: &Value) -> String {
             return bound(&text, MAX_PREVIEW_CHARS);
         }
     }
+    // A `todo_write` result carries the plan as a checklist the engine also
+    // gives the model: `- [in_progress] 2: Draft the notes`. That reads as
+    // the plan; the raw output around it does not.
+    if let Some(plan) = value
+        .pointer("/rawOutput/TodosUpdated/summary_for_prompt")
+        .and_then(Value::as_str)
+        .map(str::trim_end)
+        .filter(|plan| !plan.is_empty())
+    {
+        return bound(plan, MAX_PREVIEW_CHARS);
+    }
     if let Some(output) = value.get("rawOutput") {
         let rendered = match output {
             Value::String(s) => s.clone(),
@@ -883,6 +970,37 @@ mod tests {
             Some(10_000)
         );
         assert_eq!(usage.map(|usage| usage.context_tokens), Some(12_100));
+    }
+
+    /// An image read over the 256 KiB print-mode budget used to fail to
+    /// parse and vanish, which left its tool card running.
+    #[test]
+    fn a_tool_update_over_the_line_budget_settles_its_call() {
+        let mut parser = GrokStreamParser::new();
+        let started = parser.push_line(
+            r#"{"type":"tool_call","toolCallId":"call-read","toolName":"read_file","rawInput":{"target_file":"shot.png"}}"#,
+        );
+        assert_eq!(started.len(), 1);
+        let line = format!(
+            r#"{{"type":"tool_call_update","toolCallId":"call-read","status":"completed","content":[{{"type":"content","content":{{"type":"image","mimeType":"image/png","data":"{}"}}}}],"rawOutput":{{}}}}"#,
+            "A".repeat(crate::budget::DEFAULT_MAX_PARTIAL_LINE)
+        );
+        let cut = crate::oversized::through_the_line_buffer(
+            &line,
+            crate::budget::DEFAULT_MAX_PARTIAL_LINE,
+        );
+        assert!(cut.cut);
+        assert_eq!(
+            parser.push_cut_line(&cut.text),
+            vec![HarnessEvent::ToolCompleted {
+                call_id: "call-read".into(),
+                outcome: ToolOutcome::Succeeded,
+                preview: OVERSIZED_PAYLOAD.into(),
+                detail: None,
+                parent_call_id: None,
+            }]
+        );
+        assert_eq!(parser.unrecognized(), 0);
     }
 
     #[test]

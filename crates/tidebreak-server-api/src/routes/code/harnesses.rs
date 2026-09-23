@@ -395,6 +395,7 @@ mod tests {
             stderr: String::new(),
             env,
             commands: Vec::new(),
+            reported_efforts: None,
         }
     }
 

@@ -28,6 +28,10 @@ use crate::{HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, SessionS
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Longest line read while waiting for the ACP `initialize` answer. It lists
+/// models and commands, not history, so this is generous.
+const INITIALIZE_MAX_LINE: usize = 1_024 * 1_024;
+
 /// The original `grok --reasoning-effort` ladder captured on 1.0.4.
 pub(crate) const EFFORT_LADDER_1_0_4: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
@@ -111,14 +115,144 @@ fn published_grok_model_efforts(model_id: &str) -> Option<&'static [ReasoningEff
 fn with_model_reasoning_efforts(
     models: Vec<crate::ListedHarnessModel>,
     version: Option<&str>,
+    reported: Option<&crate::ReportedEfforts>,
 ) -> Vec<crate::ListedHarnessModel> {
     models
         .into_iter()
         .map(|mut model| {
-            model.reasoning_efforts = effective_effort_ladder(version, Some(&model.id));
+            // The engine's own statement for this model wins; the tables are
+            // the fallback for a model or a version it says nothing about.
+            model.reasoning_efforts = reported
+                .and_then(|reported| reported.models.get(&model.id))
+                .cloned()
+                .unwrap_or_else(|| effective_effort_ladder(version, Some(&model.id)));
             model
         })
         .collect()
+}
+
+/// Each model's effort ladder, from the engine's ACP `initialize` result.
+///
+/// Grok lists its models under `_meta.modelState.availableModels`, each with
+/// `_meta.reasoningEfforts` naming the levels it takes (captured on 1.0.13).
+/// A level Tidebreak cannot send is left out. A model that says it takes no
+/// effort gets an empty ladder; one that states no ladder at all, as a row
+/// from a relay's model list can, is left to the tables.
+pub(crate) fn model_efforts_from_initialize(
+    result: &serde_json::Value,
+) -> std::collections::BTreeMap<String, Vec<ReasoningEffort>> {
+    let mut models = std::collections::BTreeMap::new();
+    let listed = result
+        .pointer("/_meta/modelState/availableModels")
+        .and_then(serde_json::Value::as_array);
+    for model in listed.into_iter().flatten() {
+        let Some(id) = model
+            .get("modelId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+        else {
+            continue;
+        };
+        let meta = model.get("_meta");
+        let takes_effort = meta
+            .and_then(|meta| meta.get("supportsReasoningEffort"))
+            .and_then(serde_json::Value::as_bool);
+        let stated = meta
+            .and_then(|meta| meta.get("reasoningEfforts"))
+            .and_then(serde_json::Value::as_array);
+        let mut ladder: Vec<ReasoningEffort> = match (takes_effort, stated) {
+            (Some(false), _) => Vec::new(),
+            (_, Some(levels)) => levels
+                .iter()
+                .filter_map(|level| level.get("value").cloned())
+                .filter_map(|value| serde_json::from_value(value).ok())
+                .collect(),
+            (_, None) => continue,
+        };
+        ladder.sort_unstable();
+        ladder.dedup();
+        models.insert(id.to_owned(), ladder);
+    }
+    models
+}
+
+/// Ask the engine for each model's effort ladder.
+///
+/// Only versions whose ACP channel is captured are asked. The child answers
+/// `initialize` without a session or a sign-in, and is stopped as soon as it
+/// has. `None` when the version has no ACP channel or the answer names no
+/// model, so the tables apply.
+async fn observe_model_efforts(
+    binary: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+    version: Option<&str>,
+) -> Option<crate::ReportedEfforts> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    if !version.is_some_and(session::supports_acp_version) {
+        return None;
+    }
+    let mut command = Command::new(binary);
+    command
+        .args(["agent", "--no-leader", "stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // The probe belongs to no repository, so no project config is found.
+    let neutral = tempfile::tempdir().ok()?;
+    command.current_dir(neutral.path());
+    command.env_clear();
+    for (key, value) in crate::filter_child_env(env.iter().cloned()) {
+        command.env(key, value);
+    }
+    command.env("GROK_DISABLE_AUTOUPDATER", "1");
+    let mut child = crate::spawn_process_tree(&mut command).ok()?;
+    let (Some(mut stdin), Some(mut stdout)) = (child.take_stdin(), child.take_stdout()) else {
+        let _ = child.terminate().await;
+        return None;
+    };
+    let answer = timeout(AUTH_TIMEOUT, async {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": 1, "clientCapabilities": {}},
+        });
+        stdin
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .ok()?;
+        stdin.flush().await.ok()?;
+        let budget = crate::StreamBudget {
+            max_partial_line: INITIALIZE_MAX_LINE,
+            ..crate::StreamBudget::default()
+        };
+        let mut lines = crate::StreamLineBuffer::new();
+        let mut chunk = vec![0_u8; budget.chunk_size];
+        loop {
+            let read = stdout.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            for line in lines.push(&chunk[..read], budget).lines {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line.text) else {
+                    continue;
+                };
+                if value.get("id") == Some(&serde_json::json!(1)) && value.get("method").is_none() {
+                    return value.get("result").cloned();
+                }
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    let _ = child.terminate().await;
+    let models = model_efforts_from_initialize(&answer?);
+    (!models.is_empty()).then(|| crate::ReportedEfforts {
+        engine: Vec::new(),
+        models,
+    })
 }
 
 /// Grok CLI adapter. Capabilities below are for the captured version
@@ -148,7 +282,10 @@ impl HarnessAdapter for GrokAdapter {
                     Some(declared) => Some(declared.to_owned()),
                     None => observe_version(&capture.binary, &capture.env).await.ok(),
                 };
-                let authenticated = observe_login(&capture.binary, &capture.env).await;
+                let (authenticated, reported_efforts) = tokio::join!(
+                    observe_login(&capture.binary, &capture.env),
+                    observe_model_efforts(&capture.binary, &capture.env, version.as_deref()),
+                );
                 HarnessProbe {
                     found: true,
                     binary_path: Some(capture.binary),
@@ -157,6 +294,7 @@ impl HarnessAdapter for GrokAdapter {
                     stderr: capture.stderr,
                     env: capture.env,
                     commands: Vec::new(),
+                    reported_efforts,
                 }
             }
             Err(err) => HarnessProbe {
@@ -167,6 +305,7 @@ impl HarnessAdapter for GrokAdapter {
                 stderr: err.to_string(),
                 env: Vec::new(),
                 commands: Vec::new(),
+                reported_efforts: None,
             },
         }
     }
@@ -247,6 +386,7 @@ impl HarnessAdapter for GrokAdapter {
                 crate::list_cli_models(binary, &["models"], &probe.env).await,
             ),
             probe.version.as_deref(),
+            probe.reported_efforts.as_ref(),
         )
     }
 
@@ -619,6 +759,114 @@ mod tests {
         );
     }
 
+    /// The `initialize` answer the pinned release gave in its captured ACP
+    /// session.
+    fn pinned_initialize() -> serde_json::Value {
+        let pin = crate::pin_for(HarnessKind::Grok).unwrap();
+        let path = fixture_dir(pin.version).join("acp-plan.ndjson");
+        let capture = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            panic!(
+                "capture an ACP session with its initialize answer from the {} pin into {}",
+                pin.version,
+                path.display()
+            )
+        });
+        capture
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|frame| frame["direction"] == "server" && frame["value"]["id"] == 1)
+            .map(|frame| frame["value"]["result"].clone())
+            .expect("the capture holds the initialize answer")
+    }
+
+    /// Each model states its own ladder, and grok-4.5 stops at `high`. The
+    /// listing takes the engine's word; the table would have offered
+    /// `xhigh` for both.
+    #[test]
+    fn the_pinned_engine_states_each_models_ladder() {
+        let reported = model_efforts_from_initialize(&pinned_initialize());
+        assert_eq!(
+            reported.get("grok-4.6").map(Vec::as_slice),
+            Some(GROK_MODEL_EFFORTS)
+        );
+        assert_eq!(
+            reported.get("grok-4.5").map(Vec::as_slice),
+            Some(
+                [
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High
+                ]
+                .as_slice()
+            )
+        );
+        let listed = |id: &str| crate::ListedHarnessModel {
+            id: id.into(),
+            label: id.into(),
+            default: false,
+            reasoning_efforts: Vec::new(),
+            fast_mode: false,
+        };
+        let stamped = with_model_reasoning_efforts(
+            vec![listed("grok-4.5"), listed("glm-5.3")],
+            Some("grok 1.0.13 (5e9a58528b76)"),
+            Some(&crate::ReportedEfforts {
+                engine: Vec::new(),
+                models: reported,
+            }),
+        );
+        assert!(!stamped[0]
+            .reasoning_efforts
+            .contains(&ReasoningEffort::XHigh));
+        assert_eq!(
+            stamped[1].reasoning_efforts,
+            effective_effort_ladder(Some("grok 1.0.13 (5e9a58528b76)"), Some("glm-5.3")),
+            "a model the engine does not list keeps the table"
+        );
+    }
+
+    /// The tables are the fallback for a probe that could not ask. For the
+    /// pinned release they must still hold every level its models take: the
+    /// `--reasoning-effort` vocabulary for any model, and the published Grok
+    /// ladder for Grok models. A pin bump points this at the new release's
+    /// capture.
+    #[test]
+    fn the_fallback_tables_cover_what_the_pinned_engine_reports() {
+        let pin = crate::pin_for(HarnessKind::Grok).unwrap();
+        let vocabulary = effort_ladder_for_version(Some(pin.version));
+        for (model, ladder) in model_efforts_from_initialize(&pinned_initialize()) {
+            assert!(!ladder.is_empty(), "{model}");
+            for level in &ladder {
+                assert!(vocabulary.contains(level), "{model} takes {level:?}");
+                if model.starts_with("grok-") {
+                    assert!(
+                        GROK_MODEL_EFFORTS.contains(level),
+                        "{model} takes {level:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_model_row_with_no_stated_ladder_is_left_to_the_tables() {
+        let result = serde_json::json!({"_meta": {"modelState": {"availableModels": [
+            {"modelId": "relay-row", "_meta": {"agentType": "grok-build-plan"}},
+            {"modelId": "no-effort", "_meta": {"supportsReasoningEffort": false}},
+            {"modelId": "odd-levels", "_meta": {"reasoningEfforts": [
+                {"value": "minimal"}, {"value": "high"}, {"value": "low"}
+            ]}}
+        ]}}});
+        let reported = model_efforts_from_initialize(&result);
+        assert!(!reported.contains_key("relay-row"));
+        assert_eq!(reported.get("no-effort"), Some(&Vec::new()));
+        assert_eq!(
+            reported.get("odd-levels"),
+            Some(&vec![ReasoningEffort::Low, ReasoningEffort::High]),
+            "a level Tidebreak cannot send is left out, and the rest ascend"
+        );
+    }
+
     #[test]
     fn grok_models_do_not_advertise_max() {
         let current = Some("grok 1.0.40 (eb1a2256660d) [stable]");
@@ -687,6 +935,7 @@ mod tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         });
         assert_eq!(caps.resume, CapLevel::Supported);
         assert_eq!(caps.streaming_deltas, CapLevel::Supported);
@@ -712,6 +961,7 @@ mod tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         });
         assert_eq!(caps.structured_approvals, CapLevel::Supported);
         assert_eq!(caps.auto_mode, CapLevel::Supported);
@@ -728,6 +978,7 @@ mod tests {
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         });
         assert_eq!(caps.auto_mode, CapLevel::Unknown);
         // Off the captured version line, unverified approval and plan behavior

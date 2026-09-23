@@ -530,7 +530,14 @@ async fn acp_revalidates_the_tool_after_an_update_while_approval_waits() {
             "name" => update["_meta"] = json!({"x.ai/tool":{"name":"different_tool"}}),
             _ => unreachable!(),
         }
-        session.handle_acp_frame(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":update}}), &mut GrokStreamParser::new(), false).await.unwrap();
+        let frame = Frame {
+            value: json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":update}}),
+            cut: None,
+        };
+        session
+            .handle_acp_frame(frame, &mut GrokStreamParser::new(), false)
+            .await
+            .unwrap();
         assert!(
             matches!(
                 session
@@ -592,7 +599,10 @@ async fn acp_does_not_echo_malformed_rpc_ids_or_create_approval_waiters() {
         } else {
             request.as_object_mut().unwrap().remove("id");
         }
-        session.request_acp_permission(request).await.unwrap();
+        session
+            .request_acp_permission(request, false)
+            .await
+            .unwrap();
     }
     {
         let state = session.acp.lock().await;
@@ -954,4 +964,96 @@ fn acp_session_requests_carry_the_apps_bridge_as_an_http_server() {
     );
     assert_eq!(servers[0]["headers"][0]["name"], "Authorization");
     assert_eq!(servers[0]["headers"][0]["value"], "Bearer apps-token");
+}
+
+/// Captured on 1.0.13: each `todo_write` arrives as its own tool call, and
+/// a `plan` update restates the whole list after it, plus once more at the
+/// turn's end. The cards carry the plan as the engine's own checklist, and
+/// the restatements are recognized without adding anything.
+#[test]
+fn a_captured_plan_shows_through_its_todo_write_cards() {
+    let input = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/grok/1.0.13/acp-plan.ndjson"),
+    )
+    .unwrap();
+    let (events, unrecognized) = replay_acp_capture(&input);
+    assert_eq!(unrecognized, 0);
+    let started: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            HarnessEvent::ToolStarted { call_id, name, .. } => {
+                Some((call_id.as_str(), name.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        started,
+        [("call_todo_1", "todo_write"), ("call_todo_2", "todo_write")]
+    );
+    let last_plan = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            HarnessEvent::ToolCompleted { preview, .. } => Some(preview.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        last_plan,
+        "- [completed] 1: Survey the workspace\n\
+         - [in_progress] 2: Draft the fixture notes\n\
+         - [cancelled] 3: Publish the notes"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(HarnessEvent::TurnCompleted { .. })
+    ));
+}
+
+/// A tool update over the frame limit used to fail the whole turn. It now
+/// settles the call it reports on, with the marker in place of the image.
+#[test]
+fn an_update_over_the_frame_limit_settles_its_tool_card() {
+    let mut parser = GrokStreamParser::new();
+    let started = map_update(&json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call-read",
+        "title": "read_file",
+        "rawInput": {"target_file": "shot.png"},
+        "_meta": {"x.ai/tool": {"name": "read_file", "kind": "read"}}
+    }))
+    .unwrap();
+    assert_eq!(parser.push_line(&started.to_string()).len(), 1);
+    // Written out rather than built with `json!`, which sorts keys: the
+    // engine's own order is what decides what survives the cut.
+    let frame = format!(
+        r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"fixture-session","update":{{"sessionUpdate":"tool_call_update","toolCallId":"call-read","status":"completed","content":[{{"type":"content","content":{{"type":"image","mimeType":"image/png","data":"{}"}}}}]}}}}}}"#,
+        "A".repeat(8 * 1_024)
+    );
+    let line = crate::oversized::through_the_line_buffer(&frame, 4 * 1_024);
+    let frame = read_frame(&line).expect("a cut frame is kept");
+    let cut = frame.cut.expect("the frame says it was cut");
+    let mapped = map_update(&frame.value["params"]["update"]).unwrap();
+    let events = parser.push_recovered(update_cut(cut, mapped).expect("cut inside the update"));
+    assert_eq!(
+        events,
+        vec![HarnessEvent::ToolCompleted {
+            call_id: "call-read".into(),
+            outcome: tidebreak_core::ToolOutcome::Succeeded,
+            preview: crate::oversized::OVERSIZED_PAYLOAD.into(),
+            detail: None,
+            parent_call_id: None,
+        }]
+    );
+    assert_eq!(parser.unrecognized(), 0);
+}
+
+#[test]
+fn a_cut_frame_that_is_not_json_still_fails_the_read() {
+    let line = StreamLine {
+        text: "garbage".into(),
+        cut: true,
+    };
+    assert!(read_frame(&line).is_err());
 }

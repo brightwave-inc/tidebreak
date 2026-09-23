@@ -4,7 +4,7 @@ date = "2026-09-08"
 observed_version_command = "grok --version"
 observed_version = "grok 1.0.13 (5e9a58528b76) [stable]"
 integration_path = "print-streaming-json-and-acp-stdio"
-scenarios = ["image-read", "acp-approve", "acp-deny", "acp-cancel", "acp-resume"]
+scenarios = ["image-read", "acp-approve", "acp-deny", "acp-cancel", "acp-resume", "acp-plan"]
 
 [capture]
 notes = """
@@ -59,3 +59,32 @@ command = "grok login --help"
 captured = "2026-09-23"
 binary = "The pinned @xai-official/grok@1.0.13 install under the Tidebreak data directory"
 result = "`grok login` signs in to Grok; --oauth and --device-auth choose the flow."
+
+[acp_plan]
+file = "acp-plan.ndjson"
+captured = "2026-09-23"
+binary = "The pinned wrapper run with a fresh GROK_HOME, so it unpacked and ran its own 1.0.13 payload; `grok --version` printed `grok 1.0.13 (5e9a58528b76)`"
+command = "grok agent --no-leader --model grok-4.6 --reasoning-effort high stdio"
+provider = "Scripted localhost Responses provider reached through GROK_XAI_API_BASE_URL, with XAI_API_KEY set to a placeholder. Non-loopback network was denied. No live model ran."
+notes = """
+The scripted model calls todo_write twice: three todos, then a merge that
+marks them completed, in_progress, and cancelled. Each call arrives as its own
+tool_call and tool_call_update frames, and a `plan` session update restates
+the whole list after each. A third `plan` update, sent just before the prompt
+answer, marks every entry completed. Plan entries carry no ids, priority is
+always medium, and a cancelled todo becomes status completed with
+_meta.cancelled. The completed todo_write carries the list as
+rawOutput.TodosUpdated.summary_for_prompt.
+
+The initialize answer is kept whole. Its _meta.modelState.availableModels
+lists each model with _meta.reasoningEfforts: grok-4.6 takes low, medium,
+high, and xhigh; grok-4.5 takes low, medium, and high. With the relay's
+GROK_MODELS_BASE_URL instead, the list comes only from that endpoint's
+/models rows, which state no ladder.
+"""
+redactions = """
+The workspace path became /workspace; the session id fixture-session,
+including eventId values; the prompt id fixture-request-1; the host name
+fixture-host; agentId fixture-agent; agentInstanceId fixture-agent-instance.
+No key or token appeared. Frame order and every other value are as emitted.
+"""

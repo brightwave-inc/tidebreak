@@ -29,13 +29,14 @@ pub mod codex;
 pub mod grok;
 pub mod launch;
 pub mod opencode;
+pub mod oversized;
 pub mod pin;
 pub mod probe;
 pub mod project_config;
 mod text;
 pub mod wiring;
 
-pub use budget::{BudgetTick, StreamBudget, StreamLineBuffer};
+pub use budget::{BudgetTick, StreamBudget, StreamLine, StreamLineBuffer};
 pub use child::{
     current_process_identity, spawn_process_tree, spawned_process_identity,
     terminate_recorded_process, BoundedOutput, BoundedProcessOutput, ChildPid, OutputBudget,
@@ -1268,6 +1269,25 @@ pub struct HarnessProbe {
     pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// Engine-owned slash commands, empty when the adapter has no listing.
     pub commands: Vec<HarnessCommand>,
+    /// Effort ladders the engine itself reported while it was probed.
+    ///
+    /// `None` when this engine or version reports none, or the report could
+    /// not be read. The adapter then falls back to the table it keeps for its
+    /// pinned version.
+    pub reported_efforts: Option<ReportedEfforts>,
+}
+
+/// Effort ladders an engine reported about itself at probe time.
+///
+/// Hand-kept tables drift whenever the engine moves on without them, so an
+/// adapter reads the ladder from the engine wherever the engine states one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReportedEfforts {
+    /// Every level the engine's effort control accepts, ascending. Empty when
+    /// the engine states ladders per model only.
+    pub engine: Vec<ReasoningEffort>,
+    /// Model id → the levels that model takes, ascending.
+    pub models: BTreeMap<String, Vec<ReasoningEffort>>,
 }
 
 /// Adapter failure.
@@ -1625,6 +1645,7 @@ mod tests {
                 stderr: String::new(),
                 env: Vec::new(),
                 commands: Vec::new(),
+                reported_efforts: None,
             };
             if adapter.capabilities(&probe).image_input != CapLevel::Supported {
                 continue;
@@ -1676,6 +1697,72 @@ mod tests {
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// Every stream captured from a pinned release maps completely.
+    ///
+    /// An event kind the adapter does not map is counted as unrecognized and
+    /// kept out of the transcript. Field sessions showed real kinds counted
+    /// that way for weeks. This fails when a capture from the pinned release
+    /// shows a kind the adapter drops, and when a pin moves to a release
+    /// nobody has captured.
+    #[test]
+    fn every_pinned_release_replays_its_captures_without_unrecognized_events() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        for pin in pin::PINS {
+            let engine = match pin.kind {
+                HarnessKind::ClaudeCode => "claude-code",
+                HarnessKind::Codex => "codex",
+                HarnessKind::Grok => "grok",
+                // The 1.18.27 pin has `auth list` captures only; no turn
+                // stream was recorded at it (see fixtures/README.md).
+                HarnessKind::Opencode | HarnessKind::Internal => continue,
+            };
+            let directory = root.join(engine).join(pin.version);
+            let mut replayed = 0;
+            for entry in read_dir_sorted(&directory) {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                // The managed-human captures record MCP traffic between the
+                // engine and Tidebreak's helper, not the engine's stream.
+                if !name.ends_with(".ndjson") || name.starts_with("managed-human-mcp") {
+                    continue;
+                }
+                let input = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|err| panic!("unreadable fixture {}: {err}", path.display()));
+                let unrecognized = if engine == "grok" && name.starts_with("acp-") {
+                    grok::session::replay_acp_capture(&input).1
+                } else {
+                    match engine {
+                        "claude-code" => {
+                            claude::parse::ClaudeStreamParser::parse_ndjson(&input).unrecognized
+                        }
+                        "codex" => {
+                            codex::parse::CodexStreamParser::parse_ndjson(&input).unrecognized
+                        }
+                        _ => grok::parse::GrokStreamParser::parse_ndjson(&input).unrecognized,
+                    }
+                };
+                assert_eq!(
+                    unrecognized,
+                    0,
+                    "{} leaves {unrecognized} event(s) unrecognized; map or explicitly ignore \
+                     each kind the pinned release sends",
+                    path.display()
+                );
+                replayed += 1;
+            }
+            assert!(
+                replayed > 0,
+                "{} is pinned to {} but no stream was captured from it; record one into {}",
+                pin.kind,
+                pin.version,
+                directory.display()
+            );
         }
     }
 

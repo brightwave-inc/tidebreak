@@ -1,0 +1,121 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "claude_code",
+    "harness_version": "2.1.259",
+    "resume_ref": "24ee09e4-335e-4492-a2f9-9118ebe2de5b"
+  },
+  {
+    "type": "model_reported",
+    "model": "claude-opus-5[1m]"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "Run the scripted ste"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "ps in order and keep"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " each command short."
+  },
+  {
+    "type": "model_reported",
+    "model": "claude-opus-5"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "I'll hand the i"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "nspection to a "
+  },
+  {
+    "type": "assistant_delta",
+    "text": "subagent first."
+  },
+  {
+    "type": "assistant_message",
+    "text": "I'll hand the inspection to a subagent first."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_01zZfLUgAyQwI1f3LBEaq8sk",
+    "name": "Task",
+    "detail": {
+      "kind": "other",
+      "summary": "Inspect the fixture (general-purpose)"
+    }
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_01eFSfTuiS8zSEg1uzHAcXFs",
+    "name": "Bash",
+    "detail": {
+      "kind": "command",
+      "cmd": "sleep 31 && echo child-one",
+      "cwd": ""
+    },
+    "parent_call_id": "toolu_01zZfLUgAyQwI1f3LBEaq8sk"
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_01eFSfTuiS8zSEg1uzHAcXFs",
+    "outcome": "succeeded",
+    "preview": "child-one",
+    "parent_call_id": "toolu_01zZfLUgAyQwI1f3LBEaq8sk"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_01M8Dg1twuScLkxB9s1XcMpf",
+    "name": "Bash",
+    "detail": {
+      "kind": "command",
+      "cmd": "echo child-two",
+      "cwd": ""
+    },
+    "parent_call_id": "toolu_01zZfLUgAyQwI1f3LBEaq8sk"
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_01M8Dg1twuScLkxB9s1XcMpf",
+    "outcome": "succeeded",
+    "preview": "child-two",
+    "parent_call_id": "toolu_01zZfLUgAyQwI1f3LBEaq8sk"
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_01zZfLUgAyQwI1f3LBEaq8sk",
+    "outcome": "succeeded",
+    "preview": "The fixture repository is in place; both inspection commands ran and printed their markers.\nagentId: aa820e0e1a7eb1254 (use SendMessage with to: 'aa820e0e1a7eb1254', summary: '<5-10 word recap>' to continue this agent)\n<usage>subagent_tokens: 36\ntool_uses: 2\nduration_ms: 33327</usage>"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "All scripted steps are done"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ": the subagent ran its two "
+  },
+  {
+    "type": "assistant_delta",
+    "text": "commands and reported back."
+  },
+  {
+    "type": "assistant_message",
+    "text": "All scripted steps are done: the subagent ran its two commands and reported back."
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 19,
+      "output_tokens": 109,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "context_tokens": 19
+    }
+  }
+]

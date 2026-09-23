@@ -1,7 +1,14 @@
 version = "0.153.4"
-protocol = "stdio MCP over the pinned Codex CLI"
+protocol = "stdio MCP over the pinned Codex CLI; app-server JSON-RPC for the item and resume scenarios"
 captured = "2026-09-14"
-scenarios = ["managed-human-mcp"]
+scenarios = [
+  "managed-human-mcp",
+  "web-search-image-view",
+  "compaction",
+  "deprecation-notice",
+  "resume-exclude-turns",
+  "deprecation-notice-config",
+]
 
 [managed_human_mcp]
 provider = "Scripted localhost Responses provider; no paid inference"
@@ -19,3 +26,42 @@ captured = "2026-09-23"
 binary = "@openai/codex@0.153.4 from npm, run outside the Tidebreak data directory"
 result = "`codex login` starts the ChatGPT browser sign-in; `codex login status` is the probe's observation."
 redactions = "Trailing spaces on blank help lines were trimmed."
+
+[app_server]
+captured = "2026-09-23"
+binary = "@openai/codex@0.153.4 from npm, installed into a throwaway directory; `codex --version` printed `codex-cli 0.153.4`"
+command = "codex app-server --stdio -c 'model_providers.fixture={name=\"fixture\",base_url=\"http://127.0.0.1:<port>/v1\",wire_api=\"responses\",env_key=\"FIXTURE_API_KEY\"}' -c model_provider=\"fixture\" -c model=\"gpt-5.5\""
+provider = "Scripted localhost Responses provider; no paid inference. A fresh CODEX_HOME per scenario, no copied auth, and a dummy FIXTURE_API_KEY."
+requests = "Tidebreak's own handshake: initialize with experimentalApi false, initialized, thread/start {cwd, approvalPolicy never, sandbox danger-full-access}, turn/start {threadId, input}."
+framing = "One message per line, {\"dir\":\"out\",\"msg\":…} for client to engine and {\"dir\":\"in\",\"msg\":…} for engine to client, in the order written and read. Inbound lines are the engine's stdout bytes."
+notes = """
+web-search-image-view: the provider returns a completed web_search_call and a
+view_image function call for a 16-by-16 PNG in the repository, then a final
+answer. item/started for webSearch carries an empty query and action other;
+the query arrives on item/completed. imageView's started and completed items
+arrive back to back with the same payload and no status.
+
+compaction: one turn, then thread/compact/start. Codex answers {} and runs a
+compaction turn with item/started and item/completed for contextCompaction,
+then a warning about long threads. 0.153.4 never sends thread/compacted: its
+app-server drops the legacy event in favor of the item. Only the local
+compaction path ran.
+
+deprecation-notice: a fresh child resumes the web-search thread with
+thread/resume {threadId}. Every thread 0.153.4 starts for a client without
+experimentalApi is paginated, and a resume that does not pass excludeTurns
+draws "Full-history hydration is deprecated for paginated threads" before the
+resume answer, along with the whole history on the answer's line.
+resume-exclude-turns is the same resume with excludeTurns true: accepted
+without experimentalApi, no notice, and turns []. Tidebreak now sends that.
+
+deprecation-notice-config: a legacy config key (-c
+features.web_search_request=true) draws a notice right after thread/started.
+"""
+redactions = """
+The repository path became /workspace and CODEX_HOME /tmp/redacted-codex-home.
+remoteControl/status/changed serverName, the machine's host name, became
+redacted-host. No key or token appeared. Thread, turn, and item ids,
+installationId, timestamps, and the user agent are kept as emitted.
+"""
+limits = "Model-side content, usage, and item ids that come from the provider are scripted. gpt-5.5 was used because its catalog entry exposes view_image as a direct function tool; the code-mode-only models were not captured."

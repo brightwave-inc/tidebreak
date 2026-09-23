@@ -13,14 +13,33 @@ a capture.
 
 | Engine | Install pin | Checked-in coverage |
 | --- | --- | --- |
-| Claude Code | 2.1.259 | 2.1.233 print/stream-json baseline and MCP prompt-tool approvals. The manifest also records process observations on 2.1.238 and steering observations on 2.1.239. 2.1.259 adds managed human MCP calls and a per-server timeout check. No complete 2.1.259 capture. |
-| Codex | 0.153.4 | 0.147.0 app-server baseline; 0.153.0 MCP tool-approval elicitation. 0.153.4 adds managed human MCP discovery and a 130-second human wait. No complete 0.153.4 capture. |
+| Claude Code | 2.1.259 | 2.1.233 print/stream-json baseline and MCP prompt-tool approvals. The manifest also records process observations on 2.1.238 and steering observations on 2.1.239. 2.1.259 adds managed human MCP calls, a per-server timeout check, the task, heartbeat, commit, and pull-request lines around long, background, and git commands (`background-tasks`), and its `--help`. No complete 2.1.259 capture. |
+| Codex | 0.153.4 | 0.147.0 app-server baseline; 0.153.0 MCP tool-approval elicitation. 0.153.4 adds managed human MCP discovery, a 130-second human wait, web search and image view items, compaction, and resume and config deprecation notices. No complete 0.153.4 capture. |
 | opencode | 1.18.27 | 1.18.18 HTTP/SSE baseline. 1.18.27 adds `auth list` output only. No complete 1.18.27 protocol capture. |
-| Grok | 1.0.13 | 1.0.4 print-stream baseline, 1.0.5 subagent projection, and 1.0.13 ACP approvals/cancel/resume plus tool-image transport. The 1.0.13 capture uses a scripted local provider, not a live model. |
+| Grok | 1.0.13 | 1.0.4 print-stream baseline, 1.0.5 subagent projection, and 1.0.13 ACP approvals/cancel/resume, tool-image transport, and `todo_write` plan updates with the `initialize` model ladders. The 1.0.13 captures use a scripted local provider, not a live model. |
 
 Keep this table and the pin comments accurate when changing an install version.
 Capture a changed protocol at its observed version. Do not copy an older stream
 into a new version directory or describe a partial capture as complete coverage.
+
+Every `.ndjson` stream in a pinned version's directory must replay with no
+unrecognized event, and each pinned Claude Code, Codex, and Grok version needs at
+least one (`every_pinned_release_replays_its_captures_without_unrecognized_events`).
+The managed-human MCP captures are helper traffic, not engine streams, and are
+skipped. A kind the adapter cannot show is still recognized, with a comment
+saying why it adds nothing.
+
+## Capability tables
+
+An adapter reads a capability from the engine at probe time wherever the engine
+states it: Claude Code's `--effort` choices from `claude --help`, Codex's
+per-model ladders from `model/list`, and Grok's from its ACP `initialize` answer.
+The tables it keeps are the fallback for a probe that could not ask, or cover
+what the engine states nowhere. `pin::TABLES_REVIEWED_AT` names each engine's
+tables and the release they were checked against, and a pin bump fails
+`capability_tables_were_reviewed_for_every_pin` until someone checks them again.
+Tests hold each table to the pinned release's captures: `help.txt` for Claude
+Code and `acp-plan.ndjson`'s `initialize` answer for Grok.
 
 ## Sign-in commands
 

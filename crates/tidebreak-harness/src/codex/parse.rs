@@ -16,6 +16,7 @@ use tidebreak_core::{
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 
+use crate::oversized::{CutLine, OVERSIZED_PAYLOAD};
 use crate::{ApprovalDecision, HarnessApprovalRef, HarnessEvent};
 
 mod elicitation;
@@ -37,6 +38,9 @@ pub struct CodexStreamParser {
     started_subagents: HashSet<String>,
     /// Child thread ids whose synthetic `Task` span has settled.
     settled_subagents: HashSet<String>,
+    /// Item id → the child thread it started on. A completion the line
+    /// buffer cut loses its `threadId`, which follows the item.
+    item_threads: HashMap<String, String>,
     /// Best display detail observed for each child thread.
     subagent_details: HashMap<String, ToolDetail>,
     /// The containing `Task` for nested child threads. Top-level children map
@@ -146,18 +150,133 @@ impl CodexStreamParser {
             self.count_unrecognized("unparseable-line", line);
             return Vec::new();
         };
+        self.push_value(&value)
+    }
+
+    fn push_value(&mut self, value: &Value) -> Vec<HarnessEvent> {
         if let (Some(dir), Some(msg)) = (value.get("dir").and_then(Value::as_str), value.get("msg"))
         {
             return match dir {
                 "out" => self.push_outbound(msg),
                 "in" => self.push_inbound(msg),
                 other => {
-                    self.count_unrecognized(&format!("frame/{other}"), &value);
+                    self.count_unrecognized(&format!("frame/{other}"), value);
                     Vec::new()
                 }
             };
         }
-        self.push_inbound(&value)
+        self.push_inbound(value)
+    }
+
+    /// Parse one line the line buffer cut at its cap.
+    ///
+    /// The part that arrived still names the notification and the item. A
+    /// cut inside the item's payload settles its tool card with
+    /// [`OVERSIZED_PAYLOAD`] in place of the output the cut took. A cut after
+    /// the item cost only envelope fields: `threadId` is restored from the
+    /// item's start, and the card keeps the output that arrived.
+    pub fn push_cut_line(&mut self, line: &str) -> Vec<HarnessEvent> {
+        let Some(cut) = CutLine::recover(line) else {
+            self.count_unrecognized("oversized-line", line);
+            return Vec::new();
+        };
+        // Captures frame each message as `{"dir", "msg"}`; the live stream
+        // sends the message alone.
+        let framed = cut.value.get("dir").is_some();
+        let inside = |path: &[&str]| {
+            if framed {
+                let mut framed_path = vec!["msg"];
+                framed_path.extend_from_slice(path);
+                cut.cut_within(&framed_path)
+            } else {
+                cut.cut_within(path)
+            }
+        };
+        let item_cut = inside(&["params", "item"]);
+        let identity_cut = inside(&["params", "item", "id"]) || inside(&["params", "item", "type"]);
+        // Text a person reads keeps what arrived: a reply, or a search's query.
+        let kept_text = ["text", "query"]
+            .into_iter()
+            .find(|field| inside(&["params", "item", field]));
+        let CutLine {
+            mut value,
+            cut_text,
+            ..
+        } = cut;
+        let message = if framed {
+            value.get_mut("msg")
+        } else {
+            Some(&mut value)
+        };
+        let Some(message) = message else {
+            self.count_unrecognized("oversized-line", line);
+            return Vec::new();
+        };
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        tracing::info!(
+            target: "tidebreak_harness::codex",
+            kind = method.as_str(),
+            "engine line exceeded the parse budget; kept the part that arrived"
+        );
+        let mut cut_item = None;
+        if matches!(method.as_str(), "item/started" | "item/completed") {
+            if identity_cut {
+                // Part of an item id names no call.
+                self.count_unrecognized(&format!("oversized-line/{method}"), "item id cut");
+                return Vec::new();
+            }
+            let item_id = message
+                .pointer("/params/item/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if let Some(params) = message.get_mut("params").and_then(Value::as_object_mut) {
+                // `threadId` follows the item, so a cut anywhere from the
+                // item on loses it, and a child's item would land on the
+                // parent. Its start recorded the thread.
+                if !params.contains_key("threadId") {
+                    if let Some(thread) = item_id.as_ref().and_then(|id| self.item_threads.get(id))
+                    {
+                        params.insert("threadId".into(), Value::String(thread.clone()));
+                    }
+                }
+                if let (true, Some(item)) = (
+                    item_cut,
+                    params.get_mut("item").and_then(Value::as_object_mut),
+                ) {
+                    if let Some(field) = kept_text {
+                        item.insert(field.into(), Value::String(cut_text));
+                    }
+                    // A file change states its status after the diff. The
+                    // engine completes an item only once it has finished, and
+                    // the card needs an outcome to settle.
+                    if method == "item/completed" && !item.contains_key("status") {
+                        item.insert("status".into(), Value::String("completed".into()));
+                    }
+                }
+            }
+            // Only a cut in the payload cost the card its output.
+            if method == "item/completed" && item_cut && kept_text.is_none() {
+                cut_item = item_id;
+            }
+        }
+        let mut events = self.push_value(&value);
+        if let Some(item_id) = cut_item {
+            for event in &mut events {
+                if let HarnessEvent::ToolCompleted {
+                    call_id, preview, ..
+                } = event
+                {
+                    if *call_id == item_id {
+                        OVERSIZED_PAYLOAD.clone_into(preview);
+                    }
+                }
+            }
+        }
+        events
     }
 
     /// Parse a whole captured framed NDJSON document.
@@ -324,6 +443,24 @@ impl CodexStreamParser {
                 Vec::new()
             }
             "thread/started" => self.emit_session_started(&params),
+            "deprecationNotice" => {
+                // The engine telling its client, or the person's own config,
+                // that a setting or request shape is going away (captured on
+                // 0.153.4 for a legacy config key). It says nothing about the
+                // session's work, so it goes to the log rather than the
+                // transcript.
+                let summary = params
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                tracing::info!(
+                    target: "tidebreak_harness::codex",
+                    summary = %bound(&summary, MAX_NOTICE_CHARS),
+                    "engine deprecation notice"
+                );
+                Vec::new()
+            }
             "account/rateLimits/updated"
             | "hook/completed"
             | "hook/started"
@@ -339,6 +476,8 @@ impl CodexStreamParser {
             | "mcpServer/startupStatus/updated"
             | "remoteControl/status/changed"
             | "serverRequest/resolved"
+            // The legacy twin of the `contextCompaction` item, which reports
+            // the compaction itself. 0.153.4 no longer sends this one at all.
             | "thread/compacted"
             | "thread/goal/updated"
             | "thread/queue/changed"
@@ -365,11 +504,21 @@ impl CodexStreamParser {
         if parent_call_id.is_some() && !self.parent_turn_active {
             return Vec::new();
         }
+        if let (Some(thread), Some(id)) = (
+            parent_call_id.as_ref(),
+            item.get("id").and_then(Value::as_str),
+        ) {
+            self.item_threads.insert(id.to_owned(), thread.clone());
+        }
         match item.get("type").and_then(Value::as_str) {
             Some("commandExecution") => self.emit_tool_started(&item, parent_call_id),
             Some("mcpToolCall") => self.emit_mcp_tool_started(&item, parent_call_id),
             Some("fileChange") => self.emit_file_change_started(&item, parent_call_id),
             Some("collabAgentToolCall") => self.emit_collab_started(&item, parent_call_id),
+            Some("webSearch") => self.emit_web_search_started(&item, parent_call_id),
+            Some("imageView") => self.emit_image_view(&item, parent_call_id, false),
+            // The completion reports the compaction once it has happened.
+            Some("contextCompaction") => Vec::new(),
             Some("subAgentActivity" | "userMessage" | "agentMessage" | "reasoning") => Vec::new(),
             Some(other) => {
                 self.count_unrecognized(&format!("item/started/{other}"), &item);
@@ -404,6 +553,17 @@ impl CodexStreamParser {
                     }]
                 }
             }
+            Some("webSearch") => self.emit_web_search_completed(&item, parent_call_id),
+            Some("imageView") => self.emit_image_view(&item, parent_call_id, true),
+            // A subagent's own compaction is its business; the parent's
+            // changes what the model remembers of this conversation.
+            Some("contextCompaction") if parent_call_id.is_none() => {
+                vec![HarnessEvent::HarnessNotice {
+                    level: HarnessNoticeLevel::Info,
+                    message: "Codex compacted the conversation to fit its context window.".into(),
+                }]
+            }
+            Some("contextCompaction") => Vec::new(),
             Some("subAgentActivity" | "userMessage" | "reasoning") => Vec::new(),
             Some(other) => {
                 self.count_unrecognized(&format!("item/completed/{other}"), &item);
@@ -446,6 +606,7 @@ impl CodexStreamParser {
         // A late child frame must not reopen a span that this boundary settles.
         self.settled_subagents
             .extend(self.started_subagents.iter().cloned());
+        self.item_threads.clear();
         self.parent_turn_active = false;
         match status {
             "completed" => vec![HarnessEvent::TurnCompleted {
@@ -797,6 +958,9 @@ impl CodexStreamParser {
                 }]
             }
             "initialize" | "turn/interrupt" | "turn/steer" | "" => Vec::new(),
+            // An empty acknowledgement: the compaction then runs as a turn of
+            // its own, which reports itself (captured on 0.153.4).
+            "thread/compact/start" => Vec::new(),
             other => {
                 self.count_unrecognized(&format!("rpc-result/{other}"), value);
                 Vec::new()
@@ -1088,6 +1252,107 @@ impl CodexStreamParser {
         events
     }
 
+    /// A web search the engine ran itself.
+    ///
+    /// The engine opens the item before the search runs, when it usually
+    /// knows no query yet (`"query": ""`, captured on 0.153.4). A card that
+    /// names nothing tells the reader less than no card, so the start waits
+    /// for the query the completion carries.
+    fn emit_web_search_started(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
+        let detail = web_search_detail(item);
+        let Some(call_id) = item_id(item) else {
+            self.count_unrecognized("webSearch/missing-id", item);
+            return Vec::new();
+        };
+        if detail.specificity() == 0 || !self.started_tools.insert(call_id.clone()) {
+            return Vec::new();
+        }
+        vec![HarnessEvent::ToolStarted {
+            call_id,
+            name: "webSearch".into(),
+            detail,
+            parent_call_id,
+        }]
+    }
+
+    /// A finished web search. The item has no status: completing it is the
+    /// engine saying the search ran. Results come back out of band, so the
+    /// card names the query and shows no output.
+    fn emit_web_search_completed(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
+        let detail = web_search_detail(item);
+        let Some(call_id) = item_id(item) else {
+            self.count_unrecognized("webSearch/missing-id", item);
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        if self.started_tools.insert(call_id.clone()) {
+            events.push(HarnessEvent::ToolStarted {
+                call_id: call_id.clone(),
+                name: "webSearch".into(),
+                detail: detail.clone(),
+                parent_call_id: parent_call_id.clone(),
+            });
+        }
+        events.push(HarnessEvent::ToolCompleted {
+            call_id,
+            outcome: ToolOutcome::Succeeded,
+            preview: String::new(),
+            detail: (detail.specificity() > 0).then_some(detail),
+            parent_call_id,
+        });
+        events
+    }
+
+    /// The engine's `view_image` tool reading an image into the model's
+    /// context. The transcript has no image card of its own, so the call
+    /// reads as a file read of that image. Start and completion arrive back
+    /// to back with the same payload and no status (captured on 0.153.4).
+    fn emit_image_view(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+        completed: bool,
+    ) -> Vec<HarnessEvent> {
+        let Some(call_id) = item_id(item) else {
+            self.count_unrecognized("imageView/missing-id", item);
+            return Vec::new();
+        };
+        let detail = ToolDetail::FileRead {
+            path: item
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+        };
+        let mut events = Vec::new();
+        if self.started_tools.insert(call_id.clone()) {
+            events.push(HarnessEvent::ToolStarted {
+                call_id: call_id.clone(),
+                name: "imageView".into(),
+                detail: detail.clone(),
+                parent_call_id: parent_call_id.clone(),
+            });
+        }
+        if completed {
+            events.push(HarnessEvent::ToolCompleted {
+                call_id,
+                outcome: ToolOutcome::Succeeded,
+                preview: String::new(),
+                detail: (detail.specificity() > 0).then_some(detail),
+                parent_call_id,
+            });
+        }
+        events
+    }
+
     fn collab_outcome(&mut self, item: &Value) -> ToolOutcome {
         match item.get("status").and_then(Value::as_str) {
             Some("completed") => ToolOutcome::Succeeded,
@@ -1167,6 +1432,34 @@ fn mcp_tool_preview(item: &Value) -> String {
 
 fn thread_id(params: &Value) -> Option<&str> {
     params.get("threadId").and_then(Value::as_str)
+}
+
+/// A non-empty item id.
+fn item_id(item: &Value) -> Option<String> {
+    item.get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+/// What a web search looked for: its query, or else what its action names.
+fn web_search_detail(item: &Value) -> ToolDetail {
+    let action = item.get("action");
+    let subject = nonempty_text(item.get("query"))
+        .or_else(|| nonempty_text(action.and_then(|action| action.get("query"))))
+        .or_else(|| nonempty_text(action.and_then(|action| action.pointer("/queries/0"))))
+        .or_else(|| nonempty_text(action.and_then(|action| action.get("url"))))
+        .unwrap_or("");
+    ToolDetail::Search {
+        query: bound(subject, MAX_TOOL_SUMMARY_CHARS),
+    }
+}
+
+fn nonempty_text(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
 }
 
 /// The text of a transport reconnect-attempt notice with its `attempt N/M`
@@ -2286,6 +2579,232 @@ mod tests {
             event,
             HarnessEvent::ToolStarted { call_id, .. } if call_id == "late-command"
         )));
+    }
+
+    /// Cut `line` where a small budget cuts it. The parser never sees the
+    /// cap, so a small one keeps the test light.
+    fn cut(line: &str) -> String {
+        let cut = crate::oversized::through_the_line_buffer(line, 4 * 1_024);
+        assert!(cut.cut, "the line must outgrow the budget");
+        cut.text
+    }
+
+    /// A child's command output over the line budget used to fail to parse
+    /// and vanish, leaving the card running. `threadId` and `exitCode`
+    /// follow the output, so the recovered completion also has to keep the
+    /// child it ran under.
+    #[test]
+    fn a_completed_item_over_the_line_budget_settles_its_card_under_its_thread() {
+        let setup = r#"
+{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}
+{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"parent","cliVersion":"0.153.4"}}}}
+{"method":"turn/started","params":{"threadId":"parent","turn":{"id":"parent-turn","status":"inProgress"}}}
+{"method":"item/started","params":{"threadId":"child","turnId":"child-turn","item":{"type":"commandExecution","id":"child-command","command":"tail big.log","cwd":"/workspace","status":"inProgress"}}}
+"#;
+        let mut parser = CodexStreamParser::new();
+        for line in setup.lines() {
+            parser.push_line(line);
+        }
+        // Written out rather than built with `json!`, which sorts keys: the
+        // engine's own order is what decides what survives the cut.
+        let line = format!(
+            r#"{{"method":"item/completed","params":{{"item":{{"type":"commandExecution","id":"child-command","command":"tail big.log","cwd":"/workspace","status":"completed","aggregatedOutput":"{}","exitCode":0}},"threadId":"child","turnId":"child-turn"}}}}"#,
+            "x".repeat(8 * 1_024)
+        );
+        let events = parser.push_cut_line(&cut(&line));
+        assert_eq!(
+            events,
+            vec![HarnessEvent::ToolCompleted {
+                call_id: "child-command".into(),
+                outcome: ToolOutcome::Succeeded,
+                preview: OVERSIZED_PAYLOAD.into(),
+                detail: Some(ToolDetail::Command {
+                    cmd: "tail big.log".into(),
+                    cwd: "/workspace".into(),
+                }),
+                parent_call_id: Some("child".into()),
+            }]
+        );
+        assert_eq!(parser.unrecognized(), 0);
+    }
+
+    /// A file change states its status after its diff. A completion the cut
+    /// took that far still settles its card rather than counting as drift.
+    #[test]
+    fn a_file_change_whose_status_was_cut_still_settles() {
+        let line = format!(
+            r#"{{"method":"item/completed","params":{{"item":{{"type":"fileChange","id":"edit-1","changes":[{{"path":"big.txt","kind":"add","diff":"{}"}}],"status":"completed"}}}}}}"#,
+            "+".repeat(8 * 1_024)
+        );
+        let mut parser = CodexStreamParser::new();
+        let events = parser.push_cut_line(&cut(&line));
+        assert!(matches!(
+            events.as_slice(),
+            [
+                HarnessEvent::ToolStarted { call_id, .. },
+                HarnessEvent::ToolCompleted { call_id: completed, outcome: ToolOutcome::Succeeded, preview, .. },
+            ] if call_id == "edit-1" && completed == "edit-1" && preview == OVERSIZED_PAYLOAD
+        ));
+        assert_eq!(parser.unrecognized(), 0);
+    }
+
+    #[test]
+    fn a_cut_line_that_is_not_json_is_counted() {
+        let mut parser = CodexStreamParser::new();
+        assert!(parser.push_cut_line("garbage").is_empty());
+        assert_eq!(parser.unrecognized(), 1);
+    }
+
+    /// Cut `line` a few bytes into the value that follows `marker`.
+    fn cut_inside(line: &str, marker: &str) -> String {
+        let at = line.find(marker).expect("the marker is in the line") + marker.len() + 3;
+        let cut = crate::oversized::through_the_line_buffer(line, at);
+        assert!(cut.cut, "the line must outgrow the budget");
+        cut.text
+    }
+
+    /// A parser attached to the thread `parent`, with a turn running there.
+    fn parser_with_a_running_turn() -> CodexStreamParser {
+        let setup = r#"
+{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}
+{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"parent","cliVersion":"0.153.4"}}}}
+{"method":"turn/started","params":{"threadId":"parent","turn":{"id":"parent-turn","status":"inProgress"}}}
+"#;
+        let mut parser = CodexStreamParser::new();
+        for line in setup.lines() {
+            parser.push_line(line);
+        }
+        parser
+    }
+
+    /// A web search line written the way the engine writes it: the item,
+    /// then the thread and turn it ran on. `results` is what makes it large.
+    fn web_search_completed(id: &str, thread: &str) -> String {
+        format!(
+            r#"{{"method":"item/completed","params":{{"item":{{"type":"webSearch","id":"{id}","query":"tidebreak fixture","action":{{"type":"search","query":"tidebreak fixture","queries":null}},"results":[{{"title":"Result","url":"https://example.com/","text":"{}"}}]}},"threadId":"{thread}","turnId":"turn-1","completedAtMs":1}},"emittedAtMs":2}}"#,
+            "r".repeat(8 * 1_024)
+        )
+    }
+
+    fn search() -> ToolDetail {
+        ToolDetail::Search {
+            query: "tidebreak fixture".into(),
+        }
+    }
+
+    /// A web search whose line was cut after its item still settles its
+    /// card, with the query it recovered and under the thread it ran on.
+    /// The cut lands in `threadId`, which follows the item, so the line
+    /// carries only part of an id there. The output arrived whole, so the
+    /// card shows no marker.
+    #[test]
+    fn a_web_search_cut_after_its_item_settles_its_card() {
+        let mut parser = parser_with_a_running_turn();
+        let events = parser.push_cut_line(&cut_inside(
+            &web_search_completed("ws_parent", "parent"),
+            r#""threadId":""#,
+        ));
+        assert_eq!(
+            events,
+            vec![
+                HarnessEvent::ToolStarted {
+                    call_id: "ws_parent".into(),
+                    name: "webSearch".into(),
+                    detail: search(),
+                    parent_call_id: None,
+                },
+                HarnessEvent::ToolCompleted {
+                    call_id: "ws_parent".into(),
+                    outcome: ToolOutcome::Succeeded,
+                    preview: String::new(),
+                    detail: Some(search()),
+                    parent_call_id: None,
+                },
+            ]
+        );
+
+        // A child's search keeps the child it started under.
+        let started = r#"{"method":"item/started","params":{"item":{"type":"webSearch","id":"ws_child","query":"","action":{"type":"other"},"results":null},"threadId":"child","turnId":"child-turn"}}"#;
+        assert!(parser.push_line(started).is_empty());
+        let events = parser.push_cut_line(&cut_inside(
+            &web_search_completed("ws_child", "child"),
+            r#""threadId":""#,
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::ToolCompleted { call_id, parent_call_id: Some(parent), .. })
+                if call_id == "ws_child" && parent == "child"
+        ));
+        assert_eq!(parser.unrecognized(), 0);
+
+        // Between turns the partial id used to read as a child thread with no
+        // parent turn to run in, and the completion was dropped outright.
+        let mut idle = CodexStreamParser::new();
+        idle.push_line(r#"{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}"#);
+        idle.push_line(r#"{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"parent","cliVersion":"0.153.4"}}}}"#);
+        let events = idle.push_cut_line(&cut_inside(
+            &web_search_completed("ws_idle", "parent"),
+            r#""threadId":""#,
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::ToolCompleted { call_id, parent_call_id: None, .. }) if call_id == "ws_idle"
+        ));
+    }
+
+    /// A cut inside the results is a cut in the payload: the card settles
+    /// with the query it recovered and says the output did not fit.
+    #[test]
+    fn a_web_search_cut_in_its_results_says_the_output_did_not_fit() {
+        let mut parser = parser_with_a_running_turn();
+        let events = parser.push_cut_line(&cut_inside(
+            &web_search_completed("ws_parent", "parent"),
+            r#""text":""#,
+        ));
+        assert_eq!(
+            events.last(),
+            Some(&HarnessEvent::ToolCompleted {
+                call_id: "ws_parent".into(),
+                outcome: ToolOutcome::Succeeded,
+                preview: OVERSIZED_PAYLOAD.into(),
+                detail: Some(search()),
+                parent_call_id: None,
+            })
+        );
+        assert_eq!(parser.unrecognized(), 0);
+    }
+
+    /// An image view and a compaction whose lines were cut after their items
+    /// still report themselves.
+    #[test]
+    fn an_image_view_or_compaction_cut_after_its_item_still_reports_itself() {
+        let mut parser = parser_with_a_running_turn();
+        let image = r#"{"method":"item/completed","params":{"item":{"type":"imageView","id":"view-1","path":"/workspace/pixel.png"},"threadId":"parent","turnId":"turn-1","completedAtMs":1},"emittedAtMs":2}"#;
+        let events = parser.push_cut_line(&cut_inside(image, r#""threadId":""#));
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::ToolCompleted { call_id, parent_call_id: None, preview, .. })
+                if call_id == "view-1" && preview.is_empty()
+        ));
+
+        let compaction = r#"{"method":"item/completed","params":{"item":{"type":"contextCompaction","id":"compact-1"},"threadId":"parent","turnId":"turn-1","completedAtMs":1},"emittedAtMs":2}"#;
+        let events = parser.push_cut_line(&cut_inside(compaction, r#""turnId":""#));
+        assert!(matches!(
+            events.as_slice(),
+            [HarnessEvent::HarnessNotice {
+                level: HarnessNoticeLevel::Info,
+                ..
+            }]
+        ));
+        let events = parser.push_cut_line(&cut_inside(compaction, r#""threadId":""#));
+        assert!(matches!(
+            events.as_slice(),
+            [HarnessEvent::HarnessNotice {
+                level: HarnessNoticeLevel::Info,
+                ..
+            }]
+        ));
+        assert_eq!(parser.unrecognized(), 0);
     }
 
     #[test]

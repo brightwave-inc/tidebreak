@@ -79,6 +79,7 @@ impl HarnessAdapter for CodexAdapter {
                     stderr: capture.stderr,
                     env: capture.env,
                     commands,
+                    reported_efforts: None,
                 }
             }
             Err(err) => HarnessProbe {
@@ -89,6 +90,7 @@ impl HarnessAdapter for CodexAdapter {
                 stderr: err.to_string(),
                 env: Vec::new(),
                 commands: Vec::new(),
+                reported_efforts: None,
             },
         }
     }
@@ -910,15 +912,26 @@ mod tests {
     use tidebreak_core::PermissionMode;
 
     fn fixture_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex/0.147.0")
+        version_dir("0.147.0")
+    }
+
+    fn version_dir(version: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/codex")
+            .join(version)
     }
 
     fn replay(name: &str) -> (Vec<HarnessEvent>, u64) {
-        let path = fixture_dir().join(format!("{name}.ndjson"));
+        replay_at("0.147.0", name)
+    }
+
+    fn replay_at(version: &str, name: &str) -> (Vec<HarnessEvent>, u64) {
+        let directory = version_dir(version);
+        let path = directory.join(format!("{name}.ndjson"));
         let input = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("missing fixture {}: {err}", path.display()));
         let out = CodexStreamParser::parse_ndjson(&input);
-        let expected_path = fixture_dir().join(format!("{name}.expected.json"));
+        let expected_path = directory.join(format!("{name}.expected.json"));
         if std::env::var_os("UPDATE_HARNESS_FIXTURES").is_some() {
             let rendered = format!("{}\n", serde_json::to_string_pretty(&out.events).unwrap());
             std::fs::write(&expected_path, rendered).unwrap();
@@ -938,6 +951,123 @@ mod tests {
             );
         }
         (out.events, out.unrecognized)
+    }
+
+    /// Captured on 0.153.4. The web search opens before its query is known,
+    /// so its card waits for the query the completion carries. The image
+    /// view reads as a file read of that image: the transcript has no image
+    /// card of its own.
+    #[test]
+    fn fixture_replay_web_search_and_image_view() {
+        let (events, unrecognized) = replay_at("0.153.4", "web-search-image-view");
+        assert_eq!(unrecognized, 0);
+        let search = tidebreak_core::ToolDetail::Search {
+            query: "codex app-server protocol webSearch item".into(),
+        };
+        let image = tidebreak_core::ToolDetail::FileRead {
+            path: "/workspace/pixel.png".into(),
+        };
+        let tools: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    HarnessEvent::ToolStarted { .. } | HarnessEvent::ToolCompleted { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            tools,
+            [
+                HarnessEvent::ToolStarted {
+                    call_id: "ws_fixture01".into(),
+                    name: "webSearch".into(),
+                    detail: search.clone(),
+                    parent_call_id: None,
+                },
+                HarnessEvent::ToolCompleted {
+                    call_id: "ws_fixture01".into(),
+                    outcome: tidebreak_core::ToolOutcome::Succeeded,
+                    preview: String::new(),
+                    detail: Some(search),
+                    parent_call_id: None,
+                },
+                HarnessEvent::ToolStarted {
+                    call_id: "call_fixture_view_image".into(),
+                    name: "imageView".into(),
+                    detail: image.clone(),
+                    parent_call_id: None,
+                },
+                HarnessEvent::ToolCompleted {
+                    call_id: "call_fixture_view_image".into(),
+                    outcome: tidebreak_core::ToolOutcome::Succeeded,
+                    preview: String::new(),
+                    detail: Some(image),
+                    parent_call_id: None,
+                },
+            ]
+        );
+    }
+
+    /// Captured on 0.153.4: a compaction runs as a turn of its own and
+    /// reports itself as a `contextCompaction` item. It reaches the
+    /// transcript as a notice, before the engine's own warning about long
+    /// threads. The release sends no `thread/compacted`.
+    #[test]
+    fn fixture_replay_compaction() {
+        let (events, unrecognized) = replay_at("0.153.4", "compaction");
+        assert_eq!(unrecognized, 0);
+        let notices: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::HarnessNotice { level, message } => Some((*level, message.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 2);
+        assert_eq!(
+            notices[0],
+            (
+                tidebreak_core::HarnessNoticeLevel::Info,
+                "Codex compacted the conversation to fit its context window."
+            )
+        );
+        assert_eq!(notices[1].0, tidebreak_core::HarnessNoticeLevel::Warning);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::TurnCompleted { .. }))
+                .count(),
+            2
+        );
+    }
+
+    /// Captured on 0.153.4: a deprecation notice concerns the engine's
+    /// config or its client, not the session's work, so it stays out of the
+    /// transcript without counting as drift. The resume Tidebreak used to
+    /// send drew one; the resume it sends now does not.
+    #[test]
+    fn fixture_replay_deprecation_notices() {
+        for name in [
+            "deprecation-notice",
+            "deprecation-notice-config",
+            "resume-exclude-turns",
+        ] {
+            let (events, unrecognized) = replay_at("0.153.4", name);
+            assert_eq!(unrecognized, 0, "{name}");
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, HarnessEvent::HarnessNotice { .. })),
+                "{name}"
+            );
+        }
+        let resume =
+            std::fs::read_to_string(version_dir("0.153.4").join("resume-exclude-turns.ndjson"))
+                .unwrap();
+        assert!(resume.contains(r#""excludeTurns":true"#));
+        assert!(!resume.contains("deprecationNotice"));
     }
 
     #[test]
@@ -987,6 +1117,7 @@ mod tests {
                 name: "compact".into(),
                 description: "compact the conversation".into(),
             }],
+            reported_efforts: None,
         };
         assert_eq!(
             CodexAdapter::new().capabilities(&probe).slash_commands,
@@ -1618,6 +1749,7 @@ requires_openai_auth = true
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),
+            reported_efforts: None,
         });
         assert_eq!(caps.resume, CapLevel::Supported);
         assert_eq!(caps.streaming_deltas, CapLevel::Supported);
@@ -1645,6 +1777,7 @@ requires_openai_auth = true
                     stderr: String::new(),
                     env: Vec::new(),
                     commands: Vec::new(),
+                    reported_efforts: None,
                 })
                 .mid_turn_steering
         };

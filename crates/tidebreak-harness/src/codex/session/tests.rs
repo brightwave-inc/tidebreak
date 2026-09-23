@@ -130,7 +130,9 @@ done
 "#;
 
 /// The same stand-in, but its `thread/resume` succeeds — the engine still
-/// holds the thread, as it does after a park (decision 0064).
+/// holds the thread, as it does after a park (decision 0064). A resume that
+/// asks for the thread's history is recorded as such: 0.153.4 answers one
+/// with a deprecation notice and the whole history on one line.
 #[cfg(unix)]
 const FAKE_RESUMABLE_APP_SERVER: &str = r#"#!/bin/sh
 while IFS= read -r line; do
@@ -146,7 +148,10 @@ while IFS= read -r line; do
   printf '{"id":%s,"result":{"thread":{"id":"THREAD-1","cliVersion":"0.147.0","turns":[]}}}\n' "$id"
   ;;
 *'"method":"thread/resume"'*)
-  printf 'thread/resume\n' >>"$FAKE_CODEX_CALLS"
+  case "$line" in
+  *'"excludeTurns":true'*) printf 'thread/resume\n' >>"$FAKE_CODEX_CALLS" ;;
+  *) printf 'thread/resume with history\n' >>"$FAKE_CODEX_CALLS" ;;
+  esac
   printf '{"id":%s,"result":{"thread":{"id":"THREAD-1","cliVersion":"0.147.0","turns":[]}}}\n' "$id"
   ;;
 *'"method":"turn/start"'*)
@@ -444,12 +449,13 @@ async fn read_lines_preserves_large_browser_mcp_results() {
         .expect("the browser result should arrive before the deadline")
         .unwrap();
     assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0].len(), frame.len());
+    assert!(!lines[0].cut, "a frame under the cap arrives whole");
+    assert_eq!(lines[0].text.len(), frame.len());
     assert!(
-        lines[0] == frame,
+        lines[0].text == frame,
         "the reader must preserve the full JSON frame"
     );
-    let events = session.emit_parsed(&lines[0]).await;
+    let events = session.emit_parsed(&lines[0].text).await;
     assert!(events.iter().any(|event| matches!(
         event,
         HarnessEvent::ToolCompleted {
@@ -484,8 +490,9 @@ printf '\nfollowing event\n'
     })
     .await
     .expect("an oversized event must not block later lines");
-    assert_eq!(lines[0].len(), RPC_MAX_PARTIAL_LINE);
-    assert_eq!(lines[1], "following event");
+    assert_eq!(lines[0].text.len(), RPC_MAX_PARTIAL_LINE);
+    assert!(lines[0].cut, "the reader marks the line it cut");
+    assert_eq!(lines[1], StreamLine::whole("following event"));
     let stdout = session.stdout.lock().unwrap().clone().unwrap();
     assert!(stdout.lock().await.lines.overflow_chunks > 0);
     assert!(child.wait().await.unwrap().success());
@@ -769,7 +776,8 @@ async fn a_stale_resume_ref_reports_a_lost_resume() {
 }
 
 /// Decision 0064: a parked thread that has run resumes on a replacement
-/// child, with `thread/resume` on the wire and the same thread id kept.
+/// child, with `thread/resume` on the wire and the same thread id kept. The
+/// resume asks for no history: nothing reads it, and the engine deprecates it.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_parked_thread_is_resumed_on_the_next_turn() {

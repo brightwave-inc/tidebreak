@@ -657,6 +657,7 @@ async fn first_relay_request_after_restart_uses_the_persisted_session_grant() {
         stderr: String::new(),
         env: Vec::new(),
         commands: Vec::new(),
+        reported_efforts: None,
     };
     let key = restarted.issue_for_session(&session, &probe);
     let mut headers = HeaderMap::new();
