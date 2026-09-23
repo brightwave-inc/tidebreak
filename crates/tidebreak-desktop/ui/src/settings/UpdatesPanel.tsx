@@ -109,7 +109,7 @@ export function UpdatesPanel({
   return (
     <SettingsPanel
       title="Updates"
-      description="Tidebreak checks for updates shortly after launch and every five minutes. An update installs only after you choose Restart to update."
+      description="Tidebreak checks for updates shortly after launch and every hour. An update installs only after you choose Restart to update."
       busy={busy}
     >
       <SettingsSection title="Automatic updates">

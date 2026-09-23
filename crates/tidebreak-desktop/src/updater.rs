@@ -53,7 +53,7 @@ const UPDATE_STATE_EVENT: &str = "desktop-update-state";
 /// without moving the reader away from the current screen.
 pub(crate) const UPDATE_CHECK_REQUESTED_EVENT: &str = "desktop-update-check-requested";
 const UPDATE_CHECK_STARTUP_DELAY: Duration = Duration::from_secs(15);
-const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const UPDATE_CHECK_ERROR: &str = "Could not check for updates. Try again later.";
 pub(crate) const UPDATE_PREPARE_ERROR: &str = "Could not prepare the update. Try again later.";
 const UPDATE_INSTALL_ERROR: &str = "Could not install the update. Try again later.";

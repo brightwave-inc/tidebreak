@@ -16,7 +16,7 @@ keys live in your operating system's credential store.
 
 Local-first does not mean the app never talks to the network. Packaged
 release builds check `https://downloads.brightwave.io/tidebreak/` for a
-signed update 15 seconds after launch and every five minutes
+signed update 15 seconds after launch and every hour
 (`crates/tidebreak-desktop/src/updater.rs`). There is no setting that turns
 those checks off; development builds do not contact the feed. When a check
 finds a new version, the app downloads it in the background. To download only
