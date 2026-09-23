@@ -131,6 +131,10 @@ export function WorkspaceWorkflowControl({
       ? undefined
       : model.primary;
   const busy = resource.busy;
+  const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
+  const inspectorTab = useCodeUiStore((state) => state.inspectorTab);
+  const mergeSectionVisible =
+    reviewSidebarOpen && inspectorTab === "pr" && primary === "merge";
   const primaryLabel = primary
     ? workspaceWorkflowActionLabel(primary, model.stage)
     : null;
@@ -650,9 +654,9 @@ export function WorkspaceWorkflowControl({
         ) : primary && primaryLabel ? (
           <Button
             type="button"
-            variant="ghost"
+            variant={mergeSectionVisible ? "outline" : "default"}
             size="sm"
-            className="h-control shrink-0 rounded-none border-l border-border-subtle bg-foreground px-2.5 text-background hover:bg-foreground/90 hover:text-background"
+            className="h-control shrink-0 rounded-none border-l border-border-subtle px-2.5"
             disabled={
               disabled ||
               model.stage === "loading" ||
