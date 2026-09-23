@@ -110,9 +110,12 @@ not with MCP JSON-RPC), timeout (after N ms), or a stdio failure: command not
 found (names a bounded list of directories searched), not executable or
 permission denied, launch failure before the MCP handshake (exit status and a
 bounded stderr tail), or MCP protocol failure. A successful stdio verify
-reports the resolved executable path. Diagnostics never echo a URL, token,
-argument value, or environment value. Child stderr is not copied into host
-logs; a failed launch may quote its first line in Settings.
+reports the resolved executable path. A `401` from a remote server that asks
+for an OAuth sign-in is not a failure; see
+[OAuth for remote HTTP servers](#oauth-for-remote-http-servers). Diagnostics
+never echo a URL, token, argument value, or environment value. Child stderr is
+not copied into host logs; a failed launch may quote its first line in
+Settings.
 
 Definitions saved before the values moved into the credential store held them
 in cleartext in the connected-app record. They are migrated on first load: the
@@ -137,36 +140,61 @@ claim covers and how a server earns an entry.
 
 ## OAuth for remote HTTP servers
 
-Mark an HTTP server as OAuth when the endpoint authenticates with a discovered
-authorization server instead of a static bearer. You Connect from Settings; you
-never paste a token into the definition.
+A remote server that asks you to sign in shows **Sign in required** and a
+**Connect** button in Settings. You do not have to mark it as OAuth. When an
+HTTP server that sends no bearer token answers `401`, Tidebreak asks it how to
+authorize, and a server whose metadata names an authorization server gets a
+sign-in. Imported definitions and definitions saved before this behave the
+same way. The saved `oauth` flag still forces the OAuth path. You never paste a
+token into the definition.
+
+**Save and verify** keeps a server that asks you to sign in, because you can
+connect only a saved server. A server whose sign-in Tidebreak cannot complete
+fails the save and says why.
 
 The flow follows the MCP authorization specification:
 
 1. A `401` `WWW-Authenticate` challenge may name protected-resource metadata
-   (RFC 9728). If it does not, Tidebreak fetches
-   `<resource-origin>/.well-known/oauth-protected-resource`.
+   (RFC 9728). If it does not, or that document does not load, Tidebreak tries
+   `/.well-known/oauth-protected-resource` with the server's path after it,
+   then at the origin root.
 2. That document names authorization servers. Tidebreak takes the first and
-   fetches RFC 8414 metadata (`/.well-known/oauth-authorization-server`).
+   reads its RFC 8414 metadata, or its OpenID Connect discovery document.
 3. The authorization server must advertise a dynamic-registration endpoint
    (RFC 7591). Without one, the server is **Unsupported** — a desktop install
    has no pre-issued client id.
-4. Tidebreak registers a public client (`token_endpoint_auth_method: none`, no
-   client secret) for an ephemeral loopback redirect, then opens the system
-   browser on an authorization-code + PKCE S256 request (RFC 8252 §7.3).
+4. When you select Connect, Tidebreak registers a public client
+   (`token_endpoint_auth_method: none`, no client secret) for an ephemeral
+   loopback redirect, and answers with an authorization-code + PKCE S256 page
+   (RFC 8252 §7.3). The desktop opens that page in your browser; the server
+   never opens a browser itself. The request asks for the scope the challenge
+   named, or else the protected resource's `scopes_supported`, and carries the
+   RFC 8707 `resource` indicator for the server.
 5. After you approve, the loopback listener exchanges the code and stores the
-   tokens. Later calls present a refreshing access token as the per-call
-   bearer.
+   tokens and the client registration. The server reconnects and its tools
+   load. Later calls present a refreshing access token as the per-call bearer.
+
+While the sign-in waits, Settings shows **Waiting for sign-in** and a **Reopen
+sign-in page** button, and it updates when you finish. The sign-in gives up
+after five minutes. The loopback redirect goes to the computer that runs
+Tidebreak's server, so finish the sign-in in a browser on that computer.
 
 Connection states:
 
-- **Unsupported** — the endpoint offers no OAuth path this client can drive.
-- **Not connected** — OAuth is required and no session is stored; Connect.
+- **Unsupported** — the server asks for OAuth in a way Tidebreak cannot
+  complete: no dynamic client registration, or authorization-server metadata
+  that does not load or is not at a public `https` address. The row says
+  which.
+- **Not connected** — the server asks you to sign in and no session is stored;
+  Connect. After a sign-in that failed, the row says what stopped it, such as a
+  timeout or a server that refused to register Tidebreak.
 - **Authorizing** — a browser authorization is in flight.
 - **Connected** — a usable session is stored (a fresh access token, or a stale
   access token that still has a refresh token).
-- **Expired** — the stored access token is stale and there is no refresh token.
-- **Access denied** — the authorization server refused this user.
+- **Expired** — the stored session expired with no refresh token, or the server
+  no longer accepts it.
+- **Access denied** — you declined on the sign-in page, or the authorization
+  server refused you.
 
 Security posture:
 
@@ -198,17 +226,20 @@ not treated as degraded. **Reconnect and refresh tools** explicitly starts a
 fresh session and rediscovers its tool list. The runtime does the same after the
 server emits `notifications/tools/list_changed`.
 
-Two failures stop the automatic retries, because retrying cannot fix them. A
+Three failures stop the automatic retries, because retrying cannot fix them. A
 gateway mount without a gateway session waits for the next sign-in. A server
 whose parent environment variable is missing waits for a settings change or a
-manual reconnect. Either way the server stays `degraded` with its diagnostic,
-and **Reconnect and refresh tools** still tries at once. The log records a
-reconnect failure when it first happens or changes, not on every retry.
+manual reconnect. A remote server that asks for an OAuth sign-in waits for you
+to connect it, a settings change, or a manual reconnect. Each way the server
+stays `degraded` with its diagnostic, and **Reconnect and refresh tools** still
+tries at once. The log records a reconnect failure when it first happens or
+changes, not on every retry.
 
 Saving a candidate connects every enabled server before replacing the current
-set. If validation or initialization fails, the previous set remains active.
-Each running turn holds an immutable registry snapshot, so a configuration or
-tool-list change applies only to subsequent turns.
+set. If validation or initialization fails, the previous set remains active. A
+remote server that asks you to sign in does not fail the save: it is saved and
+waits for Connect. Each running turn holds an immutable registry snapshot, so a
+configuration or tool-list change applies only to subsequent turns.
 
 Discovery is fail-closed and bounded. Mounted names must fit the provider-safe
 64-byte `[A-Za-z0-9_-]` contract after namespacing. Tidebreak caps JSON-RPC frame

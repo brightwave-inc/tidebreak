@@ -477,10 +477,12 @@ pub async fn post_mcp_server_reconnect(
     ))
 }
 
-/// `POST /mcp/servers/{name}/connect` — begin the OAuth sign-in for one server:
-/// discover the authorization server, open the system browser, and store the
-/// resulting tokens. Returns the OAuth status, which carries the browser URL
-/// while `Authorizing`.
+/// `POST /mcp/servers/{name}/connect` — begin the OAuth sign-in for one server
+/// and return at once. The status is `Authorizing` with the page the renderer
+/// opens in the person's browser; the server never opens a browser itself.
+/// The exchange completes in the background: poll `GET /mcp/servers`, whose
+/// `oauth_status` turns `Connected` or says why the sign-in stopped. A server
+/// that cannot sign in answers `Unsupported` with the reason.
 pub async fn post_mcp_server_connect(
     State(state): State<AppState>,
     Path(name): Path<String>,

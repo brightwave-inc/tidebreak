@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
-import { Plus, RefreshCw, Trash2, Upload } from "lucide-react";
+import { ExternalLink, Plus, RefreshCw, Trash2, Upload } from "lucide-react";
 import {
   HttpError,
   type ApiClient,
   type GatewayApps,
   type McpCuration,
   type McpHealth,
+  type McpOAuthStatus,
   type McpServerDefinition,
   type McpServerInfo,
 } from "../api";
-import type { McpOAuthStatus } from "../generated/wire";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -42,6 +42,9 @@ const MOUNT_REFRESH_MS = 15_000;
  * to 127, so the mount name is derived, not the slug itself. Mount identity
  * is always the `gateway_endpoint` field, never the name. */
 const MAX_NAMESPACE_BYTES = 32;
+/** How often the list is read while a sign-in waits on the browser. The
+ * server gives up on its own after five minutes, so this ends too. */
+const SIGN_IN_POLL_MS = 2_000;
 
 type McpImportSummary = McpImportResult & { fileName: string };
 
@@ -107,8 +110,10 @@ function chipLabel(health: McpHealth): string {
 }
 
 /**
- * OAuth connection control for one HTTP MCP server. Health stays on
- * {@link McpHealthChip}; this is the authorization path beside it.
+ * The sign-in action for one HTTP MCP server that uses OAuth: Connect,
+ * reopen the page while a sign-in waits, or Disconnect. What the state means
+ * is said once, by the status line above it ({@link mcpServerStatus}), so this
+ * carries actions and nothing that repeats it.
  */
 export function McpOAuthControl({
   status,
@@ -123,61 +128,48 @@ export function McpOAuthControl({
   onConnect?: () => void;
   onDisconnect?: () => void;
 }) {
-  const error = status.error;
+  const connect = (label: string) => (
+    <Button
+      type="button"
+      size="sm"
+      disabled={disabled || busy}
+      onClick={onConnect}
+    >
+      {busy && <Spinner aria-hidden className="size-3.5" />}
+      {busy ? "Connecting…" : label}
+    </Button>
+  );
   switch (status.state) {
     case "unsupported":
-      return (
-        <span className="text-xs text-muted-foreground">
-          OAuth unsupported
-          {error ? ` — ${error}` : ""}
-        </span>
-      );
+      return null;
     case "not_connected":
+      return connect("Connect");
+    case "expired":
+      return connect("Reconnect");
+    case "access_denied":
+      return connect("Try again");
+    case "authorizing":
       return (
-        <span className="inline-flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             type="button"
             variant="outline"
             size="sm"
-            disabled={disabled || busy}
-            onClick={onConnect}
+            disabled={disabled || !status.pending_authorization_url}
+            onClick={() => {
+              const url = status.pending_authorization_url;
+              if (url) void openInBrowser(url);
+            }}
           >
-            {busy ? "Connecting…" : "Connect"}
+            <ExternalLink />
+            Reopen sign-in page
           </Button>
-        </span>
-      );
-    case "authorizing":
-      return (
-        <span className="inline-flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-            <Spinner className="size-3" />
-            Authorizing…
-          </span>
-          {status.pending_authorization_url ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={disabled}
-              onClick={() => {
-                const url = status.pending_authorization_url;
-                if (url) void openInBrowser(url);
-              }}
-            >
-              Reopen sign-in
-            </Button>
-          ) : null}
-        </span>
+        </div>
       );
     case "connected":
       return (
-        <span className="inline-flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-            <span aria-hidden className="text-success">
-              ●
-            </span>
-            Connected
-          </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground">Signed in</span>
           <Button
             type="button"
             variant="outline"
@@ -187,60 +179,84 @@ export function McpOAuthControl({
           >
             {busy ? "Disconnecting…" : "Disconnect"}
           </Button>
-        </span>
-      );
-    case "expired":
-      return (
-        <span className="inline-flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-            <span aria-hidden className="text-warning">
-              ●
-            </span>
-            Expired
-          </span>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={disabled || busy}
-            onClick={onConnect}
-          >
-            {busy ? "Connecting…" : "Reconnect"}
-          </Button>
-          {error ? (
-            <span className="text-xs text-critical break-words">{error}</span>
-          ) : null}
-        </span>
-      );
-    case "access_denied":
-      return (
-        <span className="inline-flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-            <span aria-hidden className="text-destructive">
-              ●
-            </span>
-            Access denied
-          </span>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={disabled || busy}
-            onClick={onConnect}
-          >
-            {busy ? "Connecting…" : "Try again"}
-          </Button>
-          {error ? (
-            <span className="text-xs text-critical break-words">{error}</span>
-          ) : null}
-        </span>
+        </div>
       );
   }
 }
 
+/** The status line for a server: its tone, a short verdict, and one
+ * sentence on what to do next. */
+export type McpServerStatus = {
+  tone: SettingsStatusTone;
+  label: string;
+  description: string;
+};
+
+/**
+ * What a configured server's status line says. A server that is not
+ * connected because it waits on an OAuth sign-in says so, and why, instead of
+ * reading as a failed connection; any other server reads from its health.
+ */
+export function mcpServerStatus(server: McpServerInfo): McpServerStatus {
+  const oauth = oauthStatusOf(server);
+  const unconnected =
+    server.health === "degraded" || server.health === "initializing";
+  if (oauth !== null && unconnected) {
+    switch (oauth.state) {
+      case "not_connected":
+        return {
+          tone: "warning",
+          label: "Sign in required",
+          description:
+            oauth.error ??
+            server.diagnostic ??
+            "Select Connect to sign in with your browser.",
+        };
+      case "authorizing":
+        return {
+          tone: "neutral",
+          label: "Waiting for sign-in",
+          description:
+            "Finish signing in on the page Tidebreak opened in your browser. This page updates on its own.",
+        };
+      case "expired":
+        return {
+          tone: "warning",
+          label: "Sign-in expired",
+          description: oauth.error ?? "Select Reconnect to sign in again.",
+        };
+      case "access_denied":
+        return {
+          tone: "warning",
+          label: "Sign-in denied",
+          description: oauth.error ?? "Select Try again to start over.",
+        };
+      case "unsupported":
+        return {
+          tone: "critical",
+          label: "Sign-in not supported",
+          description:
+            server.diagnostic ??
+            oauth.error ??
+            "Tidebreak cannot complete this server's sign-in.",
+        };
+      case "connected":
+        break;
+    }
+  }
+  return {
+    tone: healthTone(server.health),
+    label: healthLabel(server.health),
+    description: verifyDescription(server),
+  };
+}
+
+/** The OAuth status the server reported for an HTTP server, or `null` when
+ * nothing about it involves OAuth. The server decides: a saved `oauth` flag
+ * is not needed, so an imported server that asks for a sign-in gets one. */
 function oauthStatusOf(server: McpServerInfo): McpOAuthStatus | null {
-  if (transportOf(server) !== "http" || !server.oauth) return null;
-  return server.oauth_status ?? { state: "not_connected" };
+  if (transportOf(server) !== "http") return null;
+  return server.oauth_status ?? null;
 }
 
 /**
@@ -298,6 +314,9 @@ function transportFields(transport: "stdio" | "http"): Partial<McpServerInfo> {
       };
 }
 
+/** The definition half of a listed server: every projection field comes
+ * off, because the server refuses a definition with a field it does not
+ * know. */
 function definition(server: McpServerInfo): McpServerDefinition {
   const {
     health: _,
@@ -305,9 +324,28 @@ function definition(server: McpServerInfo): McpServerDefinition {
     diagnostic: ___,
     curated: ____,
     resolved_command: _____,
+    oauth_status: ______,
     ...value
   } = server;
   return value;
+}
+
+/** A draft row with the server's latest projection of the saved server of
+ * the same name: health, tools, diagnostic, and sign-in state. The row's own
+ * edits stay. */
+function withProjection(
+  server: McpServerInfo,
+  saved: McpServerInfo,
+): McpServerInfo {
+  const { oauth_status: _, ...draft } = server;
+  return {
+    ...draft,
+    health: saved.health,
+    tool_count: saved.tool_count,
+    diagnostic: saved.diagnostic,
+    curated: saved.curated,
+    ...(saved.oauth_status ? { oauth_status: saved.oauth_status } : {}),
+  };
 }
 
 /**
@@ -379,6 +417,9 @@ export function McpPanel({
   // Monotonic id for server-list reads: a slow in-flight read must not
   // clobber the fresher list a write (or a newer read) has since installed.
   const requestRef = useRef(0);
+  // The servers whose sign-in was waiting at the last read, so the read that
+  // sees one connect can say so.
+  const signingInRef = useRef(new Set<string>());
 
   function markDirty(value: boolean) {
     dirtyRef.current = value;
@@ -389,8 +430,8 @@ export function McpPanel({
    * unsaved; otherwise reconciled around the draft. Gateway mounts follow
    * the saved configuration — their toggle writes immediately, and the next
    * Save must carry the result instead of reverting it — while manual rows
-   * keep the reader's unsaved edits, and edited mount rows refresh only
-   * their health. */
+   * keep the reader's unsaved edits and refresh only their projection, so a
+   * sign-in that finishes mid-edit still shows. */
   function adoptServers(fresh: McpServerInfo[]) {
     setServers((current) => {
       // Reading the ref inside the updater is sound where a transition
@@ -398,13 +439,23 @@ export function McpPanel({
       // computes the same list twice.
       if (!dirtyRef.current) return fresh;
       const freshMounts = new Map<string, McpServerInfo>();
+      const freshManual = new Map<string, McpServerInfo>();
       for (const server of fresh) {
         if (server.gateway_endpoint !== null) {
           freshMounts.set(server.gateway_endpoint, server);
+        } else if (server.plugin === null) {
+          freshManual.set(server.name, server);
         }
       }
       const kept = current.flatMap((server) => {
-        if (server.gateway_endpoint === null) return [server];
+        if (server.gateway_endpoint === null) {
+          const saved = freshManual.get(server.name);
+          return [
+            saved && server.plugin === null
+              ? withProjection(server, saved)
+              : server,
+          ];
+        }
         const mount = freshMounts.get(server.gateway_endpoint);
         if (mount === undefined) return [];
         freshMounts.delete(server.gateway_endpoint);
@@ -634,47 +685,100 @@ export function McpPanel({
     }
   }
 
+  /** One authoritative read of the server list, superseding any older read
+   * still in flight. A failed read keeps the rows on screen. */
+  async function refreshServers() {
+    const request = ++requestRef.current;
+    try {
+      const result = await client.listMcpServers();
+      if (request !== requestRef.current) return;
+      announceFinishedSignIns(result.servers);
+      adoptServers(result.servers);
+      setServersKnown(true);
+      setListError(null);
+    } catch {
+      // Keep the last rows; the next read or a reopened Settings recovers.
+    }
+  }
+
+  /** Say so when a sign-in this panel was waiting on connects. A failure
+   * needs no toast: its row says what went wrong. */
+  function announceFinishedSignIns(fresh: McpServerInfo[]) {
+    for (const server of fresh) {
+      if (
+        signingInRef.current.has(server.name) &&
+        server.oauth_status?.state === "connected"
+      ) {
+        toast.success(`Connected ${server.name}`);
+      }
+    }
+    signingInRef.current = new Set(
+      fresh
+        .filter((server) => server.oauth_status?.state === "authorizing")
+        .map((server) => server.name),
+    );
+  }
+
+  /** Show one server's new sign-in state before the next read lands. */
+  function showOauthStatus(name: string, status: McpOAuthStatus) {
+    setServers((current) =>
+      current.map((server) =>
+        server.name === name ? { ...server, oauth_status: status } : server,
+      ),
+    );
+  }
+
+  /** Start a sign-in and open its page in the person's browser, from this
+   * computer: the server that runs the sign-in may be another machine. The
+   * list read that follows shows the wait, and the reads while it lasts show
+   * how it ended. */
   async function connectOauth(name: string) {
     setOauthWorking(name);
     setError(null);
     try {
-      const result = await client.connectMcpServer(name);
-      requestRef.current += 1;
-      setServers(result.servers);
+      const status = await client.connectMcpServer(name);
+      showOauthStatus(name, status);
+      const page = status.pending_authorization_url;
+      if (status.state === "authorizing" && page) {
+        signingInRef.current.add(name);
+        await openInBrowser(page);
+        toast.message(`Finish signing in to ${name} in your browser`);
+      }
     } catch (err) {
       setError(errorMessage(err));
-      try {
-        const result = await client.listMcpServers();
-        requestRef.current += 1;
-        setServers(result.servers);
-      } catch {
-        // Preserve the connect error; reopening Settings performs a full load.
-      }
     } finally {
       setOauthWorking(null);
     }
+    await refreshServers();
   }
 
   async function disconnectOauth(name: string) {
     setOauthWorking(name);
     setError(null);
     try {
-      const result = await client.disconnectMcpServer(name);
-      requestRef.current += 1;
-      setServers(result.servers);
+      await client.disconnectMcpServer(name);
     } catch (err) {
       setError(errorMessage(err));
-      try {
-        const result = await client.listMcpServers();
-        requestRef.current += 1;
-        setServers(result.servers);
-      } catch {
-        // Preserve the disconnect error; reopening Settings performs a full load.
-      }
     } finally {
       setOauthWorking(null);
     }
+    await refreshServers();
   }
+
+  // While a sign-in waits on the browser, read the list often enough that
+  // coming back from the browser shows the result without a manual refresh.
+  const signingIn = servers.some(
+    (server) => server.oauth_status?.state === "authorizing",
+  );
+  useEffect(() => {
+    if (!signingIn) return;
+    const timer = window.setInterval(
+      () => void refreshServers(),
+      SIGN_IN_POLL_MS,
+    );
+    return () => window.clearInterval(timer);
+    // refreshServers reads only refs, the client, and state setters.
+  }, [client, signingIn]);
 
   const working =
     saving ||
@@ -954,11 +1058,7 @@ export function McpPanel({
                 key={index}
                 title={server.name || `Server ${index + 1}`}
               >
-                <SettingsStatus
-                  tone={healthTone(server.health)}
-                  label={healthLabel(server.health)}
-                  description={verifyDescription(server)}
-                />
+                <SettingsStatus {...mcpServerStatus(server)} />
 
                 <McpTierChip curated={server.curated} />
                 {(() => {

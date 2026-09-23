@@ -443,7 +443,7 @@ async fn missing_selected_parent_environment_fails_before_spawn_without_a_value(
     .unwrap();
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = config.0[0]
-        .connect(&gateway, &BTreeMap::new(), None, None)
+        .connect(&gateway, &BTreeMap::new(), None)
         .await
         .err()
         .unwrap();
@@ -1004,7 +1004,7 @@ async fn missing_selected_bearer_token_fails_by_name_without_a_value() {
     definition.bearer_token_env = Some(MISSING.to_string());
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = definition
-        .connect(&gateway, &BTreeMap::new(), None, None)
+        .connect(&gateway, &BTreeMap::new(), None)
         .await
         .err()
         .unwrap();
@@ -1887,4 +1887,519 @@ async fn successful_verify_reports_tool_count_and_enabled_for_new_turns() {
     assert_eq!(info.servers[0].health, McpHealth::Disabled);
     assert!(!info.servers[0].definition.enabled);
     assert_eq!(info.servers[0].tool_count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// OAuth sign-in for a remote server whose saved definition lacks the flag
+// ---------------------------------------------------------------------------
+
+/// How the fake authorization server answers the browser.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FakeConsent {
+    Approve,
+    Deny,
+}
+
+/// A remote MCP server that requires an OAuth sign-in, shaped the way the MCP
+/// authorization specification describes and Vercel's server behaves: the
+/// MCP endpoint answers an unauthenticated request with a `401` whose
+/// challenge names protected-resource metadata, which names an authorization
+/// server offering dynamic client registration, PKCE, and resource
+/// indicators. Everything lives on one loopback origin.
+struct FakeOAuthServer {
+    origin: String,
+    registration: bool,
+    consent: FakeConsent,
+    /// Registered client ids and their one redirect URI.
+    clients: std::sync::Mutex<BTreeMap<String, String>>,
+    /// Issued codes, with the PKCE challenge, redirect, and resource they
+    /// were issued for.
+    codes: std::sync::Mutex<BTreeMap<String, (String, String, String)>>,
+    /// Bearers the MCP endpoint saw on tool calls.
+    tool_call_bearers: std::sync::Mutex<Vec<String>>,
+}
+
+const FAKE_ACCESS_TOKEN: &str = "fake-access-token-3521";
+
+impl FakeOAuthServer {
+    async fn serve(registration: bool, consent: FakeConsent) -> Arc<Self> {
+        use axum::routing::{get, post};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = Arc::new(Self {
+            origin,
+            registration,
+            consent,
+            clients: Default::default(),
+            codes: Default::default(),
+            tool_call_bearers: Default::default(),
+        });
+        let app = axum::Router::new()
+            .route("/mcp", post(Self::mcp))
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(Self::protected_resource),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server",
+                get(Self::authorization_server),
+            )
+            .route("/register", post(Self::register))
+            .route("/authorize", get(Self::authorize))
+            .route("/token", post(Self::token))
+            .with_state(Arc::clone(&server));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        server
+    }
+
+    fn mcp_url(&self) -> String {
+        format!("{}/mcp", self.origin)
+    }
+
+    async fn mcp(
+        axum::extract::State(server): axum::extract::State<Arc<Self>>,
+        headers: axum::http::HeaderMap,
+        body: String,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+
+        let bearer = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        if bearer != Some(FAKE_ACCESS_TOKEN) {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                [(
+                    "www-authenticate",
+                    format!(
+                        "Bearer error=\"invalid_token\", error_description=\"No authorization \
+                         provided\", resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+                        server.origin
+                    ),
+                )],
+                r#"{"error":"invalid_token"}"#,
+            )
+                .into_response();
+        }
+        let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let Some(id) = request.get("id").cloned() else {
+            return axum::http::StatusCode::ACCEPTED.into_response();
+        };
+        let result = match request["method"].as_str().unwrap_or_default() {
+            "initialize" => serde_json::json!({
+                "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "oauth-fixture", "version": "1"}
+            }),
+            "tools/list" => serde_json::json!({
+                "tools": [{
+                    "name": "list_projects",
+                    "description": "List projects",
+                    "inputSchema": {"type": "object"}
+                }]
+            }),
+            "tools/call" => {
+                server
+                    .tool_call_bearers
+                    .lock()
+                    .unwrap()
+                    .push(bearer.unwrap_or_default().to_string());
+                serde_json::json!({
+                    "content": [{"type": "text", "text": "two projects"}],
+                    "isError": false
+                })
+            }
+            _ => serde_json::json!({}),
+        };
+        (
+            [("content-type", "application/json")],
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+        )
+            .into_response()
+    }
+
+    async fn protected_resource(
+        axum::extract::State(server): axum::extract::State<Arc<Self>>,
+    ) -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({
+            "resource": format!("{}/mcp", server.origin),
+            "authorization_servers": [server.origin],
+            "scopes_supported": ["projects:read"]
+        }))
+    }
+
+    async fn authorization_server(
+        axum::extract::State(server): axum::extract::State<Arc<Self>>,
+    ) -> axum::Json<serde_json::Value> {
+        let mut metadata = serde_json::json!({
+            "issuer": server.origin,
+            "authorization_endpoint": format!("{}/authorize", server.origin),
+            "token_endpoint": format!("{}/token", server.origin),
+            "code_challenge_methods_supported": ["S256"]
+        });
+        if server.registration {
+            metadata["registration_endpoint"] =
+                serde_json::json!(format!("{}/register", server.origin));
+        }
+        axum::Json(metadata)
+    }
+
+    async fn register(
+        axum::extract::State(server): axum::extract::State<Arc<Self>>,
+        axum::Json(body): axum::Json<serde_json::Value>,
+    ) -> axum::Json<serde_json::Value> {
+        assert_eq!(body["token_endpoint_auth_method"], "none");
+        let redirect = body["redirect_uris"][0].as_str().unwrap().to_string();
+        let mut clients = server.clients.lock().unwrap();
+        let client_id = format!("fake-client-{}", clients.len() + 1);
+        clients.insert(client_id.clone(), redirect);
+        axum::Json(serde_json::json!({"client_id": client_id}))
+    }
+
+    async fn authorize(
+        axum::extract::State(server): axum::extract::State<Arc<Self>>,
+        axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+
+        let redirect = &query["redirect_uri"];
+        assert_eq!(
+            server.clients.lock().unwrap().get(&query["client_id"]),
+            Some(redirect),
+            "the redirect must be the one this client registered"
+        );
+        assert_eq!(query["response_type"], "code");
+        assert_eq!(query["code_challenge_method"], "S256");
+        assert_eq!(query["scope"], "projects:read");
+        let state = &query["state"];
+        let location = match server.consent {
+            FakeConsent::Deny => format!("{redirect}?error=access_denied&state={state}"),
+            FakeConsent::Approve => {
+                let code = format!("code-{}", uuid::Uuid::new_v4());
+                server.codes.lock().unwrap().insert(
+                    code.clone(),
+                    (
+                        query["code_challenge"].clone(),
+                        redirect.clone(),
+                        query["resource"].clone(),
+                    ),
+                );
+                format!("{redirect}?code={code}&state={state}")
+            }
+        };
+        (axum::http::StatusCode::FOUND, [("location", location)]).into_response()
+    }
+
+    async fn token(
+        axum::extract::State(server): axum::extract::State<Arc<Self>>,
+        axum::Form(form): axum::Form<BTreeMap<String, String>>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        use base64::Engine as _;
+        use sha2::Digest as _;
+
+        assert_eq!(form["grant_type"], "authorization_code");
+        let Some((challenge, redirect, resource)) =
+            server.codes.lock().unwrap().remove(&form["code"])
+        else {
+            return (axum::http::StatusCode::BAD_REQUEST, "invalid_grant").into_response();
+        };
+        let verified = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(form["code_verifier"].as_bytes()));
+        assert_eq!(
+            verified, challenge,
+            "PKCE verifier must match the challenge"
+        );
+        assert_eq!(form["redirect_uri"], redirect);
+        assert_eq!(form["resource"], resource);
+        assert_eq!(
+            resource,
+            server.mcp_url(),
+            "the resource indicator names the server"
+        );
+        axum::Json(serde_json::json!({
+            "access_token": FAKE_ACCESS_TOKEN,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": "fake-refresh-token-3521",
+            "scope": "projects:read"
+        }))
+        .into_response()
+    }
+}
+
+/// A runtime whose OAuth client admits the fake's loopback origin.
+async fn oauth_test_runtime() -> (Arc<McpRuntime>, Arc<dyn Store>, tempfile::TempDir) {
+    let (runtime, store, directory) = test_runtime().await;
+    runtime.admit_loopback_oauth_for_tests();
+    (runtime, store, directory)
+}
+
+/// Play the person's browser: open the authorization page, then follow the
+/// authorization server's redirect to the loopback callback.
+async fn complete_browser_sign_in(page: &str) {
+    let browser = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .unwrap();
+    let redirect = browser.get(page).send().await.unwrap();
+    assert_eq!(redirect.status(), reqwest::StatusCode::FOUND);
+    let callback = redirect.headers()["location"].to_str().unwrap().to_string();
+    let landed = browser.get(&callback).send().await.unwrap();
+    assert!(landed.status().is_success(), "{}", landed.status());
+}
+
+/// Poll `info` until `done` holds, so a test can wait on the background half
+/// of a sign-in without sleeping a fixed time.
+async fn info_when(runtime: &McpRuntime, done: impl Fn(&McpServerInfo) -> bool) -> McpServersInfo {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let info = runtime.info().await;
+        if done(&info.servers[0]) {
+            return info;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sign-in did not settle: {:?}",
+            info.servers[0]
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn oauth_state(server: &McpServerInfo) -> Option<crate::mcp_oauth_runtime::McpOAuthState> {
+    server.oauth_status.as_ref().map(|status| status.state)
+}
+
+/// Issue #3521: an imported remote server, saved without the OAuth flag,
+/// answered `401` and the save failed with "Authentication failed (401
+/// Unauthorized)" and no way to sign in. Now the challenge leads to a visible
+/// sign-in-required state and Connect, the browser's return stores the
+/// session, and the tools load and are called with the token.
+#[tokio::test]
+async fn an_imported_server_that_asks_for_oauth_signs_in_and_loads_its_tools() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let fake = FakeOAuthServer::serve(true, FakeConsent::Approve).await;
+    let (runtime, store, _directory) = oauth_test_runtime().await;
+    // Exactly what the import builds for `{"url": "..."}`: the flag is off.
+    let definition = http_definition("vercel", &fake.mcp_url());
+    assert!(!definition.oauth);
+
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .expect("a server that asks for a sign-in still saves");
+    let server = &info.servers[0];
+    assert_eq!(server.health, McpHealth::Degraded);
+    assert_eq!(oauth_state(server), Some(McpOAuthState::NotConnected));
+    let diagnostic = server.diagnostic.as_deref().unwrap();
+    assert!(diagnostic.contains("needs you to sign in"), "{diagnostic}");
+    assert!(!diagnostic.contains("401"), "{diagnostic}");
+    assert!(!diagnostic.contains("127.0.0.1"), "{diagnostic}");
+    // Retrying cannot help until someone signs in, and a model-gateway
+    // sign-in is not that.
+    assert_eq!(
+        parked(&runtime, "vercel").await,
+        Some(ReconnectPark::Authorization)
+    );
+    runtime.gateway_session_changed().await;
+    assert_eq!(
+        parked(&runtime, "vercel").await,
+        Some(ReconnectPark::Authorization)
+    );
+
+    // Connect answers at once with the page the desktop opens.
+    let status = runtime.oauth_connect("vercel").await.unwrap();
+    assert_eq!(status.state, McpOAuthState::Authorizing);
+    let page = status.pending_authorization_url.clone().unwrap();
+    assert!(
+        page.starts_with(&format!("{}/authorize?", fake.origin)),
+        "{page}"
+    );
+    let pending = runtime.info().await;
+    assert_eq!(
+        pending.servers[0].oauth_status.as_ref(),
+        Some(&status),
+        "the pending page stays available to reopen"
+    );
+
+    complete_browser_sign_in(&page).await;
+    let info = info_when(&runtime, |server| server.health == McpHealth::Healthy).await;
+    let server = &info.servers[0];
+    assert_eq!(oauth_state(server), Some(McpOAuthState::Connected));
+    assert_eq!(server.tool_count, 1);
+    assert_eq!(server.diagnostic, None);
+    assert_eq!(parked(&runtime, "vercel").await, None);
+
+    // Stored the way the OAuth path stores sessions: in the credential store
+    // under the record id, never in the definition or the projection.
+    let record = saved_records(&store).await.remove(0);
+    let secrets = runtime.secrets();
+    let token = secrets
+        .get_secret(&crate::connectors::oauth_token_secret_key(record.id))
+        .await
+        .unwrap()
+        .expect("the session is stored");
+    assert!(token.contains(FAKE_ACCESS_TOKEN));
+    assert!(secrets
+        .get_secret(&crate::connectors::oauth_client_secret_key(record.id))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(!record.definition.to_string().contains(FAKE_ACCESS_TOKEN));
+    assert!(!serde_json::to_string(&info)
+        .unwrap()
+        .contains(FAKE_ACCESS_TOKEN));
+    assert!(
+        !saved_definitions(&store).await[0].oauth,
+        "nothing rewrote the saved flag"
+    );
+
+    // A tool call presents the session's token.
+    let output = runtime
+        .snapshot()
+        .get("mcp__vercel__list_projects")
+        .expect("the server's tools are mounted")
+        .execute(
+            &tidebreak_core::ToolCtx::new_legacy_workspace(
+                tidebreak_core::SessionId::new(),
+                None,
+                std::path::PathBuf::from("unused-by-mcp"),
+            ),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.content, "two projects");
+    assert_eq!(
+        *fake.tool_call_bearers.lock().unwrap(),
+        [FAKE_ACCESS_TOKEN.to_string()]
+    );
+
+    // Disconnect clears the session, and the server asks for a sign-in again.
+    let status = runtime.oauth_disconnect("vercel").await.unwrap();
+    assert_eq!(status.state, McpOAuthState::NotConnected);
+    assert!(secrets
+        .get_secret(&crate::connectors::oauth_token_secret_key(record.id))
+        .await
+        .unwrap()
+        .is_none());
+    let info = runtime.info().await;
+    assert_eq!(
+        oauth_state(&info.servers[0]),
+        Some(McpOAuthState::NotConnected)
+    );
+    assert_eq!(info.servers[0].health, McpHealth::Degraded);
+    assert!(runtime
+        .snapshot()
+        .get("mcp__vercel__list_projects")
+        .is_none());
+}
+
+/// Declining on the authorization page lands in a visible, retryable state
+/// that says what happened, not in a silent failure.
+#[tokio::test]
+async fn a_declined_sign_in_says_so_and_offers_another_try() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let fake = FakeOAuthServer::serve(true, FakeConsent::Deny).await;
+    let (runtime, _store, _directory) = oauth_test_runtime().await;
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![http_definition("vercel", &fake.mcp_url())],
+        })
+        .await
+        .unwrap();
+    let status = runtime.oauth_connect("vercel").await.unwrap();
+    complete_browser_sign_in(&status.pending_authorization_url.unwrap()).await;
+
+    let info = info_when(&runtime, |server| {
+        oauth_state(server) != Some(McpOAuthState::Authorizing)
+    })
+    .await;
+    let status = info.servers[0].oauth_status.clone().unwrap();
+    assert_eq!(status.state, McpOAuthState::AccessDenied);
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("canceled or denied"),
+        "{status:?}"
+    );
+    assert_eq!(info.servers[0].health, McpHealth::Degraded);
+}
+
+/// A server that asks for OAuth but offers no way for Tidebreak to register
+/// is refused with a plain reason, not with the `401` it answered.
+#[tokio::test]
+async fn a_server_without_client_registration_says_sign_in_is_unsupported() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let fake = FakeOAuthServer::serve(false, FakeConsent::Approve).await;
+    let (runtime, _store, _directory) = oauth_test_runtime().await;
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![http_definition("vercel", &fake.mcp_url())],
+        })
+        .await
+        .expect_err("a sign-in Tidebreak cannot complete fails the save")
+        .to_string();
+    assert!(
+        error.contains("Tidebreak cannot complete its sign-in"),
+        "{error}"
+    );
+    assert!(error.contains("dynamic client registration"), "{error}");
+    assert!(!error.contains("401"), "{error}");
+
+    // At boot it degrades instead, says why, and stops retrying.
+    let definitions = vec![http_definition("vercel", &fake.mcp_url())];
+    runtime
+        .replace_permissive(definitions.clone(), ids_for(&definitions))
+        .await;
+    let info = runtime.info().await;
+    let status = info.servers[0].oauth_status.clone().unwrap();
+    assert_eq!(status.state, McpOAuthState::Unsupported);
+    assert!(status
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("dynamic client registration"));
+    assert_eq!(
+        parked(&runtime, "vercel").await,
+        Some(ReconnectPark::Authorization)
+    );
+    let connect = runtime.oauth_connect("vercel").await.unwrap();
+    assert_eq!(connect.state, McpOAuthState::Unsupported);
+}
+
+/// A server configured with a static bearer keeps that path: a `401` means
+/// the token is wrong, so there is no sign-in to offer.
+#[tokio::test]
+async fn a_static_bearer_server_never_offers_a_sign_in() {
+    let fake = FakeOAuthServer::serve(true, FakeConsent::Approve).await;
+    let (runtime, _store, _directory) = oauth_test_runtime().await;
+    let mut definition = http_definition("vercel", &fake.mcp_url());
+    // PATH always exists and is never the fake's token.
+    definition.bearer_token_env = Some("PATH".to_string());
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .expect_err("a rejected static token fails the save")
+        .to_string();
+    assert!(
+        error.contains("Authentication failed (401 Unauthorized)"),
+        "{error}"
+    );
+    assert!(runtime.info().await.servers.is_empty());
 }

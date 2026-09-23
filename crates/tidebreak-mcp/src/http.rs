@@ -8,8 +8,10 @@
 //! The bearer token lives only inside the prebuilt `Authorization` header value
 //! and is never echoed into errors or logs.
 
+use std::time::Duration;
+
 use serde_json::Value;
-use tidebreak_core::Result;
+use tidebreak_core::{AgentError, Result};
 
 use crate::client::{mcp_error, mcp_message, MAX_JSON_RPC_FRAME_BYTES};
 use crate::protocol::PROTOCOL_VERSION;
@@ -17,6 +19,75 @@ use crate::protocol::PROTOCOL_VERSION;
 const SESSION_ID_HEADER: &str = "mcp-session-id";
 const PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
 const MAX_SESSION_ID_BYTES: usize = 4 * 1024;
+/// The diagnostic for an HTTP 401, the one status that means "authorize
+/// first". [`is_unauthorized`] recognizes exactly this text.
+const UNAUTHORIZED_DIAGNOSTIC: &str = "Authentication failed (401 Unauthorized).";
+/// The most `WWW-Authenticate` text [`authorization_challenge`] reads. A
+/// larger challenge is ignored rather than cut, because a cut could split the
+/// URL a caller parses out of it.
+const MAX_CHALLENGE_BYTES: usize = 8 * 1024;
+
+/// Whether `error` is this transport's answer to an HTTP 401 from the server.
+///
+/// A 401 is the MCP authorization specification's signal that the client has
+/// to authorize before it connects, so a caller can then ask the server how
+/// with [`authorization_challenge`]. A 403 is not included: it means the
+/// credential that was sent is not allowed.
+pub fn is_unauthorized(error: &AgentError) -> bool {
+    matches!(error, AgentError::Message(message)
+        if message.strip_prefix("MCP client error: ") == Some(UNAUTHORIZED_DIAGNOSTIC))
+}
+
+/// Ask an HTTP MCP endpoint how it wants to be authorized.
+///
+/// Sends one `initialize` request with no credential and returns the
+/// endpoint's `WWW-Authenticate` challenge when it answers 401. Several
+/// challenge headers are joined with `", "`, the way HTTP combines repeated
+/// fields. Returns `Ok(None)` for any other answer, for a 401 without a
+/// challenge, and for a challenge that is not visible ASCII or is larger than
+/// this function reads.
+///
+/// The challenge is for parsing only. It can name URLs, and diagnostics never
+/// echo a URL, so do not show it or log it.
+pub async fn authorization_challenge(url: &str, timeout: Duration) -> Result<Option<String>> {
+    let wire = HttpWire::with_headers(url, None, reqwest::header::HeaderMap::new())?;
+    let message = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {
+                "name": crate::client::CLIENT_NAME,
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        }
+    });
+    let response = tokio::time::timeout(timeout, wire.post(&message, None))
+        .await
+        .map_err(|_| mcp_message(format!("Timed out after {} ms.", timeout.as_millis())))??;
+    if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(None);
+    }
+    let mut challenges = Vec::new();
+    let mut bytes = 0usize;
+    for value in response
+        .headers()
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+    {
+        let Ok(value) = value.to_str() else {
+            return Ok(None);
+        };
+        bytes = bytes.saturating_add(value.len());
+        if bytes > MAX_CHALLENGE_BYTES {
+            return Ok(None);
+        }
+        challenges.push(value.trim());
+    }
+    let challenge = challenges.join(", ");
+    Ok((!challenge.is_empty()).then_some(challenge))
+}
 
 /// One Streamable HTTP connection to an external MCP server.
 pub(crate) struct HttpWire {
@@ -347,7 +418,8 @@ fn http_status_diagnostic(status: reqwest::StatusCode) -> String {
         .map(|reason| format!("{} {reason}", status.as_u16()))
         .unwrap_or_else(|| status.as_u16().to_string());
     match status.as_u16() {
-        401 | 403 => format!("Authentication failed ({status_line})."),
+        401 => UNAUTHORIZED_DIAGNOSTIC.to_string(),
+        403 => format!("Authentication failed ({status_line})."),
         404 => format!("Wrong path ({status_line})."),
         500..=599 => format!("Server error ({status_line})."),
         _ => format!("HTTP status {status_line}."),
@@ -851,5 +923,77 @@ mod tests {
             "x".to_owned()
         )]))
         .is_err());
+    }
+
+    #[test]
+    fn only_the_401_diagnostic_reads_as_unauthorized() {
+        let status = |code: u16| {
+            mcp_message(http_status_diagnostic(
+                reqwest::StatusCode::from_u16(code).unwrap(),
+            ))
+        };
+        assert!(is_unauthorized(&status(401)));
+        assert!(!is_unauthorized(&status(403)));
+        assert!(!is_unauthorized(&status(404)));
+        assert!(!is_unauthorized(&AgentError::config(
+            UNAUTHORIZED_DIAGNOSTIC
+        )));
+    }
+
+    /// The first step of MCP authorization: a 401 names how to authorize.
+    /// Every challenge header comes back, joined, and no other answer does.
+    #[tokio::test]
+    async fn reads_the_challenge_a_401_carries_and_nothing_else() {
+        async fn handler(
+            State(status): State<StatusCode>,
+            headers: HeaderMap,
+        ) -> axum::response::Response {
+            // The probe never sends a credential.
+            assert!(headers.get(reqwest::header::AUTHORIZATION).is_none());
+            let mut response = axum::response::Response::builder().status(status);
+            if status == StatusCode::UNAUTHORIZED {
+                response = response
+                    .header("www-authenticate", "Basic realm=\"legacy\"")
+                    .header(
+                        "www-authenticate",
+                        "Bearer resource_metadata=\"https://mcp.example.test/.well-known/oauth-protected-resource\"",
+                    );
+            }
+            response.body(Body::empty()).unwrap()
+        }
+
+        async fn serve(status: StatusCode) -> String {
+            let app = Router::new()
+                .route("/mcp", post(handler))
+                .with_state(status);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            format!("http://{address}/mcp")
+        }
+
+        let challenge = authorization_challenge(
+            &serve(StatusCode::UNAUTHORIZED).await,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            challenge.as_deref(),
+            Some(
+                "Basic realm=\"legacy\", Bearer resource_metadata=\"https://mcp.example.test/.well-known/oauth-protected-resource\""
+            )
+        );
+        for status in [StatusCode::OK, StatusCode::FORBIDDEN, StatusCode::NOT_FOUND] {
+            assert_eq!(
+                authorization_challenge(&serve(status).await, Duration::from_secs(5))
+                    .await
+                    .unwrap(),
+                None,
+                "{status}"
+            );
+        }
     }
 }

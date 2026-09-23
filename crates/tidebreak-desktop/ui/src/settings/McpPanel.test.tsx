@@ -19,6 +19,11 @@ import {
 } from "../api";
 import { McpPanel } from "./McpPanel";
 
+const { openInBrowser } = vi.hoisted(() => ({
+  openInBrowser: vi.fn(async (_url: string) => {}),
+}));
+vi.mock("@/openInBrowser", () => ({ openInBrowser }));
+
 const healthy: McpServersInfo = {
   servers: [
     {
@@ -920,5 +925,212 @@ describe("McpPanel", () => {
         gateway_endpoint: "example-security-tools",
       }),
     ]);
+  });
+});
+
+/** An HTTP server as an import saves it, with no OAuth flag, after it
+ * answered the handshake by asking for a sign-in. */
+function signInServer(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
+  return {
+    name: "vercel",
+    command: null,
+    args: [],
+    env: [],
+    env_from: [],
+    cwd: null,
+    url: "https://mcp.vercel.com",
+    bearer_token_env: null,
+    oauth: false,
+    gateway_endpoint: null,
+    request_timeout_ms: 60_000,
+    enabled: true,
+    plugin: null,
+    health: "degraded",
+    tool_count: 0,
+    diagnostic:
+      "This server needs you to sign in. Select Connect to sign in with your browser.",
+    curated: null,
+    oauth_status: { state: "not_connected" },
+    ...overrides,
+  };
+}
+
+describe("McpPanel OAuth sign-in", () => {
+  it("offers Connect for an imported server that asks for a sign-in", async () => {
+    render(<McpPanel client={api({ servers: [signInServer()] })} />);
+
+    expect(await screen.findByText("Sign in required")).toBeInTheDocument();
+    expect(screen.getByText(/needs you to sign in/)).toBeInTheDocument();
+    // Not a failed connection: a sign-in is the next step.
+    expect(screen.queryByText("Needs attention")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
+  });
+
+  it("opens the sign-in page on this computer and shows the server once it connects", async () => {
+    const page = "https://vercel.com/oauth/authorize?client_id=tidebreak-1";
+    const waiting = signInServer({
+      oauth_status: { state: "authorizing", pending_authorization_url: page },
+    });
+    const connected = signInServer({
+      health: "healthy",
+      tool_count: 4,
+      diagnostic: null,
+      oauth_status: { state: "connected" },
+    });
+    const listMcpServers = vi
+      .fn()
+      .mockResolvedValueOnce({ servers: [signInServer()] })
+      .mockResolvedValueOnce({ servers: [waiting] })
+      .mockResolvedValue({ servers: [connected] });
+    const connectMcpServer = vi.fn().mockResolvedValue({
+      state: "authorizing",
+      pending_authorization_url: page,
+    });
+    const client = api(
+      { servers: [signInServer()] },
+      { listMcpServers, connectMcpServer },
+    );
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(connectMcpServer).toHaveBeenCalledWith("vercel");
+    await waitFor(() => expect(openInBrowser).toHaveBeenCalledWith(page));
+    expect(await screen.findByText("Waiting for sign-in")).toBeInTheDocument();
+
+    // A closed tab is not a dead end.
+    await user.click(
+      screen.getByRole("button", { name: "Reopen sign-in page" }),
+    );
+    expect(openInBrowser).toHaveBeenCalledTimes(2);
+    expect(openInBrowser).toHaveBeenLastCalledWith(page);
+
+    // The panel keeps reading while the browser has the page.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_100);
+    });
+    expect(await screen.findByText("Healthy")).toBeInTheDocument();
+    expect(
+      screen.getByText("4 tools available to new turns."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Signed in")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Disconnect" }),
+    ).toBeInTheDocument();
+  });
+
+  it("says why a sign-in stopped and offers the next step", async () => {
+    render(
+      <McpPanel
+        client={api({
+          servers: [
+            signInServer({
+              name: "denied",
+              oauth_status: {
+                state: "access_denied",
+                error:
+                  "The sign-in was canceled or denied. Select Try again to start over.",
+              },
+            }),
+            signInServer({
+              name: "late",
+              oauth_status: {
+                state: "not_connected",
+                error:
+                  "The sign-in timed out before you finished it. Select Connect to try again.",
+              },
+            }),
+            signInServer({
+              name: "legacy",
+              diagnostic:
+                "This server asks you to sign in, but Tidebreak cannot complete its sign-in. Its sign-in service does not let new apps register (no dynamic client registration), and Tidebreak has no client ID for it. If the server offers access tokens, set a bearer token variable instead.",
+              oauth_status: {
+                state: "unsupported",
+                error:
+                  "Its sign-in service does not let new apps register (no dynamic client registration), and Tidebreak has no client ID for it.",
+              },
+            }),
+          ],
+        })}
+      />,
+    );
+
+    const denied = await screen.findByRole("region", { name: "denied" });
+    expect(within(denied).getByText("Sign-in denied")).toBeInTheDocument();
+    expect(within(denied).getByText(/canceled or denied/)).toBeInTheDocument();
+    expect(
+      within(denied).getByRole("button", { name: "Try again" }),
+    ).toBeEnabled();
+
+    const late = screen.getByRole("region", { name: "late" });
+    expect(within(late).getByText("Sign in required")).toBeInTheDocument();
+    expect(within(late).getByText(/timed out/)).toBeInTheDocument();
+    expect(within(late).getByRole("button", { name: "Connect" })).toBeEnabled();
+
+    // A sign-in Tidebreak cannot run offers no button that cannot work.
+    const legacy = screen.getByRole("region", { name: "legacy" });
+    expect(
+      within(legacy).getByText("Sign-in not supported"),
+    ).toBeInTheDocument();
+    expect(
+      within(legacy).getByText(/set a bearer token variable instead/),
+    ).toBeInTheDocument();
+    expect(
+      within(legacy).queryByRole("button", { name: /Connect|Try again/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows a Connect that could not start on the server's row", async () => {
+    const refused =
+      "The server refused to register Tidebreak for sign-in. It may allow only apps it has approved.";
+    const listMcpServers = vi
+      .fn()
+      .mockResolvedValueOnce({ servers: [signInServer()] })
+      .mockResolvedValue({
+        servers: [
+          signInServer({
+            oauth_status: { state: "not_connected", error: refused },
+          }),
+        ],
+      });
+    const client = api(
+      { servers: [signInServer()] },
+      {
+        listMcpServers,
+        connectMcpServer: vi
+          .fn()
+          .mockResolvedValue({ state: "not_connected", error: refused }),
+      },
+    );
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(await screen.findByText(refused)).toBeInTheDocument();
+    expect(openInBrowser).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
+  });
+
+  it("never sends the OAuth status back as part of a definition", async () => {
+    const putMcpServers = vi
+      .fn()
+      .mockResolvedValue({ servers: [signInServer()] });
+    const client = api({ servers: [signInServer()] }, { putMcpServers });
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Save and verify" }),
+    );
+    await waitFor(() => expect(putMcpServers).toHaveBeenCalledTimes(1));
+    const [sent] = putMcpServers.mock.calls[0][0] as Record<string, unknown>[];
+    expect(sent).not.toHaveProperty("oauth_status");
+    expect(sent).not.toHaveProperty("health");
+    expect(sent).toMatchObject({
+      name: "vercel",
+      url: "https://mcp.vercel.com",
+      oauth: false,
+    });
   });
 });

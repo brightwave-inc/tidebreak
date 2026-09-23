@@ -14,6 +14,7 @@ import {
   type GatewayStatus,
   type ManagedPolicy,
   type McpAppPayload,
+  type McpOAuthStatus,
   type McpServerDefinition,
   type McpServersInfo,
   type McpViewSession,
@@ -126,14 +127,20 @@ export function withAppsApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
       });
     }
 
-    connectMcpServer(name: string): Promise<McpServersInfo> {
+    /**
+     * Start one server's OAuth sign-in. Answers at once: `authorizing` carries
+     * the page to open in the person's browser, and the sign-in finishes in
+     * the background, so read `listMcpServers` for the outcome.
+     */
+    connectMcpServer(name: string): Promise<McpOAuthStatus> {
       return this.json(`/mcp/servers/${encodeURIComponent(name)}/connect`, {
         method: "POST",
         headers: this.headers(),
       });
     }
 
-    disconnectMcpServer(name: string): Promise<McpServersInfo> {
+    /** Clear one server's stored OAuth session. */
+    disconnectMcpServer(name: string): Promise<McpOAuthStatus> {
       return this.json(`/mcp/servers/${encodeURIComponent(name)}/disconnect`, {
         method: "POST",
         headers: this.headers(),

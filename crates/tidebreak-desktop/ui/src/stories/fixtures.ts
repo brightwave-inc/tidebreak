@@ -23,6 +23,7 @@ import type {
   PendingUserQuestions,
   GatewayApps,
   GatewayStatus,
+  McpServerInfo,
   MemoryRecord,
   RemoteMachineState,
   TaskPlan,
@@ -2464,17 +2465,71 @@ export function mcpOAuthStatus(
   return { state, ...extras };
 }
 
+/* The OAuth statuses and diagnostics below use the sentences the server
+ * sends, so the stories show what a person reads. */
 export const mcpOauthNotConnected = mcpOAuthStatus("not_connected");
 export const mcpOauthAuthorizing = mcpOAuthStatus("authorizing", {
-  pending_authorization_url: "https://auth.example.test/authorize",
+  pending_authorization_url:
+    "https://auth.example.test/authorize?client_id=tidebreak",
 });
 export const mcpOauthConnected = mcpOAuthStatus("connected");
 export const mcpOauthExpired = mcpOAuthStatus("expired", {
-  error: "Refresh was rejected. Sign in again.",
+  error: "Your sign-in is no longer valid. Select Reconnect to sign in again.",
 });
 export const mcpOauthAccessDenied = mcpOAuthStatus("access_denied", {
-  error: "The authorization server refused this account.",
+  error: "The sign-in was canceled or denied. Select Try again to start over.",
+});
+export const mcpOauthTimedOut = mcpOAuthStatus("not_connected", {
+  error:
+    "The sign-in timed out before you finished it. Select Connect to try again.",
+});
+export const mcpOauthRegistrationRefused = mcpOAuthStatus("not_connected", {
+  error:
+    "The server refused to register Tidebreak for sign-in. It may allow only apps it has approved.",
 });
 export const mcpOauthUnsupported = mcpOAuthStatus("unsupported", {
-  error: "This endpoint does not offer OAuth.",
+  error:
+    "Its sign-in service does not let new apps register (no dynamic client registration), and Tidebreak has no client ID for it.",
 });
+
+export const mcpSignInDiagnostic =
+  "This server needs you to sign in. Select Connect to sign in with your browser.";
+export const mcpSignInUnsupportedDiagnostic =
+  "This server asks you to sign in, but Tidebreak cannot complete its sign-in. Its sign-in service does not let new apps register (no dynamic client registration), and Tidebreak has no client ID for it. If the server offers access tokens, set a bearer token variable instead.";
+
+/**
+ * A remote MCP server as an import saves it, with no OAuth flag, in the
+ * sign-in state `oauth_status` names. Health and diagnostic follow what the
+ * server reports for that state.
+ */
+export function mcpSignInServer(
+  oauth_status: McpOAuthStatus,
+  overrides: Partial<McpServerInfo> = {},
+): McpServerInfo {
+  const connected = oauth_status.state === "connected";
+  return {
+    name: "vercel",
+    command: null,
+    args: [],
+    env: [],
+    env_from: [],
+    cwd: null,
+    url: "https://mcp.vercel.com",
+    bearer_token_env: null,
+    oauth: false,
+    gateway_endpoint: null,
+    request_timeout_ms: 60_000,
+    enabled: true,
+    plugin: null,
+    health: connected ? "healthy" : "degraded",
+    tool_count: connected ? 12 : 0,
+    diagnostic: connected
+      ? null
+      : oauth_status.state === "unsupported"
+        ? mcpSignInUnsupportedDiagnostic
+        : mcpSignInDiagnostic,
+    curated: null,
+    oauth_status,
+    ...overrides,
+  };
+}

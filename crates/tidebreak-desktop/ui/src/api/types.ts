@@ -70,6 +70,7 @@ import {
   type CustomModelConfig as WireCustomModelConfig,
   type McpHealth as WireMcpHealth,
   type McpCuration as WireMcpCuration,
+  type McpOAuthStatus as WireMcpOAuthStatus,
   type McpServerDefinition as WireMcpServerDefinition,
   type McpViewSession,
   type GatewayApps as WireGatewayApps,
@@ -580,6 +581,13 @@ export type McpServersInfo = WireMcpServersInfo;
  * Tidebreak has driven the server end to end; absent is the community tier.
  */
 export type McpCuration = WireMcpCuration;
+
+/**
+ * Where an HTTP MCP server's OAuth sign-in stands. `POST
+ * /mcp/servers/{name}/connect` answers with it, and each listed server that
+ * signs in carries it. Never holds a token.
+ */
+export type McpOAuthStatus = WireMcpOAuthStatus;
 
 /** The Connected apps listing: per-kind projections, both kinds. */
 export type ConnectedAppsInfo = WireConnectedAppsInfo;
