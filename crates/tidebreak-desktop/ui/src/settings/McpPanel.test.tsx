@@ -1383,7 +1383,7 @@ describe("McpPanel directory", () => {
         name: "Add Linear",
       }),
     );
-    expect(addMcpDirectoryServer).toHaveBeenCalledWith("linear");
+    expect(addMcpDirectoryServer).toHaveBeenCalledWith("linear", true);
     // While the add runs, its row says so and no other add can start.
     const adding = within(await directoryRow("Linear")).getByRole("button", {
       name: "Add Linear",
@@ -1489,7 +1489,7 @@ describe("McpPanel directory", () => {
               .mockRejectedValue(
                 new HttpError(
                   400,
-                  "400: This server asks you to sign in, but Tidebreak cannot complete its sign-in.",
+                  "400: Tidebreak holds at most 32 MCP servers. Remove one before you add another.",
                 ),
               ),
           },
@@ -1498,21 +1498,95 @@ describe("McpPanel directory", () => {
     );
 
     await user.click(
-      within(await directoryRow("Stripe")).getByRole("button", {
-        name: "Add Stripe",
+      within(await directoryRow("Linear")).getByRole("button", {
+        name: "Add Linear",
       }),
     );
     // The status prefix comes off, so the reason reads as a sentence.
     expect(
       await screen.findByText(
-        "Could not add Stripe: This server asks you to sign in, but Tidebreak cannot complete its sign-in.",
+        "Could not add Linear: Tidebreak holds at most 32 MCP servers. Remove one before you add another.",
       ),
     ).toBeInTheDocument();
     expect(
-      within(await directoryRow("Stripe")).getByRole("button", {
-        name: "Add Stripe",
+      within(await directoryRow("Linear")).getByRole("button", {
+        name: "Add Linear",
       }),
     ).toBeEnabled();
+  });
+
+  it("connects a token server only when its switch is on", async () => {
+    const github = directoryEntry("github");
+    const zapier = directoryEntry("zapier");
+    const addMcpDirectoryServer = vi
+      .fn()
+      .mockResolvedValueOnce({
+        name: "github",
+        servers: [
+          mcpDirectoryServer(github, {
+            enabled: false,
+            health: "disabled",
+            tool_count: 0,
+          }),
+        ],
+      })
+      .mockResolvedValueOnce({
+        name: "zapier",
+        servers: [mcpDirectoryServer(zapier)],
+      });
+    const user = userEvent.setup();
+    render(
+      <McpPanel client={api({ servers: [] }, { addMcpDirectoryServer })} />,
+    );
+
+    // The row says what the first connect sends, and where, as the import
+    // flow does, and the switch starts off.
+    const githubRow = await directoryRow("GitHub");
+    expect(githubRow).toHaveTextContent(
+      "Sends GITHUB_PERSONAL_ACCESS_TOKEN to api.githubcopilot.com.",
+    );
+    expect(
+      within(githubRow).getByRole("switch", {
+        name: "Start GitHub after adding",
+      }),
+    ).not.toBeChecked();
+    expect(
+      within(githubRow).getByText(
+        "Adds it turned off. You can turn it on later in Connected apps.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(
+      within(githubRow).getByRole("button", { name: "Add GitHub" }),
+    );
+    await waitFor(() =>
+      expect(addMcpDirectoryServer).toHaveBeenCalledWith("github", false),
+    );
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Added GitHub, turned off"),
+    );
+
+    const zapierRow = await directoryRow("Zapier");
+    await user.click(
+      within(zapierRow).getByRole("switch", {
+        name: "Start Zapier after adding",
+      }),
+    );
+    expect(
+      within(zapierRow).getByText("Connects when you add it."),
+    ).toBeInTheDocument();
+    await user.click(
+      within(zapierRow).getByRole("button", { name: "Add Zapier" }),
+    );
+    await waitFor(() =>
+      expect(addMcpDirectoryServer).toHaveBeenLastCalledWith("zapier", true),
+    );
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Added Zapier"),
+    );
+    // Servers that send nothing of the person's have no switch.
+    expect(
+      within(await directoryRow("Linear")).queryByRole("switch"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps unsaved edits when a directory add lands", async () => {

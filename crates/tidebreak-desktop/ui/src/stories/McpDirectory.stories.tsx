@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { fn, userEvent, within } from "storybook/test";
 import type { ComponentProps } from "react";
 import { McpDirectoryList } from "@/settings/McpDirectory";
 import { mcpDirectoryServer, mcpDirectoryServers } from "./fixtures";
@@ -36,8 +36,22 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** Every server, with what it does, how it signs in, and where it connects.
- * No entry is on the tested list, so none shows a tier. */
+ * A server that reads a token says what its first connect sends, and asks
+ * with a switch that starts off. No entry is on the tested list, so none
+ * shows a tier. */
 export const Directory: Story = {};
+
+/** The person turned on the switch, so Add connects GitHub and sends its
+ * token. */
+export const ConnectAfterAdding: Story = {
+  play: async ({ canvasElement }) => {
+    await userEvent.click(
+      within(canvasElement).getByRole("switch", {
+        name: "Start GitHub after adding",
+      }),
+    );
+  },
+};
 
 /** A search that matches nothing points at adding a server by hand. */
 export const SearchWithNoResults: Story = {
@@ -59,7 +73,7 @@ export const Added: Story = {
 export const AddFailed: Story = {
   args: {
     addError:
-      "Could not add Stripe: This server asks you to sign in, but Tidebreak cannot complete its sign-in. Its sign-in service does not let new apps register (no dynamic client registration), and Tidebreak has no client ID for it.",
+      "Could not add Linear: Tidebreak holds at most 32 MCP servers. Remove one before you add another.",
   },
 };
 

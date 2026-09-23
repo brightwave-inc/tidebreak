@@ -554,29 +554,43 @@ pub struct McpDirectoryAdded {
     pub servers: Vec<crate::mcp_config::McpServerInfo>,
 }
 
+/// Body of `POST /mcp/directory/{id}/add`.
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct McpDirectoryAdd {
+    /// Whether to connect the server once it is saved. `false` saves it
+    /// turned off, so it sends nothing until someone turns it on in Connected
+    /// apps. Settings asks with a switch before it adds a server that reads a
+    /// token, because the first connect sends that token to the vendor's host.
+    pub start: bool,
+}
+
 /// `POST /mcp/directory/{id}/add` — save one directory server as a remote MCP
-/// server and connect it, without reconnecting the servers already
-/// configured.
+/// server and, when the body asks, connect it, without reconnecting the
+/// servers already configured.
 ///
 /// The server is saved even when it cannot connect yet, so its row can say
 /// what it needs. A server that asks for an OAuth sign-in reads as "Sign in
 /// required" in the answer, and the renderer starts the sign-in with
-/// `POST /mcp/servers/{name}/connect`. Adding a server whose URL is already
+/// `POST /mcp/servers/{name}/connect`. A server added with `start: false` is
+/// saved turned off and connects nowhere. Adding a server whose URL is already
 /// configured changes nothing and names that server. On a managed profile the
 /// add is refused like any other remote server a person types in.
 pub async fn post_mcp_directory_add(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Json(body): Json<McpDirectoryAdd>,
 ) -> Result<Json<McpDirectoryAdded>, ServerError> {
     let entry = crate::mcp_directory::entry(&id)
         .ok_or_else(|| ServerError::not_found("no such server in the MCP directory"))?;
+    let mut definition = entry.definition();
+    definition.enabled = body.start;
     // Resolved outside the runtime's mutation lock, as a settings save does.
     let policy = state.managed_policy()?;
     let lockdown = crate::mcp_config::ManualLockdown::for_policy(&policy);
     // Once the add begins, finish it even if the client disconnects.
     let runtime = state.mcp.clone();
-    let mutation =
-        tokio::spawn(async move { runtime.add_server(entry.definition(), lockdown).await });
+    let mutation = tokio::spawn(async move { runtime.add_server(definition, lockdown).await });
     match mutation
         .await
         .map_err(|_| ServerError::internal("MCP directory add task failed"))?

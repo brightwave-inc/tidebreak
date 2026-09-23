@@ -911,13 +911,14 @@ export function McpPanel({
 
   /** Add one directory server, then start its sign-in when it asks for one.
    * The add saves only that server, so unsaved edits stay unsaved: the new
-   * row joins the draft, and the next save keeps it. */
-  async function addFromDirectory(entry: McpDirectoryEntry) {
+   * row joins the draft, and the next save keeps it. Without `start`, the
+   * server is saved turned off and nothing connects. */
+  async function addFromDirectory(entry: McpDirectoryEntry, start: boolean) {
     setAdding(entry.id);
     setAddError(null);
     let signIn: string | null = null;
     try {
-      const result = await client.addMcpDirectoryServer(entry.id);
+      const result = await client.addMcpDirectoryServer(entry.id, start);
       // Supersede any in-flight background read; this list is fresher.
       requestRef.current += 1;
       rememberSaved(result.servers);
@@ -942,6 +943,8 @@ export function McpPanel({
         !attachedRemotely()
       ) {
         signIn = result.name;
+      } else if (!start) {
+        toast.success(`Added ${entry.name}, turned off`);
       } else {
         toast.success(`Added ${entry.name}`);
       }
@@ -1177,7 +1180,7 @@ export function McpPanel({
             disabled={working}
             loadError={directoryError}
             addError={addError}
-            onAdd={(entry) => void addFromDirectory(entry)}
+            onAdd={(entry, start) => void addFromDirectory(entry, start)}
           />
 
           <SettingsSection

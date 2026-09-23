@@ -1,10 +1,11 @@
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { Check } from "lucide-react";
 
 import type { McpDirectoryEntry, McpServerInfo } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import { McpTierChip } from "./McpTierChip";
 import { SettingsError, SettingsSection } from "./primitives";
 
@@ -32,20 +33,25 @@ function hostOf(url: string): string {
   }
 }
 
-/** How a directory row says the server signs in. */
+/**
+ * How a directory row says the server signs in, and where it connects. A
+ * token row says what the first connect sends and to which host, in the
+ * words the import flow uses.
+ */
 function signInLabel(entry: McpDirectoryEntry): ReactNode {
+  const host = <span className="font-mono">{hostOf(entry.url)}</span>;
   switch (entry.sign_in.kind) {
     case "oauth":
-      return "Sign in with your browser";
+      return <>Sign in with your browser · {host}</>;
     case "token":
       return (
         <>
-          Reads a token from{" "}
-          <span className="font-mono">{entry.sign_in.variable}</span>
+          Sends <span className="font-mono">{entry.sign_in.variable}</span> to{" "}
+          {host}.
         </>
       );
     case "none":
-      return "No sign-in";
+      return <>No sign-in · {host}</>;
   }
 }
 
@@ -59,9 +65,12 @@ function matches(entry: McpDirectoryEntry, needle: string): boolean {
  * The directory of remote MCP servers, as a list the person can search.
  *
  * Each row names the server, what it lets you do, how it signs in, and the
- * host it connects to, with one Add action. A server already configured at
- * the same address reads as added. The tier chip appears only when the
- * curated list vouches for the server; the directory claims no tier itself.
+ * host it connects to, with one Add action. A server that reads a token asks
+ * first, with a switch that stays off until the person turns it on: its first
+ * connect sends the token to the vendor's host, so an add with the switch off
+ * saves the server turned off. A server already configured at the same
+ * address reads as added. The tier chip appears only when the curated list
+ * vouches for the server; the directory claims no tier itself.
  *
  * Presentational: the panel owns the directory read, the add, and the
  * sign-in that follows it.
@@ -88,7 +97,8 @@ export function McpDirectoryList({
   /** Why the last add failed. */
   addError: string | null;
   initialQuery?: string;
-  onAdd: (entry: McpDirectoryEntry) => void;
+  /** Add one entry. `start` says whether to connect it once it is saved. */
+  onAdd: (entry: McpDirectoryEntry, start: boolean) => void;
 }) {
   const [query, setQuery] = useState(initialQuery);
   const added = new Set(
@@ -131,7 +141,7 @@ export function McpDirectoryList({
             added={added.has(endpointKey(entry.url))}
             adding={adding === entry.id}
             disabled={disabled}
-            onAdd={() => onAdd(entry)}
+            onAdd={(start) => onAdd(entry, start)}
           />
         ))}
       </ul>
@@ -170,8 +180,13 @@ function DirectoryRow({
   added: boolean;
   adding: boolean;
   disabled: boolean;
-  onAdd: () => void;
+  onAdd: (start: boolean) => void;
 }) {
+  const startId = useId();
+  const [start, setStart] = useState(false);
+  // Only a token server sends something of the person's on its first
+  // connect, so only its row asks. Every other row connects on Add.
+  const asks = entry.sign_in.kind === "token";
   return (
     <li className="flex items-start gap-3 px-3 py-2.5">
       <div className="min-w-0 flex-1">
@@ -181,9 +196,38 @@ function DirectoryRow({
         </div>
         <p className="text-xs text-muted-foreground">{entry.description}</p>
         <p className="text-xs break-words text-muted-foreground">
-          {signInLabel(entry)} ·{" "}
-          <span className="font-mono">{hostOf(entry.url)}</span>
+          {signInLabel(entry)}
         </p>
+        {asks && !added && (
+          <div className="mt-2 flex items-start gap-2">
+            <Switch
+              id={startId}
+              checked={start}
+              onCheckedChange={setStart}
+              disabled={disabled || adding}
+              aria-label={`Start ${entry.name} after adding`}
+              aria-describedby={`${startId}-hint`}
+            />
+            <div className="flex min-w-0 flex-col">
+              {/* The label's line box matches the switch's height, so its
+                  text sits on the switch's center line. */}
+              <label
+                htmlFor={startId}
+                className="text-xs leading-6 font-medium"
+              >
+                Start after adding
+              </label>
+              <p
+                id={`${startId}-hint`}
+                className="text-xs text-muted-foreground"
+              >
+                {start
+                  ? "Connects when you add it."
+                  : "Adds it turned off. You can turn it on later in Connected apps."}
+              </p>
+            </div>
+          </div>
+        )}
       </div>
       <div className="flex h-control-sm shrink-0 items-center">
         {added ? (
@@ -198,7 +242,7 @@ function DirectoryRow({
             size="sm"
             aria-label={`Add ${entry.name}`}
             disabled={disabled || adding}
-            onClick={onAdd}
+            onClick={() => onAdd(asks ? start : true)}
           >
             {adding && <Spinner aria-hidden className="size-3.5" />}
             {adding ? "Adding…" : "Add"}

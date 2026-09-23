@@ -74,6 +74,7 @@ import {
   type McpHealth as WireMcpHealth,
   type McpCuration as WireMcpCuration,
   type McpDirectory as WireMcpDirectory,
+  type McpDirectoryAdd as WireMcpDirectoryAdd,
   type McpDirectoryAdded as WireMcpDirectoryAdded,
   type McpDirectoryEntry as WireMcpDirectoryEntry,
   type McpDirectorySignIn as WireMcpDirectorySignIn,
@@ -601,6 +602,9 @@ export type McpCuration = WireMcpCuration;
 export type McpDirectory = WireMcpDirectory;
 export type McpDirectoryEntry = WireMcpDirectoryEntry;
 export type McpDirectorySignIn = WireMcpDirectorySignIn;
+
+/** Whether a directory add connects the server or saves it turned off. */
+export type McpDirectoryAdd = WireMcpDirectoryAdd;
 
 /** The name an added directory server was saved under, and the servers
  * after the add. */

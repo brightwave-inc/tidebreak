@@ -657,14 +657,18 @@ function createSettingsStoryClient(
     putMcpServers: () => write({ servers }),
     reconnectMcpServer: () => write({ servers }),
     getMcpDirectory: () => read({ servers: mcpDirectoryServers }),
-    addMcpDirectoryServer: (id) => {
+    addMcpDirectoryServer: (id, start) => {
       const entry =
         mcpDirectoryServers.find((server) => server.id === id) ??
         mcpDirectoryServers[0];
-      return write({
-        name: entry.id,
-        servers: [...servers, mcpDirectoryServer(entry)],
-      });
+      const added = start
+        ? mcpDirectoryServer(entry)
+        : mcpDirectoryServer(entry, {
+            enabled: false,
+            health: "disabled",
+            tool_count: 0,
+          });
+      return write({ name: entry.id, servers: [...servers, added] });
     },
     removeSkippedMcpServer: () => write(undefined),
     getGatewayStatus: () =>

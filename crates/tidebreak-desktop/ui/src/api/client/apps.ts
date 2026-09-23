@@ -15,6 +15,7 @@ import {
   type ManagedPolicy,
   type McpAppPayload,
   type McpDirectory,
+  type McpDirectoryAdd,
   type McpDirectoryAdded,
   type McpOAuthStatus,
   type McpServerDefinition,
@@ -113,14 +114,20 @@ export function withAppsApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
     }
 
     /**
-     * Save one directory server and connect it, leaving the configured
-     * servers alone. A server that asks for an OAuth sign-in comes back as
-     * "Sign in required"; start the sign-in with `connectMcpServer`.
+     * Save one directory server, leaving the configured servers alone. With
+     * `start`, the server connects too, and one that asks for an OAuth
+     * sign-in comes back as "Sign in required"; start the sign-in with
+     * `connectMcpServer`. Without it, the server is saved turned off.
      */
-    addMcpDirectoryServer(id: string): Promise<McpDirectoryAdded> {
+    addMcpDirectoryServer(
+      id: string,
+      start: boolean,
+    ): Promise<McpDirectoryAdded> {
+      const body: McpDirectoryAdd = { start };
       return this.json(`/mcp/directory/${encodeURIComponent(id)}/add`, {
         method: "POST",
-        headers: this.headers(),
+        headers: this.headers(true),
+        body: JSON.stringify(body),
       });
     }
 

@@ -3493,6 +3493,18 @@ notes: string, };
 export type McpDirectory = { servers: Array<McpDirectoryEntry>, };
 
 /**
+ * Body of `POST /mcp/directory/{id}/add`.
+ */
+export type McpDirectoryAdd = {
+/**
+ * Whether to connect the server once it is saved. `false` saves it
+ * turned off, so it sends nothing until someone turns it on in Connected
+ * apps. Settings asks with a switch before it adds a server that reads a
+ * token, because the first connect sends that token to the vendor's host.
+ */
+start: boolean, };
+
+/**
  * `POST /mcp/directory/{id}/add` answer: the name the server was saved under
  * and the configuration after the add.
  */
