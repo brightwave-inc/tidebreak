@@ -1011,6 +1011,7 @@ mod tests {
             &launcher,
             format!(
                 "#!/bin/sh\n\
+                 [ \"$1\" = --version ] && exit 0\n\
                  /bin/sh -c 'trap \"\" HUP INT TERM; echo $$ > \"$1\"; \
                  while :; do /bin/sleep 1; done' engine '{}' &\n\
                  wait\n",
@@ -1019,6 +1020,15 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // macOS can hold the first run of a newly written executable for
+        // longer than the probe's whole capture, so the engine would never
+        // start. Run the launcher once, so the probe's run starts at once.
+        let warm_up = tokio::process::Command::new(&launcher)
+            .arg("--version")
+            .status()
+            .await
+            .unwrap();
+        assert!(warm_up.success());
 
         assert!(observe_commands(&launcher, &[]).await.is_empty());
 
