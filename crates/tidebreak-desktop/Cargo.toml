@@ -63,6 +63,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+# The sidecar's stderr and the quit flow's warnings go to the shared log the
+# embedded server installs.
+tracing = { workspace = true }
 unicode-general-category = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }

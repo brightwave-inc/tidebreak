@@ -1045,7 +1045,10 @@ async fn pick_bundle_path(app: &AppHandle, filename: &str) -> Result<Option<Path
         .map_err(|_| "The save dialog returned an invalid destination".to_owned())
 }
 
-fn write_bundle(destination: &Path, content: &[u8]) -> Result<(), String> {
+/// Write `content` to `destination` as a private file, replacing a regular
+/// file there but never following a symlink. The diagnostics report saves
+/// through the same path.
+pub(crate) fn write_bundle(destination: &Path, content: &[u8]) -> Result<(), String> {
     if !destination.is_absolute() {
         return Err("The save destination is invalid".to_owned());
     }

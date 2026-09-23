@@ -1,9 +1,10 @@
 //! The app's native menu bar, and what its items do.
 //!
 //! Tauri's default menu is close to right, but its Close item takes Cmd+W and
-//! closes the window. Tidebreak has one window, so closing it ends the app —
-//! and on macOS a menu accelerator is claimed before the key ever reaches the
-//! webview, which is why the shell's own "close the tab" binding never ran.
+//! closes the window. Tidebreak has one window, so a stray Cmd+W put the whole
+//! app away, and on macOS a menu accelerator is claimed before the key ever
+//! reaches the webview, which is why the shell's own "close the tab" binding
+//! never ran.
 //! The menu is therefore built here rather than patched onto the default:
 //! Cmd+W is a Close Tab item the renderer answers, and closing the window is
 //! an item with no accelerator behind it.
@@ -18,6 +19,12 @@
 //! Only macOS gets a menu bar; the app ships no menu on Windows or Linux, so
 //! `install_app_menu` is macOS-only and the event handler simply never fires
 //! elsewhere.
+//!
+//! Quit is the shell's own item too, not the predefined one. The predefined
+//! item sends `terminate:` straight to AppKit; this one goes through
+//! [`crate::quit`], which asks first when agents are working. Closing the
+//! window only hides it on macOS, so the Window menu carries an item that
+//! brings it back.
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -61,6 +68,8 @@ const MENU_ZOOM_OUT_ID: &str = "zoom-out";
 const MENU_RELOAD_ID: &str = "reload-app";
 const MENU_KEYBOARD_SHORTCUTS_ID: &str = "keyboard-shortcuts";
 const MENU_DOCUMENTATION_ID: &str = "documentation";
+const MENU_QUIT_ID: &str = "quit";
+const MENU_SHOW_WINDOW_ID: &str = "show-main-window";
 
 /// Build and install the menu bar.
 ///
@@ -103,7 +112,11 @@ pub(crate) fn install_app_menu(app: &tauri::App) -> tauri::Result<()> {
             &PredefinedMenuItem::hide(handle, None)?,
             &PredefinedMenuItem::hide_others(handle, None)?,
             &PredefinedMenuItem::separator(handle)?,
-            &PredefinedMenuItem::quit(handle, None)?,
+            &item(
+                MENU_QUIT_ID,
+                &format!("Quit {}", pkg.name),
+                Some("CmdOrCtrl+Q"),
+            )?,
         ],
     )?;
 
@@ -172,6 +185,8 @@ pub(crate) fn install_app_menu(app: &tauri::App) -> tauri::Result<()> {
 
     // Tauri hands the submenus with these two ids to macOS, which lists the
     // open windows under Window and puts its search field at the top of Help.
+    // A hidden window drops out of that list, so the main window gets its
+    // own item, the way Mail and Calendar name theirs.
     let window_menu = Submenu::with_id_and_items(
         handle,
         WINDOW_SUBMENU_ID,
@@ -180,6 +195,8 @@ pub(crate) fn install_app_menu(app: &tauri::App) -> tauri::Result<()> {
         &[
             &PredefinedMenuItem::minimize(handle, None)?,
             &PredefinedMenuItem::maximize(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &item(MENU_SHOW_WINDOW_ID, &pkg.name, None)?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::bring_all_to_front(handle, None)?,
         ],
@@ -248,6 +265,10 @@ pub(crate) fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) 
                 }
             }
         }
+        MENU_QUIT_ID => {
+            crate::quit::request_quit(app);
+        }
+        MENU_SHOW_WINDOW_ID => crate::deep_link::focus_main_window(app),
         _ => {}
     }
 }
@@ -278,6 +299,8 @@ mod tests {
             MENU_CLOSE_TAB_ID,
             MENU_CLOSE_WINDOW_ID,
             MENU_RELOAD_ID,
+            MENU_QUIT_ID,
+            MENU_SHOW_WINDOW_ID,
         ] {
             assert_eq!(renderer_command(native), None, "{native}");
         }

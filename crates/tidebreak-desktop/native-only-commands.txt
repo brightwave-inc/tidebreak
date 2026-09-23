@@ -89,6 +89,14 @@ download_update: asks the native auto-updater to download a found update when au
 desktop_update_preferences: reports whether the native auto-updater downloads on its own, and whether policy locks it.
 set_automatic_update_downloads: turns the native auto-updater's automatic downloads on or off.
 
+# Quitting and crash recovery of the desktop process itself
+quit_prompt_state: reports the quit prompt the shell is holding the app's exit on; only the native shell receives the operating system's quit request.
+quit_prompt_opened: tells the shell the renderer is showing its quit prompt, so it does not fall back to a native dialog.
+answer_quit_prompt: carries the person's answer to the shell, which alone can stop, park, or keep the process and then exit it.
+unclean_exit_notice: reports that the previous desktop process ended without its exit handler, which only the shell's own run marker records.
+dismiss_unclean_exit_notice: clears that notice for this run.
+save_diagnostics_report: writes the diagnostics export to a file chosen in the native save dialog.
+
 # TODO(record 7): commands that predate the gate and do not fit the native-only
 # set. Each should become a server route with a CLI client; until then they are
 # listed so the gate stays honest about what is already owed.

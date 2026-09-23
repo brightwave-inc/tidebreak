@@ -523,9 +523,12 @@ impl Session {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = command.spawn().map_err(|_| BrokerClientError::Start)?;
+        if let Some(stderr) = child.stderr.take() {
+            tauri::async_runtime::spawn(forward_sidecar_stderr(BufReader::new(stderr)));
+        }
         let stdin = child.stdin.take().ok_or(BrokerClientError::Start)?;
         let stdout = child.stdout.take().ok_or(BrokerClientError::Start)?;
         let mut session = Self {
@@ -584,6 +587,60 @@ impl Session {
         }
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
+    }
+}
+
+/// The longest sidecar stderr line forwarded as one log line. A longer one
+/// is split rather than buffered without bound.
+const MAX_STDERR_LINE_BYTES: usize = 16 * 1024;
+
+/// Forward the sidecar's stderr into the desktop's tracing log, a line at a
+/// time. A GUI launch has no terminal, so an inherited stderr, the broker's
+/// own panic report included, used to go nowhere.
+async fn forward_sidecar_stderr(mut stderr: impl AsyncBufRead + Unpin) {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match read_bounded_line(&mut stderr, &mut line, MAX_STDERR_LINE_BYTES).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {
+                let text = String::from_utf8_lossy(&line);
+                let text = text.trim_end();
+                if !text.is_empty() {
+                    tracing::warn!(target: "tidebreak_host_broker", "{text}");
+                }
+            }
+        }
+    }
+}
+
+/// Read up to and including the next newline into `line`, or `limit` bytes,
+/// whichever comes first. Returns how many bytes it read; `0` is the end.
+async fn read_bounded_line(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    line: &mut Vec<u8>,
+    limit: usize,
+) -> std::io::Result<usize> {
+    let mut read = 0;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(read);
+        }
+        let room = limit.saturating_sub(line.len());
+        let (take, complete) = match available.iter().position(|byte| *byte == b'\n') {
+            Some(newline) if newline < room => (newline + 1, true),
+            _ => {
+                let take = available.len().min(room);
+                (take, line.len() + take >= limit)
+            }
+        };
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        read += take;
+        if complete {
+            return Ok(read);
+        }
     }
 }
 
@@ -872,6 +929,87 @@ mod tests {
                 >= tidebreak_host_broker::computer_use::HELPER_MANAGED_TIMEOUT * 2
                     + std::time::Duration::from_secs(5)
         );
+    }
+
+    /// The sidecar's stderr, its panic report included, reaches the tracing
+    /// log a line at a time, and a line with no end is split instead of
+    /// buffered without bound.
+    #[tokio::test]
+    async fn sidecar_stderr_is_read_one_bounded_line_at_a_time() {
+        let mut input = b"host broker panic in thread 'main'\nbacktrace:\n".to_vec();
+        input.extend(std::iter::repeat_n(b'x', 20));
+        let mut reader = tokio::io::BufReader::with_capacity(4, &input[..]);
+        let mut lines = Vec::new();
+        loop {
+            let mut line = Vec::new();
+            let read = super::read_bounded_line(&mut reader, &mut line, 12)
+                .await
+                .unwrap();
+            if read == 0 {
+                break;
+            }
+            lines.push(String::from_utf8(line).unwrap());
+        }
+        assert_eq!(
+            lines,
+            [
+                "host broker ",
+                "panic in thr",
+                "ead 'main'\n",
+                "backtrace:\n",
+                "xxxxxxxxxxxx",
+                "xxxxxxxx",
+            ]
+        );
+    }
+
+    /// The sidecar cannot link the server, so its panic log carries its own
+    /// copy of the server's scrub. Both land in the same diagnostics export,
+    /// so they must give the same answers.
+    #[test]
+    fn the_sidecar_scrubs_a_panic_message_like_the_server() {
+        // The credential-shaped inputs are assembled at run time, so no
+        // source line holds one for a secret scanner to flag.
+        let userinfo = ["person:", "hunter", "2"].concat();
+        let bearer = ["tb-", "launch-", "0123456789"].concat();
+        let password = ["hunter", "2"].concat();
+        let api_key = ["abc", "123"].concat();
+        let vendor_key = ["sk-", "ant-", "api03-", "abcdefghijklmnop"].concat();
+        let github_token = ["ghp", "0123456789abcdef"].join("_");
+        let tidebreak_token = ["tidebreak-", "token", ".", "0123456789abcdef"].concat();
+        let web_token = [
+            "eyJhbG",
+            "ciOiJIUzI1NiJ9",
+            ".",
+            "eyJzdW",
+            "IiOiIxIn0",
+            ".",
+            "c2lnbm",
+            "F0dXJl",
+        ]
+        .concat();
+        let samples = [
+            "fetch https://api.example.com/v1/chats?token=abc&q=my+prompt#frag failed".to_owned(),
+            "at (http://127.0.0.1:4321/chats/7?draft=hello)".to_owned(),
+            format!("clone https://{userinfo}@github.com/o/r.git"),
+            "GET /sessions/9/events?cursor=4&key=x".to_owned(),
+            format!("Authorization: Bearer {bearer} sent"),
+            format!("password={password} user=ada"),
+            "the session token expired; sign in again".to_owned(),
+            format!(r#"{{"api_key":"{api_key}","model":"m"}}"#),
+            format!("provider said {vendor_key} and {github_token}"),
+            format!("subprotocol {tidebreak_token}"),
+            format!("jwt {web_token}"),
+            "index out of bounds: the len is 3 but the index is 7".to_owned(),
+            "a task-list and sk-small stay".to_owned(),
+        ];
+        for sample in samples {
+            assert_eq!(
+                tidebreak_host_broker::panic_log::scrub_log_text(&sample, 40),
+                tidebreak_server::logging::scrub_log_text(&sample, 40),
+                "{sample}"
+            );
+        }
     }
 
     use tidebreak_host_broker::{

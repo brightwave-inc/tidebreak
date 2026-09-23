@@ -94,6 +94,32 @@ You opened an older version of Tidebreak than the one that last used this
 profile. Tidebreak changes nothing and stops. Install the newer version again,
 or restore a backup from `backups/` with the steps above.
 
+## Closing the window did not quit Tidebreak
+
+On macOS, the close button hides the window and leaves Tidebreak running, so
+agents keep working. To bring the window back, click Tidebreak in the Dock or
+choose **Window → Tidebreak**. To quit, press **⌘Q**.
+
+If agents are working when you quit, Tidebreak asks first. **Quit and stop
+them** ends their current turns. **Quit when they reach a safe point** lets
+code turns finish and picks chats up again the next time Tidebreak opens.
+Logging out or shutting down never waits on this question.
+
+An agent waiting for your answer to an approval, a question, or a plan reaches
+a safe point only after you answer, so the question says so and offers the
+inbox. While Tidebreak waits for a safe point, a bar at the bottom of the
+window counts the agents down, and you can keep using the app to answer them.
+
+## "Tidebreak quit unexpectedly"
+
+This notice appears when the last run ended without quitting normally: a
+crash, a force quit, or a power loss. **Save diagnostics report** writes a ZIP
+file where you choose. It holds a process snapshot and recent log lines,
+including any crash reports. It does not read chats, files, or credentials,
+and error messages in it have URL queries, tokens, and credentials removed.
+Log lines can still name local paths, so look it over before you share it.
+Nothing is sent anywhere; attach the file to an issue if you want help.
+
 ## Reporting a problem
 
 The chat header menu has **Copy debug info** and **Save debug bundle…**.
@@ -101,4 +127,5 @@ Attach the bundle to a
 [GitHub issue](https://github.com/brightwave-inc/tidebreak/issues) — it carries
 what is needed to reconstruct the turn.
 
-Logs are at `logs/tidebreak.log` inside the application data directory.
+Logs are at `logs/tidebreak.log` inside the application data directory, and
+crash reports are in `boot-failures.log` beside it.
