@@ -1,6 +1,8 @@
+import { useRef } from "react";
+
 import type { PendingFolderAccessRequest } from "./api";
 import type { FolderAccessDecision } from "./host";
-import { ApprovalChoiceRows } from "./ApprovalCard";
+import { ApprovalChoiceList } from "./ApprovalChoiceList";
 import { AttentionCard } from "./AttentionCard";
 import { Button } from "@/components/ui/button";
 
@@ -26,6 +28,11 @@ export function FolderAccessCard({
     : null;
   const actionable =
     nativeHost && !nativeBusy && !request.claimedByDesktop && !working;
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+  const choices = [
+    { key: "allow", label: "Allow this folder" },
+    { key: "decline", label: "Decline", muted: true },
+  ];
 
   return (
     <AttentionCard
@@ -34,6 +41,7 @@ export function FolderAccessCard({
       subtitle={request.reason}
       busy={working}
       error={error}
+      headingRef={headingRef}
     >
       {hint && (
         <p className="text-muted-foreground text-sm break-words">
@@ -77,13 +85,14 @@ export function FolderAccessCard({
           Finish the current folder request first.
         </p>
       ) : (
-        <ApprovalChoiceRows
+        <ApprovalChoiceList
           disabled={!actionable}
-          onChoose={(key) => onDecision(key as FolderAccessDecision)}
-          options={[
-            { key: "allow", label: "Allow this folder" },
-            { key: "decline", label: "Decline", muted: true },
-          ]}
+          headingRef={headingRef}
+          describedBy={`folder-${request.callId}`}
+          onChoose={(index) =>
+            onDecision(choices[index]!.key as FolderAccessDecision)
+          }
+          options={choices}
         />
       )}
     </AttentionCard>

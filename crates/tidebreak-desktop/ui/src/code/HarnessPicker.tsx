@@ -83,7 +83,7 @@ export function HarnessPicker({
           aria-label="Engine"
           className={
             variant === "composer"
-              ? "h-8 w-auto min-w-40 shrink-0 gap-2 border-transparent px-2 hover:bg-accent hover:text-accent-foreground"
+              ? "h-8 w-auto shrink-0 gap-2 border-transparent px-2 hover:bg-accent hover:text-accent-foreground"
               : undefined
           }
         >
@@ -91,9 +91,7 @@ export function HarnessPicker({
             {selected && SelectedIcon && (
               <span className="flex items-center gap-2">
                 <SelectedIcon className="size-4 shrink-0" />
-                <span className="truncate">
-                  {HARNESS_LABELS[selected.kind]}
-                </span>
+                <span>{HARNESS_LABELS[selected.kind]}</span>
               </span>
             )}
           </SelectValue>

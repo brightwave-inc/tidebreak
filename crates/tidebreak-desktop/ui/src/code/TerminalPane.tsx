@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
 import { resolveShellShortcut, usesCommandModifier } from "../ShellShortcuts";
-import { STATUS_TEXT } from "./statusTone";
+import { STATUS_TEXT, STATUS_TEXT_MUTED } from "./statusTone";
 
 const POLL_MS = 200;
 const FRAME_BUDGET = 8 * 1024;
@@ -881,7 +881,7 @@ export function TerminalPane({
             <p className={cn("text-sm font-medium", STATUS_TEXT.critical)}>
               Terminal input paused · {unsentLabel}
             </p>
-            <p className={cn("mt-0.5 text-xs", STATUS_TEXT.critical)}>
+            <p className={cn("mt-0.5 text-xs", STATUS_TEXT_MUTED.critical)}>
               {asSentence(writeFailure.message)} Try again sends the input to
               this shell and can repeat it if the first request arrived.
               Reconnect discards it and opens a new shell. Discard drops it and
@@ -921,7 +921,7 @@ export function TerminalPane({
             <p className={cn("text-sm font-medium", STATUS_TEXT.critical)}>
               {terminalError.message}
             </p>
-            <p className={cn("mt-0.5 text-xs", STATUS_TEXT.critical)}>
+            <p className={cn("mt-0.5 text-xs", STATUS_TEXT_MUTED.critical)}>
               {terminalError.kind === "read"
                 ? "Input is paused so you do not send commands without seeing the result."
                 : "Input stays paused until the shell opens."}
