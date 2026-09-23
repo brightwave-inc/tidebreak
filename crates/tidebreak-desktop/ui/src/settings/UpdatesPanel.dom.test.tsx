@@ -157,7 +157,9 @@ describe("Updates section", () => {
     render(<UpdatesSection />);
 
     expect(
-      await screen.findByText("Managed by your organization."),
+      await screen.findByText(
+        "Managed by your organization. Tidebreak tells you when an update is available and downloads it only when you ask.",
+      ),
     ).toBeVisible();
     const toggle = screen.getByRole("switch", {
       name: "Download updates automatically",

@@ -45,8 +45,20 @@ export function upToDateMessage(version: string | null): string {
     : "You're up to date.";
 }
 
-const AUTOMATIC_DOWNLOADS_HINT =
-  "Tidebreak downloads new versions in the background. When this is off, Tidebreak tells you when an update is available and downloads it only when you ask.";
+/**
+ * The hint under the automatic-download switch. A managed setting also says
+ * what your organization chose, because a disabled switch is easy to misread.
+ */
+export function automaticDownloadsHint(
+  preferences: DesktopUpdatePreferences | null,
+): string {
+  if (!preferences?.managed) {
+    return "Tidebreak downloads new versions in the background. When this is off, Tidebreak tells you when an update is available and downloads it only when you ask.";
+  }
+  return preferences.automaticDownloads
+    ? "Managed by your organization. Tidebreak downloads new versions in the background."
+    : "Managed by your organization. Tidebreak tells you when an update is available and downloads it only when you ask.";
+}
 
 export function UpdatesPanel({
   state,
@@ -146,9 +158,7 @@ export function UpdatesPanel({
         </div>
         <SettingsField
           label="Download updates automatically"
-          hint={
-            managed ? "Managed by your organization." : AUTOMATIC_DOWNLOADS_HINT
-          }
+          hint={automaticDownloadsHint(preferences)}
         >
           <Switch
             checked={preferences?.automaticDownloads ?? true}
