@@ -78,8 +78,7 @@ const EFFORT_NONE_TO_HIGH: &[ReasoningEffort] = &[
     ReasoningEffort::High,
 ];
 /// Gemini 3.1 Pro Preview and Gemini Flash from 3.7 on start at `low`; they
-/// reject `minimal`. Grok 4.5 treats `xhigh` as `high`, and Qwen3.8 Max on
-/// Fireworks gives `high` and above one thinking budget, so both stop here too.
+/// reject `minimal`. Grok 4.5 treats `xhigh` as `high`, so it stops here too.
 const EFFORT_LOW_TO_HIGH: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
@@ -107,7 +106,7 @@ const EFFORT_LOW_TO_HIGH_AND_MAX: &[ReasoningEffort] = &[
     ReasoningEffort::Max,
 ];
 /// Kimi K3's always-on thinking control exposes exactly these three levels,
-/// and so do the hosted DeepSeek V4 Flash rows and GLM-5.3 Flash.
+/// and so do DeepSeek V4 Flash and GLM-5.3 Flash on Together.
 const EFFORT_LOW_HIGH_MAX: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::High,
@@ -239,7 +238,8 @@ impl ModelSpec {
             (
                 ProviderKind::Fireworks,
                 "accounts/fireworks/models/deepseek-v4p1-flash"
-            ) | (ProviderKind::Together, "Qwen/Qwen3.7-Max")
+            ) | (ProviderKind::Fireworks, "accounts/fireworks/models/glm-5p2")
+                | (ProviderKind::Together, "Qwen/Qwen3.7-Max")
                 | (ProviderKind::Together, "Qwen/Qwen3.7-Plus")
                 | (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Pro-0813")
                 | (ProviderKind::Together, "deepseek-ai/DeepSeek-V4.1-Flash")
@@ -279,18 +279,14 @@ impl ModelSpec {
 /// first, then the earlier generations a chat can pin when the newest one
 /// regresses on its workload.
 const MODEL_REGISTRY: &[ModelSpec] = &[
-    // Opus 5.5 replaced Opus 5 as Anthropic's default Opus on 2026-09-22, so
-    // it leads the provider: the first curated Anthropic row is what a fresh
-    // Anthropic-only install resolves to. Its adaptive thinking is always on
-    // (`none` stays off the scale, as on every Claude row), and it takes the
-    // request contract Fable 5.1 introduced: no forced tool choice, native
-    // structured output, and thinking bound to the prompt prefix. The adapter
-    // reads that contract from the id. Unverified until a live turn runs.
+    // The first curated Anthropic row is what a fresh Anthropic-only install
+    // resolves to. It stays Opus 5 until the owner makes Opus 5.5, which
+    // Anthropic made its default Opus on 2026-09-22, the default here too.
     ModelSpec {
-        id: "claude-opus-5-5",
-        display_name: "Claude Opus 5.5",
+        id: "claude-opus-5",
+        display_name: "Claude Opus 5",
         provider: ProviderKind::Anthropic,
-        verification: VerificationTier::Unverified,
+        verification: VerificationTier::Verified,
         recommended: true,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
@@ -336,14 +332,18 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
-    // Superseded by Opus 5.5, so no longer shown by default. Chats already on
-    // it keep running.
+    // Anthropic's default Opus since 2026-09-22. Its adaptive thinking is
+    // always on (`none` stays off the scale, as on every Claude row), and it
+    // takes the request contract Fable 5.1 introduced: no forced tool choice,
+    // native structured output, and thinking bound to the prompt prefix. The
+    // adapter reads that contract from the id. Unverified until a live turn
+    // runs.
     ModelSpec {
-        id: "claude-opus-5",
-        display_name: "Claude Opus 5",
+        id: "claude-opus-5-5",
+        display_name: "Claude Opus 5.5",
         provider: ProviderKind::Anthropic,
-        verification: VerificationTier::Verified,
-        recommended: false,
+        verification: VerificationTier::Unverified,
+        recommended: true,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -576,9 +576,12 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
     // each row is exercised end to end. The first-party Responses route
     // carries image input (PNG and JPEG). Reasoning cannot be turned off, so
     // no row offers `none`.
+    //
+    // The first curated xAI row is what a fresh xAI-only install resolves to,
+    // so Grok 4.6 stays first until the owner makes Grok 4.7 the default.
     ModelSpec {
-        id: "grok-4.7",
-        display_name: "Grok 4.7",
+        id: "grok-4.6",
+        display_name: "Grok 4.6",
         provider: ProviderKind::Xai,
         verification: VerificationTier::Unverified,
         recommended: true,
@@ -589,13 +592,13 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_LOW_TO_XHIGH,
     },
-    // Superseded by Grok 4.7 as the general flagship.
+    // xAI's current general flagship. Unverified until a live turn runs.
     ModelSpec {
-        id: "grok-4.6",
-        display_name: "Grok 4.6",
+        id: "grok-4.7",
+        display_name: "Grok 4.7",
         provider: ProviderKind::Xai,
         verification: VerificationTier::Unverified,
-        recommended: false,
+        recommended: true,
         context_window: 500_000,
         max_output_tokens: 32_768,
         input_modalities: TEXT_AND_IMAGE,
@@ -749,9 +752,10 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_UNSUPPORTED,
     },
-    // Fireworks lists no context length for Qwen3.8 Max, so the window stays
-    // at the previous Qwen row's published 262K. Its `high`, `xhigh`, and
-    // `max` share one thinking budget, so the scale stops at `high`.
+    // Fireworks lists no context length for Qwen3.8 Max. Alibaba documents a
+    // 1M-token window for the model, but a host may serve less, so the row
+    // keeps the previous Qwen row's 262K. The model thinks, and Fireworks
+    // documents no effort values for it, so the row offers no levels.
     ModelSpec {
         id: "accounts/fireworks/models/qwen3p8-max",
         display_name: "Qwen3.8 Max",
@@ -763,9 +767,8 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_LOW_TO_HIGH,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
     },
-    // M3 thinks by default (adaptive); Fireworks publishes no effort values.
     ModelSpec {
         id: "accounts/fireworks/models/minimax-m3",
         display_name: "MiniMax M3",
@@ -775,13 +778,13 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         context_window: 512_000,
         max_output_tokens: 32_768,
         input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: true,
+        supports_reasoning: false,
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_UNSUPPORTED,
     },
     // The one DeepSeek model left on Fireworks serverless, and the named
-    // successor to V4 Pro. `medium` selects `high` and `xhigh` selects `max`,
-    // so only the three distinct levels are offered.
+    // successor to V4 Pro. The model reasons, but Fireworks documents no
+    // effort values for it, so the row offers no levels.
     ModelSpec {
         id: "accounts/fireworks/models/deepseek-v4p1-flash",
         display_name: "DeepSeek V4.1 Flash",
@@ -793,7 +796,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_LOW_HIGH_MAX,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
     },
     ModelSpec {
         id: "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
@@ -817,6 +820,48 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         context_window: 1_040_000,
         max_output_tokens: 65_536,
         input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    // Fireworks retires these three from serverless on 2026-09-25, naming
+    // GLM-5.3 or Kimi K3 as the replacement. They stay until then, out of the
+    // default view; the release after that date removes them.
+    ModelSpec {
+        id: "accounts/fireworks/models/kimi-k2p7-code",
+        display_name: "Kimi K2.7 Code",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        recommended: false,
+        context_window: 262_000,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/kimi-k2p6",
+        display_name: "Kimi K2.6",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        recommended: false,
+        context_window: 262_000,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/glm-5p2",
+        display_name: "GLM-5.2",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        recommended: false,
+        context_window: 1_040_000,
+        max_output_tokens: 65_536,
+        input_modalities: &[InputModality::Text],
         supports_reasoning: false,
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_UNSUPPORTED,
@@ -895,6 +940,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
     },
+    // Text only: Together's serverless vision table does not list it.
     ModelSpec {
         id: "zai-org/GLM-5.3-Flash",
         display_name: "GLM-5.3 Flash",
@@ -903,7 +949,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         recommended: false,
         context_window: 1_048_575,
         max_output_tokens: 65_536,
-        input_modalities: TEXT_AND_IMAGE,
+        input_modalities: &[InputModality::Text],
         supports_reasoning: true,
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_LOW_HIGH_MAX,
@@ -941,6 +987,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
     },
     // V4.1 Flash takes its effort as an integer from 1 to 100, which the
     // Chat Completions adapter does not send, so the row offers no levels.
+    // Text only: Together's serverless vision table does not list it.
     ModelSpec {
         id: "deepseek-ai/DeepSeek-V4.1-Flash",
         display_name: "DeepSeek V4.1 Flash",
@@ -949,7 +996,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         recommended: false,
         context_window: 1_000_000,
         max_output_tokens: 65_536,
-        input_modalities: TEXT_AND_IMAGE,
+        input_modalities: &[InputModality::Text],
         supports_reasoning: true,
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_UNSUPPORTED,
@@ -1207,9 +1254,11 @@ mod tests {
     }
 
     #[test]
-    fn grok_4_7_leads_xai_and_each_grok_row_carries_its_published_scale() {
+    fn grok_4_6_stays_first_and_each_grok_row_carries_its_published_scale() {
+        // The first curated xAI row is what a fresh xAI-only install resolves
+        // to, so Grok 4.6 keeps that place until the owner moves it.
         let grok_ids: Vec<_> = models_for(ProviderKind::Xai).map(|spec| spec.id).collect();
-        assert_eq!(grok_ids, ["grok-4.7", "grok-4.6", "grok-4.5"]);
+        assert_eq!(grok_ids, ["grok-4.6", "grok-4.7", "grok-4.5"]);
         for id in grok_ids {
             let grok = find_for(ProviderKind::Xai, id).unwrap();
             assert_eq!(grok.context_window, 500_000, "{id}");
@@ -1226,10 +1275,10 @@ mod tests {
         assert_eq!(grok("grok-4.6").reasoning_efforts, EFFORT_LOW_TO_XHIGH);
         // xAI's reasoning guide treats `xhigh` as `high` on Grok 4.5.
         assert_eq!(grok("grok-4.5").reasoning_efforts, EFFORT_LOW_TO_HIGH);
-        // 4.7 is the general flagship and 4.5 still backs the build alias;
-        // 4.6 is the superseded generation.
+        // 4.6 is still the default, 4.7 is the general flagship, and 4.5
+        // still backs the build alias.
+        assert!(grok("grok-4.6").recommended);
         assert!(grok("grok-4.7").recommended);
-        assert!(!grok("grok-4.6").recommended);
         assert!(grok("grok-4.5").recommended);
 
         assert!(
@@ -1456,23 +1505,27 @@ mod tests {
     }
 
     #[test]
-    fn the_anthropic_default_row_is_opus_5_5_ahead_of_fable() {
+    fn the_anthropic_default_row_stays_opus_5_ahead_of_fable() {
         // The first curated Anthropic row is what a fresh Anthropic-only install
-        // resolves to. Opus 5.5 replaced Opus 5 as Anthropic's default Opus.
-        // Fable is the demanding-work option, not the default, and the current
-        // Fable sits ahead of the one it replaced.
+        // resolves to, so Opus 5 keeps that place until the owner makes Opus
+        // 5.5 the default. Fable is the demanding-work option, not the default,
+        // and the current Fable sits ahead of the one it replaced.
         let ids: Vec<_> = models_for(ProviderKind::Anthropic)
             .map(|spec| spec.id)
             .collect();
         assert_eq!(
-            &ids[..3],
-            ["claude-opus-5-5", "claude-fable-5-1", "claude-fable-5"]
+            &ids[..4],
+            [
+                "claude-opus-5",
+                "claude-fable-5-1",
+                "claude-fable-5",
+                "claude-opus-5-5"
+            ]
         );
-        assert!(find("claude-opus-5-5").unwrap().recommended);
+        assert!(find("claude-opus-5").unwrap().recommended);
         assert!(find("claude-fable-5-1").unwrap().recommended);
         assert!(!find("claude-fable-5").unwrap().recommended);
-        // Superseded, so hidden by default; still selectable and routable.
-        assert!(!find("claude-opus-5").unwrap().recommended);
+        assert!(find("claude-opus-5-5").unwrap().recommended);
     }
 
     #[test]
@@ -1549,8 +1602,6 @@ mod tests {
         for id in [
             "moonshotai/Kimi-K3",
             "MiniMaxAI/MiniMax-M3",
-            "zai-org/GLM-5.3-Flash",
-            "deepseek-ai/DeepSeek-V4.1-Flash",
             "thinkingmachines/Inkling",
             "Qwen/Qwen3.7-Plus",
         ] {
@@ -1561,6 +1612,34 @@ mod tests {
                 "Together publishes image input for {id}",
             );
         }
+        // Together's serverless vision table does not list these.
+        for id in ["zai-org/GLM-5.3-Flash", "deepseek-ai/DeepSeek-V4.1-Flash"] {
+            assert!(
+                !find_for(ProviderKind::Together, id)
+                    .unwrap()
+                    .accepts(InputModality::Image),
+                "{id} is text only on Together",
+            );
+        }
+
+        // Fireworks documents no effort values for these, so they offer none,
+        // and it documents no reasoning for MiniMax M3 at all.
+        for id in [
+            "accounts/fireworks/models/qwen3p8-max",
+            "accounts/fireworks/models/deepseek-v4p1-flash",
+        ] {
+            let model = find_for(ProviderKind::Fireworks, id).unwrap();
+            assert!(model.supports_reasoning, "{id}");
+            assert!(model.reasoning_efforts.is_empty(), "{id}");
+        }
+        assert!(
+            !find_for(
+                ProviderKind::Fireworks,
+                "accounts/fireworks/models/minimax-m3"
+            )
+            .unwrap()
+            .supports_reasoning
+        );
 
         // DeepSeek continues a tool call only with its own reasoning trace
         // sent back, so its rows stay chat-only until that path is exercised.
@@ -1634,17 +1713,24 @@ mod tests {
             );
         }
 
+        // Fireworks retires these on 2026-09-25. Until then they stay
+        // selectable, out of the default view.
+        for id in [
+            "accounts/fireworks/models/kimi-k2p7-code",
+            "accounts/fireworks/models/kimi-k2p6",
+            "accounts/fireworks/models/glm-5p2",
+        ] {
+            let model = find_for(ProviderKind::Fireworks, id).unwrap();
+            assert!(!model.recommended, "{id}");
+        }
+        assert!(
+            !find_for(ProviderKind::Fireworks, "accounts/fireworks/models/glm-5p2")
+                .unwrap()
+                .supports_tools()
+        );
+
         // Rows the hosts no longer serve are gone, not hidden.
         for (provider, id) in [
-            (
-                ProviderKind::Fireworks,
-                "accounts/fireworks/models/kimi-k2p7-code",
-            ),
-            (
-                ProviderKind::Fireworks,
-                "accounts/fireworks/models/kimi-k2p6",
-            ),
-            (ProviderKind::Fireworks, "accounts/fireworks/models/glm-5p2"),
             (
                 ProviderKind::Fireworks,
                 "accounts/fireworks/models/qwen3p7-plus",
@@ -1668,7 +1754,7 @@ mod tests {
             assert!(find_for(provider, id).is_none(), "{provider} `{id}`");
         }
 
-        assert_eq!(models_for(ProviderKind::Fireworks).count(), 8);
+        assert_eq!(models_for(ProviderKind::Fireworks).count(), 11);
         assert_eq!(models_for(ProviderKind::Together).count(), 11);
         assert!(models_for(ProviderKind::Fireworks)
             .chain(models_for(ProviderKind::Together))

@@ -2027,7 +2027,7 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
     assert_eq!(routes[0].base_url, None);
     assert_eq!(
         routes[0].curated_models,
-        ["grok-4.7", "grok-4.6", "grok-4.5"]
+        ["grok-4.6", "grok-4.7", "grok-4.5"]
     );
 
     let grok = providers::resolve_model_policy(&*store, "grok-4.5", false, None)
@@ -2242,17 +2242,19 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
     assert_eq!(error.kind, "unknown_model");
     assert_eq!(
         error.message,
-        "model `gpt-5.6-sol` is not registered for provider `anthropic`"
+        "model `gpt-5.6-sol` is not a built-in or custom Anthropic model; add it as a custom model under Anthropic in Settings > Providers"
     );
 
+    // A model a release removed from the built-in list can still be added
+    // back by hand, so every provider's message says how.
     for (selection, message) in [
         (
             "fireworks::accounts/fireworks/models/not-a-model",
-            "model `accounts/fireworks/models/not-a-model` is not registered for provider `fireworks`",
+            "model `accounts/fireworks/models/not-a-model` is not a built-in or custom Fireworks AI model; add it as a custom model under Fireworks AI in Settings > Providers",
         ),
         (
             "together::not-a-model",
-            "model `not-a-model` is not registered for provider `together`",
+            "model `not-a-model` is not a built-in or custom Together AI model; add it as a custom model under Together AI in Settings > Providers",
         ),
     ] {
         let response =
@@ -2275,7 +2277,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
     assert_eq!(error.kind, "unknown_model");
     assert_eq!(
         error.message,
-        "model `not-a-model` is not configured under OpenAI-compatible models"
+        "model `not-a-model` is not a built-in or custom OpenAI-compatible model; add it as a custom model under OpenAI-compatible in Settings > Providers"
     );
 
     let unavailable = put_settings(
