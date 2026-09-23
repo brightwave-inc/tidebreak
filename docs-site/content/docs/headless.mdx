@@ -297,8 +297,9 @@ cargo run -p tidebreak-cli -- -p "plan the migration" \
 without the desktop app. Each one boots the same in-process server the other
 commands do, calls the route the desktop's settings pages call, and prints the
 answer — they hold no configuration logic of their own, so both surfaces stay in
-step. All of them accept `--output-format text|json`, and `json` prints the
-route's response object on one line.
+step. All of them accept `--output-format text|json`, and `json` prints one
+object on one line, stamped with `schema_version` (see
+[Compatibility](#compatibility)).
 
 ```sh
 # Providers and credentials
@@ -594,6 +595,9 @@ client. With `--attach`, `TIDEBREAK_DATA_DIR` is used solely to find
 two *are* servers, and the third rewrites local keychain items. (They ignore
 `TIDEBREAK_SERVER_URL`, so a shell that exports it can still start a daemon.)
 
+An attached command checks the server's version before it does anything else.
+See [The version check](#the-version-check).
+
 ### Getting a token
 
 The bearer token is per-launch and is full authority over the profile, so it is
@@ -612,6 +616,68 @@ cargo run -p tidebreak-cli -- serve > server.log &
 export TIDEBREAK_SERVER_URL=http://$(grep -m1 'listening on http://' server.log | sed 's|.*http://||')
 export TIDEBREAK_SERVER_TOKEN=$(grep -m1 'token ' server.log | sed 's|.*token ||')
 ```
+
+## Compatibility
+
+### What 1.x keeps stable
+
+Tests check each of these against the code, so a 1.x release cannot drop one
+by accident:
+
+- **Commands and flags.** Every command and flag in the
+  [Commands](#commands) block. A 1.x release can add a command or a flag. It
+  does not remove or rename one.
+- **Exit codes.** The codes in the exit-code tables above.
+- **JSON documents.** A command run with `--output-format json` or `--json`
+  prints one object on one line, and every object carries
+  `"schema_version": 1`. The version names the shape. A release can add keys
+  under it; a change that removes, renames, or retypes a top-level key raises
+  it. Read the keys you use and ignore the rest.
+
+Some documents carry a record exactly as the server returned it, such as the
+`settings` object in `settings show` or the snapshots the `code` family
+prints. That record has the shape the HTTP API gives it, and the HTTP API is
+internal.
+
+### What is internal
+
+These can change in any minor release. If you build on one, pin the Tidebreak
+version you tested against:
+
+- The HTTP routes and their JSON bodies.
+- The chat and code event wire, including every WebSocket frame.
+- The NDJSON streams from `-p --output-format json`, `code run --json`, and
+  `code watch --json`. They carry the event wire line by line, along with the
+  driver lines print mode writes.
+
+### The version check
+
+Every attached command reads `GET /version` first. The server answers without
+a bearer, with its release and the API level it serves:
+
+```json
+{"version":"1.3.0","api_level":1}
+```
+
+`/healthz` and `/auth/discovery` carry the same two keys. The CLI compares
+`api_level` with the range of levels it reads. If the server is newer than
+that range, the command stops before it runs anything:
+
+```text
+tidebreak: This server runs Tidebreak 1.3.0. Update Tidebreak to 1.3.0 or later to connect.
+```
+
+If the server is older than the range, the message asks you to update the
+server instead. A server from before the check answers `/version` with `404`,
+and the CLI attaches to it as before. The desktop app and the mobile app run
+the same check when they attach to a machine.
+
+The API level is not the release number. It rises only when a change breaks
+older clients, such as a removed or renamed field. A change that adds a
+field, an event, or a route leaves it alone, because Tidebreak's clients
+ignore keys they do not know. When a newer server sends an event the CLI
+cannot read, the CLI skips that event, keeps following the turn, and says so
+on stderr.
 
 ## Environment
 

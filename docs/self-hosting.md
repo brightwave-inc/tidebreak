@@ -335,8 +335,9 @@ docker pull ghcr.io/brightwave-inc/tidebreak-server:0.114.0
 docker tag ghcr.io/brightwave-inc/tidebreak-server:0.114.0 tidebreak-self-host:local
 docker compose up -d
 
-# 4. Confirm it is up.
-curl -fsS http://127.0.0.1:8080/healthz     # -> ok
+# 4. Confirm it is up. The answer names the release and API level it runs.
+curl -fsS http://127.0.0.1:8080/healthz
+# -> {"status":"ok","version":"0.114.0","api_level":1}
 ```
 
 Building from source remains the fallback when you cannot pull:
@@ -350,8 +351,11 @@ credentials through Settings, mount a Vault token file into the server
 container and pass the `TIDEBREAK_VAULT_*` variables from the preceding
 section.
 
-`/healthz` is the one unauthenticated route. Everything else needs
-`Authorization: Bearer <token>` with a token from your file.
+`/healthz` and `/version` answer without a token, and so do the sign-in routes
+under `/auth/`. Everything else needs `Authorization: Bearer <token>` with a
+token from your file. `/version` answers `{"version", "api_level"}`, and every
+client reads it before it attaches: a client too old or too new for the
+machine says which side to update instead of failing later.
 
 The stack publishes `127.0.0.1:8080` deliberately. Nothing in
 `docker-compose.yml` terminates TLS, and the database port is not published

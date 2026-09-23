@@ -81,6 +81,7 @@ reading the code. They all run in existing lanes; nothing needs a new job.
 | Validators run against generated fixtures | A field renamed server-side under a hand-written validator — the case where both suites stayed green |
 | Ids generate as bare strings | `#[serde(transparent)]` being ignored in a way that stops coinciding with the right answer |
 | The journal event shape is pinned | A rename in a persisted type, which stops existing chats loading |
+| Every fixture round-trips through the Rust types | A key the server sends that a Rust reader would silently ignore |
 
 Several of those are backstops rather than the primary defence, and it is worth
 knowing which, so nobody weakens the real guard thinking a test still covers it.
@@ -127,9 +128,18 @@ both sides and failed when the CLI next followed a turn.
 The socket's frame, event, metadata, and status types are now imported from
 `tidebreak_server::wire`, the one public module a Rust client reads the
 contract from. A rename is a compile error in the CLI the way it is a type error
-in the renderer. The module documents the strictness that comes with it:
-closed vocabularies, unknown keys rejected (`deny_unknown_fields`, matching the
-renderer's `onlyKeys` guards), and an unknown event type failing its frame.
+in the renderer. The module documents the contract that comes with it: closed
+vocabularies, unknown keys ignored, and an unknown event type failing its
+frame, which the CLI skips, counts, and reports on stderr.
+
+Unknown keys are ignored because a CLI can be a release behind the server it
+attaches to. A key a newer server adds must not break it. The strictness moved
+into the tests: every test that reads a fixture decodes each entry and
+serializes it back, so a key a type does not declare drops out of the round
+trip and fails it. Drift still fails CI; it no longer fails a user. A change a
+tolerant reader cannot absorb, such as a removed or renamed field, raises the
+server's `api_level`, and clients refuse a server outside the range they read
+before they decode anything (see `crates/tidebreak-server/src/server_version.rs`).
 
 Four more things are shared through it:
 
@@ -147,10 +157,10 @@ Four more things are shared through it:
 
 - **REST records.** The model catalog, the provider list, the MCP server
   listing, agent runs, and conversation outputs are the routes' own response
-  types, re-exported from `tidebreak_server::wire` with `Deserialize` and
-  `deny_unknown_fields`. One record tolerates unknown keys: `McpServerInfo`
-  flattens its definition, and serde cannot guard across a flatten, so its
-  envelope `McpServersInfo` is the guarded shape. The output records carry
+  types, re-exported from `tidebreak_server::wire` with `Deserialize`. They
+  ignore unknown keys like the frames do. One nested type stays strict:
+  `CustomModelConfig`, because the provider update body shares it. The output
+  records carry
   typed timestamps and a `producedBy` enum rather than preformatted strings.
   `crates/tidebreak-server-api/fixtures/rest-records.json` holds one real value
   per record (`{ name, type, value }`, the type naming the wire type it
@@ -160,15 +170,14 @@ Four more things are shared through it:
   `generated/fixtures.ts` and the generated types.
 - **Code-mode fixtures.** The repo, workspace, session, turn, approval, and
   delivery snapshots, the sequenced event frame, and the `/updates`
-  notices are re-exported from `tidebreak_server::wire` too, reject unknown
+  notices are re-exported from `tidebreak_server::wire` too, ignore unknown
   keys, and are written to `crates/tidebreak-server-api/fixtures/code-frames.json`
   by `wire_code_fixtures` (a `CodeEvent` or `CodeUpdateNotice` variant without
   a fixture fails `the_code_frame_fixtures_cover_every_event`). The server
   round-trips every entry, the CLI's `api::code` tests decode every entry, and
   the renderer's `code/parsers.test.ts` runs every entry through the matching
   parser. The event union inside a frame is `tidebreak_core::CodeEvent`, which
-  the server also reads back from its journal, so a variant tolerates keys it
-  does not declare; the frame around it does not.
+  the server also reads back from its journal.
 
 ## Scope today
 
