@@ -155,22 +155,33 @@ needs:
   [sign-in](#oauth-for-remote-http-servers) right after the add and opens the
   page in your browser. In a window attached to another machine, the row
   offers Connect instead, because the sign-in has to finish on that machine.
-- **Reads a token from `VARIABLE`** — the server takes a token as a bearer.
-  Export the variable in the shell you start Tidebreak from, then restart
-  Tidebreak.
+- **Sends `VARIABLE` to `host`** — the server takes a token as a bearer, and
+  its first connect sends the value of that environment variable to the
+  vendor's host. The row asks first, with a **Start after adding** switch
+  that starts off, the same switch an import shows before it connects a
+  server that sends a credential. Left off, Add saves the server turned off,
+  and it sends nothing until you turn it on in Connected apps. Tidebreak
+  reads the variable from the environment it started with, so export it in
+  the shell you start Tidebreak from.
 - **No sign-in** — the server is public and connects at once.
 
-An add fails, and saves nothing, only when the server asks for an OAuth
-sign-in Tidebreak can never complete. Adding a server whose address is already
-configured changes nothing, and Settings shows the entry as **Added**. On a
-managed profile the directory is hidden, and `POST /mcp/directory/{id}/add`
-refuses the add like any other remote server a person types in.
+An add fails, and saves nothing, when the server asks for an OAuth sign-in
+Tidebreak can never complete, or when Tidebreak already holds its limit of
+servers. Adding a server whose address is already configured changes nothing,
+and Settings shows the entry as **Added**. On a managed profile the directory
+is hidden, and `POST /mcp/directory/{id}/add` refuses the add like any other
+remote server a person types in. The route's body is `{"start": true}` or
+`{"start": false}`, and it has no default: a client says whether the server
+connects.
 
 Each entry is an endpoint its vendor hosts and publishes in its own
 documentation. Tidebreak holds no OAuth app for any of them: a server that
 signs in registers Tidebreak with its own sign-in service each time (RFC
 7591), the same as any remote server that asks. The directory claims no tier.
 An entry shows **Tested** only when the curated list vouches for its address.
+A vendor that hosts its server in more than one region gets one entry per
+region: Intercom has a US entry and an EU entry. Intercom does not host its
+server for Australian workspaces yet.
 
 The entries live in `crates/tidebreak-server/src/mcp_directory.json`, one
 server per line, compiled into the build. To add or correct an entry, change
@@ -294,10 +305,24 @@ When Tidebreak starts, it opens its port first and connects the saved servers
 in the background, all at once. Each saved server reads **Connecting** until
 its first connection finishes, and publishes its tools the moment it is up, so
 one slow server holds up neither the app nor the servers beside it. Settings
-reads the list again while a server is connecting. A turn that starts while
-saved servers are still connecting waits for them for at most three seconds,
-then runs with the servers that are up; the rest join later turns. An engine
-that lists its tools through the connected-apps bridge waits the same way.
+reads the list again while a server is connecting.
+
+Work that needs the tool list waits for the saved servers against one
+deadline: three seconds after Tidebreak published them. Once the deadline has
+passed, nothing waits, however long a server keeps connecting. A turn on
+Tidebreak's own engine that starts before every server is up runs with the
+servers that are up, and its system prompt names the apps still connecting,
+so the model says an app is still connecting instead of saying it is not
+connected. Their tools join the next turn. An external engine reaches the
+same tools through the connected-apps bridge
+(`/code/mcp/connected-apps`). There, only a tool list waits for the deadline;
+every other request answers at once. A list built while servers connect
+carries a `connected_apps_status` tool whose description names them, and
+calling it reports which apps are up. The bridge declares
+`tools.listChanged`, and its event stream (`GET` on the same path) sends
+`notifications/tools/list_changed` whenever the tools an engine last listed
+are out of date, so an engine that follows it lists again when a server
+comes up, reconnects with other tools, or goes away.
 
 A saved record Tidebreak cannot load does not stop it from starting. That is a
 record whose definition does not decode, for example one a newer version wrote
