@@ -67,6 +67,8 @@ pub mod project {
         pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
         pub owner: String,
+        #[sea_orm(column_type = "Text")]
+        pub instructions: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

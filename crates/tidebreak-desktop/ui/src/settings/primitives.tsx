@@ -45,14 +45,20 @@ export function SettingsPanel({
  * control takes the label's name whether or not it carries its own. Full width,
  * because the controls that live here — selects, text inputs, editors — read
  * badly squeezed against the right edge.
+ *
+ * `status` is a short reading about the value, such as how much of a size
+ * limit it uses. It sits at the right end of the hint's row, under the
+ * control's right edge.
  */
 export function SettingsField({
   label,
   hint,
+  status,
   children,
 }: {
   label: string;
   hint?: ReactNode;
+  status?: ReactNode;
   children: ReactNode;
 }) {
   const hintId = useId();
@@ -64,16 +70,26 @@ export function SettingsField({
             .join(" "),
         })
       : children;
+  const hintElement = hint && (
+    <span id={hintId} className="settings-field-hint">
+      {hint}
+    </span>
+  );
   return (
     <div className="settings-field">
       <label>
         <span className="settings-field-label">{label}</span>
         {control}
       </label>
-      {hint && (
-        <span id={hintId} className="settings-field-hint">
-          {hint}
-        </span>
+      {status ? (
+        <div className="flex items-start justify-between gap-4">
+          {hintElement}
+          <span className="settings-field-hint ml-auto shrink-0 tabular-nums">
+            {status}
+          </span>
+        </div>
+      ) : (
+        hintElement
       )}
     </div>
   );

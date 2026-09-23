@@ -42,6 +42,14 @@ describe("settings sections", () => {
     }
   });
 
+  it("always exposes personal instructions", () => {
+    for (const managed of [false, true]) {
+      expect(
+        settingsSectionsFor(managed).map((section) => section.path),
+      ).toContain("instructions");
+    }
+  });
+
   it("always exposes quick-action prompts", () => {
     for (const managed of [false, true]) {
       expect(

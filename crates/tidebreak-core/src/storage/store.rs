@@ -115,6 +115,17 @@ pub trait Store: Send + Sync {
         ))
     }
 
+    /// Replace one project's standing instructions. An empty string clears
+    /// them.
+    ///
+    /// Returns `false` when the project does not exist. Product adapters own
+    /// the size bound before calling this storage primitive.
+    async fn update_project_instructions(
+        &self,
+        id: ProjectId,
+        instructions: String,
+    ) -> Result<bool>;
+
     /// Remove one empty project without cascading owned product state.
     async fn delete_project(&self, _id: ProjectId) -> Result<DeleteProjectOutcome> {
         Err(AgentError::Store(
@@ -616,6 +627,18 @@ pub trait Store: Send + Sync {
     ) -> Result<bool> {
         let _ = owner;
         self.update_project_title(id, title).await
+    }
+
+    /// [`Store::update_project_instructions`] restricted to `owner`'s
+    /// projects; someone else's project reports `false`.
+    async fn update_project_instructions_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ProjectId,
+        instructions: String,
+    ) -> Result<bool> {
+        let _ = owner;
+        self.update_project_instructions(id, instructions).await
     }
 
     /// [`Store::delete_project`] restricted to `owner`'s projects; someone

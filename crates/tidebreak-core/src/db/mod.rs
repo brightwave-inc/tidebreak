@@ -633,6 +633,7 @@ impl DbStore {
             title: Set(project.title.clone()),
             attachment_revision: Set(project.attachment_revision),
             created_at: Set(project.created_at),
+            instructions: Set(project.instructions.clone()),
             // The local owner rides the column default; only a named
             // principal writes the column explicitly (#853).
             owner: match owner {
@@ -710,6 +711,25 @@ impl DbStore {
         let mut update = entities::project::Entity::update_many()
             .set(entities::project::ActiveModel {
                 title: Set(title),
+                ..Default::default()
+            })
+            .filter(entities::project::Column::Id.eq(id.0));
+        if let Some(owner) = owner {
+            update = update.filter(entities::project::Column::Owner.eq(owner.as_str()));
+        }
+        let result = update.exec(&self.conn).await.map_err(store_err)?;
+        Ok(result.rows_affected == 1)
+    }
+
+    async fn update_project_instructions_impl(
+        &self,
+        id: ProjectId,
+        instructions: String,
+        owner: Option<&OwnerId>,
+    ) -> Result<bool> {
+        let mut update = entities::project::Entity::update_many()
+            .set(entities::project::ActiveModel {
+                instructions: Set(instructions),
                 ..Default::default()
             })
             .filter(entities::project::Column::Id.eq(id.0));
@@ -843,6 +863,25 @@ impl Store for DbStore {
         title: Option<String>,
     ) -> Result<bool> {
         self.update_project_title_impl(id, title, Some(owner)).await
+    }
+
+    async fn update_project_instructions(
+        &self,
+        id: ProjectId,
+        instructions: String,
+    ) -> Result<bool> {
+        self.update_project_instructions_impl(id, instructions, None)
+            .await
+    }
+
+    async fn update_project_instructions_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ProjectId,
+        instructions: String,
+    ) -> Result<bool> {
+        self.update_project_instructions_impl(id, instructions, Some(owner))
+            .await
     }
 
     async fn delete_project(&self, id: ProjectId) -> Result<DeleteProjectOutcome> {
@@ -3587,6 +3626,7 @@ pub(in crate::db) fn project_from_models(
         title: model.title,
         attachment_revision: model.attachment_revision,
         root_attachments,
+        instructions: model.instructions,
         created_at: model.created_at,
     };
     validate_project_attachments(&project)?;

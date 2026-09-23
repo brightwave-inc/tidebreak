@@ -389,6 +389,9 @@ mod tests {
         // types with the conversation path, but one generated module keeps the
         // renderer importing from a single place.
         generate::collect_from::<crate::routes::Settings>(&cfg, &mut out);
+        // Its own endpoint root: personal instructions are the caller's, so
+        // they are read and written apart from the deployment's settings.
+        generate::collect_from::<crate::instructions::PersonalInstructions>(&cfg, &mut out);
         generate::collect_from::<tidebreak_core::QueuedAgentTurn>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ModelInfo>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ModelRoleInfo>(&cfg, &mut out);

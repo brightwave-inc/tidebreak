@@ -53,6 +53,7 @@ fn mem_root_attachment_begin_derives_authority_and_enforces_atomic_guards() {
         title: None,
         attachment_revision: 1,
         root_attachments: vec![project_root],
+        instructions: String::new(),
         created_at: chrono::Utc::now(),
     };
     block_on(store.create_project(&project)).unwrap();

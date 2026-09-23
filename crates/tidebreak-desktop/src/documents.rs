@@ -962,6 +962,7 @@ mod tests {
             title: Some("Project".to_owned()),
             attachment_revision: 0,
             root_attachments: Vec::new(),
+            instructions: String::new(),
             created_at: chrono::Utc::now(),
         };
         store.create_project(&project).await.unwrap();

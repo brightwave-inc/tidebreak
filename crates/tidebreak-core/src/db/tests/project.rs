@@ -272,6 +272,7 @@ async fn project_membership_fk_and_attachment_insertions_are_atomic() {
         attachment_revision: Set(MAX_ATTACHMENT_REVISION + 1),
         created_at: Set(Utc::now()),
         owner: sea_orm::ActiveValue::NotSet,
+        instructions: sea_orm::ActiveValue::NotSet,
     };
     assert!(direct_excessive.insert(&store.conn).await.is_err());
 
@@ -359,6 +360,54 @@ async fn project_title_update_sets_clears_and_reports_missing_identity() {
     );
     assert!(!store
         .update_project_title(ProjectId::new(), Some("missing".into()))
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn project_instructions_round_trip_through_create_update_get_and_list() {
+    let (_dir, store) = temp_store().await;
+    let mut project = sample_project();
+    project.instructions = "Cite the filing for every figure.".into();
+    store.create_project(&project).await.unwrap();
+    assert_eq!(
+        store.get_project(project.id).await.unwrap().as_ref(),
+        Some(&project)
+    );
+
+    let brief = "Answer in British English.\n\nKeep summaries under 200 words.";
+    assert!(store
+        .update_project_instructions(project.id, brief.into())
+        .await
+        .unwrap());
+    let stored = store.get_project(project.id).await.unwrap().unwrap();
+    assert_eq!(stored.instructions, brief);
+    // A title change leaves the instructions alone.
+    assert!(store
+        .update_project_title(project.id, Some("Renamed".into()))
+        .await
+        .unwrap());
+    assert_eq!(
+        store.list_projects().await.unwrap()[0].instructions,
+        brief,
+        "the list read carries the instructions too"
+    );
+
+    assert!(store
+        .update_project_instructions(project.id, String::new())
+        .await
+        .unwrap());
+    assert_eq!(
+        store
+            .get_project(project.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .instructions,
+        ""
+    );
+    assert!(!store
+        .update_project_instructions(ProjectId::new(), "missing".into())
         .await
         .unwrap());
 }

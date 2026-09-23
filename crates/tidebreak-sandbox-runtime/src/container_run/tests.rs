@@ -366,6 +366,16 @@ impl Store for TerminalFaultStore {
         self.inner.list_projects().await
     }
 
+    async fn update_project_instructions(
+        &self,
+        id: tidebreak_core::ProjectId,
+        instructions: String,
+    ) -> Result<bool> {
+        self.inner
+            .update_project_instructions(id, instructions)
+            .await
+    }
+
     async fn create_document(&self, document: &tidebreak_core::DocumentRecord) -> Result<()> {
         self.inner.create_document(document).await
     }

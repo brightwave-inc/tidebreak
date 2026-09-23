@@ -219,6 +219,18 @@ impl Store for MemStore {
     async fn list_projects(&self) -> Result<Vec<Project>> {
         Ok(self.projects.lock().unwrap().values().cloned().collect())
     }
+    async fn update_project_instructions(
+        &self,
+        id: ProjectId,
+        instructions: String,
+    ) -> Result<bool> {
+        let mut projects = self.projects.lock().unwrap();
+        let Some(project) = projects.get_mut(&id) else {
+            return Ok(false);
+        };
+        project.instructions = instructions;
+        Ok(true)
+    }
     async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
         if (document.chat_id.is_some() && document.project_id.is_some())
             || document
@@ -1269,6 +1281,7 @@ fn mem_store_rejects_moving_a_live_document_between_corpora() {
         title: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        instructions: String::new(),
         created_at: chrono::Utc::now(),
     };
     let project_b = Project {

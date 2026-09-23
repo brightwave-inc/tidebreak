@@ -50,6 +50,7 @@ pub mod gateway_drafts;
 pub mod gateway_runtime;
 pub mod host_folders;
 pub mod image_attachment;
+pub mod instructions;
 mod lane {
     pub(crate) use tidebreak_worker_runtime::lane::*;
 }

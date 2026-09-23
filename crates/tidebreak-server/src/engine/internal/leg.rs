@@ -1493,8 +1493,19 @@ impl LegDriver {
         let channel_instructions =
             crate::code::channel_preferences::frozen_instructions(self.store.as_ref(), chat.id)
                 .await?;
+        // The owner's personal instructions and the project's, read fresh each
+        // turn so an edit applies from the next message. They change only when
+        // someone edits them, so the prompt stays byte-identical, and the
+        // prefix cacheable, from one turn to the next.
+        let standing_instructions = crate::instructions::TurnInstructions::for_chat(
+            self.store.as_ref(),
+            owner.as_ref(),
+            &chat,
+        )
+        .await?;
         if let Some(prompt) = surface.agent_config.system_prompt.as_mut() {
             crate::code::channel_preferences::append_instructions(prompt, &channel_instructions);
+            standing_instructions.append_to(prompt);
         }
         if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
             tracing::debug!(

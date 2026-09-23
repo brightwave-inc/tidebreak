@@ -11,6 +11,7 @@ import {
   KeyRound,
   Palette,
   RefreshCw,
+  ScrollText,
   ShieldCheck,
   SquareTerminal,
   Mic,
@@ -43,6 +44,7 @@ import { PersonalInferencePreferencesPanel } from "./PersonalInferencePreference
 import { ChannelPreferencesPanel } from "./ChannelPreferencesPanel";
 import { GitSourceControlPanel } from "./GitSourceControlPanel";
 import { MemoryPanel } from "./MemoryPanel";
+import { InstructionsPanel } from "./InstructionsPanel";
 
 /**
  * Each section reads what it needs from the shell context rather than being
@@ -258,6 +260,11 @@ function MemorySection() {
   );
 }
 
+function InstructionsSection() {
+  const { client } = useApp();
+  return <InstructionsPanel client={client} />;
+}
+
 export type SettingsSectionDef = {
   /** The path segment under `/settings`, and its address. */
   path: string;
@@ -434,6 +441,16 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: Brain,
     iconClass: "text-icon-violet",
     Component: MemorySection,
+  },
+  // Beside Memory: both shape how Tidebreak answers you, one learned as you
+  // go and one written up front.
+  {
+    path: "instructions",
+    label: "Instructions",
+    group: "application",
+    icon: ScrollText,
+    iconClass: "text-icon-amber",
+    Component: InstructionsSection,
   },
 ];
 

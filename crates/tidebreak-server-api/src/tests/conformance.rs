@@ -316,6 +316,11 @@ async fn cross_principal_rest_surface_is_disjoint() {
             format!("/projects/{}", project.id),
             Some(patch_body),
         ),
+        (
+            "PATCH",
+            format!("/projects/{}", project.id),
+            Some(serde_json::json!({"instructions": "Send the filings to Bob."})),
+        ),
         ("DELETE", format!("/projects/{}", project.id), None),
         ("GET", format!("/documents/{document_id}"), None),
         (
@@ -351,6 +356,18 @@ async fn cross_principal_rest_surface_is_disjoint() {
     assert_eq!(response.status(), StatusCode::OK);
     let chat_after: Chat = json_body(response).await;
     assert_eq!(chat_after.title, chat.title);
+    let project_after: Project = json_body(
+        request(
+            &router,
+            "GET",
+            &format!("/projects/{}", project.id),
+            &alice,
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(project_after, project);
     let response = request(
         &router,
         "GET",
@@ -360,6 +377,50 @@ async fn cross_principal_rest_surface_is_disjoint() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Personal instructions belong to the person who wrote them. A member
+/// writes their own, and nobody reads or replaces anyone else's.
+#[tokio::test]
+async fn personal_instructions_belong_to_the_person_who_wrote_them() {
+    let (router, _state, _store, _dir) = self_host_app().await;
+    let alice = format!("Bearer {ALICE_TOKEN}");
+    let bob = format!("Bearer {BOB_TOKEN}");
+    let read = |bearer: String| {
+        let router = router.clone();
+        async move {
+            let response = request(&router, "GET", "/settings/instructions", &bearer, None).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            json_body::<serde_json::Value>(response).await["instructions"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+
+    let written = request(
+        &router,
+        "PUT",
+        "/settings/instructions",
+        &alice,
+        Some(serde_json::json!({"instructions": "Alice prefers tables."})),
+    )
+    .await;
+    assert_eq!(written.status(), StatusCode::OK);
+    assert_eq!(read(bob.clone()).await, "");
+
+    // Bob is a member, not an admin, and still writes his own.
+    let written = request(
+        &router,
+        "PUT",
+        "/settings/instructions",
+        &bob,
+        Some(serde_json::json!({"instructions": "Bob prefers prose."})),
+    )
+    .await;
+    assert_eq!(written.status(), StatusCode::OK);
+    assert_eq!(read(alice).await, "Alice prefers tables.");
+    assert_eq!(read(bob).await, "Bob prefers prose.");
 }
 
 /// Standing grants belong to the owner of the chat or project they cover:
@@ -632,6 +693,8 @@ fn deployment_plane_routes() -> Vec<(&'static str, &'static str)> {
 fn member_plane_routes() -> Vec<(&'static str, &'static str)> {
     vec![
         ("GET", "/settings"),
+        ("GET", "/settings/instructions"),
+        ("PUT", "/settings/instructions"),
         ("GET", "/models"),
         ("GET", "/web-search"),
         ("GET", "/code-execution"),

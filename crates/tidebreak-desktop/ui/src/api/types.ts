@@ -90,6 +90,7 @@ import {
   type ModelVisibility as WireModelVisibility,
   type QueuedTurn as WireQueuedTurn,
   type ModelRoleInfo as WireModelRoleInfo,
+  type PersonalInstructions as WirePersonalInstructions,
   type Project as WireProject,
   type ProviderInfo as WireProviderInfo,
   type ProviderAuthMode as WireProviderAuthMode,
@@ -497,6 +498,9 @@ export type { CompactionSettings };
 export type { CompactionRun };
 
 export type Project = WireProject;
+
+/** The caller's own standing instructions (`GET/PUT /settings/instructions`). */
+export type PersonalInstructions = WirePersonalInstructions;
 
 /**
  * One file a project shares with the conversations filed under it.

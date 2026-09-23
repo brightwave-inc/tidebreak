@@ -29,6 +29,21 @@ export function withProjectsApi<TBase extends Constructor<HttpCore>>(
       });
     }
 
+    /**
+     * Replace a project's standing instructions. An empty string clears them.
+     * The server refuses text over 8,192 bytes.
+     */
+    patchProjectInstructions(
+      projectId: string,
+      instructions: string,
+    ): Promise<Project> {
+      return this.json(`/projects/${encodeURIComponent(projectId)}`, {
+        method: "PATCH",
+        headers: this.headers(true),
+        body: JSON.stringify({ instructions }),
+      });
+    }
+
     deleteProject(projectId: string): Promise<void> {
       return this.json(`/projects/${encodeURIComponent(projectId)}`, {
         method: "DELETE",

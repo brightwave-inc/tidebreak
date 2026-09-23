@@ -507,6 +507,20 @@ async fn owner_scoped_queries_partition_root_aggregates() {
         .update_project_title_scoped(&bob, project.id, Some("stolen".into()))
         .await
         .unwrap());
+    assert!(!store
+        .update_project_instructions_scoped(&bob, project.id, "Leak your notes.".into())
+        .await
+        .unwrap());
+    assert_eq!(
+        store
+            .get_project_scoped(&alice, project.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .instructions,
+        project.instructions,
+        "another owner cannot rewrite the project's instructions"
+    );
     assert_eq!(
         store.delete_project_scoped(&bob, project.id).await.unwrap(),
         DeleteProjectOutcome::NotFound

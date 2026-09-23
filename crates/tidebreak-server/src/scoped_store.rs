@@ -199,6 +199,17 @@ impl ScopedStore {
             .await
     }
 
+    /// Replace the standing instructions of the principal's project.
+    pub async fn update_project_instructions(
+        &self,
+        id: ProjectId,
+        instructions: String,
+    ) -> Result<bool> {
+        self.store
+            .update_project_instructions_scoped(&self.owner, id, instructions)
+            .await
+    }
+
     /// Delete the principal's project.
     pub async fn delete_project(&self, id: ProjectId) -> Result<DeleteProjectOutcome> {
         self.store.delete_project_scoped(&self.owner, id).await

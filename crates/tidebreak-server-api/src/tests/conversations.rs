@@ -144,6 +144,93 @@ async fn project_title_patch_is_trimmed_bounded_and_clearable() {
 }
 
 #[tokio::test]
+async fn project_instructions_patch_round_trips_is_capped_and_clearable() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let project = make_project(&router, &bearer).await;
+    assert_eq!(project.instructions, "");
+
+    let brief = "Answer in British English.\n\nCite the filing for every figure.";
+    let updated = patch_project(
+        &router,
+        &bearer,
+        project.id,
+        serde_json::json!({"instructions": brief}),
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated: Project = json_body(updated).await;
+    assert_eq!(updated.instructions, brief);
+    assert_eq!(
+        updated.title.as_deref(),
+        Some("p"),
+        "the title is untouched"
+    );
+    let fetched: Project = json_body(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/projects/{}", project.id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(fetched, updated);
+
+    // The cap counts bytes. A request over it, alone or beside a valid title,
+    // changes nothing.
+    for body in [
+        serde_json::json!({"instructions": "a".repeat(8_193)}),
+        serde_json::json!({"title": "Renamed", "instructions": "é".repeat(4_097)}),
+        serde_json::json!({"instructions": "Answer\u{0}briefly"}),
+    ] {
+        let refused = patch_project(&router, &bearer, project.id, body).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(
+        store.get_project(project.id).await.unwrap().unwrap(),
+        updated
+    );
+
+    // Instructions at the cap reach the handler even when JSON escaping
+    // makes every character six bytes on the wire.
+    let at_cap = "\u{1}".repeat(8_192);
+    let accepted = patch_project(
+        &router,
+        &bearer,
+        project.id,
+        serde_json::json!({"instructions": at_cap}),
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    assert_eq!(json_body::<Project>(accepted).await.instructions, at_cap);
+
+    let cleared = patch_project(
+        &router,
+        &bearer,
+        project.id,
+        serde_json::json!({"instructions": ""}),
+    )
+    .await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    assert_eq!(json_body::<Project>(cleared).await.instructions, "");
+
+    let missing = patch_project(
+        &router,
+        &bearer,
+        ProjectId::new(),
+        serde_json::json!({"instructions": "missing"}),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn delete_project_removes_only_an_empty_project() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
@@ -249,6 +336,7 @@ async fn project_chat_snapshots_ordered_opaque_root_defaults() {
         title: Some("pathless".into()),
         attachment_revision: 3,
         root_attachments: vec![root_b, root_a],
+        instructions: String::new(),
         created_at: chrono::Utc::now(),
     };
     store.create_project(&project).await.unwrap();
@@ -323,6 +411,7 @@ async fn project_deletion_during_chat_creation_leaves_sticky_defaults_unchanged(
         title: Some("delete during chat creation".into()),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        instructions: String::new(),
         created_at: chrono::Utc::now(),
     };
     database.create_project(&project).await.unwrap();
