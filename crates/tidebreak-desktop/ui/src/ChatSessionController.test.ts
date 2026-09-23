@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatFrame, ChatMetadataFrame, SequencedEvent } from "./api";
 import {
+  CHAT_REPLAY_SETTLE_MS,
   ChatSessionController,
   INITIAL_RECONNECT_DELAY_MS,
   MAX_RECONNECT_DELAY_MS,
@@ -28,6 +29,7 @@ class FakeSocket {
 function harness() {
   const sockets: FakeSocket[] = [];
   const events: SequencedEvent[] = [];
+  const batches: (readonly SequencedEvent[])[] = [];
   const metadata: ChatMetadataFrame[] = [];
   const states: ChatConnectionState[] = [];
   let after = 0;
@@ -43,7 +45,10 @@ function harness() {
       return socket as unknown as WebSocket;
     },
     getAfter: () => after,
-    onEvent: (event) => events.push(event),
+    onEvents: (delivered) => {
+      batches.push(delivered);
+      events.push(...delivered);
+    },
     onMetadata: (notice) => metadata.push(notice),
     onConnectionState: (state) => states.push(state),
   });
@@ -51,6 +56,7 @@ function harness() {
     controller,
     sockets,
     events,
+    batches,
     metadata,
     states,
     setAfter: (value: number) => (after = value),
@@ -177,6 +183,91 @@ describe("ChatSessionController", () => {
     expect(h.events).toEqual([]);
     h.latest().emit(FRAME);
     expect(h.events).toEqual([FRAME]);
+  });
+});
+
+function replayed(seq: number, event: SequencedEvent["event"]): SequencedEvent {
+  return { seq, event, replayed: true };
+}
+
+describe("replay", () => {
+  // A reconnect replays the active turn one socket task per frame. Handing
+  // each to the host re-rendered the transcript once per frame.
+  it("holds a replay burst until it goes quiet and delivers it in one call", () => {
+    const h = harness();
+    h.controller.start();
+    h.latest().emit(replayed(1, { type: "turn_started", turn_id: "t" }));
+    h.latest().emit(replayed(2, { type: "text_delta", text: "Hel" }));
+    h.latest().emit(replayed(3, { type: "text_delta", text: "lo" }));
+    h.latest().emit(
+      replayed(4, { type: "tool_call_started", call_id: "c", name: "search" }),
+    );
+    vi.advanceTimersByTime(CHAT_REPLAY_SETTLE_MS - 1);
+    expect(h.batches).toEqual([]);
+
+    vi.advanceTimersByTime(1);
+    expect(h.batches).toEqual([
+      [
+        replayed(1, { type: "turn_started", turn_id: "t" }),
+        // Consecutive fragments arrive joined, under the last one's seq.
+        replayed(3, { type: "text_delta", text: "Hello" }),
+        replayed(4, {
+          type: "tool_call_started",
+          call_id: "c",
+          name: "search",
+        }),
+      ],
+    ]);
+  });
+
+  it("joins only fragments of the same kind with consecutive seqs", () => {
+    const h = harness();
+    h.controller.start();
+    h.latest().emit(replayed(1, { type: "reasoning_delta", text: "a" }));
+    h.latest().emit(replayed(2, { type: "text_delta", text: "b" }));
+    h.latest().emit(replayed(4, { type: "text_delta", text: "c" }));
+    vi.advanceTimersByTime(CHAT_REPLAY_SETTLE_MS);
+    expect(h.events).toEqual([
+      replayed(1, { type: "reasoning_delta", text: "a" }),
+      replayed(2, { type: "text_delta", text: "b" }),
+      replayed(4, { type: "text_delta", text: "c" }),
+    ]);
+  });
+
+  it("delivers held replay ahead of a live frame, in the same call", () => {
+    const h = harness();
+    h.controller.start();
+    h.latest().emit(replayed(1, { type: "text_delta", text: "old" }));
+    const live: SequencedEvent = {
+      seq: 2,
+      event: { type: "text_delta", text: "new" },
+    };
+    h.latest().emit(live);
+    expect(h.batches).toEqual([
+      [replayed(1, { type: "text_delta", text: "old" }), live],
+    ]);
+    vi.runAllTimers();
+    expect(h.batches).toHaveLength(1);
+  });
+
+  it("delivers held replay before a reconnect reads the cursor", () => {
+    const h = harness();
+    h.controller.start();
+    h.latest().emit(replayed(1, { type: "text_delta", text: "held" }));
+    h.latest().onclose?.();
+    expect(h.events).toEqual([
+      replayed(1, { type: "text_delta", text: "held" }),
+    ]);
+    expect(h.states).toEqual(["reconnecting"]);
+  });
+
+  it("drops held replay on dispose", () => {
+    const h = harness();
+    h.controller.start();
+    h.latest().emit(replayed(1, { type: "text_delta", text: "held" }));
+    h.controller.dispose();
+    vi.runAllTimers();
+    expect(h.events).toEqual([]);
   });
 });
 

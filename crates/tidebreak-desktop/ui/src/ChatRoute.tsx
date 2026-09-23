@@ -149,7 +149,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   const images = useImageAttachments(client, chatId);
-  const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
+  const handleEventsRef = useRef<(events: readonly SequencedEvent[]) => void>(
+    () => {},
+  );
   const terminalHydrationGenerationRef = useRef(0);
   // Steering reads the draft synchronously, from outside a render. The route
   // deliberately does not subscribe to the draft — a keystroke re-renders the
@@ -235,7 +237,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     const controller = new ChatSessionController({
       openSocket: (after, onFrame) => client.openEvents(chatId, after, onFrame),
       getAfter: () => useChatSessionStore.getState().lastSeq,
-      onEvent: (event) => handleEventRef.current(event),
+      onEvents: (events) => handleEventsRef.current(events),
       onMetadata: (metadata) => {
         if (metadata.metadata === "titled") {
           chatListActions.applyDerivedTitle(chatId, metadata.title);
@@ -272,13 +274,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     useChatSessionStore.getState().update(update);
   }
 
-  function handleEvent(framed: SequencedEvent) {
+  function handleEvents(frames: readonly SequencedEvent[]) {
     const effects = useChatSessionStore
       .getState()
-      .applyEvent(framed, sessionDeps);
+      .applyEvents(frames, sessionDeps);
     for (const effect of effects) applySessionEffect(effect);
   }
-  handleEventRef.current = handleEvent;
+  handleEventsRef.current = handleEvents;
 
   function applySessionEffect(effect: ChatSessionEffect) {
     switch (effect.type) {
