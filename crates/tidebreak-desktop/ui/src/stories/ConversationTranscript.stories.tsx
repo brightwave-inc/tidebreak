@@ -609,8 +609,9 @@ function longConversation(count: number): ChatMessage[] {
   ]).flat();
 }
 
+/** The transcript renders after the story mounts, so wait for the control. */
 const earlierButton = (canvasElement: HTMLElement) =>
-  within(canvasElement).getByRole("button", { name: "Show earlier messages" });
+  within(canvasElement).findByRole("button", { name: "Show earlier messages" });
 
 /**
  * A long conversation opens on its newest turns. The control at the top
@@ -619,7 +620,7 @@ const earlierButton = (canvasElement: HTMLElement) =>
 export const EarlierTurnsHeld: Story = {
   args: { messages: longConversation(TRANSCRIPT_TURNS_SHOWN + 4) },
   play: async ({ canvasElement }) => {
-    await expect(earlierButton(canvasElement)).toBeEnabled();
+    await expect(await earlierButton(canvasElement)).toBeEnabled();
   },
 };
 
@@ -631,8 +632,8 @@ export const EarlierPageLoading: Story = {
     onLoadEarlierMessages: () => new Promise<void>(() => undefined),
   },
   play: async ({ canvasElement }) => {
-    await userEvent.click(earlierButton(canvasElement));
-    await expect(earlierButton(canvasElement)).toBeDisabled();
+    await userEvent.click(await earlierButton(canvasElement));
+    await expect(await earlierButton(canvasElement)).toBeDisabled();
   },
 };
 
@@ -644,7 +645,7 @@ export const EarlierPageFailed: Story = {
     onLoadEarlierMessages: () => Promise.reject(new Error("offline")),
   },
   play: async ({ canvasElement }) => {
-    await userEvent.click(earlierButton(canvasElement));
+    await userEvent.click(await earlierButton(canvasElement));
     await expect(
       await within(canvasElement).findByRole("alert"),
     ).toHaveTextContent("Could not load earlier messages");
