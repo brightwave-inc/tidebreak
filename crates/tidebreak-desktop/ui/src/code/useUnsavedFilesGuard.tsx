@@ -45,8 +45,8 @@ export function unsavedFilesClosedBy(
 }
 
 /**
- * Ask before a navigation throws unsaved file changes away, and before the
- * page reloads with some.
+ * Ask before a navigation throws unsaved file changes away, and before a
+ * browser reloads or closes the page with some.
  *
  * The blocker only exists while the workspace has unsaved changes, so every
  * other navigation stays as fast as it was. Returns the confirmation dialog

@@ -11,8 +11,9 @@ import { friendlyErrorMessage } from "@/lib/utils";
  * The file viewer only mounts while its tab is in front, so the text you are
  * editing lives here, where switching tabs cannot drop it. Other code reads it
  * too: the center tabs mark a file with unsaved changes, and closing a tab,
- * leaving the workspace, or reloading asks before throwing them away. A quit
- * confirmation can ask through {@link unsavedCodeFiles} the same way.
+ * leaving the workspace, or reloading the page in a browser asks before
+ * throwing them away. A quit confirmation can ask through
+ * {@link unsavedCodeFiles} the same way.
  */
 
 /** Where the last save of a draft stands. */

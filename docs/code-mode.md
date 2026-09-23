@@ -752,9 +752,9 @@ and path, so the text outlives the viewer when you switch tabs. The center
 tabs read it to mark a file with unsaved changes, and `useUnsavedFilesGuard`
 reads it to ask before a navigation drops one: the layout lives in the URL,
 so closing a tab, leaving the workspace, and going back are all navigations
-it sees. The page's unload handler and the reload shortcut ask the same
-question. `unsavedCodeFiles` answers it for every workspace, for a later quit
-confirmation.
+it sees. A browser reloading or closing the page gets the same question
+through the unload handler. `unsavedCodeFiles` answers it for every
+workspace, for a later quit confirmation.
 
 A reload that finds the file changed under an unsaved buffer keeps the buffer
 and raises a notice with Reload and Keep my changes. A refused save raises the
@@ -765,8 +765,9 @@ while reading or editing.
 
 Out of scope: creating, renaming, or deleting files; editing in a sandbox
 workspace; multi-file find and replace; editing inside the diff panel. The
-macOS View > Reload menu item reloads from the native side, so it does not
-ask about unsaved files yet.
+desktop's View > Reload menu item reloads from the native side, so it does
+not ask about unsaved files yet; the quit confirmation will need the same
+native handshake.
 
 ## Testing
 
