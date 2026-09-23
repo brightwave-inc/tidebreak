@@ -2,6 +2,9 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
 import { ApprovalCard } from "@/ApprovalCard";
+import { FolderAccessCard } from "@/FolderAccessCard";
+import { OutputWritebackCard } from "@/OutputWritebackCard";
+
 import { execPreview } from "./fixtures";
 import { toolApprovalPresentation } from "@/ToolCallCard";
 
@@ -72,4 +75,42 @@ export const DecidingWithError: Story = {
     deciding: true,
     error: "The decision could not be saved. The command has not run.",
   },
+};
+
+export const FolderAccess = {
+  render: () => (
+    <FolderAccessCard
+      request={{
+        callId: "call-folder",
+        turnId: "turn-1",
+        reason: "The agent wants to read files in a connected folder.",
+        folderHint: "documents",
+        claimedByDesktop: false,
+      }}
+      nativeHost
+      nativeBusy={false}
+      working={false}
+      error={undefined}
+      onDecision={fn()}
+      onCancel={fn()}
+    />
+  ),
+};
+
+export const OutputWriteback = {
+  render: () => (
+    <OutputWritebackCard
+      request={{
+        callId: "call-write",
+        turnId: "turn-1",
+        mode: "create",
+        claimedByDesktop: false,
+      }}
+      nativeHost
+      working={false}
+      error={undefined}
+      onDecision={fn()}
+      onCancel={fn()}
+    />
+  ),
 };

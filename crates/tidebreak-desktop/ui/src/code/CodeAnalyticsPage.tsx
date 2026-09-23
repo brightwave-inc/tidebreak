@@ -19,6 +19,7 @@ import type {
   CodeSubscriptionUsage,
   HarnessKind,
 } from "@/api/types";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -723,9 +724,9 @@ function OutcomeCard({ report }: { report: CodeAnalyticsSnapshot }) {
           </p>
         </div>
         {totals.running_turns > 0 && (
-          <span className="rounded-full border border-live-border bg-live-background px-2 py-0.5 text-2xs font-medium text-live-foreground">
+          <Badge variant="live" size="sm">
             {totals.running_turns} running
-          </span>
+          </Badge>
         )}
       </div>
       <div className="mt-4 flex h-2 overflow-hidden rounded-full bg-muted">

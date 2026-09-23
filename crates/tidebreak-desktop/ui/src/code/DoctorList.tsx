@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { HARNESS_ICONS } from "./HarnessPicker";
+import { STATUS_TEXT } from "./statusTone";
 import {
   HARNESS_LABELS,
   HARNESS_TIER_LABELS,
@@ -337,7 +338,7 @@ function DoctorRow({
               // A failed install's only content is npm's own words, so it
               // renders in the machine voice rather than as prose.
               failed
-                ? "text-critical-foreground font-mono"
+                ? cn(STATUS_TEXT.critical, "font-mono")
                 : "text-muted-foreground",
             )}
           >

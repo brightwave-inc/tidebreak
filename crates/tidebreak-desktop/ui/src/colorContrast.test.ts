@@ -3,7 +3,12 @@ import { join } from "node:path";
 import type { VariantProps } from "class-variance-authority";
 import { describe, expect, it } from "vitest";
 
-import { STATUS_CHIP, STATUS_MARK, STATUS_TEXT } from "./code/statusTone";
+import {
+  STATUS_CHIP,
+  STATUS_MARK,
+  STATUS_TEXT,
+  STATUS_TEXT_MUTED,
+} from "./code/statusTone";
 import { badgeVariants } from "./components/ui/badge";
 import { buttonVariants } from "./components/ui/button";
 import { cn } from "./lib/utils";
@@ -454,6 +459,14 @@ describe("component color maps (see DESIGN.md)", () => {
   it("paints status text with a readable rung", () => {
     const failures = Object.entries(STATUS_TEXT).flatMap(([tone, classes]) =>
       classPairs(`STATUS_TEXT.${tone}`, classes, GROUNDS),
+    );
+    expect(failures).toEqual([]);
+  });
+
+  it("paints muted status text with a readable rung", () => {
+    const failures = Object.entries(STATUS_TEXT_MUTED).flatMap(
+      ([tone, classes]) =>
+        classPairs(`STATUS_TEXT_MUTED.${tone}`, classes, GROUNDS),
     );
     expect(failures).toEqual([]);
   });

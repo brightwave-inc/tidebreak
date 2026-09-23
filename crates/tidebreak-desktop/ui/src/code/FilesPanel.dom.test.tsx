@@ -201,6 +201,9 @@ describe("FilesPanel", () => {
       );
 
     expect(await screen.findByText("A ", { exact: false })).toBeInTheDocument();
+    const highlight = document.querySelector("mark");
+    expect(highlight).toHaveClass("bg-muted");
+    expect(highlight).not.toHaveClass("bg-warning-background");
     expect(
       screen.getByRole("list", { name: "File content matches" }),
     ).toBeInTheDocument();

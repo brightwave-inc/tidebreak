@@ -24,6 +24,7 @@ import {
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "../interactive";
+import { STATUS_TEXT } from "../statusTone";
 import {
   type BrowserViewport,
   type BrowserViewportPreset,
@@ -327,7 +328,7 @@ function CustomWidthField({
         <p
           id={errorId}
           role="alert"
-          className="mt-1 text-2xs text-critical-foreground"
+          className={cn("mt-1 text-2xs", STATUS_TEXT.critical)}
         >
           {error}
         </p>

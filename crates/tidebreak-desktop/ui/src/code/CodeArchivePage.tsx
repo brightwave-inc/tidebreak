@@ -3,7 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { formatDistanceToNowStrict } from "date-fns";
 import {
   Archive,
-  ExternalLink,
+  ArrowRight,
   GitBranch,
   GitPullRequest,
   MessageSquareText,
@@ -37,6 +37,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
+import { STATUS_TEXT } from "./statusTone";
 import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { listArchivedWorkspaces, isPutAway } from "./workspaceCards";
@@ -352,12 +353,12 @@ function CodeArchiveBody() {
             </span>
           )}
           {activeHistorySearch.error && (
-            <span role="alert" className="text-critical-foreground-muted">
+            <span role="alert" className={STATUS_TEXT.critical}>
               {activeHistorySearch.error} Workspace matches are still shown.
             </span>
           )}
           {activeHistorySearch.truncated && (
-            <span className="text-warning-foreground">
+            <span className={STATUS_TEXT.warning}>
               Conversation results were truncated. Narrow the search.
             </span>
           )}
@@ -494,33 +495,38 @@ function CodeArchiveBody() {
                       workspace.archived_at ?? workspace.created_at,
                     )}
                   </span>
-                  <span className="flex items-center justify-end gap-2">
-                    {workspace.pr?.url && (
-                      <Button
-                        type="button"
-                        size="xs"
-                        variant="outline"
-                        onClick={() => void openInBrowser(workspace.pr!.url!)}
-                      >
-                        <GitPullRequest />
-                        PR
-                      </Button>
-                    )}
-                    {canRestoreWorkspace(workspace) && (
-                      <Button
-                        type="button"
-                        size="xs"
-                        disabled={Boolean(restoring)}
-                        onClick={() => void restore(workspace.id)}
-                      >
-                        {restoring === workspace.id ? (
-                          <Spinner />
-                        ) : (
-                          <RotateCcw />
-                        )}
-                        Restore
-                      </Button>
-                    )}
+                  <span className="grid w-[11.5rem] grid-cols-[4.5rem_5.5rem_1.75rem] items-center justify-items-end gap-2">
+                    <span className="flex w-full justify-end">
+                      {workspace.pr?.url ? (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="outline"
+                          onClick={() => void openInBrowser(workspace.pr!.url!)}
+                        >
+                          <GitPullRequest />
+                          PR
+                        </Button>
+                      ) : null}
+                    </span>
+                    <span className="flex w-full justify-end">
+                      {canRestoreWorkspace(workspace) ? (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="outline"
+                          disabled={Boolean(restoring)}
+                          onClick={() => void restore(workspace.id)}
+                        >
+                          {restoring === workspace.id ? (
+                            <Spinner />
+                          ) : (
+                            <RotateCcw />
+                          )}
+                          Restore
+                        </Button>
+                      ) : null}
+                    </span>
                     <Button
                       type="button"
                       size="icon-xs"
@@ -533,7 +539,7 @@ function CodeArchiveBody() {
                         })
                       }
                     >
-                      <ExternalLink />
+                      <ArrowRight />
                     </Button>
                   </span>
                 </div>

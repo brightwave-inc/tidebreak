@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import type { CodeDeliveryPullRequestSummary } from "../../api/types";
+import { Logomark } from "@/Logomark";
 import { CornerDownRight, MessageSquare } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
 import { GithubAvatar } from "../GithubAvatar";
@@ -14,6 +15,7 @@ import { PrCheckSummary } from "../PrCheckSummary";
 import type { PullRequestGrouping } from "./views";
 import { checkCounts, prStatus, type PullRequestListGroup } from "../prState";
 import {
+  STATUS_CHIP,
   STATUS_DOT,
   STATUS_MARK,
   STATUS_TEXT,
@@ -418,14 +420,18 @@ function PullRequestRow({
           )}
           {item.unregistered_stack_numbers !== undefined && (
             <span
-              className="text-info-foreground-muted shrink-0 rounded bg-info-background px-1.5 py-0.5 text-2xs"
+              className={cn(
+                "shrink-0 rounded px-1.5 py-0.5 text-2xs",
+                STATUS_CHIP.pending,
+              )}
               title="This chain is not registered as a GitHub stack. Create the stack on the pull request page so GitHub owns the ordering and the whole-chain merge."
             >
               Unregistered stack
             </span>
           )}
           {item.workspace_links.length > 0 && (
-            <span className="shrink-0 rounded bg-info-background px-1.5 py-0.5 text-2xs text-info-foreground-muted">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border px-1.5 py-0.5 text-2xs text-muted-foreground">
+              <Logomark className="size-3" />
               Tidebreak
             </span>
           )}
@@ -459,7 +465,7 @@ function PullRequestRow({
           <Button
             type="button"
             size="xs"
-            variant={mergeAction.kind === "merge" ? "default" : "outline"}
+            variant="outline"
             disabled={busy}
             onClick={(event) => {
               event.stopPropagation();

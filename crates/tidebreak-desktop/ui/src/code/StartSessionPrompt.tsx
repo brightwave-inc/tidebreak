@@ -252,6 +252,8 @@ function StartupStep({
  */
 export function StartSessionPrompt({
   workspaceId,
+  workspaceTitle,
+  workspaceBranch,
   harnesses,
   starting,
   selectedMode,
@@ -263,6 +265,8 @@ export function StartSessionPrompt({
   workspaceFiles,
 }: {
   workspaceId: string;
+  workspaceTitle?: string;
+  workspaceBranch?: string;
   harnesses: HarnessDoctorEntry[];
   starting: boolean;
   selectedMode: PermissionMode | null;
@@ -429,109 +433,120 @@ export function StartSessionPrompt({
         send.click();
       }}
     >
-      <div className="px-4 py-6">
-        <p className="text-sm">Start a session on this workspace.</p>
-      </div>
-      <div className="mt-auto">
-        <CodeComposer
-          disabled={starting || !selected || !installed || policyBlocksStart}
-          running={starting}
-          permissionMode={mode}
-          availableModes={availableModes}
-          unavailableReason={
-            policyBlocksStart ? PERMISSION_MODE_POLICY_BLOCKED : undefined
-          }
-          harness={selected?.kind}
-          model={model}
-          modelOptions={modelOptions}
-          modelLoading={modelLoading}
-          reasoningEffort={postedEffort}
-          engineEfforts={engineEfforts}
-          slashCommands={selected?.commands}
-          fastMode={postedFastMode}
-          harnessMenu={
-            <HarnessPicker
-              harnesses={choices}
-              value={selected?.kind ?? null}
-              disabled={starting}
-              variant="composer"
-              onChange={(next) => {
-                setModelOptions([]);
-                setModelLoading(true);
-                setPicked(next);
-              }}
-            />
-          }
-          footerNote={
-            <>
-              {selected?.relaunch_composes_permission_mode === false && (
-                <p className="text-muted-foreground text-xs">
-                  {CREATE_PERMISSION_MODE_FIXED}
-                </p>
-              )}
-              <HarnessInstallNote install={install} />
-            </>
-          }
-          promptScope={workspaceId}
-          workspaceFiles={workspaceFiles}
-          onModelChange={(next) => {
-            if (!selectedKind) return;
-            setModelsByHarness((current) => ({
-              ...current,
-              [selectedKind]: next,
-            }));
-          }}
-          onEffortChange={(next) => {
-            if (!selectedKind) return;
-            setEffortByHarness((current) => {
-              const nextMap = { ...current };
-              if (next) nextMap[selectedKind] = next;
-              else delete nextMap[selectedKind];
-              return nextMap;
-            });
-          }}
-          onFastModeChange={(next) => {
-            if (!selectedKind) return;
-            setFastByHarness((current) => ({
-              ...current,
-              [selectedKind]: next,
-            }));
-          }}
-          onModeChange={onSelectMode}
-          onSubmitStart={(draft) => {
-            submittedDraft.current = draft;
-          }}
-          onSend={async (message) => {
-            if (!selected) return;
-            const draft = submittedDraft.current ?? message;
-            try {
-              if (draft === message) {
-                await onStart(
-                  selected.kind,
-                  mode,
-                  message,
-                  model,
-                  undefined,
-                  postedEffort,
-                  postedFastMode,
-                );
-              } else {
-                await onStart(
-                  selected.kind,
-                  mode,
-                  message,
-                  model,
-                  draft,
-                  postedEffort,
-                  postedFastMode,
-                );
-              }
-            } finally {
-              submittedDraft.current = null;
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 py-8">
+        <div className="flex w-full max-w-3xl flex-col gap-6">
+          <div className="flex flex-col gap-1 text-center">
+            {workspaceTitle ? (
+              <h2 className="text-lg font-semibold tracking-tight">
+                {workspaceTitle}
+              </h2>
+            ) : null}
+            {workspaceBranch ? (
+              <p className="font-mono text-sm text-muted-foreground">
+                {workspaceBranch}
+              </p>
+            ) : null}
+          </div>
+          <CodeComposer
+            disabled={starting || !selected || !installed || policyBlocksStart}
+            running={starting}
+            permissionMode={mode}
+            availableModes={availableModes}
+            unavailableReason={
+              policyBlocksStart ? PERMISSION_MODE_POLICY_BLOCKED : undefined
             }
-          }}
-          onInterrupt={() => undefined}
-        />
+            harness={selected?.kind}
+            harnessMenu={
+              <HarnessPicker
+                variant="composer"
+                harnesses={choices}
+                value={selected?.kind ?? null}
+                disabled={starting}
+                onChange={(next) => {
+                  setModelOptions([]);
+                  setModelLoading(true);
+                  setPicked(next);
+                }}
+              />
+            }
+            model={model}
+            modelOptions={modelOptions}
+            modelLoading={modelLoading}
+            reasoningEffort={postedEffort}
+            engineEfforts={engineEfforts}
+            slashCommands={selected?.commands}
+            fastMode={postedFastMode}
+            footerNote={
+              <>
+                {selected?.relaunch_composes_permission_mode === false && (
+                  <p className="text-muted-foreground text-xs">
+                    {CREATE_PERMISSION_MODE_FIXED}
+                  </p>
+                )}
+                <HarnessInstallNote install={install} />
+              </>
+            }
+            promptScope={workspaceId}
+            workspaceFiles={workspaceFiles}
+            onModelChange={(next) => {
+              if (!selectedKind) return;
+              setModelsByHarness((current) => ({
+                ...current,
+                [selectedKind]: next,
+              }));
+            }}
+            onEffortChange={(next) => {
+              if (!selectedKind) return;
+              setEffortByHarness((current) => {
+                const nextMap = { ...current };
+                if (next) nextMap[selectedKind] = next;
+                else delete nextMap[selectedKind];
+                return nextMap;
+              });
+            }}
+            onFastModeChange={(next) => {
+              if (!selectedKind) return;
+              setFastByHarness((current) => ({
+                ...current,
+                [selectedKind]: next,
+              }));
+            }}
+            onModeChange={onSelectMode}
+            onSubmitStart={(draft) => {
+              submittedDraft.current = draft;
+            }}
+            onSend={async (message) => {
+              if (!selected) return;
+              const draft = submittedDraft.current ?? message;
+              try {
+                if (draft === message) {
+                  await onStart(
+                    selected.kind,
+                    mode,
+                    message,
+                    model,
+                    undefined,
+                    postedEffort,
+                    postedFastMode,
+                  );
+                } else {
+                  await onStart(
+                    selected.kind,
+                    mode,
+                    message,
+                    model,
+                    draft,
+                    postedEffort,
+                    postedFastMode,
+                  );
+                }
+              } finally {
+                submittedDraft.current = null;
+              }
+            }}
+            onInterrupt={() => undefined}
+          />
+        </div>
       </div>
     </div>
   );

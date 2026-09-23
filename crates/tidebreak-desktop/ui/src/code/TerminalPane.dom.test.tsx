@@ -18,6 +18,9 @@ const terminals: Array<{
   options: {
     theme?: Record<string, string>;
     disableStdin?: boolean;
+    convertEol?: boolean;
+    fontFamily?: string;
+    scrollback?: number;
   };
   dataHandler: ((data: string) => void) | null;
   write: (data: string, cb?: () => void) => void;
@@ -31,6 +34,9 @@ vi.mock("@xterm/xterm", () => ({
     options: {
       theme?: Record<string, string>;
       disableStdin?: boolean;
+      convertEol?: boolean;
+      fontFamily?: string;
+      scrollback?: number;
     };
     dataHandler: ((data: string) => void) | null = null;
     write(data: string, cb?: () => void) {
@@ -50,6 +56,9 @@ vi.mock("@xterm/xterm", () => ({
     constructor(options?: {
       theme?: Record<string, string>;
       disableStdin?: boolean;
+      convertEol?: boolean;
+      fontFamily?: string;
+      scrollback?: number;
     }) {
       this.options = { ...options };
       terminals.push(this);
@@ -61,6 +70,18 @@ vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
     fit() {}
   },
+}));
+
+vi.mock("@xterm/addon-search", () => ({
+  SearchAddon: class {
+    findNext() {}
+    findPrevious() {}
+    clearDecorations() {}
+  },
+}));
+
+vi.mock("@xterm/addon-web-links", () => ({
+  WebLinksAddon: class {},
 }));
 
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
@@ -615,6 +636,7 @@ describe("TerminalPane", () => {
       "--critical-foreground": "#7f1d1d",
       "--info": "#2563eb",
       "--info-foreground": "#1e3a8a",
+      "--icon-violet": "#7c3aed",
     };
     const dark: Record<string, string> = {
       "--background": "#18181b",
@@ -628,6 +650,7 @@ describe("TerminalPane", () => {
       "--critical-foreground": "#fecaca",
       "--info": "#60a5fa",
       "--info-foreground": "#bfdbfe",
+      "--icon-violet": "#a78bfa",
     };
     const original = window.getComputedStyle;
     vi.spyOn(window, "getComputedStyle").mockImplementation((element) => {
@@ -651,6 +674,9 @@ describe("TerminalPane", () => {
       "aria-label",
       "Terminal output",
     );
+    expect(terminals[0]?.options.convertEol).toBe(false);
+    expect(terminals[0]?.options.scrollback).toBe(10000);
+    expect(terminals[0]?.options.fontFamily).toContain("Geist Mono");
     expect(terminals[0]?.options.theme).toMatchObject({
       background: "#fafafa",
       foreground: "#18181b",
@@ -658,7 +684,11 @@ describe("TerminalPane", () => {
       green: "#16a34a",
       yellow: "#ca8a04",
       blue: "#2563eb",
+      magenta: "#7c3aed",
     });
+    expect(terminals[0]?.options.theme?.magenta).not.toBe(
+      terminals[0]?.options.theme?.red,
+    );
 
     document.documentElement.classList.add("dark");
     await waitFor(() =>

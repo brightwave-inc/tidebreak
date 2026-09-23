@@ -1,5 +1,8 @@
+import { useRef } from "react";
+
 import type { PendingOutputWritebackRequest } from "./api";
 import type { OutputWritebackDecision } from "./host";
+import { ApprovalChoiceList } from "./ApprovalChoiceList";
 import { AttentionCard } from "./AttentionCard";
 import { Button } from "@/components/ui/button";
 
@@ -27,6 +30,11 @@ export function OutputWritebackCard({
     ? "The agent wants to replace a file in a folder connected to this work. The native desktop will verify the connected folder, destination, and current output revision before writing."
     : "The agent wants to write one of this work's outputs into a folder connected to this work. The native desktop will verify the connected folder, destination, and current output revision before writing.";
   const allowLabel = replacing ? "Allow replacement" : "Allow write";
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+  const choices = [
+    { key: "allow", label: allowLabel },
+    { key: "decline", label: "Decline", muted: true },
+  ];
   const unavailable = replacing
     ? "File replacement is unavailable in browser-only mode."
     : "Writing to connected folders is unavailable in browser-only mode.";
@@ -38,6 +46,7 @@ export function OutputWritebackCard({
       subtitle={subtitle}
       busy={working}
       error={error}
+      headingRef={headingRef}
     >
       {working ? (
         <p
@@ -67,23 +76,15 @@ export function OutputWritebackCard({
           </div>
         </>
       ) : (
-        <div className="flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            disabled={!actionable}
-            onClick={() => onDecision("allow")}
-          >
-            {allowLabel}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!actionable}
-            onClick={() => onDecision("decline")}
-          >
-            Decline
-          </Button>
-        </div>
+        <ApprovalChoiceList
+          disabled={!actionable}
+          headingRef={headingRef}
+          describedBy={`output-writeback-${request.callId}`}
+          onChoose={(index) =>
+            onDecision(choices[index]!.key as OutputWritebackDecision)
+          }
+          options={choices}
+        />
       )}
     </AttentionCard>
   );

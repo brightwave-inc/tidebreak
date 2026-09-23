@@ -23,11 +23,12 @@ import { ManagedPolicyContext } from "@/managedPolicy";
 import { harnessDoctor, harnessDoctorDegraded } from "./fixtures";
 
 /**
- * The session-start surface: harness picker, caps-driven permission modes,
- * reasoning effort, fast mode, and the first message. Mode lists follow each
- * engine's declared capabilities — Grok's honest refusals leave it Auto-only.
- * Effort chrome appears only when the engine lists a ladder; fast mode only
- * when the selected model serves it.
+ * The session-start surface: workspace title and branch above the composer,
+ * engine choice in the composer chip, caps-driven permission modes, reasoning
+ * effort, fast mode, and the first message. Mode lists follow each engine's
+ * declared capabilities — Grok's honest refusals leave it Auto-only. Effort
+ * chrome appears only when the engine lists a ladder; fast mode only when the
+ * selected model serves it.
  */
 const models: Partial<Record<HarnessKind, ParsedHarnessModel[]>> = {
   claude_code: [
@@ -182,6 +183,8 @@ function StartSession({
         <div className="flex h-full flex-col">
           <StartSessionPrompt
             workspaceId="ws-1"
+            workspaceTitle="acme/api"
+            workspaceBranch="feat/login"
             harnesses={harnesses}
             starting={starting}
             selectedMode={null}
@@ -214,7 +217,21 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** Four engines, each with its honest mode list. */
-export const AllEngines: Story = {};
+export const AllEngines: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByRole("heading", { name: "acme/api" }),
+    ).toBeVisible();
+    await expect(canvas.getByText("feat/login")).toBeVisible();
+    await expect(
+      canvas.getByRole("combobox", { name: "Engine" }),
+    ).toHaveTextContent("Claude Code");
+    await expect(
+      canvas.queryByRole("button", { name: "Coding engines" }),
+    ).toBeNull();
+  },
+};
 
 export const PastedTextBeforeSession: Story = {
   args: {

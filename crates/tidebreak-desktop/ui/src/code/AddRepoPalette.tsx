@@ -51,7 +51,7 @@ import { usesCommandModifier } from "@/ShellShortcuts";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { GithubAvatar } from "./GithubAvatar";
 import { useCodeUiStore } from "./CodeUiStore";
-import { STATUS_TEXT } from "./statusTone";
+import { STATUS_CHIP, STATUS_TEXT } from "./statusTone";
 import {
   activateCodeCloneClient,
   codeClientGeneration,
@@ -1693,11 +1693,16 @@ function ProgressStage({
         />
       )}
       {completed && (
-        <div className="rounded-lg border border-success-border bg-success-background p-3">
+        <div
+          className={cn(
+            "rounded-lg border border-success-border p-3",
+            STATUS_CHIP.ready,
+          )}
+        >
           <p className={cn("text-sm font-medium", STATUS_TEXT.ready)}>
             The repository is ready.
           </p>
-          <p className="mt-1 text-xs text-success-foreground-muted">
+          <p className={cn("mt-1 text-xs", STATUS_TEXT.ready)}>
             Create a workspace to start working in the new checkout.
           </p>
           {handoffError && (

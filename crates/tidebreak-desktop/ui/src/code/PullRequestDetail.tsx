@@ -103,7 +103,12 @@ import {
   pullRequestSettledAt,
   type PullRequestLifecycle,
 } from "./prState";
-import { STATUS_MARK, STATUS_TEXT, type StatusTone } from "./statusTone";
+import {
+  STATUS_CHIP,
+  STATUS_MARK,
+  STATUS_TEXT,
+  type StatusTone,
+} from "./statusTone";
 
 type MergeMethod = "squash" | "merge" | "rebase";
 type DetailTab = "conversation" | "files" | "checks";
@@ -1729,16 +1734,14 @@ function ConfirmStrip({
       className={cn(
         "flex flex-col gap-2 rounded-md border p-2.5",
         tone === "critical"
-          ? "border-critical-border bg-critical-background/40"
+          ? cn("border-critical-border", STATUS_CHIP.critical)
           : "border-border-subtle bg-muted/30",
       )}
     >
       <p
         className={cn(
           "flex items-start gap-1.5 text-xs",
-          tone === "critical"
-            ? "text-critical-foreground-muted"
-            : "text-muted-foreground",
+          tone === "critical" ? STATUS_TEXT.critical : "text-muted-foreground",
         )}
       >
         {icon}
@@ -2063,7 +2066,7 @@ function DiffPatch({ patch }: { patch: string }) {
               "block w-max min-w-full px-3 whitespace-pre",
               kind === "add" && "bg-success/10",
               kind === "remove" && "bg-critical/10",
-              kind === "hunk" && "bg-info/10 text-info-foreground-muted",
+              kind === "hunk" && cn("bg-info/10", STATUS_TEXT.pending),
             )}
           >
             {kind === "add" || kind === "remove" ? (

@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
+import { useRef, useState } from "react";
 import type { ApprovalGrantRung, ToolActionPreview } from "./api";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import {
+  ApprovalChoiceList,
+  APPROVAL_SHORTCUT_GRACE_MS,
+} from "./ApprovalChoiceList";
 import { ScrollableContainer } from "./ScrollableContainer";
 import { toolPreviewPresentation } from "./ToolPreview";
+
+export { APPROVAL_SHORTCUT_GRACE_MS };
 
 export type ApprovalDecision = "approve" | "reject";
 
@@ -76,126 +79,16 @@ export function ApprovalCard({
     grantScope,
     grantRungs,
   );
-  const [highlight, setHighlight] = useState(0);
-  const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
-  const hasAutoFocused = useRef(false);
-  const mountedAt = useRef(0);
-  const safeHighlight = Math.min(highlight, options.length - 1);
   const ask = approvalAsk(preview, summary);
   const titleId = `approval-ask-${callId}`;
   const previewId = preview ? `approval-preview-${callId}` : undefined;
 
-  // Arm the shortcuts the moment the card appears, so ↑↓ / 1–9 / ↵ work
-  // without a click first. Focus the question, not a choice: a pointer over a
-  // row must not steal the composer, and Space must never decide.
-  useEffect(() => {
-    if (hasAutoFocused.current || deciding) return;
-    hasAutoFocused.current = true;
-    mountedAt.current = Date.now();
-    const active = document.activeElement;
-    const focusedElsewhere =
-      active instanceof HTMLElement &&
-      (active.isContentEditable ||
-        active.tagName === "INPUT" ||
-        active.tagName === "TEXTAREA" ||
-        active.closest('[aria-label="Approval choices"]') !== null);
-    if (focusedElsewhere) return;
-    headingRef.current?.focus({ preventScroll: true });
-  }, [deciding]);
-
-  const shortcutsReady = () =>
-    Date.now() - mountedAt.current >= APPROVAL_SHORTCUT_GRACE_MS;
-
-  const activate = (index: number) => {
-    const option = options[index];
-    if (!option || deciding) return;
-    if (option.kind === "more") {
-      setExpanded(true);
-      // The revealed grants take the indices "More options" occupied, so
-      // leaving the highlight here would park it on a broader grant and let
-      // the next Enter commit it — the one thing this list exists to prevent.
-      setHighlight(0);
-      rowRefs.current[0]?.focus();
-      return;
-    }
-    setHighlight(index);
-    onDecide(callId, option.decision, option.grant);
-  };
-
-  const submitSelected = () => {
-    const option = options[safeHighlight];
-    if (!option || option.kind !== "decide" || deciding) return;
-    onDecide(callId, option.decision, option.grant);
-  };
-
-  const focusRow = (to: number) => {
-    const wrapped = ((to % options.length) + options.length) % options.length;
-    if (options[wrapped]?.kind === "decide") setHighlight(wrapped);
-    rowRefs.current[wrapped]?.focus();
-  };
-
-  const onCardKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    const target = event.target;
-    if (
-      target instanceof HTMLElement &&
-      target.closest("[data-approval-submit]")
-    ) {
-      return;
-    }
-    if (event.key === " ") {
-      event.preventDefault();
-      return;
-    }
-    if (!shortcutsReady()) {
-      if (
-        event.key === "Enter" ||
-        event.key === "ArrowDown" ||
-        event.key === "ArrowUp" ||
-        /^[1-9]$/.test(event.key)
-      ) {
-        event.preventDefault();
-      }
-      return;
-    }
-    if (event.key === "Enter") {
-      event.preventDefault();
-      const from =
-        target instanceof HTMLElement
-          ? rowRefs.current.findIndex((row) => row === target)
-          : -1;
-      if (from >= 0 && options[from]?.kind === "more") {
-        activate(from);
-        return;
-      }
-      submitSelected();
-      return;
-    }
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      const from =
-        target instanceof HTMLElement
-          ? rowRefs.current.findIndex((row) => row === target)
-          : -1;
-      const index = from >= 0 ? from : safeHighlight;
-      focusRow(index + (event.key === "ArrowDown" ? 1 : -1));
-      return;
-    }
-    if (/^[1-9]$/.test(event.key)) {
-      const next = Number(event.key) - 1;
-      if (next < options.length) {
-        event.preventDefault();
-        focusRow(next);
-      }
-    }
-  };
-
   return (
     <section
-      className="bg-background flex max-w-prose flex-col gap-3 rounded-lg border p-4"
+      className="bg-background flex w-full min-w-0 flex-col gap-3 rounded-lg border p-4"
       aria-label="Approval needed"
       aria-busy={deciding}
-      onKeyDown={onCardKeyDown}
     >
       <h3
         id={titleId}
@@ -223,67 +116,35 @@ export function ApprovalCard({
           {toolPreviewPresentation(preview).detail}
         </ScrollableContainer>
       )}
-      <div
-        role="group"
-        aria-label="Approval choices"
-        className="flex flex-col gap-0.5"
-      >
-        {options.map((option, index) => (
-          <button
-            type="button"
-            key={option.key}
-            ref={(node) => {
-              rowRefs.current[index] = node;
-            }}
-            aria-describedby={[titleId, previewId].filter(Boolean).join(" ")}
-            disabled={deciding}
-            onClick={() => activate(index)}
-            onFocus={() => {
-              if (option.kind === "decide") setHighlight(index);
-            }}
-            className={cn(
-              "focus-visible:ring-ring flex cursor-pointer items-baseline gap-2.5 rounded-md px-3 py-2.5 text-left text-sm outline-hidden focus-visible:ring-2",
-              index === safeHighlight ? "bg-muted" : "hover:bg-muted/60",
-              deciding && "opacity-60",
-            )}
-          >
-            <span className="text-muted-foreground w-4 shrink-0 text-xs tabular-nums">
-              {index + 1}.
-            </span>
-            <span
-              className={cn(
-                "flex-1 text-left",
-                option.kind === "decide" &&
-                  option.decision === "reject" &&
-                  "text-muted-foreground",
-                option.kind === "more" && "text-muted-foreground",
-              )}
-            >
-              {option.label}
-            </span>
-          </button>
-        ))}
-      </div>
-      {canRemember && grantScope === "project" && (
-        <p className="text-muted-foreground text-xs">
-          Saved answers apply to all work in this project. Review them under
-          Settings → Permissions.
-        </p>
-      )}
-      <div className="flex items-center justify-between gap-2 text-xs">
-        <span className="text-muted-foreground">
-          ↑↓ choose · 1–{Math.min(options.length, 9)} jump · click or Submit
-          confirms
-        </span>
-        <Button
-          size="sm"
-          disabled={deciding}
-          data-approval-submit=""
-          onClick={submitSelected}
-        >
-          Submit
-        </Button>
-      </div>
+      <ApprovalChoiceList
+        options={options.map((option) => ({
+          key: option.key,
+          label: option.label,
+          muted:
+            option.kind === "more" ||
+            (option.kind === "decide" && option.decision === "reject"),
+          expand: option.kind === "more",
+        }))}
+        disabled={deciding}
+        describedBy={
+          [titleId, previewId].filter(Boolean).join(" ") || undefined
+        }
+        headingRef={headingRef}
+        note={
+          canRemember && grantScope === "project" ? (
+            <p className="text-muted-foreground text-xs">
+              Saved answers apply to all work in this project. Review them under
+              Settings → Permissions.
+            </p>
+          ) : undefined
+        }
+        onChoose={(index) => {
+          const option = options[index];
+          if (!option || option.kind !== "decide") return;
+          onDecide(callId, option.decision, option.grant);
+        }}
+        onExpand={() => setExpanded(true)}
+      />
       {error && (
         <p className="text-destructive text-xs break-words" role="alert">
           {error}
@@ -324,9 +185,6 @@ export function approvalAsk(
   }
   return { title: summary, summaryLine: null };
 }
-
-/** Ignore shortcut keys until the card has been on screen this long. */
-export const APPROVAL_SHORTCUT_GRACE_MS = 300;
 
 /** How many grants show before the rest move behind "More options". */
 const INLINE_GRANTS = 2;

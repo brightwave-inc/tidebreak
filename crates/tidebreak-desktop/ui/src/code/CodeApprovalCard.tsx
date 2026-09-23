@@ -14,6 +14,7 @@ import { ScrollableContainer } from "@/ScrollableContainer";
 import { actorLabel } from "./CodeSessionReducer";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
+import { STATUS_TEXT } from "./statusTone";
 
 /**
  * Parked engine approval. The normalized kind leads so the reader can decide;
@@ -88,7 +89,7 @@ export function CodeApprovalCard({
 
   return (
     <section
-      className="bg-background flex min-w-0 max-w-prose flex-col gap-3 rounded-lg border p-4"
+      className="bg-background flex min-w-0 w-full flex-col gap-3 rounded-lg border p-4"
       aria-label="Approval needed"
       aria-busy={deciding}
       data-testid="code-approval-card"
@@ -216,7 +217,7 @@ export function CodeApprovalCard({
       )}
       {error && (
         <p
-          className="text-critical-foreground text-xs break-words"
+          className={cn(STATUS_TEXT.critical, "text-xs break-words")}
           role="alert"
         >
           {error}
@@ -228,10 +229,14 @@ export function CodeApprovalCard({
 
 function ApprovalState({ approval }: { approval: CodeApprovalSnapshot }) {
   if (approval.state === "approved") {
-    return <p className="text-success-foreground shrink-0 text-xs">Approved</p>;
+    return (
+      <p className={cn(STATUS_TEXT.ready, "shrink-0 text-xs")}>Approved</p>
+    );
   }
   if (approval.state === "denied") {
-    return <p className="text-warning-foreground shrink-0 text-xs">Denied</p>;
+    return (
+      <p className={cn(STATUS_TEXT.warning, "shrink-0 text-xs")}>Denied</p>
+    );
   }
   if (approval.state === "abandoned") {
     return (

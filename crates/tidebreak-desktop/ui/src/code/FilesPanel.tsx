@@ -472,7 +472,7 @@ function LiteralMatch({ text, query }: { text: string; query: string }) {
     parts.push(
       <mark
         key={`${index}:${cursor}`}
-        className="bg-warning-background text-warning-foreground rounded-[2px] px-0.5"
+        className="rounded-sm bg-muted px-0.5 text-foreground"
       >
         {text.slice(index, index + query.length)}
       </mark>,
