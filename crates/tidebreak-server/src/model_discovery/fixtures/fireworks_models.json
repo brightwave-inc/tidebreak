@@ -1,0 +1,78 @@
+{
+  "models": [
+    {
+      "name": "accounts/fireworks/models/glm-5p3",
+      "displayName": "GLM-5.3",
+      "description": "Z.ai's GLM-5.3 for agentic coding and long-context work.",
+      "createTime": "2026-08-20T00:00:00Z",
+      "state": "READY",
+      "status": { "code": "OK", "message": "" },
+      "kind": "HF_BASE_MODEL",
+      "public": true,
+      "conversationConfig": { "style": "jinja", "template": "{{ messages }}" },
+      "contextLength": 1040000,
+      "supportsImageInput": false,
+      "supportsTools": true,
+      "supportsLora": false,
+      "supportsServerless": true
+    },
+    {
+      "name": "accounts/fireworks/models/qwen3p8-max",
+      "displayName": "Qwen3.8 Max",
+      "state": "READY",
+      "kind": "HF_BASE_MODEL",
+      "public": true,
+      "conversationConfig": { "style": "jinja" },
+      "contextLength": 262000,
+      "supportsImageInput": true,
+      "supportsTools": true,
+      "supportsServerless": true
+    },
+    {
+      "name": "accounts/fireworks/models/deepseek-v4p1-flash",
+      "displayName": "DeepSeek V4.1 Flash",
+      "state": "READY",
+      "kind": "HF_BASE_MODEL",
+      "public": true,
+      "conversationConfig": { "style": "jinja" },
+      "contextLength": 1040000,
+      "supportsImageInput": true,
+      "supportsTools": false,
+      "supportsServerless": true
+    },
+    {
+      "name": "accounts/fireworks/models/qwen3-embedding-8b",
+      "displayName": "Qwen3 Embedding 8B",
+      "state": "READY",
+      "kind": "EMBEDDING_MODEL",
+      "public": true,
+      "conversationConfig": { "style": "jinja" },
+      "contextLength": 40960,
+      "supportsServerless": true
+    },
+    {
+      "name": "accounts/fireworks/models/flux-1-dev-fp8",
+      "displayName": "FLUX.1 [dev] FP8",
+      "state": "READY",
+      "kind": "FLUMINA_BASE_MODEL",
+      "public": true,
+      "supportsServerless": true
+    },
+    {
+      "name": "accounts/fireworks/models/whisper-v3",
+      "displayName": "Whisper V3 Large",
+      "state": "READY",
+      "kind": "HF_BASE_MODEL",
+      "public": true,
+      "conversationConfig": null,
+      "supportsServerless": true
+    },
+    {
+      "displayName": "A row without a name",
+      "kind": "HF_BASE_MODEL",
+      "conversationConfig": { "style": "jinja" }
+    }
+  ],
+  "nextPageToken": "page-2",
+  "totalSize": 8
+}

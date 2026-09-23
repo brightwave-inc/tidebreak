@@ -298,11 +298,12 @@ fn build_request_json_for(req: &ChatRequest, provider_id: &str) -> Result<Value>
             body["prompt_cache_key"] = json!(conversation.to_string());
         }
     }
-    // OpenAI reasoning models reject `max_tokens` — they want
-    // `max_completion_tokens`. Fireworks and Together expose reasoning models
-    // through their compatible endpoints without adopting that OpenAI-only
-    // token field, so they keep the ordinary `max_tokens` spelling.
-    if req.reasoning_model && !matches!(provider_id, "fireworks" | "together") {
+    // Only OpenAI's own Chat Completions API rejects `max_tokens` on a
+    // reasoning model and wants `max_completion_tokens`. Every other route
+    // this adapter serves (Fireworks, Together, OpenRouter, Ollama, and
+    // generic compatible servers) reads `max_tokens`, and Ollama ignores the
+    // OpenAI-only field, which would leave a reasoning model uncapped.
+    if req.reasoning_model && provider_id == "openai" {
         body["max_completion_tokens"] = json!(max_tokens);
     } else {
         body["max_tokens"] = json!(max_tokens);
@@ -966,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_models_use_max_completion_tokens() {
+    fn openai_reasoning_models_use_max_completion_tokens() {
         let req = ChatRequest {
             provider: Some(ProviderId::new("openai")),
             model: "gpt-5.6-sol".into(),
@@ -980,11 +981,38 @@ mod tests {
             images: ImageAttachments::new(),
             ..Default::default()
         };
-        let body = build_request_json(&req).unwrap();
+        let body = build_request_json_for(&req, "openai").unwrap();
         assert_eq!(body["max_completion_tokens"], 1024);
         assert!(body.get("max_tokens").is_none());
         // Absent an override, the request carries no `reasoning_effort`.
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn reasoning_models_on_other_routes_keep_max_tokens() {
+        // Ollama ignores `max_completion_tokens`, so sending it would leave a
+        // reasoning model with no output cap at all.
+        for provider in [
+            "ollama",
+            "openai_compatible",
+            "openrouter",
+            "fireworks",
+            "together",
+        ] {
+            let req = ChatRequest {
+                provider: Some(ProviderId::new(provider)),
+                model: "qwen3:8b".into(),
+                reasoning_model: true,
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                max_tokens: Some(2048),
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..Default::default()
+            };
+            let body = build_request_json_for(&req, provider).unwrap();
+            assert_eq!(body["max_tokens"], 2048, "{provider}");
+            assert!(body.get("max_completion_tokens").is_none(), "{provider}");
+            assert_eq!(body["reasoning_effort"], "high", "{provider}");
+        }
     }
 
     #[test]

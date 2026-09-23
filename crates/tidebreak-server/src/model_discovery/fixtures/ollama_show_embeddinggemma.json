@@ -1,0 +1,15 @@
+{
+  "details": {
+    "parent_model": "",
+    "format": "gguf",
+    "family": "gemma3",
+    "families": ["gemma3"],
+    "parameter_size": "307.58M",
+    "quantization_level": "BF16"
+  },
+  "model_info": {
+    "general.architecture": "gemma3",
+    "gemma3.context_length": 2048
+  },
+  "capabilities": ["embedding"]
+}

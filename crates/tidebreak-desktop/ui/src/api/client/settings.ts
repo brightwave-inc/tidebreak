@@ -1,6 +1,7 @@
 import type {
   ChatGptSignInStatus,
   CustomModelConfig,
+  DiscoveredModels,
   EgressConfig,
   ExecConfigInfo,
   ExecCredentialReadiness,
@@ -54,6 +55,18 @@ export function withSettingsApi<TBase extends Constructor<HttpCore>>(
         method: "PUT",
         headers: this.headers(true),
         body: JSON.stringify(body),
+      });
+    }
+
+    /**
+     * The chat models a provider serves, read with the key already saved for
+     * it. Adds nothing: the caller saves what the reader picks through
+     * `putProvider`. A POST, so a slow or failing provider is never retried.
+     */
+    discoverProviderModels(kind: ProviderKind): Promise<DiscoveredModels> {
+      return this.json(`/providers/${kind}/models/discover`, {
+        method: "POST",
+        headers: this.headers(),
       });
     }
 

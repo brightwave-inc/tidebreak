@@ -55,7 +55,7 @@ const UTILITY_DEFAULTS: &[&str] = &[
     "anthropic::claude-haiku-4-5-20251001",
     "openai::gpt-5.4-nano",
     "gemini::gemini-3.5-flash-lite",
-    "fireworks::accounts/fireworks/models/deepseek-v4-flash",
+    "fireworks::accounts/fireworks/models/glm-5p3-flash",
     "together::deepseek-ai/DeepSeek-V4-Flash-0731",
 ];
 
@@ -493,7 +493,7 @@ mod tests {
         write_selection(
             &*store,
             ModelRole::Utility,
-            Some("together::thinkingmachines/Inkling-Small"),
+            Some("together::Qwen/Qwen3.7-Plus"),
         )
         .await
         .unwrap();

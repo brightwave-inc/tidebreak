@@ -78,7 +78,7 @@ const EFFORT_NONE_TO_HIGH: &[ReasoningEffort] = &[
     ReasoningEffort::High,
 ];
 /// Gemini 3.1 Pro Preview and Gemini Flash from 3.7 on start at `low`; they
-/// reject `minimal`.
+/// reject `minimal`. Grok 4.5 treats `xhigh` as `high`, so it stops here too.
 const EFFORT_LOW_TO_HIGH: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
@@ -98,18 +98,22 @@ const EFFORT_LOW_TO_MAX: &[ReasoningEffort] = &[
     ReasoningEffort::Max,
 ];
 /// Claude Opus and Sonnet 4.6 accept `max`, but not the newer `xhigh` level.
+/// GLM-5.3 on Together documents the same four levels.
 const EFFORT_LOW_TO_HIGH_AND_MAX: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
     ReasoningEffort::High,
     ReasoningEffort::Max,
 ];
-/// Kimi K3's always-on thinking control exposes exactly these three levels.
+/// Kimi K3's always-on thinking control exposes exactly these three levels,
+/// and so do DeepSeek V4 Flash and GLM-5.3 Flash on Together.
 const EFFORT_LOW_HIGH_MAX: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::High,
     ReasoningEffort::Max,
 ];
+/// DeepSeek V4 Pro maps `low` and `medium` to `high`, and `xhigh` to `max`.
+const EFFORT_HIGH_AND_MAX: &[ReasoningEffort] = &[ReasoningEffort::High, ReasoningEffort::Max];
 /// For a model that takes no effort parameter at all. Not the same as a model
 /// that ignores one: Claude Haiku 4.5 rejects the request.
 const EFFORT_UNSUPPORTED: &[ReasoningEffort] = &[];
@@ -233,17 +237,13 @@ impl ModelSpec {
             (self.provider, self.id),
             (
                 ProviderKind::Fireworks,
-                "accounts/fireworks/models/deepseek-v4-flash"
-            ) | (
-                ProviderKind::Fireworks,
-                "accounts/fireworks/models/deepseek-v4-pro"
+                "accounts/fireworks/models/deepseek-v4p1-flash"
             ) | (ProviderKind::Fireworks, "accounts/fireworks/models/glm-5p2")
                 | (ProviderKind::Together, "Qwen/Qwen3.7-Max")
                 | (ProviderKind::Together, "Qwen/Qwen3.7-Plus")
-                | (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Pro")
+                | (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Pro-0813")
+                | (ProviderKind::Together, "deepseek-ai/DeepSeek-V4.1-Flash")
                 | (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Flash-0731")
-                | (ProviderKind::Together, "pearl-ai/gemma-4-31b-it")
-                | (ProviderKind::Together, "thinkingmachines/Inkling-Small")
         )
     }
 
@@ -254,31 +254,23 @@ impl ModelSpec {
     /// exposes strict schema output at the platform layer. Together documents
     /// it per serverless model, so that host uses an allow-list: a new row stays
     /// ineligible for utility work until its endpoint explicitly supports the
-    /// response shape Tidebreak sends.
+    /// response shape Tidebreak sends. Configured rows follow the same
+    /// provider-level answer through [`ProviderKind::enforces_structured_output`].
     pub fn supports_structured_output(&self) -> bool {
         match self.provider {
-            ProviderKind::Anthropic
-            | ProviderKind::Openai
-            | ProviderKind::Gemini
-            | ProviderKind::Fireworks => true,
             ProviderKind::Together => matches!(
                 self.id,
                 "thinkingmachines/Inkling"
                     | "MiniMaxAI/MiniMax-M3"
                     | "moonshotai/Kimi-K3"
-                    | "moonshotai/Kimi-K2.7-Code"
-                    | "moonshotai/Kimi-K2.6"
+                    | "zai-org/GLM-5.3"
+                    | "zai-org/GLM-5.3-Flash"
                     | "zai-org/GLM-5.2"
-                    | "deepseek-ai/DeepSeek-V4-Pro"
+                    | "deepseek-ai/DeepSeek-V4-Pro-0813"
+                    | "deepseek-ai/DeepSeek-V4.1-Flash"
                     | "deepseek-ai/DeepSeek-V4-Flash-0731"
-                    | "nvidia/nemotron-3-ultra-550b-a55b"
-                    | "google/gemma-4-31B-it"
             ),
-            ProviderKind::Xai
-            | ProviderKind::Openrouter
-            | ProviderKind::Ollama
-            | ProviderKind::OpenaiCompatible
-            | ProviderKind::ModelGateway => false,
+            provider => provider.enforces_structured_output(),
         }
     }
 }
@@ -287,9 +279,28 @@ impl ModelSpec {
 /// first, then the earlier generations a chat can pin when the newest one
 /// regresses on its workload.
 const MODEL_REGISTRY: &[ModelSpec] = &[
+    // The first curated Anthropic row is what a fresh Anthropic-only install
+    // resolves to. It stays Opus 5 until the owner makes Opus 5.5, which
+    // Anthropic made its default Opus on 2026-09-22, the default here too.
     ModelSpec {
         id: "claude-opus-5",
         display_name: "Claude Opus 5",
+        provider: ProviderKind::Anthropic,
+        verification: VerificationTier::Verified,
+        recommended: true,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: true,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
+    // Fable 5.1 is the first Claude that rejects a forced tool choice and
+    // binds its thinking blocks to the conversation prefix. The Anthropic
+    // adapter reads both from the id, so the row carries nothing for them.
+    ModelSpec {
+        id: "claude-fable-5-1",
+        display_name: "Claude Fable 5.1",
         provider: ProviderKind::Anthropic,
         verification: VerificationTier::Verified,
         recommended: true,
@@ -308,32 +319,31 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         // on the adaptive block always reasons.
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
-    // Second, not first: the built-in default is this provider's first curated
-    // row, and the default stays Opus 5.
-    //
-    // Fable 5.1 is the first Claude that rejects a forced tool choice and
-    // binds its thinking blocks to the conversation prefix. The Anthropic
-    // adapter reads both from the id, so the row carries nothing for them.
-    ModelSpec {
-        id: "claude-fable-5-1",
-        display_name: "Claude Fable 5.1",
-        provider: ProviderKind::Anthropic,
-        verification: VerificationTier::Verified,
-        recommended: true,
-        context_window: 1_000_000,
-        max_output_tokens: 128_000,
-        input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: true,
-        supports_vendor_web_search: true,
-        // Same adaptive-thinking generation as Opus 5 and Sonnet 5.
-        reasoning_efforts: EFFORT_LOW_TO_MAX,
-    },
     ModelSpec {
         id: "claude-fable-5",
         display_name: "Claude Fable 5",
         provider: ProviderKind::Anthropic,
         verification: VerificationTier::Verified,
         recommended: false,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: true,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
+    // Anthropic's default Opus since 2026-09-22. Its adaptive thinking is
+    // always on (`none` stays off the scale, as on every Claude row), and it
+    // takes the request contract Fable 5.1 introduced: no forced tool choice,
+    // native structured output, and thinking bound to the prompt prefix. The
+    // adapter reads that contract from the id. Unverified until a live turn
+    // runs.
+    ModelSpec {
+        id: "claude-opus-5-5",
+        display_name: "Claude Opus 5.5",
+        provider: ProviderKind::Anthropic,
+        verification: VerificationTier::Unverified,
+        recommended: true,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -425,6 +435,9 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
     // OpenAI's Responses hosted-search tool has no wire control for the
     // mandatory per-turn `VendorWebSearch::max_uses` budget. Keep every OpenAI
     // row honest until the adapter can enforce that cap before provider egress.
+    //
+    // First, because the built-in default is this provider's first curated
+    // row and the default stays GPT-5.6 Sol. GPT-6 Sol follows it.
     ModelSpec {
         id: "gpt-5.6-sol",
         display_name: "GPT-5.6 Sol",
@@ -441,10 +454,26 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         // `max_completion_tokens`. Only the 5.6 generation added `max`.
         reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
-    // Astra is the current flagship, but OpenAI is still rolling access out
-    // and provider discovery does not expose it on the installation used for
-    // verification. Keep it selectable without making an unavailable row the
-    // default-visible recommendation; revisit after rollout and a live turn.
+    // GPT-6 Sol and Luna shipped on 2026-09-22 with GPT-5.6 Sol's limits and
+    // effort scale. Their docs limit function calling in Chat Completions to
+    // `none` effort; Tidebreak calls OpenAI through Responses, which has no
+    // such limit. Unverified until a live turn runs.
+    ModelSpec {
+        id: "gpt-6-sol",
+        display_name: "GPT-6 Sol",
+        provider: ProviderKind::Openai,
+        verification: VerificationTier::Unverified,
+        recommended: true,
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_NONE_TO_MAX,
+    },
+    // Astra is OpenAI's most capable model, but its API page still sends
+    // keys through early-access setup, so it stays out of the default view
+    // until access is general and a live turn has run.
     ModelSpec {
         id: "gpt-6-astra",
         display_name: "GPT-6 Astra",
@@ -457,6 +486,20 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_reasoning: true,
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
+    // The cost tier of the GPT-6 line, so not shown by default.
+    ModelSpec {
+        id: "gpt-6-luna",
+        display_name: "GPT-6 Luna",
+        provider: ProviderKind::Openai,
+        verification: VerificationTier::Unverified,
+        recommended: false,
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
     ModelSpec {
         id: "gpt-5.6-terra",
@@ -527,10 +570,15 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
-    // xAI publishes a 500,000-token input limit for Grok 4.6 and 4.5 but no
-    // output ceiling. Keep the output cap conservative until each row is
-    // exercised end to end. The first-party Responses route carries image
-    // input and a low-through-xhigh reasoning scale.
+    // xAI publishes a 500,000-token context window for these rows and no
+    // output ceiling; its Responses API defaults `max_output_tokens` to
+    // 128,000 with reasoning included. Keep the output cap conservative until
+    // each row is exercised end to end. The first-party Responses route
+    // carries image input (PNG and JPEG). Reasoning cannot be turned off, so
+    // no row offers `none`.
+    //
+    // The first curated xAI row is what a fresh xAI-only install resolves to,
+    // so Grok 4.6 stays first until the owner makes Grok 4.7 the default.
     ModelSpec {
         id: "grok-4.6",
         display_name: "Grok 4.6",
@@ -544,6 +592,23 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_LOW_TO_XHIGH,
     },
+    // xAI's current general flagship. Unverified until a live turn runs.
+    ModelSpec {
+        id: "grok-4.7",
+        display_name: "Grok 4.7",
+        provider: ProviderKind::Xai,
+        verification: VerificationTier::Unverified,
+        recommended: true,
+        context_window: 500_000,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_XHIGH,
+    },
+    // Still the model behind xAI's `grok-build-latest` alias, so it stays in
+    // the default view. xAI's reasoning guide treats `xhigh` as `high` on
+    // this model, so its scale stops at `high`.
     ModelSpec {
         id: "grok-4.5",
         display_name: "Grok 4.5",
@@ -555,7 +620,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_LOW_TO_XHIGH,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH,
     },
     // Gemini rows are intentionally limited to ids currently published by
     // Google. All six accept images, expose thinking levels through `high`,
@@ -641,10 +706,11 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_LOW_TO_HIGH,
     },
-    // Fireworks serverless catalog, verified against the public model pages on
-    // 2026-08-07. The ids are the exact paths sent to Chat Completions. Where
-    // Fireworks does not publish a generation ceiling, Tidebreak deliberately
-    // uses a conservative cap instead of treating the context window as output.
+    // Fireworks serverless catalog, checked against the public model pages and
+    // changelog on 2026-09-23. The ids are the exact paths sent to Chat
+    // Completions. Where Fireworks does not publish a generation ceiling,
+    // Tidebreak deliberately uses a conservative cap instead of treating the
+    // context window as output.
     ModelSpec {
         id: "accounts/fireworks/models/kimi-k3",
         display_name: "Kimi K3",
@@ -658,6 +724,109 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_LOW_HIGH_MAX,
     },
+    // GLM-5.3 replaces GLM-5.2, which leaves Fireworks serverless on
+    // 2026-09-25. Fireworks publishes no reasoning control for it.
+    ModelSpec {
+        id: "accounts/fireworks/models/glm-5p3",
+        display_name: "GLM-5.3",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        recommended: true,
+        context_window: 1_040_000,
+        max_output_tokens: 65_536,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/glm-5p3-flash",
+        display_name: "GLM-5.3 Flash",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        recommended: false,
+        context_window: 1_040_000,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    // Fireworks lists no context length for Qwen3.8 Max. Alibaba documents a
+    // 1M-token window for the model, but a host may serve less, so the row
+    // keeps the previous Qwen row's 262K. The model thinks, and Fireworks
+    // documents no effort values for it, so the row offers no levels.
+    ModelSpec {
+        id: "accounts/fireworks/models/qwen3p8-max",
+        display_name: "Qwen3.8 Max",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        recommended: true,
+        context_window: 262_000,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/minimax-m3",
+        display_name: "MiniMax M3",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        recommended: false,
+        context_window: 512_000,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    // The one DeepSeek model left on Fireworks serverless, and the named
+    // successor to V4 Pro. The model reasons, but Fireworks documents no
+    // effort values for it, so the row offers no levels.
+    ModelSpec {
+        id: "accounts/fireworks/models/deepseek-v4p1-flash",
+        display_name: "DeepSeek V4.1 Flash",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        recommended: true,
+        context_window: 1_040_000,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
+        display_name: "Nemotron 3 Ultra",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        recommended: false,
+        context_window: 262_000,
+        max_output_tokens: 65_536,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/inkling",
+        display_name: "Inkling",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        recommended: false,
+        context_window: 1_040_000,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    // Fireworks retires these three from serverless on 2026-09-25, naming
+    // GLM-5.3 or Kimi K3 as the replacement. They stay until then, out of the
+    // default view; the release after that date removes them.
     ModelSpec {
         id: "accounts/fireworks/models/kimi-k2p7-code",
         display_name: "Kimi K2.7 Code",
@@ -689,7 +858,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         display_name: "GLM-5.2",
         provider: ProviderKind::Fireworks,
         verification: VerificationTier::Unverified,
-        recommended: true,
+        recommended: false,
         context_window: 1_040_000,
         max_output_tokens: 65_536,
         input_modalities: &[InputModality::Text],
@@ -697,87 +866,10 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_UNSUPPORTED,
     },
-    ModelSpec {
-        id: "accounts/fireworks/models/qwen3p7-plus",
-        display_name: "Qwen3.7 Plus",
-        provider: ProviderKind::Fireworks,
-        verification: VerificationTier::Unverified,
-        recommended: true,
-        context_window: 262_000,
-        max_output_tokens: 65_536,
-        input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: false,
-        supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
-    },
-    ModelSpec {
-        id: "accounts/fireworks/models/minimax-m3",
-        display_name: "MiniMax M3",
-        provider: ProviderKind::Fireworks,
-        verification: VerificationTier::Unverified,
-        recommended: false,
-        context_window: 512_000,
-        max_output_tokens: 32_768,
-        input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: false,
-        supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
-    },
-    ModelSpec {
-        id: "accounts/fireworks/models/deepseek-v4-flash",
-        display_name: "DeepSeek V4 Flash",
-        provider: ProviderKind::Fireworks,
-        verification: VerificationTier::Unverified,
-        recommended: false,
-        context_window: 1_040_000,
-        max_output_tokens: 393_216,
-        input_modalities: &[InputModality::Text],
-        supports_reasoning: false,
-        supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
-    },
-    ModelSpec {
-        id: "accounts/fireworks/models/deepseek-v4-pro",
-        display_name: "DeepSeek V4 Pro",
-        provider: ProviderKind::Fireworks,
-        verification: VerificationTier::Unverified,
-        recommended: true,
-        context_window: 1_040_000,
-        max_output_tokens: 393_216,
-        input_modalities: &[InputModality::Text],
-        supports_reasoning: false,
-        supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
-    },
-    ModelSpec {
-        id: "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
-        display_name: "Nemotron 3 Ultra",
-        provider: ProviderKind::Fireworks,
-        verification: VerificationTier::Unverified,
-        recommended: false,
-        context_window: 262_000,
-        max_output_tokens: 65_536,
-        input_modalities: &[InputModality::Text],
-        supports_reasoning: false,
-        supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
-    },
-    ModelSpec {
-        id: "accounts/fireworks/models/inkling",
-        display_name: "Inkling",
-        provider: ProviderKind::Fireworks,
-        verification: VerificationTier::Unverified,
-        recommended: false,
-        context_window: 1_040_000,
-        max_output_tokens: 65_536,
-        input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: false,
-        supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
-    },
-    // Together serverless catalog from the public model table on 2026-08-07.
-    // Same-family rows intentionally keep Together's own ids and limits rather
-    // than inheriting Fireworks metadata by canonical model name.
+    // Together serverless catalog, checked against the serverless model table,
+    // model pages, and deprecation list on 2026-09-23. Same-family rows
+    // intentionally keep Together's own ids and limits rather than inheriting
+    // Fireworks metadata by canonical model name.
     ModelSpec {
         id: "thinkingmachines/Inkling",
         display_name: "Inkling",
@@ -791,6 +883,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_UNSUPPORTED,
     },
+    // Hybrid thinking, on by default; Together publishes no effort values.
     ModelSpec {
         id: "MiniMaxAI/MiniMax-M3",
         display_name: "MiniMax M3",
@@ -800,7 +893,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         context_window: 524_288,
         max_output_tokens: 32_768,
         input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: false,
+        supports_reasoning: true,
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_UNSUPPORTED,
     },
@@ -826,62 +919,85 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Together,
         verification: VerificationTier::Unverified,
         recommended: true,
-        context_window: 1_000_000,
+        context_window: 1_048_576,
         max_output_tokens: 32_768,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_LOW_HIGH_MAX,
     },
+    // GLM-5.3 thinks on every request; `none` is not one of its levels.
     ModelSpec {
-        id: "moonshotai/Kimi-K2.7-Code",
-        display_name: "Kimi K2.7 Code",
+        id: "zai-org/GLM-5.3",
+        display_name: "GLM-5.3",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        recommended: true,
+        context_window: 1_048_575,
+        max_output_tokens: 65_536,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
+    },
+    // Text only: Together's serverless vision table does not list it.
+    ModelSpec {
+        id: "zai-org/GLM-5.3-Flash",
+        display_name: "GLM-5.3 Flash",
         provider: ProviderKind::Together,
         verification: VerificationTier::Unverified,
         recommended: false,
-        context_window: 262_144,
-        max_output_tokens: 32_768,
-        input_modalities: TEXT_AND_IMAGE,
+        context_window: 1_048_575,
+        max_output_tokens: 65_536,
+        input_modalities: &[InputModality::Text],
         supports_reasoning: true,
         supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
+        reasoning_efforts: EFFORT_LOW_HIGH_MAX,
     },
-    ModelSpec {
-        id: "moonshotai/Kimi-K2.6",
-        display_name: "Kimi K2.6",
-        provider: ProviderKind::Together,
-        verification: VerificationTier::Unverified,
-        recommended: false,
-        context_window: 262_144,
-        max_output_tokens: 32_768,
-        input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: true,
-        supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
-    },
+    // Superseded by GLM-5.3. Thinking is on by default; Together names two
+    // effort levels without publishing their values.
     ModelSpec {
         id: "zai-org/GLM-5.2",
         display_name: "GLM-5.2",
         provider: ProviderKind::Together,
         verification: VerificationTier::Unverified,
-        recommended: true,
-        context_window: 262_144,
-        max_output_tokens: 65_536,
+        recommended: false,
+        context_window: 1_048_575,
+        max_output_tokens: 131_072,
         input_modalities: &[InputModality::Text],
-        supports_reasoning: false,
+        supports_reasoning: true,
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_UNSUPPORTED,
     },
+    // The serverless V4 Pro since 2026-08-27. `low` and `medium` map to
+    // `high`, and `xhigh` to `max`, so only the two distinct levels are
+    // offered. DeepSeek's samples cap output at 384,000 tokens.
     ModelSpec {
-        id: "deepseek-ai/DeepSeek-V4-Pro",
+        id: "deepseek-ai/DeepSeek-V4-Pro-0813",
         display_name: "DeepSeek V4 Pro",
         provider: ProviderKind::Together,
         verification: VerificationTier::Unverified,
         recommended: true,
-        context_window: 512_000,
-        max_output_tokens: 393_216,
+        context_window: 1_048_576,
+        max_output_tokens: 384_000,
         input_modalities: &[InputModality::Text],
-        supports_reasoning: false,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_HIGH_AND_MAX,
+    },
+    // V4.1 Flash takes its effort as an integer from 1 to 100, which the
+    // Chat Completions adapter does not send, so the row offers no levels.
+    // Text only: Together's serverless vision table does not list it.
+    ModelSpec {
+        id: "deepseek-ai/DeepSeek-V4.1-Flash",
+        display_name: "DeepSeek V4.1 Flash",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        recommended: false,
+        context_window: 1_000_000,
+        max_output_tokens: 65_536,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: true,
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_UNSUPPORTED,
     },
@@ -891,51 +1007,12 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Together,
         verification: VerificationTier::Unverified,
         recommended: false,
-        context_window: 1_000_000,
-        max_output_tokens: 393_216,
+        context_window: 1_048_576,
+        max_output_tokens: 384_000,
         input_modalities: &[InputModality::Text],
-        supports_reasoning: false,
+        supports_reasoning: true,
         supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
-    },
-    ModelSpec {
-        id: "nvidia/nemotron-3-ultra-550b-a55b",
-        display_name: "Nemotron 3 Ultra",
-        provider: ProviderKind::Together,
-        verification: VerificationTier::Unverified,
-        recommended: false,
-        context_window: 512_300,
-        max_output_tokens: 65_536,
-        input_modalities: &[InputModality::Text],
-        supports_reasoning: false,
-        supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
-    },
-    ModelSpec {
-        id: "google/gemma-4-31B-it",
-        display_name: "Gemma 4 31B Instruct",
-        provider: ProviderKind::Together,
-        verification: VerificationTier::Unverified,
-        recommended: false,
-        context_window: 262_144,
-        max_output_tokens: 32_768,
-        input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: false,
-        supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
-    },
-    ModelSpec {
-        id: "pearl-ai/gemma-4-31b-it",
-        display_name: "Gemma 4 31B Instruct (Pearl AI)",
-        provider: ProviderKind::Together,
-        verification: VerificationTier::Unverified,
-        recommended: false,
-        context_window: 32_000,
-        max_output_tokens: 8_192,
-        input_modalities: &[InputModality::Text],
-        supports_reasoning: false,
-        supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
+        reasoning_efforts: EFFORT_LOW_HIGH_MAX,
     },
     ModelSpec {
         id: "Qwen/Qwen3.7-Plus",
@@ -944,19 +1021,6 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         verification: VerificationTier::Unverified,
         recommended: false,
         context_window: 1_000_000,
-        max_output_tokens: 65_536,
-        input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: false,
-        supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_UNSUPPORTED,
-    },
-    ModelSpec {
-        id: "thinkingmachines/Inkling-Small",
-        display_name: "Inkling Small",
-        provider: ProviderKind::Together,
-        verification: VerificationTier::Unverified,
-        recommended: false,
-        context_window: 524_288,
         max_output_tokens: 65_536,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: false,
@@ -1089,20 +1153,23 @@ mod tests {
     /// Whether Tidebreak can actually put an image on the wire for `provider`.
     ///
     /// Provider documentation alone does not earn a model `InputModality::Image`.
-    /// Each provider has its own request adapter, and a custom compatible
-    /// endpoint is not known to support the image branch at all.
+    /// Each provider has its own request adapter, and each one here shapes
+    /// hydrated image bytes into its request format: the Chat Completions
+    /// adapter behind OpenRouter, Ollama, and custom endpoints included, which
+    /// is why a configured row on those routes may declare image input. The
+    /// match stays exhaustive so a new provider kind has to answer.
     const fn provider_carries_image_input(provider: ProviderKind) -> bool {
         match provider {
-            ProviderKind::Anthropic => true,
-            ProviderKind::Openai => true,
-            ProviderKind::Xai => true,
-            ProviderKind::Gemini => true,
-            ProviderKind::Fireworks => true,
-            ProviderKind::Together => true,
-            ProviderKind::Openrouter | ProviderKind::Ollama | ProviderKind::OpenaiCompatible => {
-                false
-            }
-            ProviderKind::ModelGateway => true,
+            ProviderKind::Anthropic
+            | ProviderKind::Openai
+            | ProviderKind::Xai
+            | ProviderKind::Gemini
+            | ProviderKind::Fireworks
+            | ProviderKind::Together
+            | ProviderKind::Openrouter
+            | ProviderKind::Ollama
+            | ProviderKind::OpenaiCompatible
+            | ProviderKind::ModelGateway => true,
         }
     }
 
@@ -1187,17 +1254,32 @@ mod tests {
     }
 
     #[test]
-    fn grok_4_6_grok_4_5_and_gemini_3_5_flash_are_curated_defaults() {
+    fn grok_4_6_stays_first_and_each_grok_row_carries_its_published_scale() {
+        // The first curated xAI row is what a fresh xAI-only install resolves
+        // to, so Grok 4.6 keeps that place until the owner moves it.
         let grok_ids: Vec<_> = models_for(ProviderKind::Xai).map(|spec| spec.id).collect();
-        assert_eq!(grok_ids, ["grok-4.6", "grok-4.5"]);
-        for id in ["grok-4.6", "grok-4.5"] {
+        assert_eq!(grok_ids, ["grok-4.6", "grok-4.7", "grok-4.5"]);
+        for id in grok_ids {
             let grok = find_for(ProviderKind::Xai, id).unwrap();
-            assert_eq!(grok.context_window, 500_000);
-            assert_eq!(grok.max_output_tokens, 32_768);
-            assert!(grok.recommended);
-            assert!(grok.accepts(InputModality::Image));
-            assert_eq!(grok.reasoning_efforts, EFFORT_LOW_TO_XHIGH);
+            assert_eq!(grok.context_window, 500_000, "{id}");
+            assert_eq!(grok.max_output_tokens, 32_768, "{id}");
+            assert!(grok.accepts(InputModality::Image), "{id}");
+            // xAI reasoning cannot be turned off, so no row offers "Off".
+            assert!(
+                !grok.reasoning_efforts.contains(&ReasoningEffort::None),
+                "{id}"
+            );
         }
+        let grok = |id| find_for(ProviderKind::Xai, id).unwrap();
+        assert_eq!(grok("grok-4.7").reasoning_efforts, EFFORT_LOW_TO_XHIGH);
+        assert_eq!(grok("grok-4.6").reasoning_efforts, EFFORT_LOW_TO_XHIGH);
+        // xAI's reasoning guide treats `xhigh` as `high` on Grok 4.5.
+        assert_eq!(grok("grok-4.5").reasoning_efforts, EFFORT_LOW_TO_HIGH);
+        // 4.6 is still the default, 4.7 is the general flagship, and 4.5
+        // still backs the build alias.
+        assert!(grok("grok-4.6").recommended);
+        assert!(grok("grok-4.7").recommended);
+        assert!(grok("grok-4.5").recommended);
 
         assert!(
             find_for(ProviderKind::Gemini, "gemini-3.5-flash")
@@ -1250,6 +1332,7 @@ mod tests {
 
         // The generations that do accept `xhigh` keep advertising it.
         for id in [
+            "claude-opus-5-5",
             "claude-opus-5",
             "claude-fable-5-1",
             "claude-fable-5",
@@ -1424,52 +1507,90 @@ mod tests {
     #[test]
     fn the_anthropic_default_row_stays_opus_5_ahead_of_fable() {
         // The first curated Anthropic row is what a fresh Anthropic-only install
-        // resolves to. Fable is the demanding-work option, not the default, and
-        // the current Fable sits ahead of the one it replaced.
+        // resolves to, so Opus 5 keeps that place until the owner makes Opus
+        // 5.5 the default. Fable is the demanding-work option, not the default,
+        // and the current Fable sits ahead of the one it replaced.
         let ids: Vec<_> = models_for(ProviderKind::Anthropic)
             .map(|spec| spec.id)
             .collect();
         assert_eq!(
-            &ids[..3],
-            ["claude-opus-5", "claude-fable-5-1", "claude-fable-5"]
+            &ids[..4],
+            [
+                "claude-opus-5",
+                "claude-fable-5-1",
+                "claude-fable-5",
+                "claude-opus-5-5"
+            ]
         );
+        assert!(find("claude-opus-5").unwrap().recommended);
         assert!(find("claude-fable-5-1").unwrap().recommended);
         assert!(!find("claude-fable-5").unwrap().recommended);
+        assert!(find("claude-opus-5-5").unwrap().recommended);
+    }
+
+    #[test]
+    fn opus_5_5_carries_its_published_contract() {
+        let opus = find_for(ProviderKind::Anthropic, "claude-opus-5-5").unwrap();
+        assert_eq!(opus.verification, VerificationTier::Unverified);
+        assert_eq!(opus.context_window, 1_000_000);
+        assert_eq!(opus.max_output_tokens, 128_000);
+        assert!(opus.accepts(InputModality::Image));
+        assert!(opus.supports_reasoning);
+        assert!(opus.supports_vendor_web_search);
+        assert!(opus.supports_tools());
+        assert!(opus.supports_structured_output());
+        // All five documented levels; thinking is always on, so no `none`.
+        assert_eq!(opus.reasoning_efforts, EFFORT_LOW_TO_MAX);
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_follow_the_default_with_the_published_contract() {
+        let ids: Vec<_> = models_for(ProviderKind::Openai)
+            .map(|spec| spec.id)
+            .collect();
+        // The default stays first; GPT-6 Sol is the next flagship row.
+        assert_eq!(&ids[..2], ["gpt-5.6-sol", "gpt-6-sol"]);
+        for id in ["gpt-6-sol", "gpt-6-luna"] {
+            let gpt = find_for(ProviderKind::Openai, id).unwrap();
+            assert_eq!(gpt.verification, VerificationTier::Unverified, "{id}");
+            assert_eq!(gpt.context_window, 1_050_000, "{id}");
+            assert_eq!(gpt.max_output_tokens, 128_000, "{id}");
+            assert!(gpt.accepts(InputModality::Image), "{id}");
+            // Function calling is limited to `none` only on Chat Completions;
+            // this route speaks Responses.
+            assert!(gpt.supports_tools(), "{id}");
+            assert!(gpt.supports_chatgpt_auth(), "{id}");
+            assert_eq!(gpt.reasoning_efforts, EFFORT_NONE_TO_MAX, "{id}");
+        }
+        assert!(find("gpt-6-sol").unwrap().recommended);
+        // The cost tier is not shown by default.
+        assert!(!find("gpt-6-luna").unwrap().recommended);
+        assert!(find_for(ProviderKind::Openai, "gpt-6-terra").is_none());
     }
 
     #[test]
     fn hosted_compatible_catalogs_keep_provider_specific_ids_and_capabilities() {
-        let fireworks_qwen = find_for(
-            ProviderKind::Fireworks,
-            "accounts/fireworks/models/qwen3p7-plus",
-        )
-        .unwrap();
-        let together_qwen = find_for(ProviderKind::Together, "Qwen/Qwen3.7-Plus").unwrap();
-        assert_eq!(fireworks_qwen.context_window, 262_000);
-        assert!(fireworks_qwen.accepts(InputModality::Image));
-        assert!(fireworks_qwen.supports_tools());
-        assert_eq!(together_qwen.context_window, 1_000_000);
-        assert!(together_qwen.accepts(InputModality::Image));
-        assert!(!together_qwen.supports_tools());
-
-        let together_inkling =
-            find_for(ProviderKind::Together, "thinkingmachines/Inkling").unwrap();
-        assert!(together_inkling.accepts(InputModality::Image));
-        let together_inkling_small =
-            find_for(ProviderKind::Together, "thinkingmachines/Inkling-Small").unwrap();
-        assert!(together_inkling_small.accepts(InputModality::Image));
-        assert!(!together_inkling_small.supports_structured_output());
-
+        // One family, two hosts, two sets of published limits and controls.
         let fireworks_glm =
-            find_for(ProviderKind::Fireworks, "accounts/fireworks/models/glm-5p2").unwrap();
-        let together_glm = find_for(ProviderKind::Together, "zai-org/GLM-5.2").unwrap();
+            find_for(ProviderKind::Fireworks, "accounts/fireworks/models/glm-5p3").unwrap();
+        let together_glm = find_for(ProviderKind::Together, "zai-org/GLM-5.3").unwrap();
         assert_eq!(fireworks_glm.context_window, 1_040_000);
-        assert_eq!(together_glm.context_window, 262_144);
+        assert_eq!(together_glm.context_window, 1_048_575);
+        assert!(!fireworks_glm.accepts(InputModality::Image));
+        assert!(!together_glm.accepts(InputModality::Image));
+        assert!(fireworks_glm.supports_tools());
+        assert!(together_glm.supports_tools());
+        assert!(!fireworks_glm.supports_reasoning);
+        assert!(together_glm.supports_reasoning);
+        assert_eq!(together_glm.reasoning_efforts, EFFORT_LOW_TO_HIGH_AND_MAX);
 
         for id in [
-            "accounts/fireworks/models/kimi-k2p7-code",
-            "accounts/fireworks/models/kimi-k2p6",
+            "accounts/fireworks/models/kimi-k3",
+            "accounts/fireworks/models/glm-5p3-flash",
+            "accounts/fireworks/models/qwen3p8-max",
             "accounts/fireworks/models/minimax-m3",
+            "accounts/fireworks/models/deepseek-v4p1-flash",
+            "accounts/fireworks/models/inkling",
         ] {
             assert!(
                 find_for(ProviderKind::Fireworks, id)
@@ -1478,18 +1599,58 @@ mod tests {
                 "Fireworks publishes image input for {id}",
             );
         }
+        for id in [
+            "moonshotai/Kimi-K3",
+            "MiniMaxAI/MiniMax-M3",
+            "thinkingmachines/Inkling",
+            "Qwen/Qwen3.7-Plus",
+        ] {
+            assert!(
+                find_for(ProviderKind::Together, id)
+                    .unwrap()
+                    .accepts(InputModality::Image),
+                "Together publishes image input for {id}",
+            );
+        }
+        // Together's serverless vision table does not list these.
+        for id in ["zai-org/GLM-5.3-Flash", "deepseek-ai/DeepSeek-V4.1-Flash"] {
+            assert!(
+                !find_for(ProviderKind::Together, id)
+                    .unwrap()
+                    .accepts(InputModality::Image),
+                "{id} is text only on Together",
+            );
+        }
 
+        // Fireworks documents no effort values for these, so they offer none,
+        // and it documents no reasoning for MiniMax M3 at all.
+        for id in [
+            "accounts/fireworks/models/qwen3p8-max",
+            "accounts/fireworks/models/deepseek-v4p1-flash",
+        ] {
+            let model = find_for(ProviderKind::Fireworks, id).unwrap();
+            assert!(model.supports_reasoning, "{id}");
+            assert!(model.reasoning_efforts.is_empty(), "{id}");
+        }
+        assert!(
+            !find_for(
+                ProviderKind::Fireworks,
+                "accounts/fireworks/models/minimax-m3"
+            )
+            .unwrap()
+            .supports_reasoning
+        );
+
+        // DeepSeek continues a tool call only with its own reasoning trace
+        // sent back, so its rows stay chat-only until that path is exercised.
+        // Strict utility responses do not depend on it.
         for (provider, id) in [
             (
                 ProviderKind::Fireworks,
-                "accounts/fireworks/models/deepseek-v4-flash",
+                "accounts/fireworks/models/deepseek-v4p1-flash",
             ),
-            (
-                ProviderKind::Fireworks,
-                "accounts/fireworks/models/deepseek-v4-pro",
-            ),
-            (ProviderKind::Fireworks, "accounts/fireworks/models/glm-5p2"),
-            (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Pro"),
+            (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Pro-0813"),
+            (ProviderKind::Together, "deepseek-ai/DeepSeek-V4.1-Flash"),
             (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Flash-0731"),
         ] {
             let model = find_for(provider, id).unwrap();
@@ -1501,12 +1662,29 @@ mod tests {
                 model.supports_structured_output(),
                 "chat-only tool routing must not disable strict utility responses for {provider} `{id}`",
             );
+            assert!(model.supports_reasoning, "{provider} `{id}` reasons");
         }
+        assert_eq!(
+            find_for(ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Pro-0813")
+                .unwrap()
+                .reasoning_efforts,
+            EFFORT_HIGH_AND_MAX,
+        );
+        // V4.1 Flash on Together takes an integer effort this route never sends.
+        assert!(
+            find_for(ProviderKind::Together, "deepseek-ai/DeepSeek-V4.1-Flash")
+                .unwrap()
+                .reasoning_efforts
+                .is_empty()
+        );
 
         for id in [
             "moonshotai/Kimi-K3",
-            "moonshotai/Kimi-K2.7-Code",
-            "moonshotai/Kimi-K2.6",
+            "zai-org/GLM-5.3",
+            "zai-org/GLM-5.3-Flash",
+            "zai-org/GLM-5.2",
+            "MiniMaxAI/MiniMax-M3",
+            "thinkingmachines/Inkling",
         ] {
             assert!(
                 find_for(ProviderKind::Together, id)
@@ -1515,37 +1693,69 @@ mod tests {
                 "Together documents strict structured output for `{id}`",
             );
         }
+        // Together's catalog leaves both columns blank for these.
+        for id in ["Qwen/Qwen3.7-Max", "Qwen/Qwen3.7-Plus"] {
+            let model = find_for(ProviderKind::Together, id).unwrap();
+            assert!(!model.supports_tools(), "{id}");
+            assert!(!model.supports_structured_output(), "{id}");
+        }
+
         for (provider, id) in [
             (ProviderKind::Fireworks, "accounts/fireworks/models/kimi-k3"),
-            (
-                ProviderKind::Fireworks,
-                "accounts/fireworks/models/kimi-k2p7-code",
-            ),
-            (
-                ProviderKind::Fireworks,
-                "accounts/fireworks/models/kimi-k2p6",
-            ),
             (ProviderKind::Together, "moonshotai/Kimi-K3"),
-            (ProviderKind::Together, "moonshotai/Kimi-K2.7-Code"),
-            (ProviderKind::Together, "moonshotai/Kimi-K2.6"),
         ] {
             let model = find_for(provider, id).unwrap();
             assert!(model.supports_tools(), "{provider} `{id}` supports tools");
             assert!(model.supports_reasoning, "{provider} `{id}` reasons");
-        }
-        for (provider, id) in [
-            (ProviderKind::Fireworks, "accounts/fireworks/models/kimi-k3"),
-            (ProviderKind::Together, "moonshotai/Kimi-K3"),
-        ] {
             assert_eq!(
-                find_for(provider, id).unwrap().reasoning_efforts,
-                EFFORT_LOW_HIGH_MAX,
+                model.reasoning_efforts, EFFORT_LOW_HIGH_MAX,
                 "{provider} `{id}` exposes only its documented effort scale",
             );
         }
 
-        assert_eq!(models_for(ProviderKind::Fireworks).count(), 10);
-        assert_eq!(models_for(ProviderKind::Together).count(), 14);
+        // Fireworks retires these on 2026-09-25. Until then they stay
+        // selectable, out of the default view.
+        for id in [
+            "accounts/fireworks/models/kimi-k2p7-code",
+            "accounts/fireworks/models/kimi-k2p6",
+            "accounts/fireworks/models/glm-5p2",
+        ] {
+            let model = find_for(ProviderKind::Fireworks, id).unwrap();
+            assert!(!model.recommended, "{id}");
+        }
+        assert!(
+            !find_for(ProviderKind::Fireworks, "accounts/fireworks/models/glm-5p2")
+                .unwrap()
+                .supports_tools()
+        );
+
+        // Rows the hosts no longer serve are gone, not hidden.
+        for (provider, id) in [
+            (
+                ProviderKind::Fireworks,
+                "accounts/fireworks/models/qwen3p7-plus",
+            ),
+            (
+                ProviderKind::Fireworks,
+                "accounts/fireworks/models/deepseek-v4-flash",
+            ),
+            (
+                ProviderKind::Fireworks,
+                "accounts/fireworks/models/deepseek-v4-pro",
+            ),
+            (ProviderKind::Together, "moonshotai/Kimi-K2.7-Code"),
+            (ProviderKind::Together, "moonshotai/Kimi-K2.6"),
+            (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Pro"),
+            (ProviderKind::Together, "nvidia/nemotron-3-ultra-550b-a55b"),
+            (ProviderKind::Together, "google/gemma-4-31B-it"),
+            (ProviderKind::Together, "pearl-ai/gemma-4-31b-it"),
+            (ProviderKind::Together, "thinkingmachines/Inkling-Small"),
+        ] {
+            assert!(find_for(provider, id).is_none(), "{provider} `{id}`");
+        }
+
+        assert_eq!(models_for(ProviderKind::Fireworks).count(), 11);
+        assert_eq!(models_for(ProviderKind::Together).count(), 11);
         assert!(models_for(ProviderKind::Fireworks)
             .chain(models_for(ProviderKind::Together))
             .all(|model| model.verification == VerificationTier::Unverified));

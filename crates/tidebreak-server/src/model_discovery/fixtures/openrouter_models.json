@@ -1,0 +1,65 @@
+{
+  "data": [
+    {
+      "id": "anthropic/claude-opus-5.5",
+      "canonical_slug": "anthropic/claude-opus-5.5-20260922",
+      "hugging_face_id": null,
+      "name": "Anthropic: Claude Opus 5.5",
+      "created": 1790121600,
+      "description": "Anthropic's most capable Opus model.",
+      "context_length": 1000000,
+      "architecture": {
+        "modality": "text+image+file->text",
+        "input_modalities": ["text", "image", "file"],
+        "output_modalities": ["text"],
+        "tokenizer": "Claude",
+        "instruct_type": null
+      },
+      "pricing": { "prompt": "0.000004", "completion": "0.00002", "input_cache_read": "0.0000002" },
+      "top_provider": { "context_length": 1000000, "max_completion_tokens": 128000, "is_moderated": true },
+      "per_request_limits": null,
+      "supported_parameters": ["max_tokens", "reasoning", "include_reasoning", "response_format", "structured_outputs", "tool_choice", "tools"],
+      "default_parameters": null
+    },
+    {
+      "id": "meta-llama/llama-3.3-70b-instruct",
+      "canonical_slug": "meta-llama/llama-3.3-70b-instruct",
+      "name": "Meta: Llama 3.3 70B Instruct",
+      "created": 1733500000,
+      "context_length": 131072,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "tokenizer": "Llama3",
+        "instruct_type": "llama3"
+      },
+      "pricing": { "prompt": "0.0000001", "completion": "0.00000025" },
+      "top_provider": { "context_length": 131072, "max_completion_tokens": null, "is_moderated": false },
+      "per_request_limits": null,
+      "supported_parameters": ["max_tokens", "temperature", "top_p", "stop"],
+      "default_parameters": null
+    },
+    {
+      "id": "google/gemini-3.8-flash-image",
+      "canonical_slug": "google/gemini-3.8-flash-image",
+      "name": "Google: Gemini 3.8 Flash Image",
+      "created": 1788000000,
+      "context_length": 32768,
+      "architecture": {
+        "modality": "text+image->image",
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["image"],
+        "tokenizer": "Gemini",
+        "instruct_type": null
+      },
+      "pricing": { "prompt": "0.0000003", "completion": "0.0000025" },
+      "top_provider": { "context_length": 32768, "max_completion_tokens": 8192, "is_moderated": false },
+      "per_request_limits": null,
+      "supported_parameters": ["max_tokens"],
+      "default_parameters": null
+    }
+  ],
+  "total_count": 3,
+  "links": { "next": null }
+}

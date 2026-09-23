@@ -45,11 +45,11 @@
 //! The records the CLI reads over HTTP — the model catalog, the provider
 //! list, the MCP server listing, agent runs, and conversation outputs — are
 //! the same response types the routes serialize, re-exported below. They read
-//! the same way as the frames, with one exception: [`CustomModelConfig`],
-//! nested in a provider row, keeps `deny_unknown_fields` because the provider
-//! update body shares it. The fixtures in `fixtures/rest-records.json` hold one
-//! real value per record, serialized by the generator test in
-//! `wire_types.rs`, and the CLI decodes every entry.
+//! the same way as the frames, [`CustomModelConfig`] included: a provider row
+//! reads tolerantly, and only the provider update body checks a row's keys
+//! strictly when the server saves it. The fixtures in
+//! `fixtures/rest-records.json` hold one real value per record, serialized by
+//! the generator test in `wire_types.rs`, and the CLI decodes every entry.
 //!
 //! # Code mode
 //!
@@ -267,6 +267,20 @@ mod tests {
             let plain = serde_json::from_str::<RendererChatFrame>(without).expect("decodes");
             assert_eq!(tolerated, plain, "{with_extra}");
         }
+    }
+
+    /// A provider row a newer server extended still reads, down to the
+    /// configured models nested in it, and reads exactly as it would
+    /// without the new keys.
+    #[test]
+    fn a_provider_listing_with_unknown_model_keys_still_reads() {
+        let with_extra = r#"{"providers":[{"kind":"openai_compatible","enabled":true,"has_credential":false,"models":[{"id":"vendor/model","context_window":65536,"max_output_tokens":8192,"input_modalities":["text"],"supports_reasoning":false,"reasoning_efforts":[],"future_field":true}],"future_list":[]}]}"#;
+        let without = r#"{"providers":[{"kind":"openai_compatible","enabled":true,"has_credential":false,"models":[{"id":"vendor/model","context_window":65536,"max_output_tokens":8192,"input_modalities":["text"],"supports_reasoning":false,"reasoning_efforts":[]}]}]}"#;
+        let tolerated = serde_json::from_str::<ProvidersList>(with_extra)
+            .unwrap_or_else(|error| panic!("should read {with_extra}: {error}"));
+        let plain = serde_json::from_str::<ProvidersList>(without).expect("decodes");
+        assert_eq!(tolerated.providers, plain.providers);
+        assert!(tolerated.providers[0].models[0].supports_tools);
     }
 
     /// An event type this build does not know fails the frame rather than

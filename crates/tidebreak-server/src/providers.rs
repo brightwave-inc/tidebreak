@@ -261,6 +261,10 @@ pub fn member_catalog_models(catalog: crate::connectors::GatewayCatalog) -> Memb
                 input_modalities: vec![crate::model_registry::InputModality::Text],
                 supports_reasoning: false,
                 reasoning_efforts: Vec::new(),
+                // Gateway rows take their capabilities from the curated row
+                // they match, or the conservative uncurated shape, never from
+                // these row fields.
+                supports_tools: true,
             })
         })
         .collect();
@@ -522,11 +526,102 @@ impl ProviderKind {
         matches!(self, Self::Fireworks | Self::Together | Self::Openrouter)
     }
 
-    /// Whether the reader can register model rows beside the endpoint.
+    /// The name a person sees for this provider, matching the desktop's
+    /// provider label.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Anthropic => "Anthropic",
+            Self::Openai => "OpenAI",
+            Self::Xai => "xAI",
+            Self::Gemini => "Google Gemini",
+            Self::Fireworks => "Fireworks AI",
+            Self::Together => "Together AI",
+            Self::Openrouter => "OpenRouter",
+            Self::Ollama => "Ollama",
+            Self::OpenaiCompatible => "OpenAI-compatible",
+            Self::ModelGateway => "Model Gateway",
+        }
+    }
+
+    /// Whether the reader can register model rows beside the curated ones.
+    ///
+    /// Every direct provider accepts them: a provider ships a model before a
+    /// Tidebreak release can curate it, and a hosted or local endpoint serves
+    /// whatever its operator deployed. The gateway is the exception. Its rows
+    /// come from the gateway's own catalog, never from provider settings.
     pub const fn accepts_configured_models(self) -> bool {
+        !matches!(self, Self::ModelGateway)
+    }
+
+    /// The reasoning-effort levels a configured row on this provider may list.
+    ///
+    /// Each list is what this provider's adapter actually puts on the wire,
+    /// so a row cannot offer a level that does nothing. Anthropic and xAI
+    /// models cannot turn reasoning off, so neither offers `none`. Gemini
+    /// sends `none` as `minimal` and stops at `high`. The Chat Completions
+    /// adapter leaves `none` off the request, so on those routes "Off" would
+    /// quietly mean "provider default" and is not offered. Empty means the
+    /// provider takes no configured rows at all.
+    pub const fn custom_reasoning_efforts(self) -> &'static [ReasoningEffort] {
+        const ANTHROPIC: &[ReasoningEffort] = &[
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+        ];
+        const OPENAI: &[ReasoningEffort] = &[
+            ReasoningEffort::None,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+        ];
+        const XAI: &[ReasoningEffort] = &[
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+        ];
+        const GEMINI: &[ReasoningEffort] = &[
+            ReasoningEffort::None,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ];
+        const CHAT_COMPLETIONS: &[ReasoningEffort] = &[
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+        ];
+        match self {
+            Self::Anthropic => ANTHROPIC,
+            Self::Openai => OPENAI,
+            Self::Xai => XAI,
+            Self::Gemini => GEMINI,
+            Self::Fireworks
+            | Self::Together
+            | Self::Openrouter
+            | Self::Ollama
+            | Self::OpenaiCompatible => CHAT_COMPLETIONS,
+            Self::ModelGateway => &[],
+        }
+    }
+
+    /// Whether this provider's route enforces a strict JSON Schema response
+    /// for any model it serves, which is what utility work depends on.
+    ///
+    /// The native Anthropic, OpenAI, and Gemini adapters enforce it, and
+    /// Fireworks does at the platform layer. Together documents it model by
+    /// model, so its curated rows carry their own answer and a configured
+    /// Together row does not qualify. The other routes make no such promise.
+    pub const fn enforces_structured_output(self) -> bool {
         matches!(
             self,
-            Self::OpenaiCompatible | Self::Xai | Self::Openrouter | Self::Ollama
+            Self::Anthropic | Self::Openai | Self::Gemini | Self::Fireworks
         )
     }
 
@@ -631,7 +726,7 @@ impl ProviderKind {
     }
 }
 
-fn base_url_is_allowed(base: &str, allow_credentialless_loopback_http: bool) -> bool {
+pub(crate) fn base_url_is_allowed(base: &str, allow_credentialless_loopback_http: bool) -> bool {
     let Ok(url) = url::Url::parse(base) else {
         return false;
     };
@@ -785,12 +880,12 @@ pub struct ProviderConfig {
     /// Optional base URL override (required for `openai_compatible`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Explicit model rows served by a configurable endpoint.
+    /// Explicit model rows the reader added beside the curated catalog.
     ///
-    /// OpenAI-compatible endpoints and extra xAI account models can change
-    /// independently of an Tidebreak release, so their configured rows live
-    /// beside the endpoint. Other curated providers ignore this field and
-    /// obtain their models from the host registry.
+    /// Providers ship models before a Tidebreak release can curate them, and
+    /// hosted or local endpoints serve whatever their operator deployed, so
+    /// every direct provider keeps its configured rows beside its endpoint.
+    /// A row never shadows a curated id of the same provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<CustomModelConfig>,
 }
@@ -849,13 +944,28 @@ fn default_custom_input_modalities() -> Vec<InputModality> {
     vec![InputModality::Text]
 }
 
+fn default_custom_supports_tools() -> bool {
+    true
+}
+
+fn is_default_custom_supports_tools(supports_tools: &bool) -> bool {
+    *supports_tools == default_custom_supports_tools()
+}
+
 /// User-inspectable routing limits and capabilities for one configured model.
 ///
-/// OpenAI-compatible rows are validated to the conservative text-only shape.
-/// xAI rows may opt into the capabilities its first-party Responses adapter
-/// actually carries end to end.
+/// The reader declares what the model accepts. Validation holds each
+/// declaration to what the provider's adapter carries end to end: image input
+/// on every direct route, and only the reasoning levels that route sends.
+//
+// Read tolerantly, like every REST record: `GET /providers` carries these
+// rows, so a key a newer server adds must not break a client a release
+// behind, and a stored row a newer release wrote must not fail to load. The
+// `PUT /providers/{kind}` body checks its rows' keys strictly instead; see
+// [`CONFIGURED_MODEL_KEYS`]. A field added here serializes only when it
+// differs from its default, so an older server still accepts the rows a
+// newer client saves unless they use the new field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
 pub struct CustomModelConfig {
     /// Exact model id sent to the endpoint.
     pub id: String,
@@ -887,12 +997,72 @@ pub struct CustomModelConfig {
     /// Inputs Tidebreak may place on this model's request.
     #[serde(default = "default_custom_input_modalities")]
     pub input_modalities: Vec<InputModality>,
-    /// Whether the model uses xAI's reasoning request shape.
+    /// Whether the model reasons, so Tidebreak sends its provider's
+    /// reasoning request shape.
     #[serde(default)]
     pub supports_reasoning: bool,
     /// Reasoning-effort levels accepted by the model, ascending.
     #[serde(default)]
     pub reasoning_efforts: Vec<ReasoningEffort>,
+    /// Whether the model accepts function tools. A model without them runs
+    /// as a chat-only model: Tidebreak sends it no tool schemas.
+    ///
+    /// Defaults to on, which is how every configured row behaved before the
+    /// field existed, and is left out of the JSON while on.
+    #[serde(
+        default = "default_custom_supports_tools",
+        skip_serializing_if = "is_default_custom_supports_tools"
+    )]
+    pub supports_tools: bool,
+}
+
+/// Keys a configured-model row in a `PUT /providers/{kind}` body may carry.
+///
+/// Reading a row back is tolerant, but saving one is strict: a key this
+/// server does not know is refused, so a misspelled or newer field never
+/// saves as its default without a word. A test pins this list to the fields
+/// [`CustomModelConfig`] serializes.
+pub(crate) const CONFIGURED_MODEL_KEYS: &[&str] = &[
+    "id",
+    "display_name",
+    "upstream_id",
+    "aliases",
+    "context_window",
+    "max_output_tokens",
+    "input_modalities",
+    "supports_reasoning",
+    "reasoning_efforts",
+    "supports_tools",
+];
+
+/// Deserialize the configured-model list of a provider update, refusing any
+/// row key outside [`CONFIGURED_MODEL_KEYS`].
+fn strict_configured_models<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<CustomModelConfig>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let Some(rows) =
+        Option::<Vec<serde_json::Map<String, serde_json::Value>>>::deserialize(deserializer)?
+    else {
+        return Ok(None);
+    };
+    rows.into_iter()
+        .map(|row| {
+            if let Some(key) = row
+                .keys()
+                .find(|key| !CONFIGURED_MODEL_KEYS.contains(&key.as_str()))
+            {
+                return Err(D::Error::custom(format!(
+                    "unknown field `{key}` in a configured model"
+                )));
+            }
+            serde_json::from_value(serde_json::Value::Object(row)).map_err(D::Error::custom)
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 impl Default for CustomModelConfig {
@@ -907,6 +1077,7 @@ impl Default for CustomModelConfig {
             input_modalities: default_custom_input_modalities(),
             supports_reasoning: false,
             reasoning_efforts: Vec::new(),
+            supports_tools: default_custom_supports_tools(),
         }
     }
 }
@@ -1032,7 +1203,7 @@ impl ResolvedModelPolicy {
     /// An id that matches no curated row either way keeps the conservative
     /// custom treatment.
     fn gateway_for(model: &CustomModelConfig) -> Self {
-        let mut policy = Self::custom_for(ProviderKind::ModelGateway, model);
+        let mut policy = Self::uncurated(ProviderKind::ModelGateway, model);
         // Model Gateway protocols enforce structured output: Anthropic via a
         // forced tool or `output_config.format`, OpenAI via `json_schema`.
         // Unlike an arbitrary compatible endpoint, background utility work
@@ -1057,8 +1228,36 @@ impl ResolvedModelPolicy {
         policy
     }
 
+    /// Resolve one row the reader configured on a direct provider.
+    ///
+    /// The row declares its own contract, and validation already held that
+    /// declaration to what the provider's adapter carries when it was saved.
+    /// It is clamped again here, so a row written by an older build or edited
+    /// by hand still cannot claim more than the route sends.
     fn custom_for(provider: ProviderKind, model: &CustomModelConfig) -> Self {
-        let first_party_xai = provider == ProviderKind::Xai;
+        let mut policy = Self::uncurated(provider, model);
+        let accepted_efforts = provider.custom_reasoning_efforts();
+        if model.input_modalities.contains(&InputModality::Image) {
+            policy.input_modalities = vec![InputModality::Text, InputModality::Image];
+        }
+        policy.supports_tools = model.supports_tools;
+        policy.supports_structured_output = provider.enforces_structured_output();
+        policy.supports_reasoning = model.supports_reasoning && !accepted_efforts.is_empty();
+        if policy.supports_reasoning {
+            policy.reasoning_efforts = model
+                .reasoning_efforts
+                .iter()
+                .copied()
+                .filter(|effort| accepted_efforts.contains(effort))
+                .collect();
+        }
+        policy
+    }
+
+    /// The conservative shape every row outside the curated catalog starts
+    /// from: text only, tools on, no reasoning, and no provider-executed
+    /// search or strict output claimed.
+    fn uncurated(provider: ProviderKind, model: &CustomModelConfig) -> Self {
         Self {
             key: model_registry::selection_key(provider, &model.id),
             id: model.id.clone(),
@@ -1074,11 +1273,7 @@ impl ResolvedModelPolicy {
             recommended: true,
             context_window: model.context_window,
             max_output_tokens: model.max_output_tokens,
-            input_modalities: if first_party_xai {
-                model.input_modalities.clone()
-            } else {
-                vec![InputModality::Text]
-            },
+            input_modalities: vec![InputModality::Text],
             // Preserve the existing custom-compatible contract: users register
             // these endpoints specifically to run Tidebreak's agent loop.
             supports_tools: true,
@@ -1086,7 +1281,7 @@ impl ResolvedModelPolicy {
             // while ignoring its schema. Without an explicit route contract,
             // utility work must not depend on that response being enforced.
             supports_structured_output: false,
-            supports_reasoning: first_party_xai && model.supports_reasoning,
+            supports_reasoning: false,
             // A pass-through endpoint cannot promise a provider-executed
             // search, whatever upstream model it is serving — the request
             // shape that would enable one is the vendor's own, and this route
@@ -1095,11 +1290,7 @@ impl ResolvedModelPolicy {
             // Same reasoning, same answer: a search sub-request is the vendor's
             // own request shape, which this route does not speak.
             supports_search_subrequest: false,
-            reasoning_efforts: if first_party_xai {
-                model.reasoning_efforts.clone()
-            } else {
-                Vec::new()
-            },
+            reasoning_efforts: Vec::new(),
         }
     }
 
@@ -1108,14 +1299,7 @@ impl ResolvedModelPolicy {
             ProviderKind::OpenaiCompatible,
             &CustomModelConfig {
                 id: id.to_owned(),
-                display_name: None,
-                upstream_id: None,
-                aliases: Vec::new(),
-                context_window: default_custom_context_window(),
-                max_output_tokens: default_custom_max_output_tokens(),
-                input_modalities: default_custom_input_modalities(),
-                supports_reasoning: false,
-                reasoning_efforts: Vec::new(),
+                ..CustomModelConfig::default()
             },
         )
     }
@@ -1346,22 +1530,44 @@ async fn bare_model_owners(store: &dyn Store, value: &str) -> Result<Vec<Resolve
         .map(ResolvedModelPolicy::curated)
         .into_iter()
         .collect::<Vec<_>>();
-    for provider in [
-        ProviderKind::Xai,
-        ProviderKind::Openrouter,
-        ProviderKind::Ollama,
-        ProviderKind::OpenaiCompatible,
-    ] {
+    for &provider in ProviderKind::ALL {
+        if !provider.accepts_configured_models() {
+            continue;
+        }
         let config = read_config(store, provider).await?;
         owners.extend(
-            config
-                .models
-                .iter()
+            configured_rows(provider, &config.models)
                 .filter(|model| model.id == value)
                 .map(|model| ResolvedModelPolicy::custom_for(provider, model)),
         );
     }
     Ok(owners)
+}
+
+/// Split saved rows into the ones that still describe a model of their own
+/// and the ids a built-in model of the same provider now covers.
+fn split_replaced_rows(
+    provider: ProviderKind,
+    models: Vec<CustomModelConfig>,
+) -> (Vec<CustomModelConfig>, Vec<String>) {
+    let (replaced, kept): (Vec<_>, Vec<_>) = models
+        .into_iter()
+        .partition(|model| model_registry::find_for(provider, &model.id).is_some());
+    (kept, replaced.into_iter().map(|model| model.id).collect())
+}
+
+/// The configured rows that still describe a model of their own.
+///
+/// A row whose id a later catalog curated under the same provider is inert:
+/// resolution already prefers the curated row, so offering both would list
+/// one selection key twice and make a bare id ambiguous.
+fn configured_rows(
+    provider: ProviderKind,
+    models: &[CustomModelConfig],
+) -> impl Iterator<Item = &CustomModelConfig> {
+    models
+        .iter()
+        .filter(move |model| model_registry::find_for(provider, &model.id).is_none())
 }
 
 /// Drop a trailing `-v<digits>` or `-v<digits>:<digits>` — the revision marker
@@ -1481,6 +1687,16 @@ pub struct ProviderInfo {
     pub auth_mode: Option<ProviderAuthMode>,
     /// Explicit configured model entries for this endpoint.
     pub models: Vec<CustomModelConfig>,
+    /// The reasoning-effort levels a configured row on this provider may
+    /// list, ascending: what the provider's adapter actually sends. Absent
+    /// for the gateway, whose rows come from its own catalog.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_reasoning_efforts: Vec<ReasoningEffort>,
+    /// Saved custom model ids that a built-in model of this provider now
+    /// covers. Tidebreak uses the built-in model and leaves these out of
+    /// `models`; the next save to this provider drops them for good.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaced_by_built_in: Vec<String>,
 }
 
 /// How a provider's credential was established.
@@ -1525,9 +1741,10 @@ pub struct ProviderUpdate {
     pub base_url: Option<Option<String>>,
     #[serde(default)]
     pub credential: Option<ProviderCredential>,
-    /// Replacement configured-model list. Valid for `openai_compatible`,
-    /// OpenRouter, Ollama, and first-party xAI.
-    #[serde(default)]
+    /// Replacement configured-model list. Valid for every direct provider;
+    /// the gateway refuses every write. Each row's keys are checked
+    /// strictly, unlike a row read back.
+    #[serde(default, deserialize_with = "strict_configured_models")]
     pub models: Option<Vec<CustomModelConfig>>,
 }
 
@@ -1712,6 +1929,8 @@ pub async fn list_providers(
                     has_credential: true,
                     auth_mode: None,
                     models: snapshot.models.clone(),
+                    custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
+                    replaced_by_built_in: Vec::new(),
                 });
                 continue;
             }
@@ -1729,6 +1948,8 @@ pub async fn list_providers(
                 },
                 auth_mode: None,
                 models: gateway_models(store, policy, caller_gateway).await?,
+                custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
+                replaced_by_built_in: Vec::new(),
             });
             continue;
         }
@@ -1743,13 +1964,16 @@ pub async fn list_providers(
         } else {
             has_credential
         };
+        let (models, replaced_by_built_in) = split_replaced_rows(kind, config.models);
         out.push(ProviderInfo {
             kind,
             enabled: config.enabled,
             base_url: kind.effective_base_url(config.base_url.as_deref()),
             has_credential,
             auth_mode,
-            models: config.models,
+            models,
+            custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
+            replaced_by_built_in,
         });
     }
     Ok(out)
@@ -1806,6 +2030,12 @@ pub async fn update_provider(
     }
 
     let mut config = read_config(store, kind).await?;
+    // A row saved before a catalog update built its id in gives way to the
+    // built-in model. Every save drops it, so a client that re-sends the
+    // whole list is never blocked by it, and the response names what went.
+    let (kept, replaced_by_built_in) =
+        split_replaced_rows(kind, std::mem::take(&mut config.models));
+    config.models = kept;
 
     if let Some(enabled) = update.enabled {
         config.enabled = enabled;
@@ -1836,6 +2066,12 @@ pub async fn update_provider(
                 "configured models are not supported by {kind}"
             )));
         }
+        // A re-sent copy of a dropped row goes too. A new row that repeats a
+        // built-in id is still refused by the validation below.
+        let models: Vec<_> = models
+            .into_iter()
+            .filter(|model| !replaced_by_built_in.contains(&model.id))
+            .collect();
         validate_configured_models(kind, &models)?;
         config.models = models;
     }
@@ -1885,6 +2121,8 @@ pub async fn update_provider(
         has_credential: has_credential(secrets, kind).await,
         auth_mode: auth_mode_for(secrets, kind).await,
         models: config.models,
+        custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
+        replaced_by_built_in,
     })
 }
 
@@ -1903,16 +2141,31 @@ fn validate_configured_models(
     })
 }
 
+/// Most configured rows one provider keeps.
+pub(crate) const MAX_CUSTOM_MODELS: usize = 64;
+/// Longest configured model id, in characters.
+pub(crate) const MAX_MODEL_ID_CHARS: usize = 240;
+/// Longest configured display name, in characters.
+pub(crate) const MAX_DISPLAY_NAME_CHARS: usize = 120;
+/// Smallest configured context window, in tokens.
+pub(crate) const MIN_CONTEXT_WINDOW: u32 = 1_024;
+/// Largest configured context window, in tokens.
+pub(crate) const MAX_CONTEXT_WINDOW: u32 = 4_000_000;
+
+/// Whether `id` is shaped like a model id a configured row may carry:
+/// non-empty, bounded, and free of whitespace and control characters.
+pub(crate) fn is_valid_configured_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.chars().count() <= MAX_MODEL_ID_CHARS
+        && !id.chars().any(char::is_whitespace)
+        && !id.chars().any(char::is_control)
+}
+
 fn validate_configured_models_against(
     kind: ProviderKind,
     models: &[CustomModelConfig],
     is_curated: impl Fn(&str) -> bool,
 ) -> std::result::Result<(), ServerError> {
-    const MAX_CUSTOM_MODELS: usize = 64;
-    const MAX_MODEL_ID_CHARS: usize = 240;
-    const MAX_DISPLAY_NAME_CHARS: usize = 120;
-    const MAX_CONTEXT_WINDOW: u32 = 4_000_000;
-
     if models.len() > MAX_CUSTOM_MODELS {
         return Err(ServerError::bad_request(format!(
             "{kind} supports at most {MAX_CUSTOM_MODELS} configured models"
@@ -1921,11 +2174,7 @@ fn validate_configured_models_against(
     let mut ids = std::collections::HashSet::new();
     for model in models {
         let id = model.id.trim();
-        if id.is_empty()
-            || id.chars().count() > MAX_MODEL_ID_CHARS
-            || id.chars().any(char::is_whitespace)
-            || id.chars().any(char::is_control)
-        {
+        if !is_valid_configured_model_id(id) {
             return Err(ServerError::bad_request(
                 "configured model id must be non-empty, bounded, and contain no whitespace or control characters",
             ));
@@ -1973,9 +2222,9 @@ fn validate_configured_models_against(
                 "configured model `{id}` carries an alias that is empty, oversized, or contains whitespace or control characters"
             )));
         }
-        if !(1_024..=MAX_CONTEXT_WINDOW).contains(&model.context_window) {
+        if !(MIN_CONTEXT_WINDOW..=MAX_CONTEXT_WINDOW).contains(&model.context_window) {
             return Err(ServerError::bad_request(format!(
-                "configured model `{id}` context_window must be between 1024 and {MAX_CONTEXT_WINDOW}"
+                "configured model `{id}` context_window must be between {MIN_CONTEXT_WINDOW} and {MAX_CONTEXT_WINDOW}"
             )));
         }
         if model.max_output_tokens == 0 || model.max_output_tokens > model.context_window {
@@ -1995,22 +2244,29 @@ fn validate_configured_models_against(
                 "configured model `{id}` input_modalities must contain text exactly once and no duplicates"
             )));
         }
-        if kind != ProviderKind::Xai && model.input_modalities != [InputModality::Text] {
-            return Err(ServerError::bad_request(
-                "only xai configured models may enable image input",
-            ));
-        }
+        // Image input needs no provider check: every direct adapter carries
+        // hydrated image bytes, so the row's own declaration is the contract.
         if !model.supports_reasoning && !model.reasoning_efforts.is_empty() {
             return Err(ServerError::bad_request(format!(
                 "configured model `{id}` cannot list reasoning_efforts when supports_reasoning is false"
             )));
         }
-        if kind != ProviderKind::Xai
-            && (model.supports_reasoning || !model.reasoning_efforts.is_empty())
+        let accepted_efforts = kind.custom_reasoning_efforts();
+        if model.supports_reasoning && accepted_efforts.is_empty() {
+            return Err(ServerError::bad_request(format!(
+                "configured models on {kind} cannot declare reasoning"
+            )));
+        }
+        // The Anthropic adapter reads the reasoning shape from the model id
+        // and sends a thinking block only for Claude 4.6 and later. A row that
+        // claimed reasoning under any other id would never think.
+        if model.supports_reasoning
+            && kind == ProviderKind::Anthropic
+            && !tidebreak_router::anthropic::sends_reasoning(id)
         {
-            return Err(ServerError::bad_request(
-                "only xai configured models may enable reasoning",
-            ));
+            return Err(ServerError::bad_request(format!(
+                "configured model `{id}` cannot declare reasoning: Tidebreak sends Anthropic reasoning only to Claude 4.6 and later model ids"
+            )));
         }
         if model
             .reasoning_efforts
@@ -2021,18 +2277,14 @@ fn validate_configured_models_against(
                 "configured model `{id}` reasoning_efforts must be unique and ascending"
             )));
         }
-        if model.reasoning_efforts.iter().any(|effort| {
-            !matches!(
-                effort,
-                ReasoningEffort::None
-                    | ReasoningEffort::Low
-                    | ReasoningEffort::Medium
-                    | ReasoningEffort::High
-                    | ReasoningEffort::XHigh
-            )
-        }) {
+        if let Some(effort) = model
+            .reasoning_efforts
+            .iter()
+            .find(|effort| !accepted_efforts.contains(effort))
+        {
             return Err(ServerError::bad_request(format!(
-                "configured model `{id}` uses a reasoning effort xai does not support"
+                "configured model `{id}` lists reasoning effort `{}`, which the {kind} route does not send",
+                effort.as_str()
             )));
         }
     }
@@ -2576,21 +2828,26 @@ pub async fn catalog_models(
                 available,
             }
         }));
-        // Configured model sets: the compatible endpoint's custom entries,
-        // and the managed gateway's entitled snapshot — which is empty on an
+        // Configured model sets: each direct provider's custom rows, and the
+        // managed gateway's entitled snapshot — which is empty on an
         // unmanaged profile, so no gateway row ever reaches the catalog there.
         let configured = match kind {
             kind if kind.accepts_configured_models() => read_config(store, kind).await?.models,
             ProviderKind::ModelGateway => gateway_models(store, policy, caller_gateway).await?,
             _ => Vec::new(),
         };
-        models.extend(configured.iter().map(|model| CatalogModel {
-            policy: match kind {
-                ProviderKind::ModelGateway => ResolvedModelPolicy::gateway_for(model),
-                _ => ResolvedModelPolicy::custom_for(kind, model),
-            },
-            available: provider_usable,
-        }));
+        models.extend(
+            configured_rows(kind, &configured).map(|model| CatalogModel {
+                policy: match kind {
+                    ProviderKind::ModelGateway => ResolvedModelPolicy::gateway_for(model),
+                    _ => ResolvedModelPolicy::custom_for(kind, model),
+                },
+                // ChatGPT sign-in runs through the Codex backend, which serves
+                // only the curated ids it has agreed to; a configured OpenAI
+                // row needs an API key.
+                available: provider_usable && !chatgpt,
+            }),
+        );
     }
     Ok(models)
 }

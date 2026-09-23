@@ -71,13 +71,30 @@
       "providers": [
         {
           "auth_mode": "api_key",
+          "custom_reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
           "enabled": true,
           "has_credential": true,
           "kind": "anthropic",
-          "models": []
+          "models": [],
+          "replaced_by_built_in": [
+            "claude-opus-5-5"
+          ]
         },
         {
           "base_url": "http://localhost:11434/v1",
+          "custom_reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
           "enabled": false,
           "has_credential": false,
           "kind": "openai_compatible",

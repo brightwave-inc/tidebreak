@@ -59,6 +59,9 @@ impl ModelStateAdapter {
             input_modalities: vec![crate::model_registry::InputModality::Text],
             supports_reasoning: false,
             reasoning_efforts: Vec::new(),
+            // Unused on gateway rows, which take their capabilities from the
+            // curated row they match or the conservative uncurated shape.
+            supports_tools: true,
         }
     }
 

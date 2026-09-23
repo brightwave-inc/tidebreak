@@ -20,7 +20,7 @@ use super::types::{
     CodeAnalyticsRange, CodeAnalyticsRepository, CodeAnalyticsSnapshot, CodeAnalyticsTotals,
 };
 
-const PRICES_AS_OF: &str = "2026-09-03";
+const PRICES_AS_OF: &str = "2026-09-23";
 const NO_REPOSITORY_NAME: &str = "no repository";
 
 #[derive(Debug, Default, Deserialize)]
@@ -498,11 +498,14 @@ fn canonical_model_id(model: &str) -> Option<&'static str> {
     // and Flash-Lite must not read as Flash.
     [
         "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
         "gpt-5.5",
         "gpt-5.4-mini",
         "gpt-5.4-nano",
+        "grok-4.7",
         "grok-4.6",
         "grok-4.5",
         "gemini-3.8-flash",
@@ -513,6 +516,7 @@ fn canonical_model_id(model: &str) -> Option<&'static str> {
         "gemini-3.1-pro-preview",
         "claude-fable-5-1",
         "claude-fable-5",
+        "claude-opus-5-5",
         "claude-opus-5",
         "claude-sonnet-5",
         "claude-haiku-4-5",
@@ -548,7 +552,7 @@ fn price_for_canonical(model: &str, fast_mode: bool) -> Option<PriceRate> {
         return fast_price_for_canonical(model);
     }
     match model {
-        // OpenAI short-context (up to 272K) rates. Longer Astra prompts use
+        // OpenAI short-context (up to 272K) rates. Longer GPT-6 prompts use
         // multipliers that this canonical table does not model. The GPT-5.6
         // rows also bill cache writes; Sol's rate is promotional, published as
         // holding at least through 2026-11-21.
@@ -557,6 +561,20 @@ fn price_for_canonical(model: &str, fast_mode: bool) -> Option<PriceRate> {
             output: 50_000,
             cache_read: 1_000,
             cache_write: 12_500,
+        }),
+        // GPT-6 Sol and Luna bill cache writes at 1.25x input, like the 5.6
+        // rows.
+        "gpt-6-sol" => Some(PriceRate {
+            input: 2_000,
+            output: 10_000,
+            cache_read: 200,
+            cache_write: 2_500,
+        }),
+        "gpt-6-luna" => Some(PriceRate {
+            input: 100,
+            output: 500,
+            cache_read: 10,
+            cache_write: 125,
         }),
         "gpt-5.6-sol" => Some(PriceRate {
             input: 4_000,
@@ -596,6 +614,12 @@ fn price_for_canonical(model: &str, fast_mode: bool) -> Option<PriceRate> {
         }),
         // xAI rates for prompts under 200K tokens; a longer prompt doubles
         // every token in the request, which this table does not model.
+        "grok-4.7" => Some(PriceRate {
+            input: 2_000,
+            output: 6_000,
+            cache_read: 500,
+            cache_write: 0,
+        }),
         "grok-4.6" => Some(PriceRate {
             input: 2_000,
             output: 6_000,
@@ -650,6 +674,14 @@ fn price_for_canonical(model: &str, fast_mode: bool) -> Option<PriceRate> {
             cache_read: 1_000,
             cache_write: 12_500,
         }),
+        // Opus 5.5 reads its cache at a twentieth of input rather than the
+        // usual tenth.
+        "claude-opus-5-5" => Some(PriceRate {
+            input: 4_000,
+            output: 20_000,
+            cache_read: 200,
+            cache_write: 5_000,
+        }),
         "claude-opus-5" => Some(PriceRate {
             input: 5_000,
             output: 25_000,
@@ -689,6 +721,15 @@ fn price_for_canonical(model: &str, fast_mode: bool) -> Option<PriceRate> {
 /// at the standard rate.
 fn fast_price_for_canonical(model: &str) -> Option<PriceRate> {
     match model {
+        // Anthropic bills Opus 5.5 fast at $8 / $40, and the prompt-cache
+        // multipliers apply on top: a twentieth of input to read, 1.25x to
+        // write.
+        "claude-opus-5-5" => Some(PriceRate {
+            input: 8_000,
+            output: 40_000,
+            cache_read: 400,
+            cache_write: 10_000,
+        }),
         // Anthropic bills Claude Opus 5 fast at double the standard pair.
         "claude-opus-5" => Some(PriceRate {
             input: 10_000,
@@ -850,6 +891,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_september_rows_reach_their_own_prices() {
+        // Each new id lands on its own row, never on the model it extends.
+        assert_eq!(
+            canonical_model_id("claude-opus-5-5"),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            canonical_model_id("anthropic-us-claude-opus-5-5"),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            canonical_model_id("anthropic::claude-opus-5"),
+            Some("claude-opus-5")
+        );
+        assert_eq!(canonical_model_id("openai::gpt-6-sol"), Some("gpt-6-sol"));
+        assert_eq!(canonical_model_id("openai/gpt-6-luna"), Some("gpt-6-luna"));
+        assert_eq!(canonical_model_id("xai/grok-4.7"), Some("grok-4.7"));
+
+        assert_eq!(
+            price_for_canonical("claude-opus-5-5", false),
+            Some(PriceRate {
+                input: 4_000,
+                output: 20_000,
+                cache_read: 200,
+                cache_write: 5_000,
+            })
+        );
+        assert_eq!(
+            price_for_canonical("gpt-6-sol", false),
+            Some(PriceRate {
+                input: 2_000,
+                output: 10_000,
+                cache_read: 200,
+                cache_write: 2_500,
+            })
+        );
+        assert_eq!(
+            price_for_canonical("gpt-6-luna", false),
+            Some(PriceRate {
+                input: 100,
+                output: 500,
+                cache_read: 10,
+                cache_write: 125,
+            })
+        );
+        assert_eq!(
+            price_for_canonical("grok-4.7", false),
+            Some(PriceRate {
+                input: 2_000,
+                output: 6_000,
+                cache_read: 500,
+                cache_write: 0,
+            })
+        );
+        // Opus 5.5 fast doubles the standard pair, cache rates included.
+        let fast = price_for_canonical("claude-opus-5-5", true).unwrap();
+        let standard = price_for_canonical("claude-opus-5-5", false).unwrap();
+        assert_eq!(fast.input, standard.input * 2);
+        assert_eq!(fast.output, standard.output * 2);
+        assert_eq!(fast.cache_read, standard.cache_read * 2);
+        assert_eq!(fast.cache_write, standard.cache_write * 2);
     }
 
     #[test]

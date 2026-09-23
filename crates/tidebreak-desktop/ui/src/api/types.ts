@@ -68,6 +68,8 @@ import {
   type CodeWorkspacePullRequests as WireCodeWorkspacePullRequests,
   type EgressConfig as WireEgressConfig,
   type CustomModelConfig as WireCustomModelConfig,
+  type DiscoveredModel as WireDiscoveredModel,
+  type DiscoveredModels as WireDiscoveredModels,
   type McpHealth as WireMcpHealth,
   type McpCuration as WireMcpCuration,
   type McpOAuthStatus as WireMcpOAuthStatus,
@@ -473,6 +475,10 @@ export type VoiceTranscriptionInfo = {
 };
 
 export type CustomModelConfig = WireCustomModelConfig;
+
+/** One chat model a provider's own listing reported, from `Find models`. */
+export type DiscoveredModel = WireDiscoveredModel;
+export type DiscoveredModels = WireDiscoveredModels;
 
 /**
  * A model the picker may offer.

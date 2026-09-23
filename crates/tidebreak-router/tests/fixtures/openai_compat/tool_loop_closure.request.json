@@ -1,6 +1,6 @@
 {
   "body": {
-    "max_completion_tokens": 4096,
+    "max_tokens": 4096,
     "messages": [
       {
         "content": "Use the tools.",

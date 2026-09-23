@@ -21,7 +21,11 @@ import {
   type VoiceTranscriptionInfo,
 } from "@/api";
 import { useVoiceInputStore } from "@/VoiceInputStore";
-import { harnessDoctor } from "./fixtures";
+import {
+  discoveredAnthropicModels,
+  harnessDoctor,
+  providerInfoFixture,
+} from "./fixtures";
 
 export type SettingsStoryState =
   | "configured"
@@ -37,6 +41,7 @@ type SettingsClientMethods = Pick<
   | "getSettings"
   | "putSettings"
   | "putProvider"
+  | "discoverProviderModels"
   | "deleteCredential"
   | "getOpenaiChatgptStatus"
   | "openaiChatgptSignIn"
@@ -168,29 +173,30 @@ const managedRoles: ModelRoleInfo[] = [
 ];
 
 export const storyProviders: ProviderInfo[] = [
-  {
-    kind: "anthropic",
+  providerInfoFixture("anthropic", {
     enabled: true,
     has_credential: true,
-    models: [],
-  },
-  {
-    kind: "openai",
+    models: [
+      {
+        id: "claude-sonnet-5-5",
+        display_name: "Claude Sonnet 5.5",
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: ["text", "image"],
+        supports_reasoning: true,
+        reasoning_efforts: ["low", "medium", "high", "xhigh", "max"],
+        supports_tools: true,
+      },
+    ],
+  }),
+  providerInfoFixture("openai", {
     enabled: true,
     has_credential: true,
     auth_mode: "chatgpt",
-    models: [],
-  },
-  {
-    kind: "gemini",
-    enabled: false,
-    has_credential: false,
-    models: [],
-  },
-  {
-    kind: "ollama",
+  }),
+  providerInfoFixture("gemini"),
+  providerInfoFixture("ollama", {
     enabled: true,
-    has_credential: false,
     base_url: "http://127.0.0.1:11434/v1",
     models: [
       {
@@ -201,16 +207,15 @@ export const storyProviders: ProviderInfo[] = [
         input_modalities: ["text"],
         supports_reasoning: true,
         reasoning_efforts: ["low", "medium", "high"],
+        supports_tools: true,
       },
     ],
-  },
-  {
-    kind: "openrouter",
+  }),
+  providerInfoFixture("openrouter", {
     enabled: true,
     has_credential: true,
     base_url: "https://openrouter.ai/api/v1",
-    models: [],
-  },
+  }),
 ];
 
 export const storyModels = openModels;
@@ -546,6 +551,11 @@ function createSettingsStoryClient(
     },
     putProvider: (kind) =>
       write(storyProviders.find((provider) => provider.kind === kind)!),
+    discoverProviderModels: (kind) =>
+      read({
+        provider: kind,
+        models: kind === "anthropic" ? discoveredAnthropicModels : [],
+      }),
     deleteCredential: () => write(undefined),
     getOpenaiChatgptStatus: () =>
       read({ signed_in: true, account_hint: "alex@example.com" }),

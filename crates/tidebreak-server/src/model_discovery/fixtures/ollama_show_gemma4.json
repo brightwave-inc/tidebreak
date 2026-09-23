@@ -1,0 +1,16 @@
+{
+  "details": {
+    "parent_model": "",
+    "format": "gguf",
+    "family": "gemma4",
+    "families": ["gemma4"],
+    "parameter_size": "12B",
+    "quantization_level": "Q4_K_M"
+  },
+  "model_info": {
+    "general.architecture": "gemma4",
+    "gemma4.context_length": 131072
+  },
+  "capabilities": ["completion", "vision"],
+  "thinking": { "values": [false], "default": false }
+}

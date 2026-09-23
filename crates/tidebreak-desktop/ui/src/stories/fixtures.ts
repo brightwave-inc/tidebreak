@@ -21,6 +21,10 @@ import type {
   HarnessDoctorReport,
   HarnessKind,
   PendingUserQuestions,
+  DiscoveredModel,
+  ProviderInfo,
+  ProviderKind,
+  ReasoningEffort,
   GatewayApps,
   GatewayStatus,
   McpServerInfo,
@@ -32,6 +36,126 @@ import type {
   WebSearchCredentialReadiness,
 } from "@/api";
 import type { ContextUsageReading } from "@/ContextUsageIndicator";
+
+const CHAT_COMPLETIONS_EFFORTS: ReasoningEffort[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+/**
+ * The reasoning levels each provider's custom models may declare, as
+ * `GET /providers` reports them: what that provider's adapter sends.
+ */
+export const customReasoningEfforts: Record<ProviderKind, ReasoningEffort[]> = {
+  anthropic: ["low", "medium", "high", "xhigh", "max"],
+  openai: ["none", "low", "medium", "high", "xhigh", "max"],
+  xai: ["low", "medium", "high", "xhigh"],
+  gemini: ["none", "low", "medium", "high"],
+  fireworks: CHAT_COMPLETIONS_EFFORTS,
+  together: CHAT_COMPLETIONS_EFFORTS,
+  openrouter: CHAT_COMPLETIONS_EFFORTS,
+  ollama: CHAT_COMPLETIONS_EFFORTS,
+  openai_compatible: CHAT_COMPLETIONS_EFFORTS,
+  model_gateway: [],
+};
+
+const CLAUDE_EFFORTS: ReasoningEffort[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+/**
+ * What Find models reports for an Anthropic key: built-in rows, one custom
+ * row already added, and two the reader could add.
+ */
+export const discoveredAnthropicModels: DiscoveredModel[] = [
+  {
+    id: "claude-3-7-sonnet-20250219",
+    display_name: "Claude Sonnet 3.7",
+    context_window: 200_000,
+    max_output_tokens: 64_000,
+    image_input: true,
+    supports_reasoning: false,
+    built_in: false,
+    added: false,
+  },
+  {
+    id: "claude-fable-5-1",
+    display_name: "Claude Fable 5.1",
+    context_window: 1_000_000,
+    max_output_tokens: 128_000,
+    image_input: true,
+    supports_reasoning: true,
+    reasoning_efforts: CLAUDE_EFFORTS,
+    built_in: true,
+    added: false,
+  },
+  {
+    id: "claude-haiku-5-5",
+    display_name: "Claude Haiku 5.5",
+    context_window: 400_000,
+    max_output_tokens: 64_000,
+    image_input: true,
+    supports_reasoning: true,
+    reasoning_efforts: CLAUDE_EFFORTS,
+    built_in: false,
+    added: false,
+  },
+  {
+    id: "claude-opus-5-5",
+    display_name: "Claude Opus 5.5",
+    context_window: 1_000_000,
+    max_output_tokens: 128_000,
+    image_input: true,
+    supports_reasoning: true,
+    reasoning_efforts: CLAUDE_EFFORTS,
+    built_in: true,
+    added: false,
+  },
+  {
+    id: "claude-sonnet-5",
+    display_name: "Claude Sonnet 5",
+    context_window: 1_000_000,
+    max_output_tokens: 128_000,
+    image_input: true,
+    supports_reasoning: true,
+    reasoning_efforts: CLAUDE_EFFORTS,
+    built_in: true,
+    added: false,
+  },
+  {
+    id: "claude-sonnet-5-5",
+    display_name: "Claude Sonnet 5.5",
+    context_window: 1_000_000,
+    max_output_tokens: 128_000,
+    image_input: true,
+    supports_reasoning: true,
+    reasoning_efforts: CLAUDE_EFFORTS,
+    built_in: false,
+    added: true,
+  },
+];
+
+/** One `GET /providers` row: off, no key, no custom models, unless told. */
+export function providerInfoFixture(
+  kind: ProviderKind,
+  overrides: Partial<ProviderInfo> = {},
+): ProviderInfo {
+  return {
+    kind,
+    enabled: false,
+    has_credential: false,
+    models: [],
+    custom_reasoning_efforts: customReasoningEfforts[kind],
+    ...overrides,
+  };
+}
 
 export const taskPlan: TaskPlan = {
   turn_id: "turn-storybook",

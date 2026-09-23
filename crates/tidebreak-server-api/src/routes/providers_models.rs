@@ -174,25 +174,26 @@ pub(super) async fn validate_model_selection(
     Ok(policy.key)
 }
 
+/// Why a selection names no model, and what to do about it. A model a release
+/// removed from the built-in list is still served until its provider retires
+/// it, so every case a reader can fix points at adding it as a custom model.
 fn unknown_model_message(value: &str) -> String {
     match crate::model_registry::parse_selection_key(value) {
-        Some((ProviderKind::OpenaiCompatible, id)) => {
-            format!("model `{id}` is not configured under OpenAI-compatible models")
-        }
-        Some((ProviderKind::Openrouter, id)) => {
-            format!("model `{id}` is not configured under OpenRouter models")
-        }
-        Some((ProviderKind::Ollama, id)) => {
-            format!("model `{id}` is not configured under Ollama models")
+        // The gateway's models come from its own catalog; none is added here.
+        Some((ProviderKind::ModelGateway, id)) => {
+            format!("model `{id}` is not in the model gateway's catalog")
         }
         Some((provider, id)) => {
-            format!("model `{id}` is not registered for provider `{provider}`")
+            let name = provider.display_name();
+            format!(
+                "model `{id}` is not a built-in or custom {name} model; add it as a custom model under {name} in Settings > Providers"
+            )
         }
         None if value.contains(crate::model_registry::MODEL_KEY_SEPARATOR) => {
-            format!("model selection `{value}` names an unknown provider or model")
+            format!("model selection `{value}` names an unknown provider")
         }
         None => format!(
-            "model `{value}` is not registered; configure custom models under OpenAI-compatible settings first"
+            "model `{value}` is not registered; add it as a custom model under its provider in Settings > Providers first"
         ),
     }
 }
@@ -420,6 +421,25 @@ pub async fn delete_provider_credential(
         providers::clear_chatgpt_reconnect_required(&*state.store).await?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /providers/{kind}/models/discover` — list the chat models a provider
+/// serves, read with the credential already saved for it.
+///
+/// Adds nothing: the reader picks what to keep, and saving goes through
+/// `PUT /providers/{kind}` and its ordinary validation. The key never leaves
+/// the server.
+pub async fn post_provider_models_discover(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+) -> Result<Json<crate::model_discovery::DiscoveredModels>, ServerError> {
+    let kind = ProviderKind::parse(&kind)
+        .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
+    let policy = state.managed_policy()?;
+    Ok(Json(
+        crate::model_discovery::discover_models(&*state.store, &*state.secrets, kind, &policy)
+            .await?,
+    ))
 }
 
 /// `POST /providers/openai/chatgpt/sign-in` — start ChatGPT OAuth; returns the

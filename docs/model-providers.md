@@ -38,8 +38,8 @@ policy, not as unfinished work:
    rather than lighting every feature everywhere. Ollama is a named local
    runtime on this tier: no key for a default daemon, custom model rows, and
    the same flatten-on-switch rule as every other compatible route. OpenRouter
-   is a named hosted aggregator: a fixed endpoint, an API key, custom model
-   rows, and the same conservative text-only contract.
+   is a named hosted aggregator: a fixed endpoint, an API key, and custom
+   model rows.
 
 Refuse to invent per-provider special cases below the router. If a feature
 cannot be expressed through the existing `ModelProvider` trait plus registry
@@ -50,6 +50,35 @@ The failure mode to avoid is not "we support multiple providers." It is
 "we implied every feature works identically on every provider." Honest
 capability flags make the cheap version possible: a provider may be
 legitimately partial without lying to the user.
+
+## Custom models and discovery
+
+Every direct provider takes custom model rows beside its curated ones. Only
+the Model Gateway does not, because its catalog comes from the gateway. A
+custom row is the reader's claim about a model's contract, so validation holds
+it to what the route can actually carry:
+
+- Image input is allowed on every route, because every adapter sends images.
+- Reasoning-effort levels are limited to the ones the provider's route sends
+  (`ProviderKind::custom_reasoning_efforts`). Anthropic reasoning needs a
+  Claude 4.6 or later id, the first generation the adapter sends adaptive
+  thinking to.
+- Structured output counts only where the provider's route enforces a schema
+  (`ProviderKind::enforces_structured_output`).
+- A custom id may not shadow a curated id of the same provider. When a catalog
+  update curates an id a reader already added, the curated row wins in the
+  catalog and in bare-id resolution. The provider list leaves the saved row
+  out of `models` and names it in `replaced_by_built_in`, and the next save
+  to that provider drops it, so the row never blocks a save.
+- A configured row reads tolerantly, like every REST record, and a field
+  added to it serializes only when it differs from its default. The update
+  body still refuses a row key the server does not know.
+
+Find models (`POST /providers/{kind}/models/discover`) reads the provider's
+own model listing with the saved key, on the server. The response carries
+model data only: a row that echoes the key is dropped, and an error names the
+status but never repeats the provider's body. Discovery proposes rows; saving
+them goes through the same validation as a row typed by hand.
 
 ## Flatten-on-switch
 

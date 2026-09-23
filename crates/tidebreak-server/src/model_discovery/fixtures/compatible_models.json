@@ -1,0 +1,33 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "meta-llama/Llama-3.3-70B-Instruct",
+      "object": "model",
+      "created": 1790000000,
+      "owned_by": "vllm",
+      "root": "meta-llama/Llama-3.3-70B-Instruct",
+      "parent": null,
+      "max_model_len": 131072,
+      "permission": []
+    },
+    {
+      "id": "sql-lora",
+      "object": "model",
+      "created": 1790000000,
+      "owned_by": "vllm",
+      "root": "/adapters/sql-lora",
+      "parent": "meta-llama/Llama-3.3-70B-Instruct",
+      "max_model_len": null,
+      "permission": []
+    },
+    {
+      "id": "BAAI/bge-m3-embed",
+      "object": "model",
+      "created": 1790000000,
+      "owned_by": "vllm",
+      "max_model_len": 8192,
+      "permission": []
+    }
+  ]
+}

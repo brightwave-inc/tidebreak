@@ -69,6 +69,8 @@ pub mod memory_capture;
 pub mod memory_sweep;
 #[doc(hidden)]
 pub mod memory_tool;
+/// Listing the models a direct provider serves, with its saved credential.
+pub mod model_discovery;
 pub mod model_registry;
 pub mod model_roles;
 pub mod obo_gateway;
