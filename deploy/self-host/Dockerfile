@@ -26,7 +26,7 @@
 # tab and the desktop app run one renderer against one API. Node 22 and pnpm
 # 10 match the desktop UI lane in .github/workflows/ci.yml. Digest-pinned
 # like the stages below: this is node:22-bookworm as of 2026-09-02.
-FROM node:22-bookworm@sha256:8a34c4ab3ea2c5cd194f07e317b2a8f09461d3c8b05c4e34c8ccd56d56024c4d AS node-runtime
+FROM node:25-bookworm@sha256:78839ac448c23517f8eab2e8f7943d9b4f73979eb7f8bed2c73dbf72ff869e7b AS node-runtime
 
 FROM node-runtime AS renderer
 WORKDIR /src/crates/tidebreak-desktop/ui
