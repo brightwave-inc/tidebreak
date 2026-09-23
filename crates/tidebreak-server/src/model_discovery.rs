@@ -605,8 +605,9 @@ fn parse_openai(list: IdList) -> Vec<DiscoveredModel> {
 ///
 /// The listing carries no capability fields, so the id is all there is. It
 /// keeps the GPT and o-series families, including fine-tunes of them, and
-/// drops the audio, image, video, embedding, moderation, and legacy
-/// completion models the same listing contains.
+/// drops the audio, voice, image, video, embedding, moderation, and legacy
+/// completion models the same listing contains. `search` also catches the
+/// deep research models, which answer only with their own research tools.
 fn openai_text_model(id: &str) -> bool {
     const FAMILIES: &[&str] = &[
         "gpt-", "o1", "o3", "o4", "chatgpt-", "codex-", "ft:gpt-", "ft:o",
@@ -618,6 +619,7 @@ fn openai_text_model(id: &str) -> bool {
         "transcribe",
         "audio",
         "realtime",
+        "live",
         "image",
         "dall-e",
         "moderation",

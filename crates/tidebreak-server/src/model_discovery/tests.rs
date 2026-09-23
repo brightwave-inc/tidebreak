@@ -242,6 +242,67 @@ fn compatible_listing_reads_the_vllm_context_and_skips_embedders() {
 }
 
 #[test]
+fn openai_listing_keeps_the_text_models_the_responses_api_serves() {
+    let models = parse_openai(fixture(include_str!("fixtures/openai_models.json")));
+    // Voice, speech, transcription, image, video, embedding, moderation,
+    // search, deep research, and legacy completion models share the listing
+    // and are dropped, and so is a row without an id.
+    assert_eq!(
+        ids(&models),
+        [
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-cyber",
+            "gpt-5.5",
+            "o3",
+            "codex-mini-latest",
+            "ft:gpt-5.4-mini:acme::B7x2Qd9k",
+        ]
+    );
+    // The listing names models and nothing more, so every limit is left for
+    // the reader to fill in.
+    let sol = find(&models, "gpt-6-sol");
+    assert_eq!(sol.display_name, None);
+    assert_eq!(sol.context_window, None);
+    assert_eq!(sol.image_input, None);
+    assert_eq!(sol.supports_reasoning, None);
+}
+
+#[test]
+fn fireworks_listing_keeps_serverless_chat_models() {
+    let (models, next) =
+        parse_fireworks_page(fixture(include_str!("fixtures/fireworks_models.json")));
+    assert_eq!(next.as_deref(), Some("page-2"));
+    // Embedding, image, and speech models and a row without a name are
+    // dropped: only a model with a chat template takes Chat Completions.
+    assert_eq!(
+        ids(&models),
+        [
+            "accounts/fireworks/models/glm-5p3",
+            "accounts/fireworks/models/qwen3p8-max",
+            "accounts/fireworks/models/deepseek-v4p1-flash",
+        ]
+    );
+    let glm = find(&models, "accounts/fireworks/models/glm-5p3");
+    assert_eq!(glm.display_name.as_deref(), Some("GLM-5.3"));
+    assert_eq!(glm.context_window, Some(1_040_000));
+    assert_eq!(glm.image_input, Some(false));
+    assert_eq!(glm.supports_tools, Some(true));
+    // The listing reports neither reasoning nor an output limit.
+    assert_eq!(glm.supports_reasoning, None);
+    assert_eq!(glm.max_output_tokens, None);
+    let flash = find(&models, "accounts/fireworks/models/deepseek-v4p1-flash");
+    assert_eq!(flash.image_input, Some(true));
+    assert_eq!(flash.supports_tools, Some(false));
+
+    assert_eq!(
+        fireworks_control_root("https://api.fireworks.ai/inference/v1/"),
+        "https://api.fireworks.ai"
+    );
+}
+
+#[test]
 fn finishing_cleans_rows_marks_known_ids_and_never_echoes_the_key() {
     let key = stand_in_key("finish");
     let key = key.as_str();
@@ -382,8 +443,9 @@ async fn anthropic_discovery_pages_through_the_listing_with_its_own_headers() {
         )
         .with_state(seen.clone());
     let base = serve(router).await;
+    let key = stand_in_key("anthropic");
 
-    let found = discover_at(ProviderKind::Anthropic, &base, Some("sk-ant-test"), &[])
+    let found = discover_at(ProviderKind::Anthropic, &base, Some(&key), &[])
         .await
         .unwrap();
 
@@ -392,7 +454,7 @@ async fn anthropic_discovery_pages_through_the_listing_with_its_own_headers() {
     let requests = seen.requests();
     assert_eq!(requests.len(), 2, "one request per page");
     for (_, headers) in requests {
-        assert_eq!(header(&headers, "x-api-key"), Some("sk-ant-test"));
+        assert_eq!(header(&headers, "x-api-key"), Some(key.as_str()));
         assert_eq!(header(&headers, "anthropic-version"), Some("2023-06-01"));
         assert_eq!(header(&headers, "authorization"), None);
     }
@@ -424,6 +486,78 @@ async fn gemini_discovery_sends_its_key_in_its_own_header() {
     assert_eq!(requests.len(), 1, "an empty page token ends the listing");
     assert_eq!(header(&requests[0].1, "x-goog-api-key"), Some("gemini-key"));
     assert_eq!(header(&requests[0].1, "authorization"), None);
+}
+
+#[tokio::test]
+async fn fireworks_discovery_pages_through_the_serverless_listing_beside_the_chat_root() {
+    let seen = Seen::default();
+    let router = Router::new()
+        .route(
+            "/v1/accounts/fireworks/models",
+            get(
+                |State(seen): State<Seen>,
+                 Query(query): Query<BTreeMap<String, String>>,
+                 headers: HeaderMap| async move {
+                    seen.record(&serde_json::to_string(&query).unwrap(), &headers);
+                    match query.get("pageToken").map(String::as_str) {
+                        None => include_str!("fixtures/fireworks_models.json").to_owned(),
+                        Some("page-2") => serde_json::json!({
+                            "models": [{
+                                "name": "accounts/fireworks/models/kimi-k3",
+                                "displayName": "Kimi K3",
+                                "kind": "HF_BASE_MODEL",
+                                "conversationConfig": { "style": "jinja" },
+                                "contextLength": 262144,
+                                "supportsImageInput": true,
+                                "supportsTools": true,
+                                "supportsServerless": true
+                            }]
+                        })
+                        .to_string(),
+                        Some(other) => panic!("unexpected page token {other}"),
+                    }
+                },
+            ),
+        )
+        .with_state(seen.clone());
+    let base = serve(router).await;
+    let key = stand_in_key("fireworks");
+
+    // The saved endpoint is the Chat Completions root; the listing lives on
+    // the control plane beside it.
+    let found = discover_at(
+        ProviderKind::Fireworks,
+        &format!("{base}/inference/v1"),
+        Some(&key),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        ids(&found.models),
+        [
+            "accounts/fireworks/models/deepseek-v4p1-flash",
+            "accounts/fireworks/models/glm-5p3",
+            "accounts/fireworks/models/kimi-k3",
+            "accounts/fireworks/models/qwen3p8-max",
+        ]
+    );
+    assert!(find(&found.models, "accounts/fireworks/models/glm-5p3").built_in);
+    let requests = seen.requests();
+    let queries: Vec<&str> = requests.iter().map(|(query, _)| query.as_str()).collect();
+    assert_eq!(
+        queries,
+        [
+            r#"{"filter":"supports_serverless=true","pageSize":"200"}"#,
+            r#"{"filter":"supports_serverless=true","pageSize":"200","pageToken":"page-2"}"#,
+        ],
+        "every page asks for serverless models only"
+    );
+    let bearer = format!("Bearer {key}");
+    for (_, headers) in &requests {
+        assert_eq!(header(headers, "authorization"), Some(bearer.as_str()));
+    }
 }
 
 #[tokio::test]
