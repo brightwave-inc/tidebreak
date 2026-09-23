@@ -7,7 +7,7 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { fn } from "storybook/test";
+import { fn, userEvent, within } from "storybook/test";
 import { ChatHeaderTitle } from "@/ChatHeaderTitle";
 import { RouteFrame } from "@/RouteFrame";
 import { AppSidebar } from "@/sidebar/AppSidebar";
@@ -232,6 +232,18 @@ export const CollapsedMacWork: Story = {
 
 export const CollapseAndRestoreActiveRoute: Story = {
   args: { scenario: "narrow" },
+};
+
+/** A project's row menu, where Instructions opens the project's brief. */
+export const ProjectMenu: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", {
+        name: "Actions for Desktop release",
+      }),
+    );
+  },
 };
 
 export const NewProject: Story = {

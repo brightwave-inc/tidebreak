@@ -90,6 +90,36 @@ describe("Personal instructions", () => {
     );
   });
 
+  it("sends saves in the order you made them", async () => {
+    const api = client();
+    let release = () => {};
+    api.putPersonalInstructions.mockImplementationOnce(
+      (instructions: string) =>
+        new Promise((resolve) => {
+          release = () => resolve({ instructions });
+        }),
+    );
+    renderPanel(api);
+    const field = await screen.findByRole("textbox", {
+      name: "Personal instructions",
+    });
+    fireEvent.change(field, { target: { value: "First draft." } });
+    fireEvent.blur(field);
+    fireEvent.change(field, { target: { value: "Second draft." } });
+    fireEvent.blur(field);
+    await waitFor(() =>
+      expect(api.putPersonalInstructions).toHaveBeenCalledTimes(1),
+    );
+    release();
+    await waitFor(() =>
+      expect(api.putPersonalInstructions).toHaveBeenCalledTimes(2),
+    );
+    expect(
+      api.putPersonalInstructions.mock.calls.map(([text]) => text),
+    ).toEqual(["First draft.", "Second draft."]);
+    expect(field).toHaveProperty("value", "Second draft.");
+  });
+
   it("keeps your text and says why when a save fails", async () => {
     const api = client();
     api.putPersonalInstructions.mockRejectedValueOnce(
@@ -118,8 +148,10 @@ describe("Personal instructions", () => {
     });
     fireEvent.change(field, { target: { value: "Use metric units." } });
     view.unmount();
-    expect(api.putPersonalInstructions).toHaveBeenCalledWith(
-      "Use metric units.",
+    await waitFor(() =>
+      expect(api.putPersonalInstructions).toHaveBeenCalledWith(
+        "Use metric units.",
+      ),
     );
   });
 

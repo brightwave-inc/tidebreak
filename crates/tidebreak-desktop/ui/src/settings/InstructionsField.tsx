@@ -28,9 +28,9 @@ const number = new Intl.NumberFormat("en-US");
  * text over the cap.
  *
  * The field keeps its own draft, so a save that finishes while you type never
- * overwrites newer text. Saves run one at a time, newest last. A change that
- * never lost focus, because the page closed around it, saves once more on
- * the way out.
+ * overwrites newer text. Saves run one at a time in the order you made them,
+ * so an older save can never land after a newer one. A change that never lost
+ * focus, because the page closed around it, saves once more on the way out.
  */
 export function InstructionsField({
   label,
@@ -58,10 +58,21 @@ export function InstructionsField({
   const draftRef = useRef(draft);
   const storedRef = useRef(saved);
   const onSaveRef = useRef(onSave);
-  const inFlight = useRef(false);
-  const queued = useRef<string | null>(null);
+  const queue = useRef<Promise<void>>(Promise.resolve());
+  const pendingSaves = useRef(0);
   const mounted = useRef(true);
   onSaveRef.current = onSave;
+
+  /** Run a save after every save already queued, skipping text already stored. */
+  function enqueue(text: string): Promise<void> {
+    const run = queue.current.then(async () => {
+      if (text === storedRef.current) return;
+      await onSaveRef.current(text);
+      storedRef.current = text;
+    });
+    queue.current = run.catch(() => {});
+    return run;
+  }
 
   // Follow the stored value while the reader has not edited away from it.
   useEffect(() => {
@@ -81,7 +92,7 @@ export function InstructionsField({
         pending !== storedRef.current &&
         instructionsBytes(pending) <= MAX_INSTRUCTIONS_BYTES
       ) {
-        void onSaveRef.current(pending).catch(() => {});
+        void enqueue(pending).catch(() => {});
       }
     };
   }, []);
@@ -93,22 +104,11 @@ export function InstructionsField({
     ) {
       return;
     }
-    if (inFlight.current) {
-      queued.current = text;
-      return;
-    }
-    inFlight.current = true;
+    pendingSaves.current += 1;
     setSaving(true);
     setError(null);
     try {
-      let next: string | null = text;
-      while (next !== null) {
-        queued.current = null;
-        await onSaveRef.current(next);
-        storedRef.current = next;
-        const after: string | null = queued.current;
-        next = after !== null && after !== next ? after : null;
-      }
+      await enqueue(text);
     } catch (caught) {
       if (mounted.current) {
         setError(
@@ -116,8 +116,8 @@ export function InstructionsField({
         );
       }
     } finally {
-      inFlight.current = false;
-      if (mounted.current) setSaving(false);
+      pendingSaves.current -= 1;
+      if (mounted.current && pendingSaves.current === 0) setSaving(false);
     }
   }
 
