@@ -67,7 +67,10 @@ use crate::storage::{
 };
 use crate::PermissionMode;
 
+mod connection;
 mod ops;
+
+use connection::StoreConnection;
 
 /// Map any SeaORM failure into an [`AgentError::Store`].
 fn store_err(err: impl std::fmt::Display) -> AgentError {
@@ -75,9 +78,16 @@ fn store_err(err: impl std::fmt::Display) -> AgentError {
 }
 
 /// A [`Store`] backed by a SeaORM connection (SQLite today, Postgres-ready).
+///
+/// A SQLite store opened with more than one connection runs every write on
+/// one writer connection and plain reads on a separate read pool; see
+/// [`connection`].
 #[derive(Clone)]
 pub struct DbStore {
-    conn: DatabaseConnection,
+    conn: StoreConnection,
+    /// Code journal appends waiting for the SQLite writer, shared by every
+    /// clone of this store.
+    journal: std::sync::Arc<ops::code::journal_writer::JournalWriter>,
 }
 
 /// Projected row for metadata-only document listings. Keeping this distinct
@@ -99,19 +109,43 @@ struct DocumentSummaryRow {
     updated_at: chrono::DateTime<Utc>,
 }
 
-/// How long a SQLite writer waits for the write lock before it gives up.
+/// How long a SQLite connection waits for a lock before it gives up.
 ///
-/// sqlx defaults to 5s, which a real turn write can exceed while a fleet runs;
-/// waiting is better than surfacing "database is locked" to the caller.
+/// Writers in this process never wait here: they queue for the one writer
+/// connection instead. The timeout covers a writer in another process (the
+/// CLI opening the same profile, say) holding the write lock, and the rare
+/// moments a WAL reader must wait. sqlx defaults to 5s; waiting is better than
+/// surfacing "database is locked" to the caller.
 #[cfg(feature = "sqlite")]
 const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Apply the write policy that a `PRAGMA` at connect time cannot.
+/// Whether `options` opens a SQLite database.
+fn is_sqlite(options: &ConnectOptions) -> bool {
+    options.get_url().starts_with("sqlite:")
+}
+
+/// The size of the read pool a SQLite store opens beside its writer, or
+/// `None` when the store keeps one pool.
+///
+/// A file-backed SQLite store asked for more than one connection splits
+/// them: one writer, and a read pool of the requested size. An in-memory
+/// database cannot split, because each new connection to it would open an
+/// empty database of its own.
+fn sqlite_read_pool_size(options: &ConnectOptions) -> Option<u32> {
+    let url = options.get_url();
+    if !is_sqlite(options) || url.contains(":memory:") || url.contains("mode=memory") {
+        return None;
+    }
+    options.get_max_connections().filter(|size| *size > 1)
+}
+
+/// Apply the write policy that a `PRAGMA` at connect time cannot, and size
+/// the writer pool.
 ///
 /// Constraint: `synchronous` and `busy_timeout` are per-connection settings,
-/// so a pool larger than one connection only honours them if they ride the
-/// connect options. `journal_mode` is the exception — it is a persistent
-/// file-level setting, which is why WAL stays a one-shot `PRAGMA` below.
+/// so they ride the connect options. `journal_mode` is the exception — it is
+/// a persistent file-level setting, which is why WAL stays a one-shot
+/// `PRAGMA` below.
 ///
 /// `synchronous=NORMAL` is the standard WAL pairing: WAL already keeps a
 /// commit durable across a process crash, and the default `FULL` buys
@@ -119,10 +153,21 @@ const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// macOS, and it lengthens every write while SQLite's single writer is the
 /// contended resource (#2316).
 ///
-/// SeaORM only applies this hook to the SQLite driver, so it is a no-op for a
-/// Postgres self-host.
+/// With a read pool beside it, the writer pool holds exactly one connection.
+/// No SQLite connection is pinged before use: it lives in this process and
+/// cannot go stale the way a socket can, and the ping would put a round trip
+/// on the writer's critical path.
+///
+/// SeaORM only applies the connection hook to the SQLite driver, so it is a
+/// no-op for a Postgres self-host.
 #[cfg(feature = "sqlite")]
-fn with_sqlite_write_policy(mut options: ConnectOptions) -> ConnectOptions {
+fn with_sqlite_write_policy(mut options: ConnectOptions, with_read_pool: bool) -> ConnectOptions {
+    if is_sqlite(&options) {
+        if with_read_pool {
+            options.max_connections(1).min_connections(1);
+        }
+        options.test_before_acquire(false);
+    }
     options.map_sqlx_sqlite_opts(|sqlite| {
         sqlite
             .synchronous(sea_orm::sqlx::sqlite::SqliteSynchronous::Normal)
@@ -132,11 +177,65 @@ fn with_sqlite_write_policy(mut options: ConnectOptions) -> ConnectOptions {
 }
 
 #[cfg(not(feature = "sqlite"))]
-fn with_sqlite_write_policy(options: ConnectOptions) -> ConnectOptions {
+fn with_sqlite_write_policy(options: ConnectOptions, _with_read_pool: bool) -> ConnectOptions {
     options
 }
 
+/// Open the `query_only` read pool beside a SQLite writer, sized by the
+/// caller's `max_connections` and warmed to its `min_connections`.
+#[cfg(feature = "sqlite")]
+async fn connect_sqlite_read_pool(
+    mut options: ConnectOptions,
+    size: Option<u32>,
+) -> Result<Option<DatabaseConnection>> {
+    let Some(size) = size else {
+        return Ok(None);
+    };
+    let warm = options.get_min_connections().unwrap_or(1).clamp(1, size);
+    options
+        .max_connections(size)
+        .min_connections(warm)
+        .test_before_acquire(false);
+    options.map_sqlx_sqlite_opts(sqlite_read_policy);
+    Database::connect(options)
+        .await
+        .map(Some)
+        .map_err(store_err)
+}
+
+#[cfg(not(feature = "sqlite"))]
+async fn connect_sqlite_read_pool(
+    _options: ConnectOptions,
+    _size: Option<u32>,
+) -> Result<Option<DatabaseConnection>> {
+    Ok(None)
+}
+
+/// A read-pool connection refuses to write, so a statement routed to it by
+/// mistake fails loudly instead of racing the writer.
+#[cfg(feature = "sqlite")]
+fn sqlite_read_policy(
+    sqlite: sea_orm::sqlx::sqlite::SqliteConnectOptions,
+) -> sea_orm::sqlx::sqlite::SqliteConnectOptions {
+    sqlite
+        .busy_timeout(SQLITE_BUSY_TIMEOUT)
+        .pragma("query_only", "ON")
+}
+
 impl DbStore {
+    fn from_connection(conn: StoreConnection) -> Self {
+        Self {
+            conn,
+            journal: std::sync::Arc::default(),
+        }
+    }
+
+    /// A store over one connection a test opened itself.
+    #[cfg(test)]
+    fn over(conn: DatabaseConnection) -> Self {
+        Self::from_connection(StoreConnection::single(conn))
+    }
+
     /// Connect to `url` and run migrations. For a SQLite file that should be
     /// created if missing, include `?mode=rwc` (e.g.
     /// `sqlite:///path/tidebreak.db?mode=rwc`).
@@ -148,19 +247,22 @@ impl DbStore {
     ///
     /// Ordinary fixtures use one connection so nextest does not create and tear
     /// down an oversized pool per process. Tests that exercise concurrent
-    /// claims can request a larger pool explicitly.
+    /// claims can request a larger pool explicitly, and get the production
+    /// shape: one writer, and a `query_only` read pool of that size.
     #[cfg(any(test, feature = "test-util"))]
     #[doc(hidden)]
     pub async fn connect_test_sqlite(url: &str, max_connections: u32) -> Result<Self> {
+        let with_read_pool = max_connections > 1;
         let mut options = ConnectOptions::new(url);
         options
-            .max_connections(max_connections.max(1))
-            .min_connections(1);
+            .max_connections(1)
+            .min_connections(1)
+            .test_before_acquire(false);
         // A single connection never contends with itself, so the rollback
         // journal is the cheapest choice. A pooled fixture mirrors production
-        // and uses WAL so readers and a writer interleave the way they do in
+        // and uses WAL so readers and the writer interleave the way they do in
         // the host. With synchronous off, WAL costs nothing extra here.
-        let journal_mode = if max_connections > 1 {
+        let journal_mode = if with_read_pool {
             sea_orm::sqlx::sqlite::SqliteJournalMode::Wal
         } else {
             sea_orm::sqlx::sqlite::SqliteJournalMode::Delete
@@ -171,8 +273,16 @@ impl DbStore {
                 .synchronous(sea_orm::sqlx::sqlite::SqliteSynchronous::Off)
                 .busy_timeout(SQLITE_BUSY_TIMEOUT)
         });
-        let conn = Database::connect(options).await.map_err(store_err)?;
-        Ok(Self { conn })
+        let write = Database::connect(options).await.map_err(store_err)?;
+        let mut read = ConnectOptions::new(url);
+        read.max_connections(max_connections).min_connections(1);
+        let conn = match connect_sqlite_read_pool(read, with_read_pool.then_some(max_connections))
+            .await?
+        {
+            Some(read) => StoreConnection::split(write, read),
+            None => StoreConnection::single(write),
+        };
+        Ok(Self::from_connection(conn))
     }
 
     /// Clone the migrated test template into `url` with one connection.
@@ -231,8 +341,13 @@ impl DbStore {
         options: ConnectOptions,
         backups: Option<&std::path::Path>,
     ) -> Result<Self> {
-        let options = with_sqlite_write_policy(options);
-        let conn = Database::connect(options).await.map_err(store_err)?;
+        let read_pool = sqlite_read_pool_size(&options);
+        let conn = Database::connect(with_sqlite_write_policy(
+            options.clone(),
+            read_pool.is_some(),
+        ))
+        .await
+        .map_err(store_err)?;
         let sqlite = conn.get_database_backend() == sea_orm::DatabaseBackend::Sqlite;
         // WAL lets a reader (e.g. the UI listing chats) proceed concurrently
         // with a writer (a turn appending messages). SQLite-only; it's a
@@ -271,7 +386,13 @@ impl DbStore {
         migration::Migrator::up(&conn, None)
             .await
             .map_err(store_err)?;
-        Ok(Self { conn })
+        // Readers open only once the schema is current, so none of them caches
+        // a statement against a table a migration was about to change.
+        let conn = match connect_sqlite_read_pool(options, read_pool).await? {
+            Some(read) => StoreConnection::split(conn, read),
+            None => StoreConnection::single(conn),
+        };
+        Ok(Self::from_connection(conn))
     }
 
     /// Close the connection pool, releasing every database file handle before
