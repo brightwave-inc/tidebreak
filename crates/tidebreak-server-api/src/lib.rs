@@ -35,10 +35,10 @@ pub use core::{
     output_files, register_pending_pairing, register_replacing_pairing, rehome_configured_secrets,
     rest_executor, sandbox_container_run, sandbox_docker, secret_rehome, voice_transcription,
     web_search, workspace_config, AppState, BrowserChannelBinding, BrowserRuntime,
-    BrowserRuntimeError, BrowserRuntimeScope, DeprovisionTarget, DurableOperationStore,
-    LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus, NativeChannelBinding,
-    NativeRuntime, NativeRuntimeError, NativeRuntimeScope, PairingError, PairingHandle,
-    PendingRegistration, Server, ServerError, UpdateQuiesce,
+    BrowserRuntimeError, BrowserRuntimeScope, ClientExecutionWake, DeprovisionTarget,
+    DurableOperationStore, LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus,
+    NativeChannelBinding, NativeRuntime, NativeRuntimeError, NativeRuntimeScope, PairingError,
+    PairingHandle, PendingRegistration, Server, ServerError, UpdateQuiesce,
 };
 
 pub mod routes;

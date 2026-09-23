@@ -82,4 +82,9 @@ pub trait SandboxHost: Send + Sync {
     fn publish_event(&self, session_id: SessionId, event: SequencedAgentEvent) {
         let _ = (session_id, event);
     }
+
+    /// Tell the host that a run parked work only the host can execute, such
+    /// as a delegated file read. A latency hint only: the host's executor
+    /// also finds the work on its own slower sweep.
+    fn host_execution_pending(&self) {}
 }

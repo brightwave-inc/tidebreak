@@ -3090,6 +3090,19 @@ pub trait Store: Send + Sync {
         chat_id: SessionId,
     ) -> Result<Vec<ToolCallRecord>>;
 
+    /// [`Store::list_pending_client_tool_calls`] across every conversation.
+    ///
+    /// A native executor sweeps with this, so a store should answer it
+    /// without a read per conversation. The default does read per
+    /// conversation, which is only fit for small test stores.
+    async fn list_all_pending_client_tool_calls(&self) -> Result<Vec<ToolCallRecord>> {
+        let mut pending = Vec::new();
+        for chat in self.list_chats().await? {
+            pending.extend(self.list_pending_client_tool_calls(chat.id).await?);
+        }
+        Ok(pending)
+    }
+
     /// List only validated renderer-safe foreground question cards.
     async fn list_pending_user_questions(
         &self,

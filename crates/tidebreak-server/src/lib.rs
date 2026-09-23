@@ -318,6 +318,7 @@ impl NativeChannelBinding {
         &self.bridge_command
     }
 }
+pub use bus::ClientExecutionWake;
 pub use error::ServerError;
 pub use pairing::{
     deprovision_provisioned_gateway, deprovision_target, register_pending_pairing,
@@ -379,6 +380,8 @@ pub struct Server {
     token: Arc<str>,
     client_executor_token: Arc<str>,
     store: Arc<dyn Store>,
+    /// Wakes native executors when client-executed work may be pending.
+    client_execution_wake: bus::ClientExecutionWake,
     /// The live exec staging registry, handed to native embedders so the host
     /// folder tools answer from the same per-turn copy exec writes into.
     code_execution: Arc<code_execution::ConfiguredExecProvider>,
@@ -528,6 +531,14 @@ impl Server {
     /// boundary and hand back chat turn leases before replacing the bundle.
     pub fn update_quiesce(&self) -> UpdateQuiesce {
         self.update_quiesce.clone()
+    }
+
+    /// A wake for one native executor loop.
+    ///
+    /// It fires when client-executed work may have become pending, so an
+    /// executor can sleep between slow safety sweeps instead of polling.
+    pub fn client_execution_wake(&self) -> ClientExecutionWake {
+        self.client_execution_wake.clone()
     }
 
     /// Run the accept loop until the process exits.
@@ -1750,6 +1761,7 @@ async fn bind_inner(
         ))
     };
     let server_store = state.store.clone();
+    let client_execution_wake = state.events.client_execution_wake();
     let data_dir = state.config.data_dir.clone();
     let mcp_runtime = state.mcp.clone();
     let gateway_runtime = state.gateway.clone();
@@ -1822,6 +1834,7 @@ async fn bind_inner(
         token,
         client_executor_token,
         store: server_store,
+        client_execution_wake,
         code_execution,
         mcp: mcp_runtime,
         gateway: gateway_runtime,

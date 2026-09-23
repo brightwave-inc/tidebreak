@@ -207,6 +207,10 @@ impl runtime::GatewayMcpControl for McpControlAdapter {
     async fn refresh_connected_app_roster(&self) {
         self.0.refresh_connected_app_roster().await;
     }
+
+    async fn gateway_session_changed(&self) {
+        self.0.gateway_session_changed().await;
+    }
 }
 
 struct PairingCommitAdapter {

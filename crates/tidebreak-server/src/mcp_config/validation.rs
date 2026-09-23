@@ -241,15 +241,10 @@ pub(super) fn connection_diagnostic(
                 and allows this kind of access."
             .to_string();
     }
-    if let Some(name) = definition
-        .env_from
-        .iter()
-        .chain(&definition.bearer_token_env)
-        .find(|name| std::env::var_os(name).is_none())
-    {
+    if let Some(name) = missing_parent_environment(definition) {
         return missing_environment_diagnostic(
             name,
-            definition.bearer_token_env.as_deref() == Some(name.as_str()),
+            definition.bearer_token_env.as_deref() == Some(name),
         );
     }
     let detail = classified_transport_detail(error);
@@ -261,6 +256,37 @@ pub(super) fn connection_diagnostic(
     }
     "Could not initialize this server. Check its executable, arguments, and working directory."
         .to_string()
+}
+
+/// Why retrying a failed connection cannot help until something outside the
+/// supervisor changes, if that is so.
+///
+/// A signed-out gateway mount fails the same way until the next sign-in, and
+/// a server whose parent environment variable is missing fails the same way
+/// until Tidebreak restarts. Every other failure may clear on its own, such as
+/// a network outage or a server that is still starting, so it keeps retrying.
+pub(super) fn reconnect_park(
+    definition: &McpServerDefinition,
+    error: &AgentError,
+) -> Option<ReconnectPark> {
+    if crate::connectors::is_sign_in_required(error) {
+        return Some(ReconnectPark::SignIn);
+    }
+    if definition.gateway_endpoint.is_none() && missing_parent_environment(definition).is_some() {
+        return Some(ReconnectPark::Configuration);
+    }
+    None
+}
+
+/// The first parent environment variable the definition reads that this
+/// process does not have.
+fn missing_parent_environment(definition: &McpServerDefinition) -> Option<&str> {
+    definition
+        .env_from
+        .iter()
+        .chain(&definition.bearer_token_env)
+        .find(|name| std::env::var_os(name).is_none())
+        .map(String::as_str)
 }
 
 fn missing_environment_diagnostic(name: &str, bearer: bool) -> String {

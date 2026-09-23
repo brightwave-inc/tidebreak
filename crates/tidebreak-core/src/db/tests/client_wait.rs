@@ -2446,6 +2446,88 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
 }
 
 #[tokio::test]
+async fn one_sweep_lists_pending_client_work_across_chats_and_expires_lapsed_claims() {
+    let (_dir, store) = temp_store().await;
+    let first = sample_chat();
+    let second = sample_chat();
+    let lapsed = sample_chat();
+    for chat in [&first, &second, &lapsed] {
+        store.create_chat(chat).await.unwrap();
+    }
+    let created_at = DateTime::<Utc>::from_timestamp(1_700_000_030, 0).unwrap();
+    let client_call = |chat_id: SessionId| ToolCallRecord {
+        id: CallId::new(),
+        chat_id,
+        turn_id: TurnId::new(),
+        provider_id: "tu_list".into(),
+        name: "list_folder".into(),
+        arguments: serde_json::json!({}),
+        raw_arguments: None,
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        result_preview: None,
+        provider_replay: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at,
+        resolved_at: None,
+    };
+    let first_call = client_call(first.id);
+    let second_call = client_call(second.id);
+    let lapsed_call = client_call(lapsed.id);
+    let server_call = ToolCallRecord {
+        id: CallId::new(),
+        execution: ToolCallExecution::Server,
+        ..client_call(first.id)
+    };
+    for call in [&first_call, &second_call, &lapsed_call, &server_call] {
+        store.accept_tool_call(call).await.unwrap();
+    }
+    // An executor claimed this call and then went away, so its lease ran out
+    // long ago. The sweep must fail it, exactly like the per-chat read does.
+    let claimed_at = created_at + chrono::Duration::seconds(1);
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                lapsed_call.id,
+                lapsed.id,
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                claimed_at,
+                claimed_at + chrono::Duration::seconds(5),
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Claimed(_)
+    ));
+
+    let pending = store.list_all_pending_client_tool_calls().await.unwrap();
+
+    let pending_ids = pending
+        .iter()
+        .map(|call| call.id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        pending_ids,
+        std::collections::HashSet::from([first_call.id, second_call.id])
+    );
+    let expired = store
+        .list_tool_calls(lapsed.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(expired.status, ToolCallStatus::Failed);
+    assert_eq!(
+        expired.error_code.as_deref(),
+        Some("client_executor_lease_expired")
+    );
+}
+
+#[tokio::test]
 async fn concurrent_client_claim_has_one_sqlite_winner() {
     let (_dir, store) = temp_store().await;
     let store = std::sync::Arc::new(store);

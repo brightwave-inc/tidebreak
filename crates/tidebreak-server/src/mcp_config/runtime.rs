@@ -21,18 +21,88 @@ use crate::mcp_curated::{curation_for, McpCuration};
 use crate::mcp_oauth_runtime::{McpOAuthState, McpOAuthStatus};
 
 use super::types::*;
-use super::validation::{connection_diagnostic, validate_servers};
+use super::validation::{connection_diagnostic, reconnect_park, validate_servers};
 
 pub(super) struct ManagedServer {
     client: Option<McpClient>,
     health: McpHealth,
     diagnostic: Option<String>,
     resolved_command: Option<String>,
-    reconnect_backoff: Duration,
+    pub(super) reconnect: Reconnect,
     pub(super) epoch: u64,
     pub(super) reconnect_lock: Arc<Mutex<()>>,
     /// Prefetched MCP Apps view documents, keyed by declared `ui://` URI.
     ui_views: HashMap<String, UiViewDocument>,
+}
+
+/// How the supervisor retries one server that is not connected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Reconnect {
+    /// The wait before the next attempt. Each failure doubles it, up to
+    /// [`MAX_RECONNECT_BACKOFF`].
+    backoff: Duration,
+    /// Set when retrying cannot help until something outside changes. The
+    /// supervisor then leaves the server alone.
+    pub(super) parked: Option<ReconnectPark>,
+    /// The failure last written to the log, so a repeat of it stays quiet.
+    reported: Option<String>,
+}
+
+impl Default for Reconnect {
+    fn default() -> Self {
+        Self {
+            backoff: INITIAL_RECONNECT_BACKOFF,
+            parked: None,
+            reported: None,
+        }
+    }
+}
+
+impl Reconnect {
+    /// The state after a first connection failed. The caller logs that
+    /// failure itself, so it counts as reported.
+    fn after_failure(definition: &McpServerDefinition, error: &AgentError) -> Self {
+        Self {
+            backoff: INITIAL_RECONNECT_BACKOFF,
+            parked: reconnect_park(definition, error),
+            reported: Some(connection_diagnostic(definition, error)),
+        }
+    }
+
+    /// Record one more failed attempt. Returns whether it differs from the
+    /// failure last logged, which is when it earns a line in the log.
+    pub(super) fn failed(&mut self, park: Option<ReconnectPark>, diagnostic: &str) -> bool {
+        self.backoff = self.backoff.saturating_mul(2).min(MAX_RECONNECT_BACKOFF);
+        self.parked = park;
+        let changed = self.reported.as_deref() != Some(diagnostic);
+        self.reported = Some(diagnostic.to_owned());
+        changed
+    }
+
+    /// Let a server parked for want of a gateway session retry now.
+    fn resume_after_sign_in(&mut self) {
+        if self.parked == Some(ReconnectPark::SignIn) {
+            self.parked = None;
+            self.backoff = INITIAL_RECONNECT_BACKOFF;
+        }
+    }
+}
+
+/// Log a reconnect failure that differs from the last one logged for the
+/// server, saying whether the supervisor keeps retrying.
+fn report_reconnect_failure(name: &str, park: Option<ReconnectPark>, error: &AgentError) {
+    match park {
+        Some(ReconnectPark::SignIn) => tracing::warn!(
+            server = %name,
+            "MCP server needs a model-gateway sign-in; it retries after the next sign-in: {error}"
+        ),
+        Some(ReconnectPark::Configuration) => tracing::warn!(
+            server = %name,
+            "MCP server cannot start with its configuration; it retries after a settings \
+             change or a manual reconnect: {error}"
+        ),
+        None => tracing::warn!(server = %name, "MCP server reconnect failed: {error}"),
+    }
 }
 
 pub(super) struct RuntimeState {
@@ -877,7 +947,7 @@ impl McpRuntime {
                             health: McpHealth::Degraded,
                             diagnostic: Some(connection_diagnostic(definition, &error)),
                             resolved_command: None,
-                            reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                            reconnect: Reconnect::after_failure(definition, &error),
                             epoch: self.fresh_epoch(),
                             reconnect_lock: Arc::new(Mutex::new(())),
                             ui_views: HashMap::new(),
@@ -901,7 +971,7 @@ impl McpRuntime {
                         health: McpHealth::Disabled,
                         diagnostic: disabled_diagnostic(definition, lockdown),
                         resolved_command: None,
-                        reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                        reconnect: Reconnect::default(),
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
                         ui_views: HashMap::new(),
@@ -916,7 +986,7 @@ impl McpRuntime {
                     health: McpHealth::Healthy,
                     diagnostic: None,
                     resolved_command: super::stdio::resolved_display(definition).await,
-                    reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                    reconnect: Reconnect::default(),
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views,
@@ -997,7 +1067,7 @@ impl McpRuntime {
                     health: McpHealth::Disabled,
                     diagnostic: disabled_diagnostic(definition, lockdown),
                     resolved_command: None,
-                    reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                    reconnect: Reconnect::default(),
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views: HashMap::new(),
@@ -1007,7 +1077,7 @@ impl McpRuntime {
                     health: McpHealth::Healthy,
                     diagnostic: None,
                     resolved_command: super::stdio::resolved_display(definition).await,
-                    reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                    reconnect: Reconnect::default(),
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views,
@@ -1025,7 +1095,7 @@ impl McpRuntime {
                         health: McpHealth::Degraded,
                         diagnostic: Some(connection_diagnostic(definition, &error)),
                         resolved_command: None,
-                        reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                        reconnect: Reconnect::after_failure(definition, &error),
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
                         ui_views: HashMap::new(),
@@ -1107,7 +1177,7 @@ impl McpRuntime {
                     health: McpHealth::Healthy,
                     diagnostic: None,
                     resolved_command: super::stdio::resolved_display(definition).await,
-                    reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                    reconnect: Reconnect::default(),
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views,
@@ -1117,7 +1187,7 @@ impl McpRuntime {
                     health: McpHealth::Disabled,
                     diagnostic: disabled_diagnostic(definition, lockdown),
                     resolved_command: None,
-                    reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                    reconnect: Reconnect::default(),
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
                     ui_views: HashMap::new(),
@@ -1133,7 +1203,7 @@ impl McpRuntime {
                         health: McpHealth::Degraded,
                         diagnostic: Some(connection_diagnostic(definition, &error)),
                         resolved_command: None,
-                        reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                        reconnect: Reconnect::after_failure(definition, &error),
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
                         ui_views: HashMap::new(),
@@ -1554,7 +1624,7 @@ impl McpRuntime {
                         health: McpHealth::Initializing,
                         diagnostic: None,
                         resolved_command: None,
-                        reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                        reconnect: Reconnect::default(),
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
                         ui_views: HashMap::new(),
@@ -1564,7 +1634,10 @@ impl McpRuntime {
                 server.diagnostic = None;
                 server.resolved_command = super::stdio::resolved_display(&definition).await;
                 server.ui_views = ui_views;
-                server.reconnect_backoff = INITIAL_RECONNECT_BACKOFF;
+                if server.reconnect.reported.is_some() {
+                    tracing::info!(server = %name, "MCP server reconnected");
+                }
+                server.reconnect = Reconnect::default();
                 server.epoch = self.fresh_epoch();
                 let registry = self.registry_for(&state).await;
                 *self
@@ -1574,11 +1647,8 @@ impl McpRuntime {
                 Ok(self.info_locked(&state))
             }
             Err(error) => {
-                // As in `replace_strict`: the error chain is URL- and
-                // secret-free, and the warn serves `tidebreak serve` until the
-                // desktop installs a tracing subscriber.
-                tracing::warn!(server = %name, "MCP server reconnect failed: {error}");
                 let diagnostic = connection_diagnostic(&definition, &error);
+                let park = reconnect_park(&definition, &error);
                 let mut state = self.state.lock().await;
                 if let Some(server) = state
                     .servers
@@ -1589,10 +1659,15 @@ impl McpRuntime {
                     server.health = McpHealth::Degraded;
                     server.diagnostic = Some(diagnostic.clone());
                     server.ui_views = HashMap::new();
-                    server.reconnect_backoff = server
-                        .reconnect_backoff
-                        .saturating_mul(2)
-                        .min(MAX_RECONNECT_BACKOFF);
+                    // As in `replace_strict`, the error chain is URL- and
+                    // secret-free. A failure that repeats the last one logged
+                    // stays at debug, so a server that stays down for hours
+                    // writes one warning, not one per attempt.
+                    if server.reconnect.failed(park, &diagnostic) {
+                        report_reconnect_failure(name, park, &error);
+                    } else {
+                        tracing::debug!(server = %name, "MCP server reconnect failed again: {error}");
+                    }
                     server.epoch = self.fresh_epoch();
                 } else {
                     return Ok(self.info_locked(&state));
@@ -1621,24 +1696,7 @@ impl McpRuntime {
             if lockdown != ManualLockdown::Open {
                 self.take_down_locked_manual_servers(lockdown).await;
             }
-            let probes = {
-                let state = self.state.lock().await;
-                state
-                    .definitions
-                    .iter()
-                    .filter(|definition| connects(definition, lockdown))
-                    .filter_map(|definition| {
-                        state.servers.get(&definition.name).map(|server| {
-                            (
-                                definition.name.clone(),
-                                server.client.clone(),
-                                server.reconnect_backoff,
-                                server.epoch,
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            };
+            let probes = self.supervised_servers(lockdown).await;
             join_all(probes.into_iter().map(|(name, client, backoff, epoch)| {
                 let runtime = self.clone();
                 async move {
@@ -1667,6 +1725,47 @@ impl McpRuntime {
         }
     }
 
+    /// The servers one supervisor sweep probes or reconnects, as (name,
+    /// client, backoff, epoch).
+    ///
+    /// A parked server is left out: retrying it cannot succeed until a
+    /// sign-in, a settings change, or a manual reconnect, and each of those
+    /// brings it back on its own.
+    pub(super) async fn supervised_servers(
+        &self,
+        lockdown: ManualLockdown,
+    ) -> Vec<(String, Option<McpClient>, Duration, u64)> {
+        let state = self.state.lock().await;
+        state
+            .definitions
+            .iter()
+            .filter(|definition| connects(definition, lockdown))
+            .filter_map(|definition| {
+                state
+                    .servers
+                    .get(&definition.name)
+                    .filter(|server| server.reconnect.parked.is_none())
+                    .map(|server| {
+                        (
+                            definition.name.clone(),
+                            server.client.clone(),
+                            server.reconnect.backoff,
+                            server.epoch,
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// A sign-in stored a new model-gateway session. Servers parked for want
+    /// of one go back to the supervisor, which retries them on its next sweep.
+    pub async fn gateway_session_changed(&self) {
+        let mut state = self.state.lock().await;
+        for server in state.servers.values_mut() {
+            server.reconnect.resume_after_sign_in();
+        }
+    }
+
     pub(super) async fn mark_degraded(&self, name: &str, epoch: u64, backoff: Duration) {
         let mut state = self.state.lock().await;
         if let Some(server) = state
@@ -1679,7 +1778,7 @@ impl McpRuntime {
             server.diagnostic =
                 Some("Health check failed. Tidebreak will retry this server.".to_string());
             server.ui_views = HashMap::new();
-            server.reconnect_backoff = backoff;
+            server.reconnect.backoff = backoff;
         }
         let registry = self.registry_for(&state).await;
         *self

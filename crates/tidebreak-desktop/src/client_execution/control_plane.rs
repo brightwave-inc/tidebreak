@@ -84,6 +84,13 @@ struct FinishRootAttachmentRequest<'a> {
     terminal: &'a RootAttachmentChangeTerminal,
 }
 
+/// One pending client call and the conversation that owns it.
+#[derive(Debug, Deserialize)]
+pub(super) struct PendingClientCall {
+    pub(super) chat_id: SessionId,
+    pub(super) call: ToolCallRecord,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub(super) struct PendingDelegatedFileRead {
     pub(super) call_id: CallId,
@@ -240,6 +247,11 @@ impl ControlPlaneClient {
     ) -> Result<Vec<ToolCallRecord>, ControlPlaneError> {
         self.get(&format!("/chats/{chat_id}/client-executions/pending/raw"))
             .await
+    }
+
+    /// Every pending client call across all conversations, in one request.
+    pub(super) async fn all_pending(&self) -> Result<Vec<PendingClientCall>, ControlPlaneError> {
+        self.get("/native/client-executions/pending").await
     }
 
     pub(super) async fn pending_delegated_file_reads(

@@ -34,6 +34,18 @@ pub(super) const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
 pub(super) const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Why the supervisor stopped retrying a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReconnectPark {
+    /// The model gateway has no usable session. The server waits for the next
+    /// sign-in, a manual reconnect, or a settings change.
+    SignIn,
+    /// The server needs something this process lacks, such as a parent
+    /// environment variable. It waits for a manual reconnect or a settings
+    /// change.
+    Configuration,
+}
+
 /// The diagnostic every manual (command/url) server carries while managed
 /// policy holds. The definitions stay persisted — inert, not deleted — so an
 /// unprovisioned profile is byte-for-byte unaffected and the list stays

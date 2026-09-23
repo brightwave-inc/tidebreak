@@ -363,6 +363,7 @@ impl GatewayRuntime {
                      (the background sync will retry): {error}"
                 );
             }
+            mcp.gateway_session_changed().await;
             mcp.refresh_connected_app_roster().await;
         });
         Ok(authorization_url)

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 use tidebreak_core::code::SequencedEvent;
 use tidebreak_core::{chat_journal, SequencedAgentEvent, SessionId, TurnId};
@@ -71,6 +71,31 @@ pub struct EventBus {
     /// Installed once the code runtime exists; absent in tests that assemble
     /// state without one, where nothing follows the session channel.
     mirror: OnceLock<Arc<CodeEventBus>>,
+    /// Counts the moments client-executed work may have become pending, so
+    /// native executors can wake instead of polling every conversation.
+    client_executions: watch::Sender<u64>,
+}
+
+/// Wakes a native executor when client-executed work may be waiting.
+///
+/// A latency hint only. The durable rows stay the source of truth, and an
+/// executor still sweeps them on a slow timer, so a wake that never comes
+/// delays work rather than losing it.
+#[derive(Clone)]
+pub struct ClientExecutionWake {
+    receiver: watch::Receiver<u64>,
+}
+
+impl ClientExecutionWake {
+    /// Resolve once work is signalled after the previous call returned.
+    ///
+    /// A signal that arrives while the caller is busy is kept, so the next
+    /// call returns at once. Once the server is gone this never resolves.
+    pub async fn notified(&mut self) {
+        if self.receiver.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 /// The publishing half of one chat's live channel.
@@ -182,5 +207,52 @@ impl EventBus {
             .entry(chat)
             .or_insert_with(|| broadcast::channel(METADATA_BUFFER).0)
             .clone()
+    }
+
+    /// Tell native executors that client-executed work may be pending: a
+    /// turn parked on a client tool, a sandbox run asked for a host file, or
+    /// a permission change freed a parked write-back.
+    pub fn notify_client_execution_pending(&self) {
+        self.client_executions
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    /// A wake for one native executor loop.
+    pub fn client_execution_wake(&self) -> ClientExecutionWake {
+        ClientExecutionWake {
+            receiver: self.client_executions.subscribe(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_client_execution_signal_sent_while_the_executor_is_busy_is_kept() {
+        let bus = EventBus::default();
+        let mut wake = bus.client_execution_wake();
+
+        // Nothing has been signalled since the wake was made.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), wake.notified())
+                .await
+                .is_err()
+        );
+
+        // Two signals while the executor is mid-pass coalesce into one wake.
+        bus.notify_client_execution_pending();
+        bus.notify_client_execution_pending();
+        tokio::time::timeout(Duration::from_secs(1), wake.notified())
+            .await
+            .expect("a signal sent before the wait must wake it");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), wake.notified())
+                .await
+                .is_err()
+        );
     }
 }
