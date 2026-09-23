@@ -364,6 +364,22 @@ describe("tool call lifecycle", () => {
     expect(tool).toMatchObject({ status: "waiting_approval" });
   });
 
+  // The server sends one delta per argument fragment. A new transcript array
+  // for each one re-rendered every row of a long conversation per fragment.
+  it("leaves the transcript alone for argument fragments of a running call", () => {
+    const started = play([TURN, START_SEARCH]);
+    const { state } = reduceChatSessionEvent(
+      started.state,
+      framed(started.state.lastSeq + 1, {
+        type: "tool_call_args_delta",
+        call_id: "call-1",
+      }),
+      makeDeps(),
+    );
+    expect(state.messages).toBe(started.state.messages);
+    expect(state.lastSeq).toBe(started.state.lastSeq + 1);
+  });
+
   it("completes, fails, and keeps cancellation sticky", () => {
     const completed = play([
       TURN,

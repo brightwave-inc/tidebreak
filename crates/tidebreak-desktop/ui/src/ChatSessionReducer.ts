@@ -280,13 +280,24 @@ export function reduceChatSessionEvent(
     case "tool_call_args_delta": {
       // Arguments are intentionally not retained in renderer state. They can
       // contain paths, file content, credentials, or provider-specific data.
+      // The server sends one of these per argument fragment, so a call that is
+      // already running or parked on approval has nothing new to show. Keep
+      // the transcript as it is: a new array would re-render every row once
+      // per fragment. The cursor above still advances.
+      const tool = findToolCall(state.messages, event.call_id);
+      if (
+        tool === undefined ||
+        tool.status === "running" ||
+        tool.status === "waiting_approval"
+      ) {
+        return { state, effects };
+      }
       return {
         state: {
           ...state,
-          messages: updateToolCall(state.messages, event.call_id, (tool) => ({
-            ...tool,
-            status:
-              tool.status === "waiting_approval" ? tool.status : "running",
+          messages: updateToolCall(state.messages, event.call_id, (entry) => ({
+            ...entry,
+            status: "running",
           })),
         },
         effects,
@@ -737,6 +748,18 @@ export function upsertToolCall(
     ...messages,
     { id: deps.nextId(), role: "tool", callId, name, status },
   ];
+}
+
+/** The transcript row for one call, searched from the end where live calls sit. */
+function findToolCall(
+  messages: readonly ChatMessage[],
+  callId: string,
+): Extract<ChatMessage, { role: "tool" }> | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "tool" && message.callId === callId) return message;
+  }
+  return undefined;
 }
 
 export function updateToolCall(
