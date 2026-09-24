@@ -95,6 +95,9 @@ struct ScriptedWrite {
     contents: String,
 }
 
+/// Whether a launch was read-only, and the extra environment it was handed.
+pub type LaunchPosture = (bool, Vec<(String, String)>);
+
 /// One scripted engine session.
 #[derive(Clone)]
 pub struct ScriptedAdapter {
@@ -164,7 +167,7 @@ pub struct ScriptedAdapter {
     /// Working directory and permission mode each launch was handed.
     launched_sessions: Arc<std::sync::Mutex<Vec<(PathBuf, PermissionMode)>>>,
     /// Whether each launch was read-only, and the environment it was handed.
-    launched_postures: Arc<std::sync::Mutex<Vec<(bool, Vec<(String, String)>)>>>,
+    launched_postures: Arc<std::sync::Mutex<Vec<LaunchPosture>>>,
     /// Files to materialize in the worktree at the start of each turn.
     writes: Vec<ScriptedWrite>,
     /// Sleep once at the start of each turn, so a caller can observe Running
@@ -271,7 +274,7 @@ impl ScriptedAdapter {
     /// Whether each launched session was read-only, and the extra
     /// environment it was handed, in order.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn launched_postures(&self) -> Vec<(bool, Vec<(String, String)>)> {
+    pub fn launched_postures(&self) -> Vec<LaunchPosture> {
         self.launched_postures
             .lock()
             .expect("scripted launches")
