@@ -6,20 +6,40 @@ description: The tidebreak CLI — serve, one-shot prompts, and the MCP stdio se
 The desktop app embeds a local HTTP + WebSocket server. The same server, agent
 loop, and tools run from a command line without the window.
 
-On a macOS install the CLI is inside the app bundle. It is not on your PATH:
+## Install the command
+
+The `tidebreak` command ships inside the desktop app. To run it from a
+terminal, install it from the app:
+
+1. In the Tidebreak menu, choose **Install the tidebreak Command**. You can
+   also open **Settings → Command line** and choose **Install the tidebreak
+   command**.
+2. Tidebreak links `tidebreak` into `~/.local/bin`, creates that folder if it
+   does not exist, and says whether the folder is on your PATH.
+3. If the folder is not on your PATH, add this line to your shell profile,
+   such as `~/.zshrc`, and open a new terminal:
+
+   ```sh
+   export PATH="$HOME/.local/bin:$PATH"
+   ```
+
+To check the install, run:
 
 ```sh
-/Applications/Tidebreak.app/Contents/MacOS/tidebreak --version
+tidebreak --version
 ```
 
-From a clone you can still build it:
+To install the command for every account on the Mac, open **Settings →
+Command line** and choose **Install for all users**. macOS asks for an
+administrator password, and Tidebreak links `/usr/local/bin/tidebreak`.
 
-```sh
-cargo build -p tidebreak-cli --release
-```
+The link points into the app bundle, so an app update keeps the command
+current. If you move the app, install the command again to repair the link.
+Tidebreak refuses to replace a `tidebreak` it did not install, and **Uninstall
+the command** in the same settings page removes only a link Tidebreak made.
 
-The examples below use `tidebreak` for the command. Substitute the app-bundle
-path, or `cargo run -p tidebreak-cli --`, if that is what you have.
+The examples below use the installed `tidebreak` command. To run the CLI from
+a clone instead, see [Build from source](#build-from-source).
 
 ## Which data does the CLI use?
 
@@ -42,10 +62,6 @@ Nothing uses the folder you run a command from. `serve`, `folder`, and
 `rehome-secrets` follow the same rule: the app's data unless
 `TIDEBREAK_DATA_DIR` names another folder. Because one data directory has one
 server at a time, `serve` over the app's data cannot run while the app does.
-
-A debug build of the CLI, such as `cargo run -p tidebreak-cli --`, uses the
-dev app's profile (`io.brightwave.tidebreak.dev`) in place of the installed
-app's.
 
 A command trusts the app's `listen.json` only while the app holds its data
 directory, and only after the server the file names answers as Tidebreak.
@@ -263,10 +279,10 @@ Runs a single turn without a terminal. stdout carries the assistant's text, and
 the exit status says how the turn ended.
 
 ```sh
-cargo run -p tidebreak-cli -- -p "summarize the CSV in output/"
-cargo run -p tidebreak-cli -- -p "…" --output-format json
-cargo run -p tidebreak-cli -- -p "…" --permission-mode allow
-cargo run -p tidebreak-cli -- -p "…" --model anthropic::claude-haiku-4-5-20251001
+tidebreak -p "summarize the CSV in output/"
+tidebreak -p "…" --output-format json
+tidebreak -p "…" --permission-mode allow
+tidebreak -p "…" --model anthropic::claude-haiku-4-5-20251001
 ```
 
 `--output-format json` emits the turn's event stream as NDJSON instead of plain
@@ -370,7 +386,7 @@ export TIDEBREAK_DATA_DIR="$(mktemp -d)/tidebreak"
 export TIDEBREAK_KEYCHAIN_MOCK=1   # debug builds only — see below
 export ANTHROPIC_API_KEY=sk-...
 
-cargo run -p tidebreak-cli -- -p "run the tests and summarize what failed" \
+tidebreak -p "run the tests and summarize what failed" \
   --permission-mode allow --output-format json < /dev/null
 ```
 
@@ -384,7 +400,7 @@ To drive it instead, hold both pipes — read stdout line by line, and write a
 decision line when a request arrives:
 
 ```sh
-cargo run -p tidebreak-cli -- -p "plan the migration" \
+tidebreak -p "plan the migration" \
   --permission-mode plan --output-format json < decisions.pipe
 ```
 
@@ -400,48 +416,47 @@ stamped with `schema_version` (see [Compatibility](#compatibility)).
 
 ```sh
 # Providers and credentials
-cargo run -p tidebreak-cli -- provider list
-cargo run -p tidebreak-cli -- provider set-key anthropic < key.txt
-ANTHROPIC_KEY=sk-... cargo run -p tidebreak-cli -- \
-  provider set-key anthropic --from-env ANTHROPIC_KEY
-cargo run -p tidebreak-cli -- provider remove-key anthropic
+tidebreak provider list
+tidebreak provider set-key anthropic < key.txt
+tidebreak provider set-key anthropic --from-env ANTHROPIC_API_KEY
+tidebreak provider remove-key anthropic
 
 # Models
-cargo run -p tidebreak-cli -- model list
-cargo run -p tidebreak-cli -- model roles
-cargo run -p tidebreak-cli -- model select anthropic::claude-opus-5
-cargo run -p tidebreak-cli -- model select auto --role utility
+tidebreak model list
+tidebreak model roles
+tidebreak model select anthropic::claude-opus-5
+tidebreak model select auto --role utility
 
 # Web search and code execution
-cargo run -p tidebreak-cli -- settings show
-cargo run -p tidebreak-cli -- settings web-search select exa
-cargo run -p tidebreak-cli -- settings web-search set-key exa --from-env EXA_KEY
-cargo run -p tidebreak-cli -- settings exec select e2b
-cargo run -p tidebreak-cli -- settings exec set-key e2b --from-env E2B_KEY
+tidebreak settings show
+tidebreak settings web-search select exa
+tidebreak settings web-search set-key exa --from-env EXA_KEY
+tidebreak settings exec select e2b
+tidebreak settings exec set-key e2b --from-env E2B_KEY
 
 # MCP servers
-cargo run -p tidebreak-cli -- mcp-server list
-cargo run -p tidebreak-cli -- mcp-server add docs \
+tidebreak mcp-server list
+tidebreak mcp-server add docs \
   --command npx --arg -y --arg @acme/docs-mcp --env-from ACME_TOKEN
-cargo run -p tidebreak-cli -- mcp-server add vercel \
+tidebreak mcp-server add vercel \
   --url https://mcp.vercel.com --oauth
-cargo run -p tidebreak-cli -- mcp-server remove docs
+tidebreak mcp-server remove docs
 
 # Plugins from a pinned Git source
-cargo run -p tidebreak-cli -- plugins install \
+tidebreak plugins install \
   --git https://github.com/acme/notes --ref v1.0.0
-cargo run -p tidebreak-cli -- plugins install \
+tidebreak plugins install \
   --git https://github.com/acme/notes --ref v1.0.0 --json
 
 # Chats
-cargo run -p tidebreak-cli -- chat list
-CHAT=$(cargo run -p tidebreak-cli -- chat create)
-cargo run -p tidebreak-cli -- -p "…" --chat "$CHAT"
-cargo run -p tidebreak-cli -- chat retry "$CHAT" --wait
-cargo run -p tidebreak-cli -- chat regenerate "$CHAT" --wait
-cargo run -p tidebreak-cli -- chat regenerate "$CHAT" --model anthropic::claude-opus-5
-cargo run -p tidebreak-cli -- chat edit "$CHAT" "Make it shorter" --wait
-BRANCH=$(cargo run -p tidebreak-cli -- chat branch "$CHAT")
+tidebreak chat list
+CHAT=$(tidebreak chat create)
+tidebreak -p "…" --chat "$CHAT"
+tidebreak chat retry "$CHAT" --wait
+tidebreak chat regenerate "$CHAT" --wait
+tidebreak chat regenerate "$CHAT" --model anthropic::claude-opus-5
+tidebreak chat edit "$CHAT" "Make it shorter" --wait
+BRANCH=$(tidebreak chat branch "$CHAT")
 ```
 
 `chat retry`, `chat regenerate`, `chat edit`, and `chat branch` rerun and
@@ -507,10 +522,10 @@ a path — the same routes the desktop's Outputs panel uses, so a file produced
 in the app is readable here and the other way round.
 
 ```sh
-cargo run -p tidebreak-cli -- output list <chat-uuid>
-cargo run -p tidebreak-cli -- output show <chat-uuid> <output-uuid>
-cargo run -p tidebreak-cli -- output revisions <chat-uuid> <output-uuid>
-cargo run -p tidebreak-cli -- output export <chat-uuid> <output-uuid> ./report.md
+tidebreak output list <chat-uuid>
+tidebreak output show <chat-uuid> <output-uuid>
+tidebreak output revisions <chat-uuid> <output-uuid>
+tidebreak output export <chat-uuid> <output-uuid> ./report.md
 ```
 
 `list` prints one tab-separated row per output, starting with the id the other
@@ -532,7 +547,7 @@ image attachment, everything else is ingested as a source document. The id it
 prints on stdout is what a later turn references.
 
 ```sh
-cargo run -p tidebreak-cli -- attach <chat-uuid> ./contract.pdf
+tidebreak attach <chat-uuid> ./contract.pdf
 ```
 
 ### `data`
@@ -541,10 +556,10 @@ The same backup and export the desktop's **Settings → Data and privacy** page
 offers, through the same routes.
 
 ```sh
-cargo run -p tidebreak-cli -- data show
-cargo run -p tidebreak-cli -- data backup ./tidebreak-backup.tar.gz
-cargo run -p tidebreak-cli -- data export ./conversations.zip
-cargo run -p tidebreak-cli -- data export ./chat.json --format json --chat <chat-uuid>
+tidebreak data show
+tidebreak data backup ./tidebreak-backup.tar.gz
+tidebreak data export ./conversations.zip
+tidebreak data export ./chat.json --format json --chat <chat-uuid>
 ```
 
 `show` prints the data folder and how much disk its database, attachments,
@@ -578,7 +593,7 @@ Serves Tidebreak's own read-only filesystem tools over MCP stdio, confined to
 one explicit workspace directory:
 
 ```sh
-cargo run -p tidebreak-cli -- mcp /absolute/path/to/workspace
+tidebreak mcp /absolute/path/to/workspace
 ```
 
 It exposes `read_file` and `list_dir`, and only after a proper MCP initialize
@@ -605,7 +620,7 @@ tidebreak agent-mcp
 
 # Another server
 export TIDEBREAK_SERVER_TOKEN=<the token that server printed>
-cargo run -p tidebreak-cli -- agent-mcp --server http://127.0.0.1:53421
+tidebreak agent-mcp --server http://127.0.0.1:53421
 ```
 
 stdout is JSON-RPC only. Diagnostics go to stderr.
@@ -730,7 +745,7 @@ stored by an earlier build keep prompting. This rewrites each stored credential
 under the running binary's signature.
 
 ```sh
-cargo run -p tidebreak-cli -- rehome-secrets
+tidebreak rehome-secrets
 ```
 
 ## Attaching to a running server
@@ -759,15 +774,15 @@ credential):
 
 ```sh
 # Same data directory the desktop or `serve` owns
-export TIDEBREAK_DATA_DIR="$HOME/Library/Application Support/io.brightwave.tidebreak.dev"
-cargo run -p tidebreak-cli -- --attach provider list
-cargo run -p tidebreak-cli -- -p "what changed today?" --attach
+export TIDEBREAK_DATA_DIR="$HOME/Library/Application Support/io.brightwave.tidebreak"
+tidebreak --attach provider list
+tidebreak -p "what changed today?" --attach
 ```
 
-On a release desktop build, the directory is `io.brightwave.tidebreak` (no
-`.dev`). With `TIDEBREAK_DATA_DIR` unset, `--attach` reads the app's own
-`listen.json`, so it fails when the app is not running. `--attach`, `--server`,
-and `--embed` conflict; pick one.
+The dev app, which a debug build of the CLI uses, keeps its data in
+`io.brightwave.tidebreak.dev`. With `TIDEBREAK_DATA_DIR` unset, `--attach`
+reads the app's own `listen.json`, so it fails when the app is not running.
+`--attach`, `--server`, and `--embed` conflict; pick one.
 
 `--attach` believes a `listen.json` only while a live process holds the lock
 on its data directory, and only when it names a server on this computer. The
@@ -780,7 +795,7 @@ from `serve`'s stdout):
 
 ```sh
 export TIDEBREAK_SERVER_TOKEN=<the token that server printed>
-cargo run -p tidebreak-cli -- --server http://127.0.0.1:53421 provider list
+tidebreak --server http://127.0.0.1:53421 provider list
 ```
 
 `--server`, `--attach`, and `--embed` work on `-p`, `agent-mcp`, and every setup command.
@@ -812,7 +827,7 @@ and use `--attach`, or leave it unset to reach the app. `serve` still prints
 the URL and token on stdout if you prefer to capture them:
 
 ```sh
-TIDEBREAK_DATA_DIR="$(mktemp -d)" cargo run -p tidebreak-cli -- serve > server.log &
+TIDEBREAK_DATA_DIR="$(mktemp -d)" tidebreak serve > server.log &
 export TIDEBREAK_SERVER_URL=http://$(grep -m1 'listening on http://' server.log | sed 's|.*http://||')
 export TIDEBREAK_SERVER_TOKEN=$(grep -m1 'token ' server.log | sed 's|.*token ||')
 ```
@@ -956,3 +971,23 @@ profile never opens the desktop OS keychain.
 Multi-process ownership is not finished. Self-host blob bytes use
 the S3-compatible bucket named by `TIDEBREAK_BLOB_STORE_URL`. Treat
 self-hosting as experimental.
+
+## Build from source
+
+If you work on Tidebreak itself, you can run the CLI from a clone instead of
+the installed command. To build a release binary, run:
+
+```sh
+cargo build -p tidebreak-cli --release
+```
+
+To run the CLI without installing it, put `cargo run -p tidebreak-cli --` in
+place of `tidebreak` in any example above:
+
+```sh
+cargo run -p tidebreak-cli -- <args>
+```
+
+A debug build, such as `cargo run -p tidebreak-cli --`, uses the dev app's
+profile (`io.brightwave.tidebreak.dev`) in place of the installed app's. A
+release build uses the installed app's profile.
