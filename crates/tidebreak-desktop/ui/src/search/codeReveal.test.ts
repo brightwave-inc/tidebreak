@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type {
   CodeEvent,
@@ -10,7 +10,11 @@ import {
   itemForEvent,
   reduceCodeSessionEvent,
 } from "../code/CodeSessionReducer";
-import { historyFromJournal } from "./useCodeTranscriptSearch";
+import {
+  CALL_START_LOOKBACK_EVENTS,
+  historyFromJournal,
+  journalWindow,
+} from "./useCodeTranscriptSearch";
 
 const NOW = "2026-09-24T12:00:00Z";
 
@@ -157,5 +161,100 @@ describe("a window of an old session's journal", () => {
           item.kind === "notice" && /Earlier history/.test(item.message),
       ),
     ).toBe(true);
+  });
+});
+
+/**
+ * A session's journal of `length` events: turn t1 starts at 1, tool call c1
+ * starts at `start` and finishes at `end`, and notes fill the rest. Reads
+ * it the way the journal route does.
+ */
+function journal(length: number, start: number, end: number) {
+  const events: SequencedCodeEventFrame[] = [];
+  for (let seq = 1; seq <= length; seq += 1) {
+    let event: CodeEvent = {
+      type: "harness_notice",
+      level: "info",
+      message: `note ${seq}`,
+    };
+    if (seq === 1) event = { type: "turn_started", turn_id: "t1" };
+    if (seq === start) {
+      event = {
+        type: "tool_started",
+        call_id: "c1",
+        name: "Bash",
+        detail: { kind: "command", cmd: "cargo test", cwd: "/repo" },
+      };
+    }
+    if (seq === end) {
+      event = {
+        type: "tool_completed",
+        call_id: "c1",
+        outcome: "succeeded",
+        preview: "ok",
+        detail: {
+          kind: "command",
+          cmd: "cargo test --workspace",
+          cwd: "/repo",
+        },
+      };
+    }
+    events.push({ seq, event, replayed: true });
+  }
+  return vi.fn(
+    async (
+      _sessionId: string,
+      window: { before: number; limit?: number },
+    ): Promise<SequencedCodeEventFrame[]> => {
+      const below = events.filter((frame) => frame.seq < window.before);
+      const page = below.slice(-(window.limit ?? 400));
+      return page.map((frame, index) =>
+        index === 0 && page.length < below.length
+          ? { ...frame, truncated: true }
+          : frame,
+      );
+    },
+  );
+}
+
+describe("opening a tool call a search found", () => {
+  it("reads back to where a long call started, so its row can open", async () => {
+    // The match names the call's last word, a thousand events after it
+    // started: well before the window around the match.
+    const listCodeJournal = journal(1_200, 2, 1_000);
+    const opened = await journalWindow({ listCodeJournal }, "sess-1", 1_000);
+    expect(opened.callStartMissing).toBe(false);
+    expect(listCodeJournal).toHaveBeenCalledTimes(2);
+    const view = historyFromJournal(opened.frames, [turn("t1", 1, "test")]);
+    expect(itemForEvent(view.items, { eventSeq: 1_000 })).toMatchObject({
+      kind: "tool",
+      callId: "c1",
+      status: "succeeded",
+    });
+    // The window now reaches the start of the journal, so nothing says
+    // earlier history is left out.
+    expect(
+      view.items.filter(
+        (item) =>
+          item.kind === "notice" && /Earlier history/.test(item.message),
+      ),
+    ).toHaveLength(0);
+    expect(opened.frames[0]?.seq).toBe(1);
+  });
+
+  it("says so when the call started further back than it reads", async () => {
+    const end = CALL_START_LOOKBACK_EVENTS + 1_000;
+    const listCodeJournal = journal(end + 10, 2, end);
+    const opened = await journalWindow({ listCodeJournal }, "sess-1", end);
+    expect(opened.callStartMissing).toBe(true);
+    expect(opened.frames.filter((frame) => frame.truncated)).toHaveLength(1);
+    expect(opened.frames[0]?.truncated).toBe(true);
+  });
+
+  it("reads one window for a match that is not a tool call", async () => {
+    const listCodeJournal = journal(1_200, 2, 1_000);
+    const opened = await journalWindow({ listCodeJournal }, "sess-1", 900);
+    expect(opened.callStartMissing).toBe(false);
+    expect(listCodeJournal).toHaveBeenCalledTimes(1);
   });
 });

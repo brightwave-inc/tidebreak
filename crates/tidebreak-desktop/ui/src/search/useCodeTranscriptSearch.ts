@@ -2,7 +2,11 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { ApiClient } from "../api";
-import type { CodeTurnSnapshot, SequencedCodeEventFrame } from "../api/types";
+import type {
+  CodeEvent,
+  CodeTurnSnapshot,
+  SequencedCodeEventFrame,
+} from "../api/types";
 import {
   type CodeSessionDeps,
   type CodeTranscriptItem,
@@ -28,6 +32,13 @@ import { useFindBar } from "./useFindBar";
 export const EVENTS_AFTER_FOUND = 120;
 /** How many events a window of the journal reads. */
 export const JOURNAL_WINDOW_EVENTS = 400;
+/**
+ * How many events a window reads back past its start to find where a found
+ * tool call started, a page at a time.
+ */
+export const CALL_START_LOOKBACK_EVENTS = 4_000;
+/** One page of that look back; the journal route's own ceiling. */
+const LOOKBACK_PAGE_EVENTS = 2_000;
 /** How long a reveal waits for its row to render before giving up. */
 const REVEAL_DEADLINE_MS = 5_000;
 
@@ -75,6 +86,72 @@ export function historyFromJournal(
     state = reduceCodeSessionEvent(state, frame, historyDeps).state;
   }
   return { items: state.items };
+}
+
+type JournalClient = Pick<ApiClient, "listCodeJournal">;
+
+/** The tool call a journal event reports on, when it reports on one. */
+function callOf(event: CodeEvent): string | null {
+  if (event.type === "background_activity") return callOf(event.event);
+  return event.type === "tool_started" || event.type === "tool_completed"
+    ? event.call_id
+    : null;
+}
+
+/** Whether `frames` hold the event that started `callId`. */
+function startsCall(
+  frames: readonly SequencedCodeEventFrame[],
+  callId: string,
+): boolean {
+  return frames.some((frame) => {
+    const event =
+      frame.event.type === "background_activity"
+        ? frame.event.event
+        : frame.event;
+    return event.type === "tool_started" && event.call_id === callId;
+  });
+}
+
+/**
+ * The window of the journal that opens the event at `eventSeq`: the events
+ * around it, oldest first.
+ *
+ * A tool call's row is drawn from the event that started it, while a match
+ * on the call names the last event that restated it. When the call started
+ * before the window, the window reads back to its start, up to
+ * {@link CALL_START_LOOKBACK_EVENTS} further. `callStartMissing` says the
+ * start was still not found.
+ */
+export async function journalWindow(
+  client: JournalClient,
+  sessionId: string,
+  eventSeq: number,
+): Promise<{
+  frames: SequencedCodeEventFrame[];
+  callStartMissing: boolean;
+}> {
+  let frames = await client.listCodeJournal(sessionId, {
+    before: eventSeq + EVENTS_AFTER_FOUND,
+    limit: JOURNAL_WINDOW_EVENTS,
+  });
+  const found = frames.find((frame) => frame.seq === eventSeq);
+  const callId = found ? callOf(found.event) : null;
+  if (!callId) return { frames, callStartMissing: false };
+  let read = 0;
+  while (!startsCall(frames, callId) && read < CALL_START_LOOKBACK_EVENTS) {
+    const first = frames[0];
+    if (!first?.truncated) break;
+    const older = await client.listCodeJournal(sessionId, {
+      before: first.seq,
+      limit: Math.min(LOOKBACK_PAGE_EVENTS, CALL_START_LOOKBACK_EVENTS - read),
+    });
+    if (older.length === 0) break;
+    read += older.length;
+    // Only the window's first frame says older events were left out.
+    const { truncated: _joined, ...joined } = first;
+    frames = [...older, joined, ...frames.slice(1)];
+  }
+  return { frames, callStartMissing: !startsCall(frames, callId) };
 }
 
 /** The element that draws a code row, found by the id the reducer gave it. */
@@ -154,15 +231,12 @@ export function useCodeTranscriptSearch({
         return;
       }
       try {
-        const [frames, turns] = await Promise.all([
-          client.listCodeJournal(sessionId, {
-            before: target.eventSeq + EVENTS_AFTER_FOUND,
-            limit: JOURNAL_WINDOW_EVENTS,
-          }),
+        const [opened, turns] = await Promise.all([
+          journalWindow(client, sessionId, target.eventSeq),
           client.listCodeSessionTurns(sessionId),
         ]);
         if (token !== latest.current) return;
-        const view = historyFromJournal(frames, turns);
+        const view = historyFromJournal(opened.frames, turns);
         // The pane draws the main agent's rows; a subagent's are read from
         // its own view.
         const found = itemForEvent(
@@ -173,7 +247,9 @@ export function useCodeTranscriptSearch({
           toast.message(
             itemForEvent(view.items, target)
               ? "That message is in a subagent's work. Open the subagent to read it."
-              : "That message is no longer in this session.",
+              : opened.callStartMissing
+                ? "That tool call started too far back in this session to open here."
+                : "That message is no longer in this session.",
           );
           return;
         }
