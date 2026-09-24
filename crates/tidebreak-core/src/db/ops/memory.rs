@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseTransaction, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseTransaction, DbBackend,
+    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set, Statement, TransactionTrait,
 };
 
 use crate::memory::{
@@ -28,6 +28,119 @@ struct ScopeState {
 
 fn backend_err(error: impl std::fmt::Display) -> MemoryError {
     MemoryError::Backend(error.to_string())
+}
+
+/// Turn on SQLite's `secure_delete` for this transaction's connection, so a
+/// memory delete overwrites the bytes it frees instead of leaving them
+/// readable in free pages. Returns the setting to put back with
+/// [`end_secure_delete`]; other databases answer `None` and are left alone.
+async fn begin_secure_delete<C: ConnectionTrait>(conn: &C) -> MemoryResult<Option<i64>> {
+    if conn.get_database_backend() != DbBackend::Sqlite {
+        return Ok(None);
+    }
+    let previous = conn
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA secure_delete",
+        ))
+        .await
+        .map_err(backend_err)?
+        .map(|row| row.try_get_by_index::<i64>(0))
+        .transpose()
+        .map_err(backend_err)?
+        .unwrap_or(0);
+    conn.execute_unprepared("PRAGMA secure_delete = 1")
+        .await
+        .map_err(backend_err)?;
+    Ok(Some(previous))
+}
+
+/// Put back the `secure_delete` setting [`begin_secure_delete`] replaced.
+async fn end_secure_delete<C: ConnectionTrait>(
+    conn: &C,
+    previous: Option<i64>,
+) -> MemoryResult<()> {
+    if let Some(previous) = previous {
+        conn.execute_unprepared(&format!("PRAGMA secure_delete = {previous}"))
+            .await
+            .map_err(backend_err)?;
+    }
+    Ok(())
+}
+
+/// Fold the write-ahead log into the database file and empty it, so the pages
+/// a secure delete overwrote replace the old copies in the log too. Best
+/// effort: while another connection reads, SQLite's next checkpoint does it.
+async fn checkpoint_after_delete<C: ConnectionTrait>(conn: &C) {
+    if conn.get_database_backend() != DbBackend::Sqlite {
+        return;
+    }
+    if let Err(error) = conn
+        .execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE)")
+        .await
+    {
+        tracing::warn!(%error, "memory: could not checkpoint after a delete");
+    }
+}
+
+/// Delete one record and its revisions, and check that both are gone.
+async fn remove_record(
+    transaction: &DatabaseTransaction,
+    owner: &OwnerId,
+    id: MemoryRecordId,
+) -> MemoryResult<()> {
+    let deleted = entities::memory_record::Entity::delete_many()
+        .filter(entities::memory_record::Column::Id.eq(id.0))
+        .filter(entities::memory_record::Column::Owner.eq(owner.as_str()))
+        .exec(transaction)
+        .await
+        .map_err(backend_err)?;
+    if deleted.rows_affected != 1 {
+        return Err(MemoryError::NotFound);
+    }
+    let record_remains = entities::memory_record::Entity::find_by_id(id.0)
+        .one(transaction)
+        .await
+        .map_err(backend_err)?
+        .is_some();
+    let revision_remains = entities::memory_revision::Entity::find()
+        .filter(entities::memory_revision::Column::RecordId.eq(id.0))
+        .one(transaction)
+        .await
+        .map_err(backend_err)?
+        .is_some();
+    if record_remains || revision_remains {
+        return Err(MemoryError::Backend(
+            "memory delete did not remove the record and revisions".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Delete every record and revision `owner` has, and the sweep's per-scope
+/// fingerprints, which describe a record set that no longer exists.
+async fn remove_all_records(
+    transaction: &DatabaseTransaction,
+    owner: &OwnerId,
+) -> MemoryResult<()> {
+    // Revisions first, so the delete does not lean on the foreign key's
+    // cascade, which SQLite enforces only when the pragma is on.
+    entities::memory_revision::Entity::delete_many()
+        .filter(entities::memory_revision::Column::Owner.eq(owner.as_str()))
+        .exec(transaction)
+        .await
+        .map_err(backend_err)?;
+    entities::memory_record::Entity::delete_many()
+        .filter(entities::memory_record::Column::Owner.eq(owner.as_str()))
+        .exec(transaction)
+        .await
+        .map_err(backend_err)?;
+    entities::memory_sweep_scope::Entity::delete_many()
+        .filter(entities::memory_sweep_scope::Column::Owner.eq(owner.as_str()))
+        .exec(transaction)
+        .await
+        .map_err(backend_err)?;
+    Ok(())
 }
 
 fn scope_ref(scope: MemoryScope) -> String {
@@ -801,32 +914,12 @@ impl MemoryBackend for DbStore {
             return Ok(false);
         };
         lock_scope(&transaction, owner, existing.scope).await?;
-        let deleted = entities::memory_record::Entity::delete_many()
-            .filter(entities::memory_record::Column::Id.eq(id.0))
-            .filter(entities::memory_record::Column::Owner.eq(owner.as_str()))
-            .exec(&transaction)
-            .await
-            .map_err(backend_err)?;
-        if deleted.rows_affected != 1 {
-            return Err(MemoryError::NotFound);
-        }
-        let record_remains = entities::memory_record::Entity::find_by_id(id.0)
-            .one(&transaction)
-            .await
-            .map_err(backend_err)?
-            .is_some();
-        let revision_remains = entities::memory_revision::Entity::find()
-            .filter(entities::memory_revision::Column::RecordId.eq(id.0))
-            .one(&transaction)
-            .await
-            .map_err(backend_err)?
-            .is_some();
-        if record_remains || revision_remains {
-            return Err(MemoryError::Backend(
-                "memory delete did not remove the record and revisions".to_owned(),
-            ));
-        }
+        let previous = begin_secure_delete(&transaction).await?;
+        let removed = remove_record(&transaction, owner, id).await;
+        end_secure_delete(&transaction, previous).await?;
+        removed?;
         transaction.commit().await.map_err(backend_err)?;
+        checkpoint_after_delete(&self.conn).await;
         Ok(true)
     }
 
@@ -844,24 +937,12 @@ impl MemoryBackend for DbStore {
             .into_iter()
             .map(|model| MemoryRecordId(model.id))
             .collect();
-        // Revisions first, so the delete does not lean on the foreign key's
-        // cascade, which SQLite enforces only when the pragma is on.
-        entities::memory_revision::Entity::delete_many()
-            .filter(entities::memory_revision::Column::Owner.eq(owner.as_str()))
-            .exec(&transaction)
-            .await
-            .map_err(backend_err)?;
-        entities::memory_record::Entity::delete_many()
-            .filter(entities::memory_record::Column::Owner.eq(owner.as_str()))
-            .exec(&transaction)
-            .await
-            .map_err(backend_err)?;
-        entities::memory_sweep_scope::Entity::delete_many()
-            .filter(entities::memory_sweep_scope::Column::Owner.eq(owner.as_str()))
-            .exec(&transaction)
-            .await
-            .map_err(backend_err)?;
+        let previous = begin_secure_delete(&transaction).await?;
+        let removed = remove_all_records(&transaction, owner).await;
+        end_secure_delete(&transaction, previous).await?;
+        removed?;
         transaction.commit().await.map_err(backend_err)?;
+        checkpoint_after_delete(&self.conn).await;
         Ok(ids)
     }
 

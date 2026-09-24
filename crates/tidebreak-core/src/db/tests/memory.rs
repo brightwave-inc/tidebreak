@@ -741,6 +741,46 @@ async fn restoring_a_superseded_source_leaves_the_merge_alone() {
 
 /// Delete everything removes every record the owner has, forgotten ones and
 /// their revisions included, and nothing another owner has.
+/// The bytes on disk under `directory` that belong to the database: the file
+/// and its write-ahead log.
+fn database_bytes(directory: &std::path::Path) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for name in ["test.db", "test.db-wal"] {
+        if let Ok(file) = std::fs::read(directory.join(name)) {
+            bytes.extend(file);
+        }
+    }
+    bytes
+}
+
+fn contains(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
+}
+
+/// Deleting a memory overwrites it on disk. Without that, the text stays in
+/// the database's free pages and its write-ahead log, where anyone who reads
+/// the file finds it after the record is gone.
+#[tokio::test]
+async fn a_deleted_memory_leaves_no_copy_in_the_database_file() {
+    const ONE: &str = "heron-quartz-marker-one";
+    const EVERY: &str = "heron-quartz-marker-every";
+    let (directory, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let one = user_record(MemoryScope::Personal, MemoryStatus::Active, ONE, ONE, 1);
+    let every = user_record(MemoryScope::Personal, MemoryStatus::Active, EVERY, EVERY, 2);
+    store.put(&owner, one.clone()).await.unwrap();
+    store.put(&owner, every.clone()).await.unwrap();
+    assert!(contains(&database_bytes(directory.path()), ONE));
+
+    assert!(store.delete(&owner, one.id).await.unwrap());
+    assert!(!contains(&database_bytes(directory.path()), ONE));
+
+    store.delete_all(&owner).await.unwrap();
+    assert!(!contains(&database_bytes(directory.path()), EVERY));
+}
+
 #[tokio::test]
 async fn delete_all_removes_one_owners_records_and_revisions() {
     let (_directory, store) = temp_store().await;
