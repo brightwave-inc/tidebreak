@@ -7132,7 +7132,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/thekashey/detect-node
 - License text: `LICENSE` ([L-5dd2a43c0ed6](#l-5dd2a43c0ed6))
 
-### devalue 5.9.0
+### devalue 5.9.2
 
 - License: `MIT`
 - Repository: sveltejs/devalue
