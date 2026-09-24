@@ -8,17 +8,22 @@
 //! [`inspect`] refuses what no saved state could bring back, and names it: a
 //! file the snapshot does not hold where the next tree writes, ignored and
 //! excluded files included; a folder holding such a file that must become a
-//! file; a nested repository or submodule; and a file that changed since the
-//! snapshot.
+//! file; a nested repository or submodule; two paths that name one file on
+//! this disk; and a file that changed since the snapshot. It also stores each
+//! file it would replace or remove exactly as its bytes stand, with no
+//! filters, because a snapshot holds what git's clean filters made of it and
+//! a lossy filter drops the rest.
 //!
 //! [`apply`] then moves one path at a time, and git writes nothing in the
-//! worktree. Each new version is written to a temporary file beside its path
-//! first. Right before it moves into place, the path must still hold what the
-//! plan saw, or still be empty, or the apply stops. It lands with a rename, or
-//! with a hard link where nothing stood, so a path is never missing between
-//! its old and new content, and never overwrites a file that appeared. When a
-//! path fails, every path already moved goes back to what the snapshot holds,
-//! and the failure says whether each of them was then verified to match.
+//! worktree. Each new version is written to a temporary file in the
+//! repository's own git folder first, under a short name, so no leftover of a
+//! crash lands in the worktree. Right before it moves into place, the path
+//! must still hold what the plan saw, or still be empty, or the apply stops.
+//! It lands with a rename, or with a hard link where nothing stood, so a path
+//! is never missing between its old and new content, and never overwrites a
+//! file that appeared. When a path fails, every path already moved goes back
+//! to its exact bytes, and the failure says whether each of them was then
+//! verified to match.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -200,6 +205,80 @@ pub(super) async fn tree_with_changes(
     git_text_env(worktree, &["write-tree"], &env, GIT_TIMEOUT)
         .await
         .map_err(CheckpointError::internal)
+}
+
+/// A tree holding exactly `entries`, however many there are, in one call.
+pub(super) async fn tree_of_entries(
+    worktree: &Path,
+    entries: &[(GitPath, TreeEntry)],
+) -> Result<String, CheckpointError> {
+    let index = TempIndex::new()?;
+    let mut records = Vec::new();
+    for (path, entry) in entries {
+        records.extend_from_slice(format!("{} {}\t", entry.mode, entry.oid).as_bytes());
+        records.extend_from_slice(path.as_bytes());
+        records.push(0);
+    }
+    let input = temp_file_with(&records)?;
+    let stdin = std::fs::File::open(input.path())
+        .map_err(|err| CheckpointError::internal(format!("could not stage a file: {err}")))?;
+    let mut command = git_command(worktree);
+    command
+        .env("GIT_INDEX_FILE", &index.path)
+        .args(["update-index", "-z", "--index-info"])
+        .stdin(Stdio::from(stdin));
+    run_git_command(
+        command,
+        format!("update-index --index-info <{} paths>", entries.len()),
+        GIT_SNAPSHOT_TIMEOUT,
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    git_text_env(worktree, &["write-tree"], &index.env(), GIT_TIMEOUT)
+        .await
+        .map_err(CheckpointError::internal)
+}
+
+/// Every file entry `tree` holds, by path.
+pub(super) async fn tree_entries(
+    worktree: &Path,
+    tree: &str,
+) -> Result<HashMap<GitPath, TreeEntry>, CheckpointError> {
+    let (raw, truncated) = git_bytes_bounded(
+        worktree,
+        &["ls-tree", "-r", "-z", "--full-tree", tree],
+        GIT_TIMEOUT,
+        OutputBudget::head(SCAN_BYTES, SCAN_LINES),
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    if truncated {
+        return Err(CheckpointError::internal(
+            "a saved state lists more files than Tidebreak can read",
+        ));
+    }
+    let mut entries = HashMap::new();
+    for record in raw
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            continue;
+        };
+        let mut fields = record[..tab].split(|byte| *byte == b' ');
+        let (Some(mode), Some(_kind), Some(oid)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        entries.insert(
+            GitPath::from_bytes(&record[tab + 1..]),
+            TreeEntry {
+                mode: String::from_utf8_lossy(mode).into_owned(),
+                oid: String::from_utf8_lossy(oid).into_owned(),
+            },
+        );
+    }
+    Ok(entries)
 }
 
 /// A file's content as the repository stores it.
@@ -406,8 +485,53 @@ pub(super) struct Plan {
     changes: Vec<RawChange>,
     /// What each path the plan replaces or removes held when it was checked.
     stamps: HashMap<GitPath, Stamp>,
+    /// Each file the plan replaces or removes, stored exactly as its bytes
+    /// stood, with no filters. Putting a path back writes these bytes, never
+    /// what a clean filter made of them.
+    exact_before: HashMap<GitPath, String>,
+    /// Paths whose new version is written as these exact bytes, with no
+    /// filters: a saved state brought back as it stood.
+    exact_after: HashMap<GitPath, TreeEntry>,
     /// Whether the executable bit counts, as `core.fileMode` says.
     file_mode: bool,
+}
+
+impl Plan {
+    /// Each file this plan replaces or removes whose exact bytes differ from
+    /// what the snapshot holds for it, with the blob that holds those bytes.
+    /// A saved state keeps these, or undoing it would lose what a clean
+    /// filter dropped.
+    pub fn exact_bytes_the_snapshot_lacks(&self) -> Vec<(GitPath, TreeEntry)> {
+        self.changes
+            .iter()
+            .filter_map(|change| {
+                let before = change.before.as_ref()?;
+                let exact = self.exact_before.get(&change.path)?;
+                (*exact != before.oid).then(|| {
+                    (
+                        change.path.clone(),
+                        TreeEntry {
+                            mode: before.mode.clone(),
+                            oid: exact.clone(),
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Write these paths' new versions as the exact bytes a saved state
+    /// kept for them, instead of through the smudge filters.
+    pub fn write_exact(&mut self, saved: HashMap<GitPath, TreeEntry>) {
+        for change in &self.changes {
+            let (Some(after), Some(exact)) = (&change.after, saved.get(&change.path)) else {
+                continue;
+            };
+            if after.is_regular_file() && exact.mode == after.mode {
+                self.exact_after.insert(change.path.clone(), exact.clone());
+            }
+        }
+    }
 }
 
 /// What [`inspect`] found before anything moved.
@@ -418,6 +542,9 @@ pub(super) struct Inspection {
     /// bring back: files the snapshot does not hold, folders holding them,
     /// and nested repositories and submodules.
     pub blocked: Vec<GitPath>,
+    /// Pairs of paths that name one file on this disk, where the change
+    /// touches one of them: changing one would change the other.
+    pub aliased: Vec<(GitPath, GitPath)>,
     /// Paths that no longer hold what the snapshot holds.
     pub changed: Vec<GitPath>,
 }
@@ -427,6 +554,18 @@ impl Inspection {
     pub fn into_plan(self, kind: &'static str, action: &str) -> Result<Plan, CheckpointError> {
         if !self.blocked.is_empty() {
             return Err(blocked(kind, action, &self.blocked));
+        }
+        if let Some((one, other)) = self.aliased.first() {
+            return Err(CheckpointError::conflict(
+                kind,
+                format!(
+                    "{} and {} name the same file on this disk, so changing one would change \
+                     the other. {action} leaves both alone. Rename or remove one of them in a \
+                     terminal, then try again.",
+                    one.to_wire(),
+                    other.to_wire()
+                ),
+            ));
         }
         if !self.changed.is_empty() {
             return Err(CheckpointError::conflict(
@@ -439,6 +578,18 @@ impl Inspection {
             ));
         }
         Ok(self.plan)
+    }
+
+    /// Every path a person must deal with before the change can run.
+    pub fn in_the_way(&self) -> Vec<GitPath> {
+        let mut paths = self.blocked.clone();
+        for (one, other) in &self.aliased {
+            paths.push(one.clone());
+            paths.push(other.clone());
+        }
+        paths.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        paths.dedup();
+        paths
     }
 }
 
@@ -510,12 +661,13 @@ pub(super) async fn inspect(
                 let saved: HashSet<GitPath> = removed.iter().map(|path| (*path).clone()).collect();
                 blocked.extend(unsaved_under(worktree, &change.path, &saved)?);
             }
-            Some(_) if !case_alias_removed(worktree, &change.path, &removed) => {
+            Some(_) if !alias_of_removed(worktree, &change.path, &removed) => {
                 blocked.push(change.path.clone());
             }
             Some(_) => {}
         }
     }
+    let aliased = find_aliases(worktree, from, &changes).await?;
 
     // Every path the change replaces or removes must still hold what the
     // snapshot holds. Stamp first, then hash: a change after the stamp shows
@@ -560,12 +712,19 @@ pub(super) async fn inspect(
     let paths: Vec<GitPath> = files.iter().map(|(path, _)| path.clone()).collect();
     for ((path, expected), actual) in files
         .iter()
-        .zip(hash_worktree_files(worktree, &paths).await?)
+        .zip(hash_worktree_files(worktree, &paths, Hashing::Cleaned).await?)
     {
         if *expected != actual {
             changed.push(path.clone());
         }
     }
+    // The exact bytes too, stored, so putting a file back never depends on
+    // what a clean filter kept of it.
+    let exact_before: HashMap<GitPath, String> = paths
+        .iter()
+        .cloned()
+        .zip(hash_worktree_files(worktree, &paths, Hashing::ExactAndStored).await?)
+        .collect();
     let targets: Vec<Vec<u8>> = links.iter().map(|(_, target, _)| target.clone()).collect();
     for ((path, _, expected), actual) in links.iter().zip(hash_bytes(worktree, &targets).await?) {
         if *expected != actual {
@@ -581,9 +740,12 @@ pub(super) async fn inspect(
         plan: Plan {
             changes,
             stamps,
+            exact_before,
+            exact_after: HashMap::new(),
             file_mode,
         },
         blocked,
+        aliased,
         changed,
     })
 }
@@ -646,33 +808,202 @@ pub(super) fn unsaved_under(
     Ok(found)
 }
 
-/// On a filesystem that ignores case, a file this same change removes can
-/// answer for a new path that differs from it only in case. That file is not
-/// in the way: it goes first.
-fn case_alias_removed(worktree: &Path, path: &GitPath, removed: &HashSet<&GitPath>) -> bool {
-    let Ok(full) = path.to_os_string().map(|path| worktree.join(path)) else {
+/// Whether the file standing at the new path `path` is really a file this
+/// same change removes, reached under another spelling: a disk that ignores
+/// case or Unicode normalization finds `README.md` when asked for
+/// `readme.md`. That file is not in the way: it goes first.
+fn alias_of_removed(worktree: &Path, path: &GitPath, removed: &HashSet<&GitPath>) -> bool {
+    let folder = path.folder();
+    let Some(on_disk) = folder_names(worktree, folder.as_ref()) else {
         return false;
     };
-    let (Some(parent), Some(name)) = (full.parent(), full.file_name()) else {
+    if on_disk.contains(path.name()) {
+        // The exact name is there: a real file in the way.
         return false;
-    };
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return false;
-    };
-    let name = name.to_string_lossy();
-    let mut alias = false;
-    for entry in entries.flatten() {
-        let other = entry.file_name();
-        let other_name = other.to_string_lossy();
-        if other_name == name {
-            // The exact name is there: a real file in the way.
-            return false;
+    }
+    removed
+        .iter()
+        .any(|other| *other != path && other.folder() == folder && same_file(worktree, path, other))
+}
+
+/// Pairs of paths that name one file on this disk, where `changes` touches
+/// one of them.
+///
+/// A disk that ignores case or Unicode normalization opens `README.md` when
+/// asked for `readme.md`. When `core.ignorecase` or `core.precomposeunicode`
+/// says otherwise, git keeps both spellings apart, so a snapshot can hold two
+/// paths for one file, and changing one changes the other. A case-only
+/// rename, one spelling removed and the other added, is not a problem: the
+/// removal goes first.
+async fn find_aliases(
+    worktree: &Path,
+    snapshot: &str,
+    changes: &[RawChange],
+) -> Result<Vec<(GitPath, GitPath)>, CheckpointError> {
+    if changes.is_empty() || !may_hold_aliases(worktree).await {
+        return Ok(Vec::new());
+    }
+    let touched: HashMap<&GitPath, &RawChange> = changes
+        .iter()
+        .map(|change| (&change.path, change))
+        .collect();
+    let mut folders: HashMap<Option<GitPath>, (HashSet<GitPath>, bool)> = HashMap::new();
+    for change in changes {
+        let (claimed, in_snapshot) = folders.entry(change.path.folder()).or_default();
+        claimed.insert(change.path.clone());
+        *in_snapshot |= change.before.is_some();
+    }
+    let mut pairs = Vec::new();
+    for (folder, (mut claimed, in_snapshot)) in folders {
+        if in_snapshot {
+            claimed.extend(snapshot_names_in(worktree, snapshot, folder.as_ref()).await?);
         }
-        if other_name.eq_ignore_ascii_case(&name) {
-            alias |= removed.contains(&path.sibling(&other));
+        let Some(on_disk) = folder_names(worktree, folder.as_ref()) else {
+            continue;
+        };
+        let (spelled, other): (Vec<&GitPath>, Vec<&GitPath>) = claimed
+            .iter()
+            .partition(|path| on_disk.contains(path.name()));
+        // A path whose exact name is not on disk, but which opens anyway, is
+        // another spelling of a name that is.
+        for alias in other {
+            for exact in &spelled {
+                if !same_file(worktree, alias, exact) {
+                    continue;
+                }
+                let (one, two) = (touched.get(alias), touched.get(*exact));
+                if (one.is_none() && two.is_none()) || is_rename_pair(one, two) {
+                    continue;
+                }
+                let (first, second) = if alias.as_bytes() <= exact.as_bytes() {
+                    (alias.clone(), (*exact).clone())
+                } else {
+                    ((*exact).clone(), alias.clone())
+                };
+                pairs.push((first, second));
+            }
         }
     }
-    alias
+    pairs.sort_by(|a, b| (a.0.as_bytes(), a.1.as_bytes()).cmp(&(b.0.as_bytes(), b.1.as_bytes())));
+    pairs.dedup();
+    Ok(pairs)
+}
+
+/// One spelling removed and the other added: a case-only rename.
+fn is_rename_pair(one: Option<&&RawChange>, two: Option<&&RawChange>) -> bool {
+    let removed = |change: &RawChange| change.before.is_some() && change.after.is_none();
+    let added = |change: &RawChange| change.before.is_none() && change.after.is_some();
+    match (one, two) {
+        (Some(one), Some(two)) => (removed(one) && added(two)) || (added(one) && removed(two)),
+        _ => false,
+    }
+}
+
+/// Whether a snapshot of this worktree can hold two spellings of one file:
+/// the disk folds names in a way git's config does not.
+async fn may_hold_aliases(worktree: &Path) -> bool {
+    // The worktree's own `.git`, asked for in capitals.
+    let folds_case = std::fs::symlink_metadata(worktree.join(".GIT")).is_ok();
+    let folds_unicode = cfg!(target_os = "macos");
+    if !folds_case && !folds_unicode {
+        return false;
+    }
+    let setting = |name: &'static str| async move {
+        git_text(worktree, &["config", "--bool", "--get", name], GIT_TIMEOUT)
+            .await
+            .is_ok_and(|value| value.trim() == "true")
+    };
+    (folds_case && !setting("core.ignorecase").await)
+        || (folds_unicode && !setting("core.precomposeunicode").await)
+}
+
+/// Every path the snapshot holds directly inside `folder`, the top of the
+/// worktree when `None`.
+async fn snapshot_names_in(
+    worktree: &Path,
+    snapshot: &str,
+    folder: Option<&GitPath>,
+) -> Result<Vec<GitPath>, CheckpointError> {
+    let mut spec = OsString::from(format!("{snapshot}:"));
+    if let Some(folder) = folder {
+        spec.push(folder.to_os_string().map_err(CheckpointError::internal)?);
+    }
+    let mut command = git_command(worktree);
+    command.args(["ls-tree", "-z", "--name-only"]).arg(spec);
+    let (raw, truncated) = super::run_git_command_bounded(
+        command,
+        "ls-tree <folder>".to_owned(),
+        GIT_TIMEOUT,
+        OutputBudget::head(SCAN_BYTES, SCAN_LINES),
+        true,
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    if truncated {
+        return Err(CheckpointError::conflict(
+            "change_too_large",
+            "A folder this change touches holds too many files to check here. Use Git in a \
+             terminal.",
+        ));
+    }
+    Ok(raw
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| match folder {
+            Some(folder) => GitPath::from_bytes(&[&folder.child_prefix()[..], name].concat()),
+            None => GitPath::from_bytes(name),
+        })
+        .collect())
+}
+
+/// The exact names the disk holds in `folder`, the top of the worktree when
+/// `None`. `None` when the folder cannot be read.
+fn folder_names(worktree: &Path, folder: Option<&GitPath>) -> Option<HashSet<Vec<u8>>> {
+    let full = match folder {
+        Some(folder) => full_path(worktree, folder).ok()?,
+        None => worktree.to_path_buf(),
+    };
+    let entries = std::fs::read_dir(full).ok()?;
+    Some(
+        entries
+            .flatten()
+            .map(|entry| os_bytes(&entry.file_name()))
+            .collect(),
+    )
+}
+
+fn os_bytes(name: &std::ffi::OsStr) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        name.as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        name.to_string_lossy().as_bytes().to_vec()
+    }
+}
+
+/// Whether two paths open one file, without following a symlink.
+#[cfg(unix)]
+fn same_file(worktree: &Path, one: &GitPath, other: &GitPath) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (
+        symlink_metadata(worktree, one),
+        symlink_metadata(worktree, other),
+    ) {
+        (Ok(Some(one)), Ok(Some(other))) => one.dev() == other.dev() && one.ino() == other.ino(),
+        _ => false,
+    }
+}
+
+/// Whether two paths open one file. This platform has no stable file
+/// identity to compare, and its disks fold case.
+#[cfg(not(unix))]
+fn same_file(worktree: &Path, one: &GitPath, other: &GitPath) -> bool {
+    one.as_bytes().eq_ignore_ascii_case(other.as_bytes())
+        && matches!(symlink_metadata(worktree, one), Ok(Some(_)))
+        && matches!(symlink_metadata(worktree, other), Ok(Some(_)))
 }
 
 /// The refusal for a change that would overwrite or remove unsaved files.
@@ -772,9 +1103,10 @@ struct Moved {
 /// Move every path in `plan`. When one fails, every path already moved goes
 /// back, and the failure says whether the result was verified.
 pub(super) async fn apply(worktree: &Path, plan: &Plan) -> Result<(), ApplyFailure> {
-    match apply_steps(worktree, plan, |_| false).await {
+    let staging = Staging::prepare(worktree);
+    match apply_steps(worktree, &staging, plan, |_| false).await {
         Ok(()) => Ok(()),
-        Err((stop, moved)) => Err(roll_back(worktree, plan, moved, stop).await),
+        Err((stop, moved)) => Err(roll_back(worktree, &staging, plan, moved, stop).await),
     }
 }
 
@@ -796,15 +1128,17 @@ fn move_order(plan: &Plan) -> Vec<usize> {
 
 /// Move the paths before step `killed_at`, then stop the way a killed
 /// process stops: nothing rolls back.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn apply_until_killed(worktree: &Path, plan: &Plan, killed_at: usize) {
-    let _ = apply_steps(worktree, plan, |step| step == killed_at).await;
+    let staging = Staging::prepare(worktree);
+    let _ = apply_steps(worktree, &staging, plan, |step| step == killed_at).await;
 }
 
 /// Move each path in turn. `halt` is asked before each step and ends the run
 /// there, as a crash would, leaving what moved for the caller.
 async fn apply_steps(
     worktree: &Path,
+    staging: &Staging,
     plan: &Plan,
     halt: impl Fn(usize) -> bool,
 ) -> Result<(), (Stop, Vec<Moved>)> {
@@ -813,7 +1147,7 @@ async fn apply_steps(
         if halt(step) {
             return Err((Stop::failed("Stopped."), moved));
         }
-        match move_one(worktree, plan, &plan.changes[index]).await {
+        match move_one(worktree, staging, plan, &plan.changes[index]).await {
             Ok(left) => moved.push(Moved {
                 change: index,
                 left,
@@ -825,7 +1159,12 @@ async fn apply_steps(
 }
 
 /// Move one path, after checking it still holds what the plan saw.
-async fn move_one(worktree: &Path, plan: &Plan, change: &RawChange) -> Result<Option<Stamp>, Stop> {
+async fn move_one(
+    worktree: &Path,
+    staging: &Staging,
+    plan: &Plan,
+    change: &RawChange,
+) -> Result<Option<Stamp>, Stop> {
     let path = &change.path;
     let full = full_path(worktree, path).map_err(Stop::failed)?;
     folders_on_the_way(worktree, path, change.after.is_some())?;
@@ -871,7 +1210,11 @@ async fn move_one(worktree: &Path, plan: &Plan, change: &RawChange) -> Result<Op
         Some(stamp) if change.before.is_some() => Expect::Stamp(stamp),
         _ => Expect::Nothing,
     };
-    write_entry(worktree, path, &full, after, expect).await?;
+    let content = match plan.exact_after.get(path) {
+        Some(exact) => Content::Exact(exact),
+        None => Content::Smudged(after),
+    };
+    write_entry(worktree, staging, path, &full, content, expect).await?;
     // The path is written; a stamp that cannot be read only makes a later
     // roll back more careful, never less.
     Ok(stamp_at(&full).ok().flatten())
@@ -926,8 +1269,112 @@ fn remove_empty_folders(worktree: &Path, path: &GitPath) {
     }
 }
 
+/// What a write puts at a path.
+#[derive(Debug, Clone, Copy)]
+enum Content<'a> {
+    /// A tree's version, through the smudge filters its path's attributes
+    /// name, the way a checkout writes it.
+    Smudged(&'a TreeEntry),
+    /// These exact bytes, with no filters.
+    Exact(&'a TreeEntry),
+}
+
+impl Content<'_> {
+    fn entry(&self) -> &TreeEntry {
+        match self {
+            Self::Smudged(entry) | Self::Exact(entry) => entry,
+        }
+    }
+}
+
+/// The name of the staging folder inside a worktree's own git folder.
+const STAGING_FOLDER: &str = "tidebreak-tmp";
+
+/// Where new versions are written before they move into place.
+///
+/// The folder sits in the worktree's own git folder, which git never lists
+/// and a snapshot never reads, so a crash mid-write leaves nothing in the
+/// worktree. Its names are short and fixed-length, so a file whose own name
+/// is as long as the disk allows still gets written.
+struct Staging {
+    folder: Option<PathBuf>,
+}
+
+impl Staging {
+    /// The staging folder for `worktree`, emptied of anything an earlier
+    /// crash left. Only one change holds a worktree at a time, so nothing
+    /// in it belongs to anyone else.
+    fn prepare(worktree: &Path) -> Self {
+        let folder = staging_folder(worktree).and_then(|folder| {
+            let _ = std::fs::remove_dir_all(&folder);
+            std::fs::create_dir_all(&folder).ok().map(|()| folder)
+        });
+        Self { folder }
+    }
+
+    /// A fresh path for the new version of `full`: in the staging folder
+    /// when it is on the same disk as `full`, so the move is one rename.
+    /// Otherwise a short name beside `full`.
+    fn temp_for(&self, full: &Path) -> PathBuf {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        if let (Some(folder), Some(parent)) = (&self.folder, full.parent()) {
+            if same_disk(folder, parent) {
+                return folder.join(&id[..16]);
+            }
+        }
+        full.with_file_name(format!(".tb-{}.tmp", &id[..8]))
+    }
+}
+
+/// The staging folder inside `worktree`'s own git folder: `.git/tidebreak-tmp`
+/// in a main worktree, and the linked worktree's own folder under
+/// `.git/worktrees/` for a linked one. `None` when `.git` cannot be read.
+pub(crate) fn staging_folder(worktree: &Path) -> Option<PathBuf> {
+    let dot_git = worktree.join(".git");
+    let meta = std::fs::symlink_metadata(&dot_git).ok()?;
+    if meta.is_dir() {
+        return Some(dot_git.join(STAGING_FOLDER));
+    }
+    let text = std::fs::read_to_string(&dot_git).ok()?;
+    let git_dir = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))?
+        .trim();
+    if git_dir.is_empty() {
+        return None;
+    }
+    let git_dir = Path::new(git_dir);
+    let git_dir = if git_dir.is_absolute() {
+        git_dir.to_path_buf()
+    } else {
+        worktree.join(git_dir)
+    };
+    Some(git_dir.join(STAGING_FOLDER))
+}
+
+/// Remove whatever a crash left in `worktree`'s staging folder.
+pub(crate) fn clear_staging_folder(worktree: &Path) {
+    if let Some(folder) = staging_folder(worktree) {
+        let _ = std::fs::remove_dir_all(folder);
+    }
+}
+
+#[cfg(unix)]
+fn same_disk(one: &Path, other: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(one), std::fs::metadata(other)) {
+        (Ok(one), Ok(other)) => one.dev() == other.dev(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_disk(_one: &Path, _other: &Path) -> bool {
+    true
+}
+
 /// What must stand at a path for a write to land there, checked again at the
-/// last moment, after the new content is ready beside it.
+/// last moment, after the new content is ready.
 #[derive(Debug, Clone, Copy)]
 enum Expect<'a> {
     /// Nothing. A file that appears first is never overwritten.
@@ -936,21 +1383,22 @@ enum Expect<'a> {
     Stamp(&'a Stamp),
 }
 
-/// Write `entry` at `path`: its content to a temporary file beside the path,
-/// then moved into place in one step, once the path still holds what
-/// `expect` says.
+/// Write `content` at `path`: to a temporary file first, then moved into
+/// place in one step, once the path still holds what `expect` says.
 async fn write_entry(
     worktree: &Path,
+    staging: &Staging,
     path: &GitPath,
     full: &Path,
-    entry: &TreeEntry,
+    content: Content<'_>,
     expect: Expect<'_>,
 ) -> Result<(), Stop> {
-    let temp = temp_path_beside(full);
+    let temp = staging.temp_for(full);
+    let entry = content.entry();
     let written = if entry.is_symlink() {
         write_symlink(worktree, entry, &temp).await
     } else if entry.is_regular_file() {
-        write_file(worktree, path, entry, &temp).await
+        write_file(worktree, path, content, &temp).await
     } else {
         Err(format!(
             "{} is not a file Tidebreak can write.",
@@ -1017,38 +1465,36 @@ fn appeared(path: &GitPath) -> Stop {
     ))
 }
 
-fn temp_path_beside(full: &Path) -> PathBuf {
-    let name = full
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    full.with_file_name(format!(
-        ".{name}.tidebreak-{}.tmp",
-        uuid::Uuid::new_v4().simple()
-    ))
-}
-
-/// A file's content, through the smudge filters its path's attributes name,
-/// streamed straight to `temp`.
+/// A file's content streamed straight to `temp`: through the smudge filters
+/// its path's attributes name, or as its exact bytes.
 async fn write_file(
     worktree: &Path,
     path: &GitPath,
-    entry: &TreeEntry,
+    content: Content<'_>,
     temp: &Path,
 ) -> Result<(), String> {
+    let entry = content.entry();
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(temp)
         .map_err(|err| format!("Could not write {}: {err}.", path.to_wire()))?;
-    let mut filtered_path = OsString::from("--path=");
-    filtered_path.push(path.to_os_string()?);
     let mut command = tokio::process::Command::new("git");
     command
         .current_dir(worktree)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .args(["cat-file", "--filters"])
-        .arg(filtered_path)
+        .arg("cat-file");
+    match content {
+        Content::Smudged(_) => {
+            let mut filtered_path = OsString::from("--path=");
+            filtered_path.push(path.to_os_string()?);
+            command.arg("--filters").arg(filtered_path);
+        }
+        Content::Exact(_) => {
+            command.arg("blob");
+        }
+    }
+    command
         .arg(&entry.oid)
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
@@ -1109,12 +1555,18 @@ fn set_executable(_path: &Path, _executable: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Put back every path the apply moved, newest first, then check each of
-/// them against the snapshot.
+/// Put back every path the apply moved, newest first, as its exact bytes,
+/// then check each of them.
 ///
 /// A path that no longer holds what the apply left there changed under it,
 /// and stays as it is: putting it back would lose that change.
-async fn roll_back(worktree: &Path, plan: &Plan, moved: Vec<Moved>, stop: Stop) -> ApplyFailure {
+async fn roll_back(
+    worktree: &Path,
+    staging: &Staging,
+    plan: &Plan,
+    moved: Vec<Moved>,
+    stop: Stop,
+) -> ApplyFailure {
     let mut clean = true;
     for step in moved.iter().rev() {
         let change = &plan.changes[step.change];
@@ -1136,18 +1588,32 @@ async fn roll_back(worktree: &Path, plan: &Plan, moved: Vec<Moved>, stop: Stop) 
                 remove_empty_folders(worktree, &change.path);
                 removed
             }
-            Some(before) => match folders_on_the_way(worktree, &change.path, true) {
-                Ok(()) => {
-                    let expect = match &step.left {
-                        Some(left) => Expect::Stamp(left),
-                        None => Expect::Nothing,
-                    };
-                    write_entry(worktree, &change.path, &full, before, expect)
-                        .await
-                        .map_err(|stop| stop.reason)
+            Some(before) => {
+                let exact = before
+                    .is_regular_file()
+                    .then(|| plan.exact_before.get(&change.path))
+                    .flatten()
+                    .map(|oid| TreeEntry {
+                        mode: before.mode.clone(),
+                        oid: oid.clone(),
+                    });
+                let content = match &exact {
+                    Some(exact) => Content::Exact(exact),
+                    None => Content::Smudged(before),
+                };
+                match folders_on_the_way(worktree, &change.path, true) {
+                    Ok(()) => {
+                        let expect = match &step.left {
+                            Some(left) => Expect::Stamp(left),
+                            None => Expect::Nothing,
+                        };
+                        write_entry(worktree, staging, &change.path, &full, content, expect)
+                            .await
+                            .map_err(|stop| stop.reason)
+                    }
+                    Err(stop) => Err(stop.reason),
                 }
-                Err(stop) => Err(stop.reason),
-            },
+            }
         };
         if put_back.is_err() {
             clean = false;
@@ -1167,9 +1633,9 @@ async fn roll_back(worktree: &Path, plan: &Plan, moved: Vec<Moved>, stop: Stop) 
     }
 }
 
-/// Whether every path the apply moved holds exactly what the snapshot
-/// holds. A path it never reached is as the check found it, or as someone
-/// else left it since; either way the apply did not change it.
+/// Whether every path the apply moved holds exactly the bytes it held before.
+/// A path it never reached is as the check found it, or as someone else left
+/// it since; either way the apply did not change it.
 async fn holds_before(
     worktree: &Path,
     plan: &Plan,
@@ -1200,11 +1666,14 @@ async fn holds_before(
             {
                 return Ok(false);
             }
-            files.push((change.path.clone(), before.oid.clone()));
+            let Some(exact) = plan.exact_before.get(&change.path) else {
+                return Ok(false);
+            };
+            files.push((change.path.clone(), exact.clone()));
         }
     }
     let paths: Vec<GitPath> = files.iter().map(|(path, _)| path.clone()).collect();
-    let hashed = hash_worktree_files(worktree, &paths).await?;
+    let hashed = hash_worktree_files(worktree, &paths, Hashing::Exact).await?;
     if files
         .iter()
         .zip(hashed)
@@ -1220,16 +1689,38 @@ async fn holds_before(
         .any(|((_, expected), actual)| *expected != actual))
 }
 
-/// The blob id git gives each worktree file, with the clean filters its
-/// path's attributes name, the way `git add` hashes it.
+/// How [`hash_worktree_files`] reads a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hashing {
+    /// Through the clean filters its path's attributes name, the way
+    /// `git add` hashes it.
+    Cleaned,
+    /// Its exact bytes, with no filters.
+    Exact,
+    /// Its exact bytes, stored as a blob so they can be written back.
+    ExactAndStored,
+}
+
+/// The blob id git gives each worktree file, read as `hashing` says.
 async fn hash_worktree_files(
     worktree: &Path,
     paths: &[GitPath],
+    hashing: Hashing,
 ) -> Result<Vec<String>, CheckpointError> {
     let mut oids = Vec::with_capacity(paths.len());
     for batch in paths.chunks(HASH_BATCH) {
         let mut command = git_command(worktree);
-        command.args(["hash-object", "--"]);
+        command.arg("hash-object");
+        match hashing {
+            Hashing::Cleaned => {}
+            Hashing::Exact => {
+                command.arg("--no-filters");
+            }
+            Hashing::ExactAndStored => {
+                command.args(["-w", "--no-filters"]);
+            }
+        }
+        command.arg("--");
         for path in batch {
             command.arg(path.to_os_string().map_err(CheckpointError::internal)?);
         }
@@ -1255,26 +1746,36 @@ async fn hash_worktree_files(
 }
 
 /// The blob id of each byte string, as git stores it, with no filters.
+///
+/// Each string goes to a temporary file that is closed before the next one
+/// opens, so many symlinks never run into the open-file limit.
 async fn hash_bytes(worktree: &Path, contents: &[Vec<u8>]) -> Result<Vec<String>, CheckpointError> {
-    if contents.is_empty() {
-        return Ok(Vec::new());
+    let mut oids = Vec::with_capacity(contents.len());
+    for batch in contents.chunks(HASH_BATCH) {
+        let files = batch
+            .iter()
+            .map(|bytes| temp_file_with(bytes).map(tempfile::NamedTempFile::into_temp_path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut command = git_command(worktree);
+        command.args(["hash-object", "--no-filters", "--"]);
+        for file in &files {
+            command.arg(file.as_os_str());
+        }
+        let raw = run_git_command(command, "hash-object --no-filters".to_owned(), GIT_TIMEOUT)
+            .await
+            .map_err(CheckpointError::internal)?;
+        oids.extend(
+            String::from_utf8_lossy(&raw)
+                .lines()
+                .map(|line| line.trim().to_owned()),
+        );
     }
-    let files = contents
-        .iter()
-        .map(|bytes| temp_file_with(bytes))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut command = git_command(worktree);
-    command.args(["hash-object", "--no-filters", "--"]);
-    for file in &files {
-        command.arg(file.path());
+    if oids.len() != contents.len() {
+        return Err(CheckpointError::internal(
+            "git hashed a different number of strings than it was given",
+        ));
     }
-    let raw = run_git_command(command, "hash-object --no-filters".to_owned(), GIT_TIMEOUT)
-        .await
-        .map_err(CheckpointError::internal)?;
-    Ok(String::from_utf8_lossy(&raw)
-        .lines()
-        .map(|line| line.trim().to_owned())
-        .collect())
+    Ok(oids)
 }
 
 /// Whether the repository counts the executable bit, as `core.fileMode`
@@ -1308,6 +1809,104 @@ pub(super) async fn refuse_sparse_checkout(worktree: &Path) -> Result<(), Checkp
         ));
     }
     Ok(())
+}
+
+/// Refuse a change that has no Undo when it would replace or remove a file
+/// whose exact bytes git's filters do not give back.
+///
+/// A clean filter can drop part of a file on its way into git, such as a
+/// filter that strips notebook output. A revert or a discard builds the new
+/// version from what the filter kept, so the rest would be lost, and nothing
+/// could bring it back. A filter that only changes line endings and gives
+/// them back on checkout loses nothing, and passes.
+pub(super) async fn refuse_lossy_filters(
+    worktree: &Path,
+    plan: &Plan,
+    action: &str,
+) -> Result<(), CheckpointError> {
+    for change in &plan.changes {
+        let Some(before) = change
+            .before
+            .as_ref()
+            .filter(|entry| entry.is_regular_file())
+        else {
+            continue;
+        };
+        let Some(exact) = plan.exact_before.get(&change.path) else {
+            continue;
+        };
+        if *exact == before.oid || smudges_back(worktree, &change.path, &before.oid, exact).await? {
+            continue;
+        }
+        let path = change.path.to_wire();
+        return Err(CheckpointError::conflict(
+            "filter_lossy",
+            match filter_name(worktree, &change.path).await {
+                Some(filter) => format!(
+                    "{action} would lose part of {path}: Git's \"{filter}\" filter drops it on \
+                     the way into Git, so Tidebreak could not write it back. Change the file in \
+                     your editor instead."
+                ),
+                None => format!(
+                    "{action} would lose part of {path}: Git changes its bytes on the way into \
+                     Git, such as its line endings, and does not give them back. Change the file \
+                     in your editor instead."
+                ),
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the smudge filters turn `cleaned`, what the clean filters made of
+/// the file at `path`, back into exactly the blob `exact`.
+async fn smudges_back(
+    worktree: &Path,
+    path: &GitPath,
+    cleaned: &str,
+    exact: &str,
+) -> Result<bool, CheckpointError> {
+    let smudged = tempfile::NamedTempFile::new()
+        .map_err(|err| CheckpointError::internal(format!("could not stage a file: {err}")))?
+        .into_temp_path();
+    std::fs::remove_file(&smudged)
+        .map_err(|err| CheckpointError::internal(format!("could not stage a file: {err}")))?;
+    write_file(
+        worktree,
+        path,
+        Content::Smudged(&TreeEntry {
+            mode: "100644".to_owned(),
+            oid: cleaned.to_owned(),
+        }),
+        &smudged,
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    let mut command = git_command(worktree);
+    command
+        .args(["hash-object", "--no-filters", "--"])
+        .arg(smudged.as_os_str());
+    let oid = run_git_command(command, "hash-object --no-filters".to_owned(), GIT_TIMEOUT)
+        .await
+        .map_err(CheckpointError::internal)?;
+    Ok(String::from_utf8_lossy(&oid).trim() == exact)
+}
+
+/// The filter driver `.gitattributes` names for `path`, if any.
+async fn filter_name(worktree: &Path, path: &GitPath) -> Option<String> {
+    let (raw, _) = git_bytes_with_literal_paths_bounded(
+        worktree,
+        &["check-attr", "-z", "filter", "--"],
+        std::slice::from_ref(path),
+        GIT_TIMEOUT,
+        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
+    )
+    .await
+    .ok()?;
+    // `<path> NUL filter NUL <value> NUL`
+    let value = raw.split(|byte| *byte == 0).nth(2)?;
+    let value = String::from_utf8_lossy(value).into_owned();
+    (!matches!(value.as_str(), "" | "unspecified" | "unset" | "set")).then_some(value)
 }
 
 /// An index file of the caller's own, deleted when it drops.
@@ -1701,7 +2300,9 @@ mod tests {
 
     /// A plan killed partway, the way a crash or a killed process stops it,
     /// leaves every path whole: its old version or its new one, never
-    /// missing. Restoring the snapshot then brings back exactly the state
+    /// missing. A write it was in the middle of leaves its temporary file in
+    /// the staging folder, where no snapshot sees it and the next change
+    /// clears it. Restoring the snapshot then brings back exactly the state
     /// before.
     #[tokio::test]
     async fn a_plan_killed_partway_leaves_every_path_whole_and_can_be_undone() {
@@ -1716,6 +2317,7 @@ mod tests {
             std::fs::write(tree.join(format!("f{n}.txt")), format!("current {n}\n")).unwrap();
         }
         let before = index.snapshot(&tree).await.unwrap();
+        let staging = staging_folder(&tree).unwrap();
 
         for killed_at in 0..=5 {
             let plan = inspect(&tree, &before, &target)
@@ -1723,9 +2325,9 @@ mod tests {
                 .unwrap()
                 .into_plan("restore_blocked", "The restore")
                 .unwrap();
-            let _ = apply_steps(&tree, &plan, |step| step == killed_at).await;
-            // A kill inside a write can leave its temporary file behind.
-            std::fs::write(tree.join(".f0.txt.tidebreak-killed.tmp"), "half\n").unwrap();
+            apply_until_killed(&tree, &plan, killed_at).await;
+            let leftover = staging.join("0123456789abcdef");
+            std::fs::write(&leftover, "half\n").unwrap();
             for n in 0..5 {
                 let now = read(&tree, &format!("f{n}.txt"));
                 assert!(
@@ -1733,16 +2335,30 @@ mod tests {
                     "f{n}.txt is whole after a kill at step {killed_at}: {now:?}"
                 );
             }
-            // Undo: the saved snapshot comes back exactly.
+            // Undo: the saved snapshot comes back exactly, with nothing of
+            // the killed write in the worktree.
             let now = index.snapshot(&tree).await.unwrap();
-            let undo = inspect(&tree, &now, &before)
-                .await
-                .unwrap()
-                .into_plan("restore_blocked", "The restore")
-                .unwrap();
-            apply(&tree, &undo).await.unwrap();
+            if now != before {
+                let undo = inspect(&tree, &now, &before)
+                    .await
+                    .unwrap()
+                    .into_plan("restore_blocked", "The restore")
+                    .unwrap();
+                apply(&tree, &undo).await.unwrap();
+            }
             assert_eq!(index.snapshot(&tree).await.unwrap(), before);
+            let _ = std::fs::remove_file(&leftover);
         }
+        // The next change clears what a crash left.
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("0123456789abcdef"), "half\n").unwrap();
+        let plan = inspect(&tree, &before, &target)
+            .await
+            .unwrap()
+            .into_plan("restore_blocked", "The restore")
+            .unwrap();
+        apply(&tree, &plan).await.unwrap();
+        assert!(!staging.join("0123456789abcdef").exists());
     }
 
     /// An ignored file typed after the check, where the plan writes, is never

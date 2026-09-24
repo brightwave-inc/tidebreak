@@ -818,22 +818,35 @@ the paths that differ itself, one at a time, under the worktree lock:
 
 - `inspect` lists the paths with `diff-tree --no-renames`, records what the
   worktree holds at each (kind, size, mode, and modification time), then
-  hashes each file and checks it against the snapshot. It names what is in
-  the way: an ignored or excluded file, a folder holding one, and a nested
+  hashes each file and checks it against the snapshot. It also stores each
+  file it would replace or remove exactly as its bytes stand, with
+  `hash-object -w --no-filters`: a snapshot holds what the clean filters
+  made of a file, and a lossy filter drops the rest. It names what is in the
+  way: an ignored or excluded file, a folder holding one, and a nested
   repository, submodule, or gitlink the operation would remove or replace. A
   snapshot holds only a nested repository's commit, never its files, so no
   undo could bring them back.
+- It also refuses a change to a path that opens the same file on this disk
+  as another path the snapshot holds. With `core.ignorecase` or
+  `core.precomposeunicode` off on a disk that folds names, git keeps
+  `readme.md` and `README.md`, or two Unicode forms of one name, apart, and
+  changing one changes the other. The refusal names both. A case-only
+  rename, one spelling removed and the other added, passes.
 - `apply` removes paths first, deepest first, then writes, parents first.
   It writes each new version, through the repository's checkout filters, to
-  a temporary file beside its path. Right before that file moves into place,
-  the path must still hold what `inspect` recorded, or still be empty, or the
-  apply stops, so an ignored file that appears after the check is never
-  overwritten. The file lands with a rename, or with a hard link where
-  nothing stood, so each path holds its old content or its new content,
-  never a mix. It never writes through a symlink: a symlink or a file where a
-  folder must be stops it.
-- When a path cannot move, every path already moved goes back, newest first,
-  and each is checked against the snapshot. A path someone changed after the
+  a temporary file in the worktree's own git folder (`tidebreak-tmp`, under
+  a short name of fixed length). A crash mid-write leaves that file where
+  git never lists it, and the next change, or the next boot, clears it; a
+  file whose name is as long as the disk allows still gets written. When the
+  git folder is on another disk, the file goes beside its path under a short
+  name instead. Right before it moves into place, the path must still hold
+  what `inspect` recorded, or still be empty, or the apply stops, so an
+  ignored file that appears after the check is never overwritten. The file
+  lands with a rename, or with a hard link where nothing stood, so each path
+  holds its old content or its new content, never a mix. It never writes
+  through a symlink: a symlink or a file where a folder must be stops it.
+- When a path cannot move, every path already moved goes back as its exact
+  bytes, newest first, and each is checked. A path someone changed after the
   apply left it stays as they left it. Only when every moved path checks out
   may the caller say nothing changed.
 - A sparse checkout answers `409 sparse_checkout`: its snapshot cannot tell a
@@ -861,13 +874,21 @@ an older checkpoint, which would also undo turns nobody picked.
 3. It commits that tree to `refs/tidebreak/checkpoints/<ws>/<session>/restore/<id>`
    and journals `CheckpointRestored` with status `started`, both before any
    file moves, so the restore's Undo is reachable even if the process dies
-   mid-restore.
+   mid-restore. A file whose exact bytes the snapshot lacks, because a clean
+   filter changed them, is kept as it stood in a second commit: the saved
+   state's second parent, named by its `Tidebreak-Exact-Bytes:` trailer. A
+   restore to a saved state writes those bytes back with no filters. The
+   restore also writes a record to `{data_dir}/code/restores/<id>.json`, and
+   removes it once the last row is journaled.
 4. It moves the files. When it stops partway, every path it moved goes back.
-   Only when each checks out against the saved state does the row end
-   `failed`, which says nothing changed. Otherwise the row ends `partial` and
-   the reply names the restore id. The row keeps its Undo either way, and on
-   a restore the process never finished: it puts back everything the restore
-   replaced.
+   Only when each checks out does the row end `failed`, which says nothing
+   changed. Otherwise the row ends `partial`, the reply names the restore id,
+   and every open session's chain points at the files as they stand. The row
+   keeps its Undo either way: it puts back everything the restore replaced.
+   A record the next boot finds belongs to a restore the process never
+   finished. Before any worker attaches, the boot journals it as `partial`,
+   with its Undo, and points every open session's chain at the files as they
+   stand. The same boot clears every local worktree's staging folder.
 5. It points `…/<session>/after/<n>` at the restored state for every open
    session in the workspace, where `n` is that session's newest turn. The next
    turn's diff starts there, so no turn is credited with undoing what the
@@ -894,6 +915,12 @@ whole file goes back the same way. An added file is removed only while it is
 still exactly as the diff left it, and a renamed file goes back to its old
 name. A turn's diff is history, so the desktop marks a reverted hunk there
 instead of offering it again.
+
+Revert and discard build the new version from what the clean filters kept,
+and neither has an Undo. So each refuses a file whose exact bytes the
+filters do not give back, such as a notebook whose output a filter strips
+(`409 filter_lossy`), and names the filter. Line endings git converts on the
+way in and gives back on checkout pass.
 
 **Discard** acts on exactly the paths it is given, as the Changes list names
 them: a renamed file's row names its new path and its old one. It puts each

@@ -165,6 +165,10 @@ impl CodeRuntime {
                 .await
                 .map_err(ServerError::from)?,
         );
+        // Before any worker attaches, so no turn starts from a chain that
+        // still describes the files as they were before an unfinished
+        // restore.
+        Box::pin(self.finish_interrupted_restores()).await;
         for workspace in
             list_workspaces_by_status_all_owners(&self.db, CodeWorkspaceStatus::Archiving).await?
         {

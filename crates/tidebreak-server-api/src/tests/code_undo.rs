@@ -39,16 +39,14 @@ async fn run_turn(
     session: &str,
     message: &str,
 ) -> serde_json::Value {
-    let turn: serde_json::Value = client
-        .post(format!("http://{addr}/sessions/{session}/turns"))
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "message": message }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let turn = run_turn_to_end(
+        client,
+        addr,
+        token,
+        session,
+        serde_json::json!({ "message": message }),
+    )
+    .await;
     assert_eq!(turn["status"], "completed", "{turn}");
     turn
 }
@@ -247,6 +245,113 @@ async fn a_restore_goes_back_to_before_a_turn_journals_itself_and_can_be_undone(
         Some("typed by a person\n")
     );
     assert!(worktree.join("module.rs").exists());
+}
+
+/// A restore the process never finished, the way a crash leaves it. The next
+/// boot marks its row as stopped partway, keeping its Undo; points the next
+/// turn's diff at the files as they really stand, so the engine hears which
+/// files moved; and clears the staging folder of the crash's temporary file.
+/// The Undo then brings back the state before exactly.
+#[tokio::test]
+async fn a_restore_the_process_never_finished_is_marked_at_the_next_boot() {
+    let adapter = ScriptedAdapter::new(plain_text_script());
+    let (router, token, runtime, dir) = code_app_with(adapter.clone()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let workspace_id = json_id(&workspace).to_owned();
+    let worktree = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    let session = create_session(&client, addr, &token, &workspace, "plan").await;
+    std::fs::write(worktree.join("a.txt"), "a before\n").unwrap();
+    std::fs::write(worktree.join("b.txt"), "b before\n").unwrap();
+    run_turn(&client, addr, &token, &session, "plan it").await;
+    std::fs::write(worktree.join("a.txt"), "a after\n").unwrap();
+    std::fs::write(worktree.join("b.txt"), "b after\n").unwrap();
+    let second = run_turn(&client, addr, &token, &session, "build it").await;
+
+    // Killed after the first of the two files moved.
+    let restore_id = runtime
+        .restore_checkpoint_killed_at(
+            &OwnerId::local(),
+            workspace_id.parse().unwrap(),
+            tidebreak_core::CheckpointRestoreTarget::BeforeTurn {
+                turn_id: json_id(&second).parse().unwrap(),
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(read(worktree.join("a.txt")).as_deref(), Some("a before\n"));
+    assert_eq!(read(worktree.join("b.txt")).as_deref(), Some("b after\n"));
+    let staging = std::path::PathBuf::from(
+        String::from_utf8(
+            std::process::Command::new("git")
+                .args([
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-path",
+                    "tidebreak-tmp",
+                ])
+                .current_dir(&worktree)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim(),
+    );
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("0123456789abcdef"), "half written\n").unwrap();
+
+    runtime.recover().await.unwrap();
+
+    let session_id: SessionId = session.parse().unwrap();
+    let rows: Vec<Event> = journaled_events(&runtime.db, session_id)
+        .await
+        .into_iter()
+        .map(|framed| framed.event)
+        .filter(|event| {
+            matches!(event, Event::CheckpointRestored { restore_id: id, .. } if *id == restore_id)
+        })
+        .collect();
+    let [Event::CheckpointRestored {
+        status: started, ..
+    }, Event::CheckpointRestored { status, error, .. }] = rows.as_slice()
+    else {
+        panic!("the boot journals how the restore ended: {rows:?}");
+    };
+    assert_eq!(*started, tidebreak_core::CheckpointRestoreStatus::Started);
+    assert_eq!(*status, tidebreak_core::CheckpointRestoreStatus::Partial);
+    assert!(
+        error.as_deref().is_some_and(|error| error.contains("quit")),
+        "{error:?}"
+    );
+    assert!(!staging.join("0123456789abcdef").exists());
+
+    // The next turn starts from the files as they stand, so it is credited
+    // with nothing, and the engine hears the one file that moved.
+    let third = run_turn(&client, addr, &token, &session, "carry on").await;
+    assert_eq!(third["diffstat"]["files"], 0, "{third}");
+    let told = adapter.turn_inputs().last().unwrap().text.clone();
+    assert!(
+        told.contains("- a.txt") && !told.contains("b.txt") && told.ends_with("carry on"),
+        "{told}"
+    );
+
+    let response = post(
+        &client,
+        addr,
+        &token,
+        &format!("/code/workspaces/{workspace_id}/checkpoints/restore"),
+        serde_json::json!({
+            "target": { "kind": "before_restore", "restore_id": restore_id.to_string() },
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(read(worktree.join("a.txt")).as_deref(), Some("a after\n"));
+    assert_eq!(read(worktree.join("b.txt")).as_deref(), Some("b after\n"));
 }
 
 #[tokio::test]

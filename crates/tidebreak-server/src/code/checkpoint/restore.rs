@@ -17,12 +17,14 @@
 //! the files one at a time. When a path cannot move, the paths already moved
 //! go back, and the error says whether that was verified.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use tidebreak_core::{CodeRestoreId, SessionId, WorkspaceId};
 
 use super::worktree::{
-    apply, inspect, refuse_sparse_checkout, tree_of, ApplyFailure, Plan, PrivateIndex,
+    apply, inspect, refuse_sparse_checkout, tree_entries, tree_of, tree_of_entries, ApplyFailure,
+    Plan, PrivateIndex, TreeEntry,
 };
 use super::{
     checkpoint_ref, collect_changes, git_text, snapshot_tree, BoundedFiles, CheckpointError,
@@ -126,7 +128,7 @@ pub async fn preview_restore(
         collect_changes(worktree, &target_tree, &current_tree, DiffBounds::default()).await?;
     let blocked = inspect(worktree, &current_tree, &target_tree)
         .await?
-        .blocked;
+        .in_the_way();
     Ok(RestorePreview {
         current_tree,
         files,
@@ -202,9 +204,12 @@ pub async fn prepare_restore(
             "The workspace already matches that checkpoint.",
         ));
     }
-    let plan = inspect(worktree, &current_tree, &restored_tree)
+    let mut plan = inspect(worktree, &current_tree, &restored_tree)
         .await?
         .into_plan("restore_blocked", "The restore")?;
+    // A saved state comes back as the exact bytes it kept, not as what a
+    // clean filter made of them.
+    plan.write_exact(exact_bytes_kept_by(worktree, target).await?);
     let files = collect_changes(
         worktree,
         &current_tree,
@@ -217,7 +222,14 @@ pub async fn prepare_restore(
     let head = git_text(worktree, &["rev-parse", "HEAD"], GIT_TIMEOUT)
         .await
         .map_err(CheckpointError::internal)?;
-    let saved_oid = commit_tree(worktree, &current_tree, &head, saved_message).await?;
+    let saved_oid = save_state(
+        worktree,
+        &current_tree,
+        &head,
+        saved_message,
+        &plan.exact_bytes_the_snapshot_lacks(),
+    )
+    .await?;
     git_text(
         worktree,
         &["update-ref", "--no-deref", saved_ref, &saved_oid, ""],
@@ -248,6 +260,13 @@ impl PreparedRestore {
             }
             Err(ApplyFailure::Partial { reason }) => Err(RestoreApplyError::Partial(reason)),
         }
+    }
+
+    /// Move the paths before step `killed_at`, then stop the way a killed
+    /// process stops: nothing rolls back and nothing is reported.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn apply_until_killed(self, worktree: &Path, killed_at: usize) {
+        super::worktree::apply_until_killed(worktree, &self.plan, killed_at).await;
     }
 }
 
@@ -328,16 +347,30 @@ pub async fn continue_chains_after_restore(
     message: &str,
     resume_refs: &[String],
 ) -> Result<(), CheckpointError> {
-    if resume_refs.is_empty() {
-        return Ok(());
-    }
-    let restored = commit_tree(
+    continue_chains_to(
         worktree,
         &applied.restored_tree,
         &applied.saved_oid,
         message,
+        resume_refs,
     )
-    .await?;
+    .await
+}
+
+/// Point each session's chain at `tree`, on top of the state a restore
+/// saved. A restore that did not finish passes the files as they stand, so
+/// the next turn diffs from what is really there.
+pub async fn continue_chains_to(
+    worktree: &Path,
+    tree: &str,
+    saved_oid: &str,
+    message: &str,
+    resume_refs: &[String],
+) -> Result<(), CheckpointError> {
+    if resume_refs.is_empty() {
+        return Ok(());
+    }
+    let restored = commit_tree(worktree, tree, &[saved_oid], message).await?;
     for r#ref in resume_refs {
         git_text(
             worktree,
@@ -440,24 +473,86 @@ pub async fn restore_note(
     )))
 }
 
-async fn commit_tree(
+/// The trailer on a saved state that names the commit holding the exact
+/// bytes of files a clean filter changed.
+const EXACT_BYTES_TRAILER: &str = "Tidebreak-Exact-Bytes:";
+
+/// Commit the state a restore replaces, on top of `head`.
+///
+/// A snapshot holds each file as git's clean filters made it. When a filter
+/// dropped part of a file the restore replaces, such as notebook output, the
+/// file's exact bytes go in a second commit: the saved state's second parent,
+/// which keeps them reachable, and which its message names. Undoing the
+/// restore writes those bytes back as they were.
+async fn save_state(
     worktree: &Path,
     tree: &str,
-    parent: &str,
+    head: &str,
     message: &str,
+    exact: &[(GitPath, TreeEntry)],
 ) -> Result<String, CheckpointError> {
-    git_text(
+    if exact.is_empty() {
+        return commit_tree(worktree, tree, &[head], message).await;
+    }
+    let exact_tree = tree_of_entries(worktree, exact).await?;
+    let exact_commit = commit_tree(
         worktree,
-        &["commit-tree", tree, "-p", parent, "-m", message],
+        &exact_tree,
+        &[],
+        "exact bytes of the files git's filters change",
+    )
+    .await?;
+    commit_tree(
+        worktree,
+        tree,
+        &[head, &exact_commit],
+        &format!("{message}\n\n{EXACT_BYTES_TRAILER} {exact_commit}\n"),
+    )
+    .await
+}
+
+/// The exact bytes a saved state kept for files a clean filter changed, by
+/// path. Empty for a turn's checkpoint, which keeps none.
+async fn exact_bytes_kept_by(
+    worktree: &Path,
+    target: &str,
+) -> Result<HashMap<GitPath, TreeEntry>, CheckpointError> {
+    let message = git_text(
+        worktree,
+        &["show", "-s", "--format=%B", target, "--"],
         GIT_TIMEOUT,
     )
     .await
-    .map_err(CheckpointError::internal)
+    .map_err(CheckpointError::internal)?;
+    let Some(commit) = message
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(EXACT_BYTES_TRAILER))
+        .map(str::trim)
+    else {
+        return Ok(HashMap::new());
+    };
+    tree_entries(worktree, commit).await
+}
+
+async fn commit_tree(
+    worktree: &Path,
+    tree: &str,
+    parents: &[&str],
+    message: &str,
+) -> Result<String, CheckpointError> {
+    let mut args = vec!["commit-tree", tree];
+    for parent in parents {
+        args.extend(["-p", parent]);
+    }
+    args.extend(["-m", message]);
+    git_text(worktree, &args, GIT_TIMEOUT)
+        .await
+        .map_err(CheckpointError::internal)
 }
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::super::testing::{add_worktree, git_stdout, init_repo, run};
+    use super::super::testing::{add_worktree, git_stdout, init_repo, run, strip_output_filter};
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -1007,6 +1102,115 @@ mod tests {
                 "the state before comes back exactly after a kill at step {killed_at}"
             );
         }
+    }
+
+    /// A clean filter drops `OUTPUT` lines, so no snapshot holds them. The
+    /// restore saves the file's exact bytes, so its Undo brings the output
+    /// back, and so does undoing that Undo.
+    #[tokio::test]
+    async fn a_restore_and_its_undo_keep_what_a_filter_strips() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "lossy-restore");
+        strip_output_filter(&tree);
+        std::fs::write(tree.join("nb.ipynb"), "code v1\nOUTPUT 1\n").unwrap();
+        let before = checkpoint(&tree, "before").await;
+        let with_output = "code v2\nOUTPUT 42\n";
+        std::fs::write(tree.join("nb.ipynb"), with_output).unwrap();
+
+        restore_worktree(&tree, &before, None, &saved_ref(), "state before restore")
+            .await
+            .unwrap();
+        // The checkpoint never held its output; the restore writes what it has.
+        assert_eq!(read(&tree.join("nb.ipynb")).as_deref(), Some("code v1\n"));
+
+        let undo = format!("{REF_PREFIX}/test/undo");
+        restore_worktree(&tree, &saved_ref(), None, &undo, "state before undo")
+            .await
+            .unwrap();
+        assert_eq!(read(&tree.join("nb.ipynb")).as_deref(), Some(with_output));
+
+        let redo = format!("{REF_PREFIX}/test/redo");
+        restore_worktree(&tree, &undo, None, &redo, "state before redo")
+            .await
+            .unwrap();
+        assert_eq!(read(&tree.join("nb.ipynb")).as_deref(), Some("code v1\n"));
+        restore_worktree(
+            &tree,
+            &redo,
+            None,
+            &format!("{REF_PREFIX}/test/again"),
+            "again",
+        )
+        .await
+        .unwrap();
+        assert_eq!(read(&tree.join("nb.ipynb")).as_deref(), Some(with_output));
+    }
+
+    /// A restore that stops partway puts a file back as its exact bytes,
+    /// not as what the filter kept of it.
+    #[tokio::test]
+    async fn a_restore_that_stops_partway_puts_back_what_a_filter_strips() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "lossy-rollback");
+        strip_output_filter(&tree);
+        std::fs::create_dir_all(tree.join("locked")).unwrap();
+        std::fs::write(tree.join("locked/kept.txt"), "kept\n").unwrap();
+        std::fs::write(tree.join("a.ipynb"), "code v1\n").unwrap();
+        std::fs::write(tree.join("locked/later.txt"), "the checkpoint's file\n").unwrap();
+        let before = checkpoint(&tree, "before").await;
+        let with_output = "code v2\nOUTPUT 42\n";
+        std::fs::write(tree.join("a.ipynb"), with_output).unwrap();
+        std::fs::remove_file(tree.join("locked/later.txt")).unwrap();
+
+        let prepared = prepare_restore(&tree, &before, None, &saved_ref(), "state before restore")
+            .await
+            .unwrap();
+        // `a.ipynb` is written first; the file in `locked/` cannot be.
+        std::fs::set_permissions(tree.join("locked"), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+        let err = prepared.apply(&tree).await.unwrap_err();
+        std::fs::set_permissions(tree.join("locked"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        assert!(
+            matches!(
+                err,
+                RestoreApplyError::NothingChanged { changed: false, .. }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(read(&tree.join("a.ipynb")).as_deref(), Some(with_output));
+    }
+
+    /// A file whose name is as long as the disk allows: a restore removes it
+    /// and rewrites another, and its Undo writes both back, because each new
+    /// version is written under a short name first.
+    #[tokio::test]
+    async fn a_long_file_name_survives_a_restore_and_its_undo() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "long-restore");
+        let added = format!("{}.txt", "a".repeat(246));
+        let edited = format!("{}.txt", "e".repeat(246));
+        std::fs::write(tree.join(&edited), "v1\n").unwrap();
+        let before = checkpoint(&tree, "before").await;
+        std::fs::write(tree.join(&edited), "v2\n").unwrap();
+        std::fs::write(tree.join(&added), "made after the checkpoint\n").unwrap();
+
+        restore_worktree(&tree, &before, None, &saved_ref(), "state before restore")
+            .await
+            .unwrap();
+        assert!(!tree.join(&added).exists());
+        assert_eq!(read(&tree.join(&edited)).as_deref(), Some("v1\n"));
+
+        let undo = format!("{REF_PREFIX}/test/undo");
+        restore_worktree(&tree, &saved_ref(), None, &undo, "state before undo")
+            .await
+            .unwrap();
+        assert_eq!(
+            read(&tree.join(&added)).as_deref(),
+            Some("made after the checkpoint\n")
+        );
+        assert_eq!(read(&tree.join(&edited)).as_deref(), Some("v2\n"));
     }
 
     #[tokio::test]

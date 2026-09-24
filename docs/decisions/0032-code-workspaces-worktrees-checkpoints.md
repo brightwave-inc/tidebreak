@@ -202,12 +202,26 @@ what the worktree holds at each. Right before it touches a path, it checks
 that the path still holds what it recorded, or is still absent, and stops
 rather than overwrite or remove anything that changed since. It removes
 paths first, deepest first, then writes, parents first. It writes each file
-to a temporary file beside it, checks the path one last time, and moves the
-file into place with a rename, or with a hard link where nothing stood. A
-path holds its old content or its new content, never a mix, and a file that
-appears meanwhile is never overwritten. When it stops, every path it moved
-goes back, and it checks each one against the saved state. No checkout hook
-fires, and a file whose content matches is never touched.
+to a temporary file in the worktree's own git folder, under a short name of
+fixed length, checks the path one last time, and moves the file into place
+with a rename, or with a hard link where nothing stood. A path holds its old
+content or its new content, never a mix, and a file that appears meanwhile
+is never overwritten. A crash mid-write leaves its temporary file where git
+never lists it, and the next change or the next boot clears it; a file
+whose name is as long as the disk allows still gets written. When it stops,
+every path it moved goes back as its exact bytes, and it checks each one.
+No checkout hook fires, and a file whose content matches is never touched.
+
+**Exact bytes, whatever the filters.** A snapshot holds each file as git's
+clean filters made it, and a lossy filter drops part of it on the way in:
+a filter that strips notebook output, or line endings git does not give back.
+So before anything moves, every file an undo would replace or remove is also
+stored exactly as its bytes stand. A restore's saved state keeps those bytes
+in a second commit, its second parent, which its message names, and its Undo
+writes them back unfiltered. A revert or a discard builds its new version
+from what the filter kept and has no Undo, so it refuses a file whose bytes
+the filters do not give back (`filter_lossy`) and names the filter. A filter
+that gives every byte back on checkout passes.
 
 **What a restore refuses.** Ignored files are in no snapshot, so no Undo could
 bring one back. A restore that would overwrite or remove one, or a folder
@@ -215,8 +229,12 @@ holding one, or any other file no snapshot holds, refuses and names it. So
 does one that would remove or replace a nested repository, a submodule, or a
 gitlink, or a folder that holds one: a snapshot holds only its commit, never
 its files. The preview names the same paths, so the person can move them
-first. A sparse checkout refuses every undo, because its snapshot cannot
-tell a file outside the cone from a deleted one.
+first. So does a change to a path that names the same file on this disk as
+another path git keeps apart, such as `readme.md` and `README.md` when
+`core.ignorecase` is off on a disk that ignores case: changing one would
+change the other, so the refusal names both. A sparse checkout refuses every
+undo, because its snapshot cannot tell a file outside the cone from a deleted
+one.
 
 **A restore can be undone.** Before any file moves, the state being replaced
 is committed to its own hidden ref,
@@ -229,13 +247,18 @@ left alone. When a restore stops partway and every path it moved checks out
 against the saved state, it is journaled as failed, the one outcome that
 says nothing changed. Otherwise it is journaled as partial. Its Undo,
 reachable from the transcript and by id, puts back everything it replaced,
-and its row keeps the Undo whatever the status, including a restore the
-process never finished. The route runs the restore on a task of its own, so
-a client that disconnects cannot stop it halfway.
+and its row keeps the Undo whatever the status. Before its first row, the
+restore also leaves a record in the data folder, removed after its last. A
+record the next boot finds belongs to a restore the process never finished:
+the boot journals it as partial, with its Undo, and points each open
+session's chain at the files as they really stand. The route runs the
+restore on a task of its own, so a client that disconnects cannot stop it
+halfway.
 
 **The chain continues from the restore.** For every open session in the
 workspace, `…/<session>/after/<n>` points at the restored state, where `n` is
-that session's newest turn. The next turn diffs from it. Without that, the
+that session's newest turn, or at the files as they stand after a restore
+that stopped partway. The next turn diffs from it. Without that, the
 next turn's diff would start at its own previous checkpoint and claim the
 restore's reversal as the turn's work. The same ref tells the engine, ahead of
 the next message, which files moved since its last turn. Its own memory of
@@ -286,12 +309,20 @@ and says so. A plan stopped after any one path leaves every path whole, in
 its state before or after, and restoring the saved state brings back the
 before state. A hunk of a renamed file reverts under the new name, a stale
 hunk refuses rather than land on an identical block, and a discard refuses a
-folder in its way and touches exactly the paths it is given.
+folder in its way and touches exactly the paths it is given. With a filter
+that strips `OUTPUT` lines, a restore's Undo, and a restore that rolls back,
+bring the lines back, and a revert or a discard refuses; line endings git
+gives back pass. A file with a 250-byte name survives a restore, its Undo, a
+discard, and the revert of a rename. With `core.ignorecase` or
+`core.precomposeunicode` off, a discard of one spelling of a file refuses and
+names both.
 `a_turn_after_a_restore_diffs_from_the_restored_state` in `checkpoint.rs`
 pins the chain. `tests/code_undo.rs` in `tidebreak-server-api` drives the
 routes end to end: the journal rows, the note to the engine, the refusals
-while a turn is parked, commit included, and a commit over unreviewed
-changes. A plausible wrong implementation restores tracked files only and
+while a turn is parked, commit included, a commit over unreviewed changes,
+and a restore killed partway that the next boot journals as partial, whose
+next turn starts from the files as they stand and whose Undo brings the
+state before back. A plausible wrong implementation restores tracked files only and
 passes every tracked-edit case; the untracked file that must come back fails
 it. Another checks out with `--reset` and passes every case without ignored
 files; the ignored `.env` that must survive fails it. A third applies the

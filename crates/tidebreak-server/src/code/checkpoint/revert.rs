@@ -18,9 +18,9 @@ use std::path::Path;
 use tidebreak_harness::OutputBudget;
 
 use super::worktree::{
-    apply, inspect, merge_blobs, name_paths, read_blob, refuse_sparse_checkout, tree_entry,
-    tree_paths_under, tree_with_changes, unsaved_under, write_blob, ApplyFailure, PrivateIndex,
-    TreeEntry, MAX_BLOB_BYTES,
+    apply, inspect, merge_blobs, name_paths, read_blob, refuse_lossy_filters,
+    refuse_sparse_checkout, tree_entry, tree_paths_under, tree_with_changes, unsaved_under,
+    write_blob, ApplyFailure, PrivateIndex, TreeEntry, MAX_BLOB_BYTES,
 };
 use super::{
     complete_nul_terminated_records, git_bytes_bounded, git_bytes_with_literal_paths_bounded,
@@ -115,6 +115,7 @@ pub async fn revert_change(
     let plan = inspect(worktree, &current, &target)
         .await?
         .into_plan("revert_blocked", "Reverting this change")?;
+    refuse_lossy_filters(worktree, &plan, "Reverting this change").await?;
     apply(worktree, &plan)
         .await
         .map_err(ApplyFailure::into_error)?;
@@ -454,6 +455,7 @@ pub async fn discard_paths(
     let plan = inspect(worktree, &current, &target)
         .await?
         .into_plan("discard_blocked", "Discarding these changes")?;
+    refuse_lossy_filters(worktree, &plan, "Discarding these changes").await?;
     apply(worktree, &plan)
         .await
         .map_err(ApplyFailure::into_error)?;
@@ -650,7 +652,9 @@ impl<'a> FileSection<'a> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::super::testing::{add_worktree, git_stdout, init_repo, run};
+    use super::super::testing::{
+        add_worktree, disk_folds_case, git_stdout, init_repo, run, strip_output_filter,
+    };
     use super::super::{merge_base, produce_diff, snapshot_tree, DiffBounds};
     use super::*;
 
@@ -1072,6 +1076,186 @@ mod tests {
             read(&tree.join("src/outside.txt")).as_deref(),
             Some("outside the cone\n")
         );
+    }
+
+    /// A revert or a discard builds the new version from what the clean
+    /// filter kept. The `OUTPUT` line exists only on disk and no Undo could
+    /// bring it back, so both refuse, name the filter, and leave the file.
+    #[tokio::test]
+    async fn revert_and_discard_refuse_a_file_a_filter_strips() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "lossy");
+        strip_output_filter(&tree);
+        std::fs::write(tree.join("nb.ipynb"), lines(40, "cell")).unwrap();
+        run(&tree, &["git", "add", "nb.ipynb"]);
+        run(&tree, &["git", "commit", "-q", "-m", "notebook"]);
+        let base = snapshot_tree(&tree).await.unwrap();
+        let edited = format!(
+            "{}OUTPUT 42\n",
+            lines(40, "cell")
+                .replace("cell 2\n", "cell two\n")
+                .replace("cell 35\n", "cell thirty-five\n")
+        );
+        std::fs::write(tree.join("nb.ipynb"), &edited).unwrap();
+        let to = snapshot_tree(&tree).await.unwrap();
+        let second = shown_hunk(&tree, &base, &to, "nb.ipynb", 1).await;
+        assert!(!second.contains("OUTPUT"), "{second}");
+
+        let err = revert_change(
+            &tree,
+            &base,
+            &to,
+            "nb.ipynb",
+            Some(HunkSelector {
+                index: 1,
+                text: &second,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(conflict_kind(&err), "filter_lossy", "{err:?}");
+        assert!(err.to_string().contains("\"strip\""), "{err}");
+        assert_eq!(read(&tree.join("nb.ipynb")), Some(edited.clone()));
+
+        let err = revert_change(&tree, &base, &to, "nb.ipynb", None)
+            .await
+            .unwrap_err();
+        assert_eq!(conflict_kind(&err), "filter_lossy", "{err:?}");
+
+        let err = discard_paths(&tree, &["nb.ipynb".to_owned()], None)
+            .await
+            .unwrap_err();
+        assert_eq!(conflict_kind(&err), "filter_lossy", "{err:?}");
+        assert_eq!(read(&tree.join("nb.ipynb")), Some(edited));
+    }
+
+    /// Line endings git converts on the way in and gives back on the way out
+    /// lose nothing, so a discard goes ahead and writes them back.
+    #[tokio::test]
+    async fn a_discard_goes_ahead_when_the_filters_give_every_byte_back() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "crlf");
+        std::fs::write(tree.join(".gitattributes"), "*.txt eol=crlf\n").unwrap();
+        std::fs::write(tree.join("lines.txt"), "one\r\ntwo\r\n").unwrap();
+        run(&tree, &["git", "add", ".gitattributes", "lines.txt"]);
+        run(&tree, &["git", "commit", "-q", "-m", "crlf"]);
+        std::fs::write(tree.join("lines.txt"), "one\r\nchanged\r\n").unwrap();
+
+        discard_paths(&tree, &["lines.txt".to_owned()], None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(tree.join("lines.txt")).unwrap(),
+            b"one\r\ntwo\r\n"
+        );
+    }
+
+    /// A name as long as the disk allows still discards and reverts: the new
+    /// version is written under a short name first, then moved into place.
+    #[tokio::test]
+    async fn long_file_names_discard_and_revert_a_rename() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "long-names");
+        let old = format!("{}.txt", "o".repeat(246));
+        let new = format!("{}.txt", "n".repeat(246));
+        let body = lines(10, "line");
+        std::fs::write(tree.join(&old), &body).unwrap();
+        run(&tree, &["git", "add", "--", old.as_str()]);
+        run(&tree, &["git", "commit", "-q", "-m", "long"]);
+        let base = snapshot_tree(&tree).await.unwrap();
+
+        std::fs::write(tree.join(&old), format!("{body}more\n")).unwrap();
+        discard_paths(&tree, std::slice::from_ref(&old), None)
+            .await
+            .unwrap();
+        assert_eq!(read(&tree.join(&old)), Some(body.clone()));
+
+        // Reverting a rename between two long names brings the old one back.
+        std::fs::rename(tree.join(&old), tree.join(&new)).unwrap();
+        let to = snapshot_tree(&tree).await.unwrap();
+        revert_change(&tree, &base, &to, &new, None).await.unwrap();
+        assert_eq!(read(&tree.join(&old)), Some(body));
+        assert!(!tree.join(&new).exists());
+    }
+
+    /// With `core.ignorecase` off on a disk that ignores case, git keeps
+    /// `notes.md` and `NOTES.md` as two paths for one file. A discard of
+    /// either would change the other, so it refuses and names both. On a disk
+    /// that keeps case they are two files, and a discard touches only its own.
+    #[tokio::test]
+    async fn a_discard_never_changes_a_file_through_another_spelling() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "alias-case");
+        std::fs::write(tree.join("notes.md"), "committed\n").unwrap();
+        run(&tree, &["git", "add", "notes.md"]);
+        run(&tree, &["git", "commit", "-q", "-m", "notes"]);
+        run(&tree, &["git", "config", "core.ignorecase", "false"]);
+        std::fs::rename(tree.join("notes.md"), tree.join("NOTES.md")).unwrap();
+        std::fs::write(tree.join("NOTES.md"), "edited by hand\n").unwrap();
+
+        if disk_folds_case(&tree) {
+            for picked in ["notes.md", "NOTES.md"] {
+                let err = discard_paths(&tree, &[picked.to_owned()], None)
+                    .await
+                    .unwrap_err();
+                assert_eq!(conflict_kind(&err), "discard_blocked", "{picked}: {err:?}");
+                let message = err.to_string();
+                assert!(
+                    message.contains("notes.md") && message.contains("NOTES.md"),
+                    "{message}"
+                );
+                assert_eq!(
+                    read(&tree.join("NOTES.md")).as_deref(),
+                    Some("edited by hand\n")
+                );
+            }
+        } else {
+            discard_paths(&tree, &["notes.md".to_owned()], None)
+                .await
+                .unwrap();
+            assert_eq!(read(&tree.join("notes.md")).as_deref(), Some("committed\n"));
+            assert_eq!(
+                read(&tree.join("NOTES.md")).as_deref(),
+                Some("edited by hand\n")
+            );
+        }
+    }
+
+    /// With `core.precomposeunicode` off, git can hold one name in two
+    /// Unicode forms. On a disk that treats both forms as one name, a
+    /// discard of one would change the other, so it refuses.
+    #[tokio::test]
+    async fn a_discard_never_changes_a_file_through_another_unicode_form() {
+        let composed = "caf\u{e9}.txt";
+        let decomposed = "cafe\u{301}.txt";
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "alias-unicode");
+        std::fs::write(tree.join(composed), "committed\n").unwrap();
+        run(&tree, &["git", "add", composed]);
+        run(&tree, &["git", "commit", "-q", "-m", "cafe"]);
+        run(&tree, &["git", "config", "core.precomposeunicode", "false"]);
+        std::fs::remove_file(tree.join(composed)).unwrap();
+        std::fs::write(tree.join(decomposed), "edited by hand\n").unwrap();
+        let one_name = tree.join(composed).exists();
+
+        let discarded = discard_paths(&tree, &[composed.to_owned()], None).await;
+
+        if one_name {
+            let err = discarded.unwrap_err();
+            assert_eq!(conflict_kind(&err), "discard_blocked", "{err:?}");
+            assert_eq!(
+                read(&tree.join(decomposed)).as_deref(),
+                Some("edited by hand\n")
+            );
+        } else {
+            discarded.unwrap();
+            assert_eq!(read(&tree.join(composed)).as_deref(), Some("committed\n"));
+            assert_eq!(
+                read(&tree.join(decomposed)).as_deref(),
+                Some("edited by hand\n")
+            );
+        }
     }
 
     /// A committed file `config` was replaced by a folder holding a new file

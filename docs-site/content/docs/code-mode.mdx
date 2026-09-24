@@ -101,11 +101,14 @@ what an agent did, open the turn's menu on its review card and choose
 - Everything changed since then is lost: that turn, later turns, other agents
   in the workspace, and edits you made by hand. The confirmation lists those
   files, and names the other agents' turns, before anything changes.
-- Tidebreak saves the state it replaces. The conversation shows the restore
-  with an **Undo** that puts that state back. If a restore stops partway,
-  Tidebreak puts back the files it had changed and checks each one. The
-  **Undo** stays on the restore however it ended, so you can always put back
-  everything it replaced.
+- Tidebreak saves the state it replaces, byte for byte, even when a Git
+  filter changes a file on its way into Git, such as one that strips notebook
+  output. The conversation shows the restore with an **Undo** that puts that
+  state back. If a restore stops partway, Tidebreak puts back the files it
+  had changed and checks each one. If Tidebreak quits in the middle of a
+  restore, the conversation shows it stopped partway when Tidebreak starts
+  again. The **Undo** stays on the restore however it ended, so you can
+  always put back everything it replaced.
 - Your commits and your branch stay as they are. If a turn committed, the
   restore shows up as uncommitted changes that undo the commit.
 - The agent still remembers the turns a restore undid. When you send your next
@@ -130,7 +133,10 @@ a file's uncommitted changes, open its menu in the list and choose **Discard
 uncommitted changes**. Discard changes only the paths that row shows: the file
 goes back to its last commit, and a rename you have not committed goes back
 to the old name. It refuses when a folder you did not pick stands where the
-file goes, and it cannot be undone.
+file goes, and it cannot be undone. Revert and discard both refuse a file a
+Git filter changes in a way Git cannot give back, such as a notebook whose
+output a filter strips, because they would lose that part; change such a
+file in your editor.
 
 Restore, revert, discard, and commit refuse while a turn runs, and commit also
 refuses while a message waits in the queue, so an agent never has its files

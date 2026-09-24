@@ -39,11 +39,12 @@ mod worktree;
 
 pub use restore::{
     chain_commit_message, chain_resume_ref, commit_time, continue_chains_after_restore,
-    find_restore_point, prepare_restore, preview_restore, restore_note, restore_point_ref,
-    restore_worktree, AppliedRestore, PreparedRestore, RestoreApplyError, RestorePreview,
-    RestoredTo,
+    continue_chains_to, find_restore_point, prepare_restore, preview_restore, restore_note,
+    restore_point_ref, restore_worktree, AppliedRestore, PreparedRestore, RestoreApplyError,
+    RestorePreview, RestoredTo,
 };
 pub use revert::{discard_paths, revert_change, uncommitted_paths, HunkSelector, RevertedChange};
+pub(crate) use worktree::clear_staging_folder;
 
 use std::ffi::OsString;
 use std::future::Future;
@@ -182,6 +183,22 @@ impl GitPath {
         prefix
     }
 
+    /// The folder that holds this path, or `None` at the top of the worktree.
+    fn folder(&self) -> Option<GitPath> {
+        self.0
+            .iter()
+            .rposition(|byte| *byte == b'/')
+            .map(|at| Self(self.0[..at].to_vec()))
+    }
+
+    /// The entry's own name: the last part of this path.
+    fn name(&self) -> &[u8] {
+        match self.0.iter().rposition(|byte| *byte == b'/') {
+            Some(at) => &self.0[at + 1..],
+            None => &self.0,
+        }
+    }
+
     /// The entry `name` inside this folder.
     fn join_name(&self, name: &std::ffi::OsStr) -> GitPath {
         let mut path = self.child_prefix();
@@ -195,24 +212,6 @@ impl GitPath {
             path.extend_from_slice(name.to_string_lossy().as_bytes());
         }
         Self(path)
-    }
-
-    /// The entry `name` in the same folder as this path.
-    fn sibling(&self, name: &std::ffi::OsStr) -> GitPath {
-        match self.0.iter().rposition(|byte| *byte == b'/') {
-            Some(at) => Self(self.0[..at].to_vec()).join_name(name),
-            None => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStrExt;
-                    Self(name.as_bytes().to_vec())
-                }
-                #[cfg(not(unix))]
-                {
-                    Self(name.to_string_lossy().as_bytes().to_vec())
-                }
-            }
-        }
     }
 }
 

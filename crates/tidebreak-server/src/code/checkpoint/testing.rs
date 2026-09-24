@@ -65,3 +65,23 @@ pub(super) fn git_stdout(cwd: &Path, args: &[&str]) -> String {
     );
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
+
+/// A clean filter that drops every line starting `OUTPUT` on its way into
+/// git, the way a notebook output stripper does, for `*.ipynb`. A snapshot
+/// never holds those lines; only the file on disk does.
+pub(super) fn strip_output_filter(worktree: &Path) {
+    run(
+        worktree,
+        &["git", "config", "filter.strip.clean", "sed '/^OUTPUT/d'"],
+    );
+    run(worktree, &["git", "config", "filter.strip.smudge", "cat"]);
+    std::fs::write(worktree.join(".gitattributes"), "*.ipynb filter=strip\n").unwrap();
+    run(worktree, &["git", "add", ".gitattributes"]);
+    run(worktree, &["git", "commit", "-q", "-m", "strip output"]);
+}
+
+/// Whether this disk opens a name in capitals as the same file: the
+/// worktree's own `.git`, asked for as `.GIT`.
+pub(super) fn disk_folds_case(worktree: &Path) -> bool {
+    std::fs::symlink_metadata(worktree.join(".GIT")).is_ok()
+}

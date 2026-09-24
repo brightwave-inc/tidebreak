@@ -117,50 +117,35 @@ impl CodeRuntime {
         target: CheckpointRestoreTarget,
         expected_tree: Option<&str>,
     ) -> Result<CheckpointRestoreOutcome, ServerError> {
-        refuse_sandbox(&self.get_workspace(owner, workspace_id).await?)?;
-        let claim = self.claim_worktree(owner, workspace_id).await?;
-        let resolved = self
-            .resolve_restore_target(owner, &claim.workspace, target)
+        let (begun, claim, prepared) = self
+            .begin_restore(owner, caller, workspace_id, target, expected_tree)
             .await?;
-        let worktree = std::path::PathBuf::from(&claim.workspace.worktree_path);
-        let restore_id = CodeRestoreId::new();
-        let prepared = checkpoint::prepare_restore(
-            &worktree,
-            &resolved.commit,
-            expected_tree,
-            &checkpoint::restore_point_ref(workspace_id, resolved.session_id, restore_id),
-            &format!("state before restore {restore_id}"),
-        )
-        .await
-        .map_err(map_checkpoint)?;
-        let actor = (caller != owner).then(|| TurnActor::principal(caller));
-        let diffstat = prepared.files.stat.clone();
-        let row =
-            |status: CheckpointRestoreStatus, error: Option<String>| Event::CheckpointRestored {
-                restore_id,
-                target,
-                diffstat: diffstat.clone(),
-                actor: actor.clone(),
-                status,
-                error,
-            };
-        // Before any file moves, so the Undo is reachable whatever happens
-        // next, a crash included.
-        self.journal_restore(
-            owner,
-            resolved.session_id,
-            row(CheckpointRestoreStatus::Started, None),
-        )
-        .await
-        .map_err(|error| {
-            ServerError::internal(format!(
-                "the restore could not be recorded, so it did not run: {error}"
-            ))
-        })?;
-
+        let BegunRestore {
+            worktree,
+            restore_id,
+            session_id,
+            restored_to,
+            ..
+        } = &begun;
+        let (worktree, restore_id, session_id, restored_to) =
+            (worktree.clone(), *restore_id, *session_id, *restored_to);
+        let saved_oid = prepared.saved_oid.clone();
         let applied = match prepared.apply(&worktree).await {
             Ok(applied) => applied,
             Err(failure) => {
+                if matches!(failure, RestoreApplyError::Partial(_)) {
+                    // Some files moved: the next turn diffs from what is
+                    // really there and hears which files moved.
+                    self.continue_chains_to_worktree(
+                        owner,
+                        workspace_id,
+                        &worktree,
+                        restore_id,
+                        restored_to,
+                        &saved_oid,
+                    )
+                    .await;
+                }
                 drop(claim);
                 let (status, reason, reply) = match failure {
                     // Every path was verified to hold what it held before:
@@ -209,12 +194,14 @@ impl CodeRuntime {
                 if let Err(error) = self
                     .journal_restore(
                         owner,
-                        resolved.session_id,
-                        row(status, Some(bounded_reason(&reason))),
+                        session_id,
+                        begun.row(status, Some(bounded_reason(&reason))),
                     )
                     .await
                 {
                     tracing::warn!(%restore_id, %error, "how the restore ended was not journaled");
+                } else {
+                    forget_restore_in_flight(begun.in_flight);
                 }
                 self.announce_files_changed(owner, caller, workspace_id);
                 return Err(reply);
@@ -223,30 +210,7 @@ impl CodeRuntime {
 
         // Every session's next turn diffs from the restored state, not from
         // its own last checkpoint, so no turn is credited with the restore.
-        let mut resume_refs = Vec::new();
-        for session in list_sessions_for_workspace(&self.db, owner, workspace_id).await? {
-            if session.lifecycle == SessionLifecycle::Ended {
-                continue;
-            }
-            let newest = list_turns(&self.db, owner, session.id)
-                .await?
-                .iter()
-                .map(|turn| turn.ordinal)
-                .max()
-                .unwrap_or(0);
-            resume_refs.push(checkpoint::chain_resume_ref(
-                workspace_id,
-                session.id,
-                newest,
-            ));
-        }
-        let restored_to = match resolved.ordinal {
-            Some(ordinal) => RestoredTo::BeforeTurn {
-                session_id: resolved.session_id,
-                ordinal,
-            },
-            None => RestoredTo::BeforeRestore,
-        };
+        let resume_refs = self.resume_refs(owner, workspace_id).await?;
         if let Err(error) = checkpoint::continue_chains_after_restore(
             &worktree,
             &applied,
@@ -266,20 +230,314 @@ impl CodeRuntime {
         if let Err(error) = self
             .journal_restore(
                 owner,
-                resolved.session_id,
-                row(CheckpointRestoreStatus::Completed, None),
+                session_id,
+                begun.row(CheckpointRestoreStatus::Completed, None),
             )
             .await
         {
             tracing::warn!(%restore_id, %error, "the finished restore was not journaled");
+        } else {
+            forget_restore_in_flight(begun.in_flight);
         }
         self.announce_files_changed(owner, caller, workspace_id);
         Ok(CheckpointRestoreOutcome {
             restore_id,
             target,
-            session_id: resolved.session_id,
+            session_id,
             files: applied.files,
         })
+    }
+
+    /// Claim the worktree, save the state a restore replaces, and journal the
+    /// restore as started. No file has moved yet.
+    async fn begin_restore(
+        &self,
+        owner: &OwnerId,
+        caller: &OwnerId,
+        workspace_id: WorkspaceId,
+        target: CheckpointRestoreTarget,
+        expected_tree: Option<&str>,
+    ) -> Result<(BegunRestore, WorktreeClaim, checkpoint::PreparedRestore), ServerError> {
+        refuse_sandbox(&self.get_workspace(owner, workspace_id).await?)?;
+        let claim = self.claim_worktree(owner, workspace_id).await?;
+        let resolved = self
+            .resolve_restore_target(owner, &claim.workspace, target)
+            .await?;
+        let worktree = std::path::PathBuf::from(&claim.workspace.worktree_path);
+        let restore_id = CodeRestoreId::new();
+        let prepared = checkpoint::prepare_restore(
+            &worktree,
+            &resolved.commit,
+            expected_tree,
+            &checkpoint::restore_point_ref(workspace_id, resolved.session_id, restore_id),
+            &format!("state before restore {restore_id}"),
+        )
+        .await
+        .map_err(map_checkpoint)?;
+        let mut begun = BegunRestore {
+            worktree,
+            restore_id,
+            target,
+            session_id: resolved.session_id,
+            restored_to: match resolved.ordinal {
+                Some(ordinal) => RestoredTo::BeforeTurn {
+                    session_id: resolved.session_id,
+                    ordinal,
+                },
+                None => RestoredTo::BeforeRestore,
+            },
+            diffstat: prepared.files.stat.clone(),
+            actor: (caller != owner).then(|| TurnActor::principal(caller)),
+            in_flight: None,
+        };
+        // A record the next boot finds if this process never gets to the
+        // restore's last row.
+        begun.in_flight = self.note_restore_in_flight(&RestoreInFlight {
+            owner: owner.clone(),
+            workspace_id,
+            session_id: begun.session_id,
+            restore_id,
+            ordinal: resolved.ordinal,
+            saved_oid: prepared.saved_oid.clone(),
+            started: begun.row(CheckpointRestoreStatus::Started, None),
+        });
+        // Before any file moves, so the Undo is reachable whatever happens
+        // next, a crash included.
+        if let Err(error) = self
+            .journal_restore(
+                owner,
+                begun.session_id,
+                begun.row(CheckpointRestoreStatus::Started, None),
+            )
+            .await
+        {
+            forget_restore_in_flight(begun.in_flight.take());
+            return Err(ServerError::internal(format!(
+                "the restore could not be recorded, so it did not run: {error}"
+            )));
+        }
+        Ok((begun, claim, prepared))
+    }
+
+    /// A restore stopped before step `killed_at` the way a killed process
+    /// stops: journaled as started, some files moved, nothing after. For
+    /// tests of what the next boot does with it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn restore_checkpoint_killed_at(
+        &self,
+        owner: &OwnerId,
+        workspace_id: WorkspaceId,
+        target: CheckpointRestoreTarget,
+        killed_at: usize,
+    ) -> Result<CodeRestoreId, ServerError> {
+        let (begun, _claim, prepared) = self
+            .begin_restore(owner, owner, workspace_id, target, None)
+            .await?;
+        prepared
+            .apply_until_killed(&begun.worktree, killed_at)
+            .await;
+        Ok(begun.restore_id)
+    }
+
+    /// The chain ref each open session's next turn resumes from.
+    async fn resume_refs(
+        &self,
+        owner: &OwnerId,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<String>, ServerError> {
+        let mut resume_refs = Vec::new();
+        for session in list_sessions_for_workspace(&self.db, owner, workspace_id).await? {
+            if session.lifecycle == SessionLifecycle::Ended {
+                continue;
+            }
+            let newest = list_turns(&self.db, owner, session.id)
+                .await?
+                .iter()
+                .map(|turn| turn.ordinal)
+                .max()
+                .unwrap_or(0);
+            resume_refs.push(checkpoint::chain_resume_ref(
+                workspace_id,
+                session.id,
+                newest,
+            ));
+        }
+        Ok(resume_refs)
+    }
+
+    /// Point every open session's chain at the worktree as it stands now,
+    /// after a restore that did not finish, so the next turn diffs from what
+    /// is really there and hears which files moved.
+    async fn continue_chains_to_worktree(
+        &self,
+        owner: &OwnerId,
+        workspace_id: WorkspaceId,
+        worktree: &std::path::Path,
+        restore_id: CodeRestoreId,
+        restored_to: RestoredTo,
+        saved_oid: &str,
+    ) {
+        let continued = async {
+            let resume_refs = self
+                .resume_refs(owner, workspace_id)
+                .await
+                .map_err(|error| error.message().to_owned())?;
+            let tree = checkpoint::snapshot_tree(worktree)
+                .await
+                .map_err(|error| error.to_string())?;
+            checkpoint::continue_chains_to(
+                worktree,
+                &tree,
+                saved_oid,
+                &checkpoint::chain_commit_message(restore_id, restored_to),
+                &resume_refs,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        };
+        if let Err(error) = continued.await {
+            tracing::warn!(
+                workspace = %workspace_id,
+                %restore_id,
+                %error,
+                "the next turn's diff may include this unfinished restore"
+            );
+        }
+    }
+
+    /// Record a restore in flight, so the next boot finds it if this process
+    /// stops before the restore's last row. `None` when the record could not
+    /// be written; the restore still runs, and its started row keeps its Undo.
+    fn note_restore_in_flight(&self, restore: &RestoreInFlight) -> Option<std::path::PathBuf> {
+        let folder = restores_in_flight_folder(&self.data_dir);
+        let path = folder.join(format!("{}.json", restore.restore_id));
+        let written = std::fs::create_dir_all(&folder)
+            .map_err(|error| error.to_string())
+            .and_then(|()| serde_json::to_vec(restore).map_err(|error| error.to_string()))
+            .and_then(|bytes| {
+                let temp = folder.join(format!(".{}.tmp", restore.restore_id));
+                std::fs::write(&temp, bytes)
+                    .and_then(|()| std::fs::rename(&temp, &path))
+                    .map_err(|error| error.to_string())
+            });
+        match written {
+            Ok(()) => Some(path),
+            Err(error) => {
+                tracing::warn!(
+                    restore_id = %restore.restore_id,
+                    %error,
+                    "a crash during this restore will not be noticed at the next boot"
+                );
+                None
+            }
+        }
+    }
+
+    /// Finish what the last process left: journal every restore it never
+    /// finished as stopped partway, with its Undo, and point each open
+    /// session's chain at the files as they stand; then clear every local
+    /// worktree's staging folder of temporary files a crash left.
+    ///
+    /// Runs at boot, before any worker attaches, so no turn starts from a
+    /// chain that still describes the files before the restore.
+    pub(super) async fn finish_interrupted_restores(&self) {
+        let folder = restores_in_flight_folder(&self.data_dir);
+        let entries = std::fs::read_dir(&folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"));
+        for path in entries.collect::<Vec<_>>() {
+            let restore = match std::fs::read(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|bytes| {
+                    serde_json::from_slice::<RestoreInFlight>(&bytes)
+                        .map_err(|error| error.to_string())
+                }) {
+                Ok(restore) => restore,
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "an unreadable restore record");
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+            };
+            self.finish_interrupted_restore(&restore).await;
+            let _ = std::fs::remove_file(&path);
+        }
+        match list_workspaces_all_owners(&self.db).await {
+            Ok(workspaces) => {
+                for workspace in workspaces {
+                    if !workspace.is_remote() && !workspace.worktree_path.is_empty() {
+                        checkpoint::clear_staging_folder(std::path::Path::new(
+                            &workspace.worktree_path,
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "code-mode: could not list workspaces to clear staging");
+            }
+        }
+    }
+
+    async fn finish_interrupted_restore(&self, restore: &RestoreInFlight) {
+        let Event::CheckpointRestored {
+            restore_id,
+            target,
+            diffstat,
+            actor,
+            ..
+        } = restore.started.clone()
+        else {
+            return;
+        };
+        let restored_to = match restore.ordinal {
+            Some(ordinal) => RestoredTo::BeforeTurn {
+                session_id: restore.session_id,
+                ordinal,
+            },
+            None => RestoredTo::BeforeRestore,
+        };
+        let workspace = get_workspace(&self.db, &restore.owner, restore.workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .filter(|workspace| {
+                !workspace.is_remote() && std::path::Path::new(&workspace.worktree_path).exists()
+            });
+        if let Some(workspace) = workspace {
+            let _write = self.workspace_write_lock(workspace.id).lock_owned().await;
+            if let Ok(_turn) = self.worktree_turn_lock(workspace.id).try_lock_owned() {
+                self.continue_chains_to_worktree(
+                    &restore.owner,
+                    workspace.id,
+                    std::path::Path::new(&workspace.worktree_path),
+                    restore_id,
+                    restored_to,
+                    &restore.saved_oid,
+                )
+                .await;
+            }
+        }
+        let row = Event::CheckpointRestored {
+            restore_id,
+            target,
+            diffstat,
+            actor,
+            status: CheckpointRestoreStatus::Partial,
+            error: Some(
+                "Tidebreak quit before this restore finished, so some files may not have moved. \
+                 Undo puts back every file it replaced."
+                    .to_owned(),
+            ),
+        };
+        if let Err(error) = self
+            .journal_restore(&restore.owner, restore.session_id, row)
+            .await
+        {
+            tracing::warn!(%restore_id, %error, "an unfinished restore was not journaled");
+        }
     }
 
     /// Undo one file's change, or one hunk of it, in the diff the person is
@@ -549,6 +807,63 @@ impl CodeRuntime {
 
 fn bounded_reason(reason: &str) -> String {
     reason.chars().take(MAX_RESTORE_ERROR_CHARS).collect()
+}
+
+/// A restore that is saved and journaled as started, with no file moved yet.
+struct BegunRestore {
+    worktree: std::path::PathBuf,
+    restore_id: CodeRestoreId,
+    target: CheckpointRestoreTarget,
+    /// The session whose transcript records the restore.
+    session_id: SessionId,
+    restored_to: RestoredTo,
+    diffstat: Diffstat,
+    actor: Option<TurnActor>,
+    /// The record the next boot finds if this process stops first.
+    in_flight: Option<std::path::PathBuf>,
+}
+
+impl BegunRestore {
+    /// The restore's row in its transcript, with how far it got.
+    fn row(&self, status: CheckpointRestoreStatus, error: Option<String>) -> Event {
+        Event::CheckpointRestored {
+            restore_id: self.restore_id,
+            target: self.target,
+            diffstat: self.diffstat.clone(),
+            actor: self.actor.clone(),
+            status,
+            error,
+        }
+    }
+}
+
+/// A restore that has started and not yet journaled how it ended, as the
+/// next boot needs it if this process stops first.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct RestoreInFlight {
+    owner: OwnerId,
+    workspace_id: WorkspaceId,
+    /// The session whose transcript records the restore.
+    session_id: SessionId,
+    restore_id: CodeRestoreId,
+    /// The target turn's ordinal, for a restore to before a turn.
+    ordinal: Option<i64>,
+    /// The commit that holds the state the restore replaces.
+    saved_oid: String,
+    /// The row journaled as started.
+    started: Event,
+}
+
+/// `{data_dir}/code/restores`: one record per restore in flight.
+fn restores_in_flight_folder(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("code").join("restores")
+}
+
+/// Drop the record of a restore whose last row is journaled.
+fn forget_restore_in_flight(record: Option<std::path::PathBuf>) {
+    if let Some(path) = record {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// The refusal while a turn holds the worktree.
