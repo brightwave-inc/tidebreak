@@ -1,6 +1,5 @@
 import { useSyncExternalStore } from "react";
-import hljs from "highlight.js/lib/core";
-import type { LanguageFn } from "highlight.js";
+import type { HLJSApi, LanguageFn } from "highlight.js";
 
 import { codeLanguageForFilename } from "@/codeLanguage";
 import type { DiffFileGroup } from "../unifiedDiff";
@@ -22,7 +21,8 @@ import type { DiffFileGroup } from "../unifiedDiff";
  *   own grounds, and `colorContrast.test.ts` holds each one to 4.5:1 on the
  *   plain row, the added and removed tints, and the word emphasis, in both
  *   themes.
- * - It costs a pass. Grammars load on first use, one per language. The view
+ * - It costs a pass. The engine and each grammar load on first use, so the
+ *   app starts without them and a diff loads only its own language. The view
  *   highlights a chunk of rows at a time and small hunks synchronously; the
  *   caps below leave very large files, very large hunks, and minified lines
  *   as plain text rather than stall the view.
@@ -112,8 +112,30 @@ export function diffLanguage(path: string): string | null {
   return language && language in GRAMMARS ? language : null;
 }
 
-/** The diff highlighter's own instance, so its grammars never reach chat's. */
-const engine = hljs.newInstance();
+/**
+ * The diff highlighter's own engine, so its grammars never reach chat's. It
+ * loads with the first grammar a diff asks for rather than with the app: the
+ * transcript's highlighter carries its own copy of the core, and this one
+ * would otherwise sit in the entry chunk for every launch.
+ */
+let engine: HLJSApi | null = null;
+let engineLoading: Promise<HLJSApi> | null = null;
+
+function loadEngine(): Promise<HLJSApi> {
+  engineLoading ??= import("highlight.js/lib/core").then(
+    (module) => {
+      engine = module.default.newInstance();
+      return engine;
+    },
+    (error: unknown) => {
+      // Let the next diff that asks try again.
+      engineLoading = null;
+      throw error;
+    },
+  );
+  return engineLoading;
+}
+
 const ready = new Set<string>();
 const pending = new Map<string, Promise<boolean>>();
 const listeners = new Set<() => void>();
@@ -133,9 +155,9 @@ export function loadLanguage(language: string): Promise<boolean> {
   if (!loader) return Promise.resolve(false);
   let promise = pending.get(language);
   if (!promise) {
-    promise = loader().then(
-      (module) => {
-        engine.registerLanguage(language, module.default);
+    promise = Promise.all([loadEngine(), loader()]).then(
+      ([loaded, module]) => {
+        loaded.registerLanguage(language, module.default);
         ready.add(language);
         pending.delete(language);
         readyVersion += 1;
@@ -289,7 +311,7 @@ export function highlightLines(
   lines: readonly string[],
   language: string,
 ): SyntaxLine[] | null {
-  if (!ready.has(language)) return null;
+  if (!ready.has(language) || !engine) return null;
   if (lines.length === 0) return [];
   if (lines.length > MAX_HIGHLIGHT_HUNK_LINES) return null;
   if (lines.some((line) => line.length > MAX_HIGHLIGHT_LINE_CHARS)) {

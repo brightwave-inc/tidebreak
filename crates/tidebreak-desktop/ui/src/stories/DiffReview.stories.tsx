@@ -4,7 +4,7 @@ import { expect, userEvent, waitFor, within } from "storybook/test";
 
 import type { ApiClient } from "@/api/client";
 import type { CodeWorkspaceDiff } from "@/api/types";
-import { DiffPanel } from "@/code/DiffPanel";
+import { DiffPanel, type DiffRevertActions } from "@/code/DiffPanel";
 import {
   useDiffPreferences,
   type DiffLayout,
@@ -38,6 +38,14 @@ type DiffStoryProps = {
   /** The workspace whose pending review the story seeds. */
   workspaceId: string;
   height?: number;
+  /** Offer Revert on the file and its hunks. */
+  revertable?: boolean;
+};
+
+/** Reverts that ask nothing and land at once, for the stories. */
+const STORY_REVERTS: DiffRevertActions = {
+  onRevertFile: async () => true,
+  onRevertHunk: async () => true,
 };
 
 function stat(diff: string): CodeWorkspaceDiff["stat"] {
@@ -75,7 +83,13 @@ function clientFor(
 }
 
 /** The workspace diff surface as the center tab shows it. */
-function DiffStory({ diff, path, workspaceId, height = 560 }: DiffStoryProps) {
+function DiffStory({
+  diff,
+  path,
+  workspaceId,
+  height = 560,
+  revertable = false,
+}: DiffStoryProps) {
   return (
     <div
       className="bg-background flex min-h-0 flex-col overflow-hidden rounded-lg border"
@@ -86,6 +100,7 @@ function DiffStory({ diff, path, workspaceId, height = 560 }: DiffStoryProps) {
         workspaceId={workspaceId}
         file={path}
         onOpenFile={() => {}}
+        revert={revertable ? STORY_REVERTS : undefined}
       />
     </div>
   );
@@ -203,6 +218,31 @@ export const Split: Story = {
 };
 
 /**
+ * Side by side with Revert on each hunk. The hunk's action cell grows past
+ * the single gutter each side has, so the word reads whole.
+ */
+export const SplitWithRevert: Story = {
+  args: { workspaceId: "ws-diff-split-revert", revertable: true },
+  loaders: [seedReview("ws-diff-split-revert", [], [], "split")],
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() =>
+      expect(
+        canvasElement.querySelector('[data-diff-view="split"]'),
+      ).not.toBeNull(),
+    );
+    const [revert] = await canvas.findAllByRole("button", {
+      name: /^Revert the change at/,
+    });
+    const cell = revert!.closest<HTMLElement>('[data-diff-gutter="action"]')!;
+    // The button fits inside its cell rather than spilling out of its left edge.
+    await expect(revert!.getBoundingClientRect().left).toBeGreaterThanOrEqual(
+      cell.getBoundingClientRect().left,
+    );
+  },
+};
+
+/**
  * Hunks that open inside a block comment and carry a raw string across
  * lines. Each side of a hunk is highlighted as one run, so both read the
  * way they do in the file.
@@ -277,8 +317,8 @@ export const WhitespaceOnly: Story = {
 
 /**
  * Comments waiting for the next message, under the lines they are about.
- * One was written on a line this diff no longer shows, so it keeps its
- * quote at the top.
+ * One quotes a line the agent has since changed, so it sits at the top as
+ * outdated, with its quote.
  */
 export const PendingComments: Story = {
   args: { workspaceId: "ws-diff-pending" },
@@ -288,6 +328,29 @@ export const PendingComments: Story = {
     await expect(
       canvas.findByText(/Rename the field back/),
     ).resolves.toBeVisible();
+  },
+};
+
+/**
+ * A comment whose code changed after it was written. It never moves onto
+ * whatever now sits at its old line number: it keeps its quote, says it is
+ * outdated, and the message that carries it says so too.
+ */
+export const OutdatedComment: Story = {
+  args: { workspaceId: "ws-diff-outdated" },
+  loaders: [
+    seedReview("ws-diff-outdated", [
+      comment(
+        "c-outdated",
+        QUEUE_PATH,
+        [line("add", null, 20, "  createdAt: Date;")],
+        "Store this as the server's ISO string, not a Date: the journal compares them as text.",
+      ),
+    ]),
+  ],
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.findByText("Outdated")).resolves.toBeVisible();
   },
 };
 
