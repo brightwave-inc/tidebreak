@@ -685,6 +685,9 @@ impl Server {
         self._mcp_boot.wait().await;
         self._mcp_supervisor.wait().await;
         self._gateway_model_sync.wait().await;
+        // The boot and the supervisor are gone, so nothing connects a server
+        // again: no MCP server, and nothing one started, writes after this.
+        self.mcp.kill_stdio_servers().await;
         self.worker_health.mark_all_stopped();
     }
 }

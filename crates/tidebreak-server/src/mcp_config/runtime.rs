@@ -3148,6 +3148,27 @@ impl McpRuntime {
             .collect()
     }
 
+    /// Kill every stdio server, together with each process it started, for
+    /// good. The server stop calls this once the boot and the supervisor
+    /// can no longer connect one, so Delete all data removes folders no MCP
+    /// server can write into again. A server over HTTP has no process here.
+    /// Holds the mutation lock, so a settings save in flight finishes first
+    /// and its servers are killed too.
+    pub async fn kill_stdio_servers(&self) {
+        let _mutation = self.mutation.lock().await;
+        let clients: Vec<McpClient> = {
+            let state = self.state.lock().await;
+            state
+                .servers
+                .values()
+                .filter_map(|server| server.client.clone())
+                .collect()
+        };
+        for client in clients {
+            client.kill().await;
+        }
+    }
+
     /// A sign-in stored a new model-gateway session. Servers parked for want
     /// of one go back to the supervisor, which retries them on its next sweep.
     pub async fn gateway_session_changed(&self) {
