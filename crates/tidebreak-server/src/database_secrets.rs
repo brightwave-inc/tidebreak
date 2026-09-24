@@ -19,11 +19,12 @@
 //!   credential later. After boot, a row that fails to decrypt is an error
 //!   that names the secret, never a missing secret. Errors name secrets, never
 //!   values or the key.
-//! - A key file that accounts other than its owner can change is refused, and
-//!   one every account can read draws a warning. Group read access is how a
-//!   container's server user shares a file with the host account that made
-//!   it, so it passes quietly. The check follows symlinks, as a Kubernetes
-//!   secret mount is one.
+//! - A key file that accounts other than its owner can change is refused. One
+//!   its group can read draws a warning that names the group, because the
+//!   mode cannot say who belongs to it; group read access is how a container's
+//!   server user shares the file with the host account that made it, so it
+//!   is allowed. One every account can read draws a stronger warning. The
+//!   check follows symlinks, as a Kubernetes secret mount is one.
 //!
 //! The key protects dumps and backups, not a database someone can write to:
 //! a writer can put back an older row under the same name and key, and it
@@ -94,10 +95,18 @@ impl SecretKey {
         // Kubernetes secret mount is, this is the target's.
         #[cfg(unix)]
         {
+            use std::os::unix::fs::MetadataExt as _;
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = file.metadata().map_err(unreadable)?.permissions().mode();
+            let metadata = file.metadata().map_err(unreadable)?;
+            let mode = metadata.permissions().mode();
             match key_file_access(mode) {
                 KeyFileAccess::Private => {}
+                KeyFileAccess::ReadableByGroup => tracing::warn!(
+                    "{KEY_FILE_VARIABLE} at {shown} can be read by members of its group (gid \
+                     {}). That is safe only when the group holds just the accounts that run \
+                     Tidebreak; otherwise remove it with `chmod g-r {shown}`",
+                    metadata.gid()
+                ),
                 KeyFileAccess::ReadableByEveryone => tracing::warn!(
                     "{KEY_FILE_VARIABLE} at {shown} can be read by every account on this \
                      machine. Remove that access with `chmod o-r {shown}`"
@@ -173,9 +182,11 @@ impl SecretKey {
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyFileAccess {
-    /// Only the owner, and its group when the group may read it.
+    /// Only the owner.
     Private,
-    /// Every account can read it, but none besides the owner can change it.
+    /// Its group can read it, but no one besides the owner can change it.
+    ReadableByGroup,
+    /// Every account can read it, but no one besides the owner can change it.
     ReadableByEveryone,
     /// Its group or every account can change it.
     WritableByOthers,
@@ -187,6 +198,8 @@ fn key_file_access(mode: u32) -> KeyFileAccess {
         KeyFileAccess::WritableByOthers
     } else if mode & 0o004 != 0 {
         KeyFileAccess::ReadableByEveryone
+    } else if mode & 0o040 != 0 {
+        KeyFileAccess::ReadableByGroup
     } else {
         KeyFileAccess::Private
     }
@@ -888,10 +901,10 @@ mod tests {
         assert!(message.contains("can be changed by accounts"), "{message}");
     }
 
-    /// A key file every account can read still loads, with a warning that
-    /// says how to restrict it. A private or group-readable one loads quietly,
-    /// including through a symlink, whose own mode says nothing about the file
-    /// it names.
+    /// A key file its group or every account can read still loads, with a
+    /// warning that says who can read it and how to restrict it. A private
+    /// one loads quietly, including through a symlink, whose own mode says
+    /// nothing about the file it names.
     #[cfg(unix)]
     #[test]
     fn a_key_file_others_can_read_loads_with_a_warning() {
@@ -915,8 +928,23 @@ mod tests {
         }
 
         // Group read access is how the container's user shares a key file
-        // with the host account that created it.
-        for mode in [0o600, 0o400, 0o640, 0o440] {
+        // with the host account that created it: allowed, but the mode
+        // cannot say who is in the group, so the warning names it.
+        for mode in [0o640, 0o440] {
+            let path = key_file(dir.path(), &contents);
+            set_mode(&path, mode);
+            let (loaded, logged) = load_logging(&path);
+            assert_eq!(loaded.unwrap().id(), expected, "{mode:o}");
+            assert!(logged.contains("WARN"), "{mode:o}: {logged}");
+            assert!(
+                logged.contains("can be read by members of its group (gid"),
+                "{mode:o}: {logged}"
+            );
+            assert!(logged.contains("chmod g-r"), "{mode:o}: {logged}");
+            assert!(!logged.contains(contents.trim()), "{mode:o}: {logged}");
+        }
+
+        for mode in [0o600, 0o400] {
             let path = key_file(dir.path(), &contents);
             set_mode(&path, mode);
             let (loaded, logged) = load_logging(&path);

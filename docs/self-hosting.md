@@ -263,10 +263,11 @@ file:
 The server reads the key once at boot. It refuses to start when the file is
 missing, unreadable, or does not decode to exactly 32 bytes, when accounts
 other than its owner can change it, and when the `TIDEBREAK_VAULT_*`
-variables are set as well. It starts, with a warning, when every account on
-the machine can read the file; read access for the file's group is fine. The
-check follows symlinks, so a Kubernetes secret mount is judged by the file it
-names.
+variables are set as well. It starts, with a warning, when the file's group or
+every account on the machine can read it. Group read access is fine when the
+group holds only the accounts that run Tidebreak, such as your own account's
+private group. The check follows symlinks, so a Kubernetes secret mount is
+judged by the file it names.
 
 The server also refuses to start when the database holds secrets written
 under a different key. In that case, restore the original key file and start
