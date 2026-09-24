@@ -1,6 +1,63 @@
 use super::*;
 use std::path::PathBuf;
 
+/// A read-only session turns off web search and each MCP server the person
+/// configured, by name; a name `-c` cannot address refuses the session.
+#[test]
+fn a_read_only_session_turns_off_web_search_and_every_configured_mcp_server() {
+    let listing = r#"[
+        {"name": "github", "enabled": true, "transport": {"type": "streamable_http"}},
+        {"name": "fs_writer", "enabled": true, "transport": {"type": "stdio"}}
+    ]"#;
+    let names = mcp_server_names(listing).unwrap();
+    assert_eq!(names, ["github", "fs_writer"]);
+    assert_eq!(
+        read_only_overrides(&names).unwrap(),
+        [
+            "-c",
+            "web_search=\"disabled\"",
+            "-c",
+            "mcp_servers.github.enabled=false",
+            "-c",
+            "mcp_servers.fs_writer.enabled=false",
+        ]
+    );
+    assert_eq!(
+        read_only_overrides(&[]).unwrap(),
+        ["-c", "web_search=\"disabled\""]
+    );
+    assert!(read_only_overrides(&["my.server".to_owned()]).is_err());
+    assert!(read_only_overrides(&["a=b".to_owned()]).is_err());
+    assert!(mcp_server_names("not json").is_err());
+    assert!(mcp_server_names(r#"[{"enabled": true}]"#).is_err());
+}
+
+/// The listing runs the pinned binary, and a Codex that cannot give it
+/// refuses the read-only session instead of starting with its servers on.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_read_only_session_that_cannot_list_mcp_servers_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("codex");
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\nif [ \"$1 $2 $3\" = 'mcp list --json' ]; then echo 'error: unknown flag' >&2; exit 2; fi\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut spec = spec_for(dir.path(), &binary, None);
+    spec.read_only = true;
+    let session = CodexSession::new(spec);
+    let error = session.configured_mcp_servers().await.unwrap_err();
+    assert!(
+        error.to_string().contains(
+            "could not list its MCP servers, so a read-only session cannot turn them off"
+        ),
+        "{error}"
+    );
+}
+
 #[test]
 fn app_server_plan_is_clean() {
     let plan = compose_app_server_plan(

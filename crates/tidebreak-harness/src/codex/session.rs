@@ -874,6 +874,102 @@ pub(crate) fn compose_app_server_plan(
     Ok(plan)
 }
 
+/// How long listing the person's MCP servers may take.
+const MCP_LIST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Codex's switches for a read-only session ([`crate::SessionSpec::read_only`]):
+/// no web search, and none of the person's own MCP servers.
+///
+/// Codex's `read-only` sandbox already keeps commands from writing or
+/// reaching the network (the app-server schema's `ReadOnlySandboxPolicy`
+/// has `networkAccess` off). What runs outside that sandbox is the web
+/// search tool and the MCP servers in `~/.codex/config.toml`, whose tools
+/// can write or reach the network as the person. `-c` merges tables, so
+/// `mcp_servers={}` would leave every server on; each one is turned off by
+/// name instead. Checked against 0.155.1: a configured server starts on a
+/// plain `thread/start` and not with its `enabled=false` override.
+///
+/// A server name that is not a bare key cannot be addressed in a `-c` path,
+/// so a session with one is refused rather than run with it on.
+pub(crate) fn read_only_overrides(servers: &[String]) -> Result<Vec<String>, HarnessError> {
+    let mut overrides = vec!["-c".to_owned(), "web_search=\"disabled\"".to_owned()];
+    for name in servers {
+        let bare = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !bare {
+            return Err(HarnessError::Other(format!(
+                "Codex CLI has an MCP server Tidebreak cannot turn off for a read-only session: {name:?}"
+            )));
+        }
+        overrides.push("-c".to_owned());
+        overrides.push(format!("mcp_servers.{name}.enabled=false"));
+    }
+    Ok(overrides)
+}
+
+/// The names in `codex mcp list --json`, the servers the person configured.
+fn mcp_server_names(listing: &str) -> Result<Vec<String>, HarnessError> {
+    let parsed: Value = serde_json::from_str(listing.trim()).map_err(|error| {
+        HarnessError::Other(format!("Codex CLI's MCP server list is not JSON: {error}"))
+    })?;
+    let entries = parsed.as_array().ok_or_else(|| {
+        HarnessError::Other("Codex CLI's MCP server list is not a list".to_owned())
+    })?;
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    HarnessError::Other("Codex CLI listed an MCP server with no name".to_owned())
+                })
+        })
+        .collect()
+}
+
+impl CodexSession {
+    /// The MCP servers the person configured for Codex, by name, so a
+    /// read-only session can turn each one off. Fails closed: a listing
+    /// Codex cannot give is an error, not an empty list.
+    async fn configured_mcp_servers(&self) -> Result<Vec<String>, HarnessError> {
+        let binary = self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?;
+        let mut command = Command::new(binary);
+        command
+            .args(["mcp", "list", "--json"])
+            .current_dir(&self.spec.worktree)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut env = self.spec.extra_env.clone();
+        env.retain(|(key, _)| {
+            !crate::BrowserChannelSpec::is_reserved_env_key_except(
+                key,
+                self.spec.relay_key_env.as_deref(),
+            ) && key != "PWD"
+        });
+        self.spec
+            .apply_child_env(&mut command, tidebreak_core::HarnessKind::Codex, &env);
+        let child = spawn_process_tree(&mut command)?;
+        let output = timeout(MCP_LIST_TIMEOUT, child.wait_with_output())
+            .await
+            .map_err(|_| {
+                HarnessError::Other("listing Codex CLI's MCP servers timed out".to_owned())
+            })??;
+        if !output.status.success() {
+            let said = String::from_utf8_lossy(&output.stderr);
+            return Err(HarnessError::Other(format!(
+                "Codex CLI could not list its MCP servers, so a read-only session cannot turn them off: {}",
+                said.trim().chars().take(300).collect::<String>()
+            )));
+        }
+        mcp_server_names(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
 /// Codex's switch for a repository the user has not trusted: the worktree
 /// marked untrusted in this process's config.
 ///
@@ -998,6 +1094,10 @@ impl CodexSession {
             self.spec.project_config,
             &self.spec.worktree,
         )?);
+        if self.spec.read_only {
+            let servers = self.configured_mcp_servers().await?;
+            extra_argv.extend(read_only_overrides(&servers)?);
+        }
         let plan = compose_app_server_plan(
             self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
             &extra_argv,

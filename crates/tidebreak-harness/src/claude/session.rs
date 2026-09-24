@@ -113,6 +113,7 @@ pub(crate) fn settings_flags(
     plans_directory: &Path,
     fast_mode: bool,
     model: Option<&str>,
+    read_only: bool,
 ) -> Result<Vec<String>, HarnessError> {
     let plans_directory = plans_directory
         .to_str()
@@ -123,6 +124,13 @@ pub(crate) fn settings_flags(
     )]);
     if fast_mode && model.is_some_and(crate::claude::model_serves_fast_mode) {
         settings.insert("fastMode".to_owned(), serde_json::Value::Bool(true));
+    }
+    if read_only {
+        // A person's own hooks (`SessionStart`, `PreToolUse`, ...) run
+        // commands outside the tool surface a read-only session takes away.
+        // Only hooks go: the rest of the person's settings, such as the env
+        // a gateway endpoint needs, still apply.
+        settings.insert("disableAllHooks".to_owned(), serde_json::Value::Bool(true));
     }
     Ok(vec![
         "--settings".into(),
@@ -155,22 +163,41 @@ pub(crate) fn project_config_flags(project_config: ProjectConfig) -> Vec<String>
     }
 }
 
-/// The tools a read-only session never gets: the ones that run commands or
-/// write files. Read, Grep, and Glob remain.
-pub(crate) const READ_ONLY_DISALLOWED_TOOLS: [&str; 4] = ["Bash", "Edit", "Write", "NotebookEdit"];
+/// The built-in tools a read-only session has: reading and searching files.
+pub(crate) const READ_ONLY_TOOLS: &str = "Read,Grep,Glob";
+
+/// The tools a read-only session never gets: the ones that run commands,
+/// write files, or reach the network. Read, Grep, and Glob remain.
+pub(crate) const READ_ONLY_DISALLOWED_TOOLS: [&str; 6] = [
+    "Bash",
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+];
 
 /// Claude Code's switches for a read-only session ([`SessionSpec::read_only`]).
 ///
-/// Plan mode refuses Write and Edit, but a person's own allow rule such as
-/// `"allow": ["Bash"]` in `~/.claude/settings.json` still runs commands in
-/// plan mode. `--disallowedTools` takes the tools away instead, and a deny
-/// wins over any allow. Checked against 2.1.282.
+/// `--tools` names the only built-in tools the session has, so everything
+/// else is gone: the ones that write or run commands, and ones such as
+/// `SendMessage`, `Agent`, `Workflow`, and `EnterWorktree` that reach past
+/// the session. `--disallowedTools` then denies the writing, command, and
+/// web tools by name as well, and a deny wins over any allow, so a person's
+/// own `"allow": ["Bash"]` rule hands nothing back. Nothing the session
+/// reads leaves except through the model it runs on. Checked live against
+/// 2.1.282: the session offered only Glob, Grep, and Read, and a WebFetch
+/// call failed as disabled.
 #[must_use]
 pub(crate) fn read_only_flags(read_only: bool) -> Vec<String> {
     if !read_only {
         return Vec::new();
     }
-    let mut flags = vec!["--disallowedTools".to_owned()];
+    let mut flags = vec![
+        "--tools".to_owned(),
+        READ_ONLY_TOOLS.to_owned(),
+        "--disallowedTools".to_owned(),
+    ];
     flags.extend(
         READ_ONLY_DISALLOWED_TOOLS
             .iter()
@@ -1373,6 +1400,7 @@ impl ClaudeSession {
             &self.plans_directory,
             self.spec.fast_mode,
             self.resolved_model(turn_model).as_deref(),
+            self.spec.read_only,
         )?);
         argv.extend(project_config_flags(self.spec.project_config));
         argv.extend(read_only_flags(self.spec.read_only));
@@ -2452,9 +2480,11 @@ done
     }
 
     /// A review launch: plan mode, none of the repository's settings or MCP
-    /// servers, no permission-prompt tool, and the tools that run commands or
-    /// write files taken away, so a person's own `"allow": ["Bash"]` rule
-    /// cannot run one. Read, Grep, and Glob stay.
+    /// servers, no permission-prompt tool, none of the person's hooks, and the
+    /// tools that run commands, write files, or reach the network taken away,
+    /// so a person's own `"allow": ["Bash"]` rule cannot run one. Read, Grep,
+    /// and Glob stay. Checked live against 2.1.282: a `SessionStart` hook in
+    /// the person's settings fires on a plain launch and not on this one.
     #[test]
     fn a_read_only_launch_takes_away_the_tools_that_write_or_run_commands() {
         let dir = tempfile::tempdir().unwrap();
@@ -2476,14 +2506,28 @@ done
         assert_eq!(after("--permission-mode")[0], "plan");
         assert_eq!(after("--setting-sources")[0], "user");
         assert!(argv.iter().any(|arg| arg == "--strict-mcp-config"));
+        // Only these built-in tools exist in the session.
+        assert_eq!(after("--tools")[0], "Read,Grep,Glob");
         assert_eq!(
-            after("--disallowedTools")[..4],
-            ["Bash", "Edit", "Write", "NotebookEdit"]
+            after("--disallowedTools")[..6],
+            [
+                "Bash",
+                "Edit",
+                "Write",
+                "NotebookEdit",
+                "WebFetch",
+                "WebSearch"
+            ]
         );
         // The list ends at the next flag, if any follows.
         assert!(after("--disallowedTools")
-            .get(4)
+            .get(6)
             .is_none_or(|next| next.starts_with("--")));
+        // One `--settings` object: the session's own, with hooks off.
+        assert_eq!(argv.iter().filter(|arg| *arg == "--settings").count(), 1);
+        let settings: serde_json::Value = serde_json::from_str(&after("--settings")[0]).unwrap();
+        assert_eq!(settings["disableAllHooks"], true);
+        assert!(settings["plansDirectory"].is_string());
         for tool in ["Read", "Grep", "Glob"] {
             assert!(
                 !argv.iter().any(|arg| arg == tool),
@@ -2502,6 +2546,17 @@ done
         session.spec.read_only = false;
         let plan = session.compose_plan_for(None, None).unwrap();
         assert!(!plan.argv.iter().any(|arg| arg == "--disallowedTools"));
+        assert!(!plan.argv.iter().any(|arg| arg == "--tools"));
+        let index = plan
+            .argv
+            .iter()
+            .position(|arg| arg == "--settings")
+            .unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&plan.argv[index + 1]).unwrap();
+        assert!(
+            settings.get("disableAllHooks").is_none(),
+            "a working session keeps its hooks"
+        );
     }
 
     #[test]

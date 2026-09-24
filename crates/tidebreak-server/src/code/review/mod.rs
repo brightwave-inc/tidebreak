@@ -9,18 +9,24 @@
 //!
 //! Read-only holds in layers:
 //!
-//! - The engine loses what it has for writing files or running commands
-//!   (`SessionSpec::read_only`), whatever the person's own rules allow:
-//!   Claude Code launches in plan mode with Bash, Edit, Write, and
-//!   NotebookEdit disallowed and no MCP servers; Codex runs in its read-only
-//!   OS sandbox; opencode's plan agent gets rules that deny every tool but
-//!   reading, the person's own MCP servers' tools included; Grok CLI, which
-//!   has no plan mode, runs in Ask under its `read-only` sandbox profile,
-//!   and a machine where Grok cannot apply that profile does not offer Grok
-//!   for review at all ([`CodeRuntime::review_blocker`]). An engine with
-//!   neither a plan mode nor approvals Tidebreak can refuse is not offered.
-//!   This layer is what stops a write aimed outside the copy below; the OS
-//!   enforces it for Codex and Grok.
+//! - The engine loses what it has for writing files, running commands, or
+//!   reaching the network (`SessionSpec::read_only`), whatever the person's
+//!   own rules, hooks, or MCP servers allow: Claude Code launches in plan
+//!   mode with only Read, Grep, and Glob, no MCP servers, and the person's
+//!   hooks off; Codex runs in its read-only OS sandbox with web search and
+//!   the person's MCP servers off; opencode's plan agent gets rules that deny
+//!   every tool but reading, the person's own MCP servers' tools included;
+//!   Grok CLI, which has no plan mode, runs in Ask under its `read-only`
+//!   sandbox profile, and a machine where Grok cannot apply that profile
+//!   does not offer Grok for review at all ([`CodeRuntime::review_blocker`]).
+//!   An engine with neither a plan mode nor approvals Tidebreak can refuse
+//!   is not offered. This layer is what stops a write aimed outside the copy
+//!   below; the OS enforces it for Codex and Grok.
+//!
+//!   Reading is not confined: a reviewer reads what the person's account
+//!   can, as the coding engines do, except opencode's, whose rules keep it
+//!   inside the copy. What it reads leaves only through its own model
+//!   provider, with one exception the docs name for Grok.
 //! - Every approval the engine asks for is refused, with feedback telling it
 //!   to report the change as a finding instead. Claude Code gets no
 //!   permission-prompt tool at all, so print mode refuses what plan mode

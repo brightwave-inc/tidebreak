@@ -581,9 +581,15 @@ async fn links_are_copied_as_plain_files_and_the_copy_reaches_nothing_of_the_per
     assert_eq!(config("protocol.allow"), "never");
     assert_eq!(config("core.fsmonitor"), "false");
     let hooks = PathBuf::from(config("core.hooksPath"));
-    assert!(hooks.starts_with(&root), "{hooks:?}");
+    let resolved_root = std::fs::canonicalize(&root).unwrap();
+    assert!(hooks.starts_with(&resolved_root), "{hooks:?}");
     assert_eq!(std::fs::read_dir(&hooks).unwrap().count(), 0);
-    assert_eq!(copy.git_config, root.join("gitconfig"));
+    assert_eq!(copy.git_config, resolved_root.join("gitconfig"));
+    assert_eq!(
+        copy.tree,
+        resolved_root.join("tree"),
+        "the copy is named as it resolves"
+    );
     assert!(std::fs::read(&copy.git_config).unwrap().is_empty());
 
     // No transport: a push from the copy never reaches the remote.

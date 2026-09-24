@@ -1026,21 +1026,23 @@ pub struct SessionSpec {
     pub project_config: ProjectConfig,
     /// A read-only session: the engine only reads. On top of the permission
     /// mode, each adapter takes away what the engine offers for writing
-    /// files or running commands, so a person's own allow rules cannot hand
-    /// them back:
+    /// files, running commands, or reaching the network, so a person's own
+    /// allow rules, hooks, or MCP servers cannot hand them back:
     ///
-    /// - Claude Code launches with `--disallowedTools` for Bash, Edit, Write,
-    ///   and NotebookEdit. Deny rules win over allow rules, so Read, Grep,
-    ///   and Glob are what is left.
+    /// - Claude Code launches with only Read, Grep, and Glob (`--tools`),
+    ///   the writing, command, and web tools also denied by name, and the
+    ///   person's hooks off (`disableAllHooks` in `--settings`).
     /// - opencode's session carries rules that deny every tool but reading,
     ///   the person's own MCP servers' tools included. They come after the
     ///   agent's and the user's rules and so win.
     /// - Grok CLI runs under its `read-only` sandbox profile (`GROK_SANDBOX`),
-    ///   which the OS enforces. A caller checks first that it applies here
-    ///   ([`HarnessAdapter::read_only_blocker`]) and refuses the session when
-    ///   it does not.
-    /// - Codex needs nothing more: its Plan posture is already the read-only
-    ///   OS sandbox.
+    ///   which the OS enforces, with web fetch off. A caller checks first that
+    ///   the profile applies here ([`HarnessAdapter::read_only_blocker`]) and
+    ///   refuses the session when it does not.
+    /// - Codex's Plan posture is already the read-only OS sandbox, which also
+    ///   keeps commands off the network; web search and each of the person's
+    ///   MCP servers are turned off too, and a Codex that cannot list its
+    ///   servers refuses the session.
     pub read_only: bool,
 }
 

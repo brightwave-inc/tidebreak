@@ -260,6 +260,12 @@ pub(crate) fn project_config_env(
 /// `GROK_SANDBOX_AUTO_ALLOW_BASH=false` keeps a person's
 /// `sandbox.auto_allow_bash` from running commands unasked while the
 /// profile is on: each one still asks, and a review refuses it.
+/// `GROK_WEB_FETCH=false` and `GROK_DISABLE_WEB_FETCH=1` keep the
+/// `web_fetch` tool off, and the `*_MCPS_ENABLED` switches keep Grok from
+/// importing MCP servers from Claude Code's and Cursor's configs. Grok's
+/// `web_search` runs through xAI, the provider the session already talks
+/// to, and `grok agent` has no switch for it or for the MCP servers in
+/// Grok's own config.
 ///
 /// Before a read-only session starts, the adapter checks that the profile
 /// applies on this machine ([`crate::HarnessAdapter::read_only_blocker`]),
@@ -269,6 +275,10 @@ pub(crate) fn read_only_env(read_only: bool) -> &'static [(&'static str, &'stati
         &[
             ("GROK_SANDBOX", "read-only"),
             ("GROK_SANDBOX_AUTO_ALLOW_BASH", "false"),
+            ("GROK_WEB_FETCH", "false"),
+            ("GROK_DISABLE_WEB_FETCH", "1"),
+            ("GROK_CLAUDE_MCPS_ENABLED", "false"),
+            ("GROK_CURSOR_MCPS_ENABLED", "false"),
         ]
     } else {
         &[]
@@ -1021,11 +1031,20 @@ mod tests {
             .unwrap();
         assert_eq!(sandbox(&acp), ["read-only"]);
         // Commands still ask under the profile, whatever the person's
-        // `sandbox.auto_allow_bash` says, so a review can refuse them.
-        assert!(acp
-            .env
-            .iter()
-            .any(|(key, value)| key == "GROK_SANDBOX_AUTO_ALLOW_BASH" && value == "false"));
+        // `sandbox.auto_allow_bash` says, so a review can refuse them; and
+        // the web fetch tool is off.
+        for (key, value) in [
+            ("GROK_SANDBOX_AUTO_ALLOW_BASH", "false"),
+            ("GROK_WEB_FETCH", "false"),
+            ("GROK_DISABLE_WEB_FETCH", "1"),
+        ] {
+            assert!(
+                acp.env
+                    .iter()
+                    .any(|(name, set)| name == key && set == value),
+                "{key}"
+            );
+        }
 
         let session = GrokSession::new(spec(false), "1.0.40".into());
         let plan = session

@@ -137,6 +137,11 @@ async fn materialize_inner(
     .ok();
 
     create_private_dir(root)?;
+    // The reviewer works under the path the filesystem resolves, so an
+    // engine that confines its reads to its working directory, as opencode
+    // does, finds the copy's files inside it even when the data folder sits
+    // under a link.
+    let root = &resolved(root);
     let config = root.join(CONFIG_FILE);
     std::fs::write(&config, b"").map_err(|err| format!("could not write {CONFIG_FILE}: {err}"))?;
     let hooks = root.join(HOOKS_DIR);
@@ -356,6 +361,17 @@ fn absolute(worktree: &Path, path: &str) -> PathBuf {
         path.to_path_buf()
     } else {
         worktree.join(path)
+    }
+}
+
+/// `path` with every link resolved, where that is safe to hand an engine:
+/// on Unix. Windows keeps the path as given, since its resolved form is a
+/// `\\?\` path some engines cannot take.
+fn resolved(path: &Path) -> PathBuf {
+    if cfg!(unix) {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
     }
 }
 
