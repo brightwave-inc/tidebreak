@@ -25,6 +25,7 @@ import { useRefreshSignals } from "../RefreshSignals";
 import { friendlyErrorMessage } from "../lib/utils";
 import { applyLiveTurnRewrite } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
+import { digestActivityState, isReadyToMergeAttention } from "./workspaceCards";
 
 /**
  * Install-wide digest store fed by `WS /updates`.
@@ -57,10 +58,12 @@ export type SelectedCodeClone = {
 
 export type CodeUpdatesState = {
   /**
-   * Whether the socket has restated its snapshot since the last reset.
+   * Whether the socket is connected and has restated its snapshot.
    *
-   * Until it has, empty digest maps mean "not heard yet", not "nothing is
-   * live", so a surface that would say nothing needs you waits for this.
+   * False before the first snapshot and again whenever the socket drops,
+   * until the reconnect restates it. While false, the digest maps are either
+   * not heard yet or possibly stale, so a surface that would say nothing
+   * needs you says nothing instead.
    */
   snapshotLoaded: boolean;
   /**
@@ -141,6 +144,7 @@ export type CodeUpdatesAction =
       rewrite?: string;
     }
   | { type: "view"; workspaceId: string | null }
+  | { type: "disconnected" }
   | { type: "reset" };
 
 const EMPTY: CodeUpdatesState = {
@@ -281,6 +285,10 @@ export function reduceCodeUpdates(
     }
     case "view":
       return { ...state, viewedWorkspaceId: action.workspaceId };
+    case "disconnected":
+      // The digests stay on screen, but nothing vouches for them until the
+      // reconnect restates the snapshot.
+      return state.snapshotLoaded ? { ...state, snapshotLoaded: false } : state;
     case "reset":
       return { ...EMPTY, viewedWorkspaceId: state.viewedWorkspaceId };
   }
@@ -319,9 +327,12 @@ function upsertDigest(
  *
  * A card is a row per workspace, not per agent, so several conversations
  * collapse to the one that most wants a person: a need first, then a running
- * engine, then anything still live. Title and PR state come from the
- * workspace itself, so every sibling agrees on them and this choice only
- * decides whose attention the card reports.
+ * engine, then a ready-to-merge notice, then a finished turn, then anything
+ * still live. Needs and live work are what `digestActivityState` says they
+ * are — a stall that outlived its turn and a lost connection waiting on Try
+ * again both count as needs — so a sibling can never hide one. Title and PR
+ * state come from the workspace itself, so every sibling agrees on them and
+ * this choice only decides whose attention the card reports.
  */
 export function workspaceDigest(
   state: Pick<CodeUpdatesState, "conversationsByWorkspace">,
@@ -330,18 +341,26 @@ export function workspaceDigest(
   const conversations = state.conversationsByWorkspace[workspaceId];
   if (!conversations) return undefined;
   let best: CodeSessionDigest | undefined;
+  let bestUrgency = Number.POSITIVE_INFINITY;
   for (const digest of Object.values(conversations)) {
-    if (!best || digestUrgency(digest) < digestUrgency(best)) best = digest;
+    const urgency = digestUrgency(digest);
+    if (urgency < bestUrgency) {
+      best = digest;
+      bestUrgency = urgency;
+    }
   }
   return best;
 }
 
 function digestUrgency(digest: CodeSessionDigest): number {
-  if (digest.lifecycle === "ended") return 4;
-  if (digest.attention.state.type === "needs_you") return 0;
-  if (digest.lifecycle === "running") return 1;
-  if (digest.attention.state.type === "done_unreviewed") return 2;
-  return 3;
+  if (digest.lifecycle === "ended") return 5;
+  const activity = digestActivityState(digest);
+  if (activity === "needs_you") return 0;
+  if (activity === "running") return 1;
+  // Good news rather than a blocker: below live work, above a finished turn.
+  if (isReadyToMergeAttention(digest.attention)) return 2;
+  if (digest.attention.state.type === "done_unreviewed") return 3;
+  return 4;
 }
 
 /**
@@ -1084,6 +1103,7 @@ function open(client: CloneUpdatesClient, born: number): void {
       return;
     }
     socket = null;
+    useCodeUpdatesStore.getState().apply({ type: "disconnected" });
     scheduleReconnect(client, born);
   };
   next.onerror = () => {
