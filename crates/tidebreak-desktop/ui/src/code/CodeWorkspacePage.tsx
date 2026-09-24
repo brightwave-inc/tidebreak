@@ -1,24 +1,17 @@
 import { workspaceCommandsForAccess } from "./workspaceAccess";
-import {
-  isArchivedLocalWorkspace,
-  isRemoteWorktreePath,
-} from "./workspaceRemote";
+import { isArchivedLocalWorkspace } from "./workspaceRemote";
 import { CodeEditorGroups } from "./CodeEditorGroups";
 import { Button } from "@/components/ui/button";
 import {
-  centerEditorTabId,
   CenterTabIcon,
   centerTabParts,
   CHAT_PANEL_ID,
   CodeCenterTabs,
   conversationTabId,
-  EDITOR_PANEL_ID,
-  SPLIT_EDITOR_PANEL_ID,
 } from "./CodeCenterTabs";
 import {
   closeAllEditorTabs,
   closeCodeChromeTab,
-  type CodeEditorRegion,
   closeEditorTab,
   closeEditorTabsToRight,
   closeOtherEditorTabs,
@@ -37,33 +30,23 @@ import type {
   CodeSessionSnapshot,
   PermissionMode,
 } from "../api/types";
-import { CodeInspector, WorkspaceDeliveryPrTab } from "./CodeInspector";
+import { CodeInspector } from "./CodeInspector";
 import { CodeQuickOpen } from "./CodeQuickOpen";
 import { CodeSessionContent } from "./CodeSessionPage";
 import { CodeSessionPane } from "./workspace/CodeSessionPane";
 import {
   DEFAULT_INSPECTOR_LAYOUT,
-  fitsInspectorSplit,
   INSPECTOR_LAYOUT_STORAGE_ID,
-  INSPECTOR_PANEL_IDS,
   MAX_INSPECTOR_SIZE,
   MIN_INSPECTOR_SIZE,
   MIN_WORKSPACE_SIZE,
-  usableInspectorLayout,
 } from "./inspectorLayout";
-import { DiffOverview, type ChangeRowActions } from "./DiffOverview";
-import { DiffPanel, type DiffRevertActions } from "./DiffPanel";
 import type { DiffReviewerContext } from "./review/ReviewChanges";
 import { WorkspaceCommitBox } from "./WorkspaceCommitBox";
-import { TURN_RUNNING_REASON, useWorktreeUndo } from "./worktreeUndo";
 import { DndContext, DragOverlay, useSensor, useSensors } from "@dnd-kit/core";
 import { ErrorBoundary } from "@/ErrorBoundary";
-import type { LayoutState, PanelContent } from "@/panel/panelTypes";
-import {
-  renderCodePanel,
-  useCodeShortcutHints,
-  useMeasuredWidth,
-} from "./workspace/layout";
+import type { LayoutState } from "@/panel/panelTypes";
+import { renderCodePanel, useCodeShortcutHints } from "./workspace/layout";
 import { MarkdownLinkProvider } from "@/MessageMarkdown";
 import { PanelLayout } from "@/panel/PanelLayout";
 import {
@@ -79,7 +62,6 @@ import { sessionRecoveryAccess, sessionRecoveryState } from "./sessionRecovery";
 import { SessionRecoveryNotice } from "./SessionRecoveryNotice";
 import { SessionLifecycleIndicator } from "./SessionLifecycleIndicator";
 import { SessionPermissionIndicator } from "./SessionPermissionIndicator";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   SplitDropZone,
   tabDropTarget,
@@ -90,25 +72,15 @@ import {
   StartSessionPrompt,
   WorkspaceSessionStartingState,
 } from "./StartSessionPrompt";
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { WatchTaskBar } from "./workspace/subagents";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 import {
-  openWorkspaceFileInEditor,
   useWorkspaceCardCommands,
   workspaceHeaderCommands,
   WorkspaceOverflowMenu,
 } from "./workspaceActions";
 import { WorkspaceWorkflowControl } from "./WorkspaceWorkflowControl";
-import { canOpenInExternalEditor } from "./codeWorktreeHost";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { codeClientGeneration } from "./CodeClientGeneration";
 import { findEditorPanel, offersSplitDrop } from "./editorDrag";
@@ -121,36 +93,19 @@ import { useCodeContentRevision } from "./useLiveContent";
 import { useDirtyCodeFilePaths } from "./CodeFileDraftStore";
 import { useUnsavedFilesGuard } from "./useUnsavedFilesGuard";
 import { useCodeUiStore } from "./CodeUiStore";
-import {
-  useCodeUpdatesStore,
-  useSessionDigest,
-  useWorkspaceFileRevision,
-  useWorkspaceTurnRunning,
-} from "./CodeUpdatesStore";
+import { useSessionDigest, useWorkspaceFileRevision } from "./CodeUpdatesStore";
 import { useBrowserTabs } from "./workspace/useBrowserTabs";
 import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
 import { useEditorTabs } from "./workspace/useEditorTabs";
 import { useTerminalTabs } from "./workspace/useTerminalTabs";
 import { useWorkspaceSessions } from "./workspace/useWorkspaceSessions";
-import { useDefaultLayout, useGroupRef } from "react-resizable-panels";
+import { useInspectorLayout } from "./workspace/useInspectorLayout";
+import { useViewedWorkspace } from "./workspace/useViewedWorkspace";
+import { useWorktreeActions } from "./workspace/useWorktreeActions";
+import { WorkspaceEditorPanel } from "./workspace/WorkspaceEditorPanel";
 import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
-
-const FileViewer = lazy(async () => {
-  const module = await import("./FileViewer");
-  return { default: module.FileViewer };
-});
-
-const CodeBrowserTab = lazy(async () => {
-  const module = await import("./browser/CodeBrowserTab");
-  return { default: module.CodeBrowserTab };
-});
-
-const TerminalPane = lazy(async () => {
-  const module = await import("./TerminalPane");
-  return { default: module.TerminalPane };
-});
 
 /**
  * One workspace: header, transcript, composer, and automatic recovery.
@@ -288,19 +243,16 @@ function CodeWorkspaceBody({
   };
   const taskParam = workspaceSearch.task;
   const subagentParam = workspaceSearch.subagent;
-  const inspectorLayout = useDefaultLayout({
-    id: INSPECTOR_LAYOUT_STORAGE_ID,
-    panelIds: INSPECTOR_PANEL_IDS,
-    onlySaveAfterUserInteractions: true,
-  });
-  const inspectorGroupRef = useGroupRef();
-  const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
-  const toggleReviewSidebar = useCodeUiStore(
-    (state) => state.toggleReviewSidebar,
-  );
-  const setReviewSidebarOpen = useCodeUiStore(
-    (state) => state.setReviewSidebarOpen,
-  );
+  const {
+    inspectorLayout,
+    inspectorGroupRef,
+    inspectorDefaultLayout,
+    inspectorPaneRef,
+    inspectorFits,
+    inspectorOpen,
+    toggleReviewSidebar,
+    setReviewSidebarOpen,
+  } = useInspectorLayout();
   const archivePending = useCodeUiStore((state) => state.archivePending);
   const shortcutHints = useCodeShortcutHints();
   const tabDragSensors = useSensors(
@@ -308,24 +260,6 @@ function CodeWorkspaceBody({
     // selects the tab it landed on.
     useSensor(TabPointerSensor, { activationConstraint: { distance: 4 } }),
   );
-
-  const inspectorDefaultLayout = useMemo(
-    () =>
-      usableInspectorLayout(inspectorLayout.defaultLayout) ?? {
-        ...DEFAULT_INSPECTOR_LAYOUT,
-      },
-    [inspectorLayout.defaultLayout],
-  );
-
-  const { paneRef: inspectorPaneRef, width: inspectorPaneWidth } =
-    useMeasuredWidth();
-  const inspectorFits = fitsInspectorSplit(inspectorPaneWidth);
-  /**
-   * The split only appears when the reader asked for it and the pane can
-   * carry it. The stored preference survives a narrow window, so widening
-   * one brings the inspector straight back.
-   */
-  const inspectorOpen = reviewSidebarOpen && inspectorFits;
   const [createMode, setCreateMode] = useState<PermissionMode | null>(null);
 
   layoutRef.current = layout;
@@ -367,9 +301,6 @@ function CodeWorkspaceBody({
       setWorkspaceLayout(focusConversation(layoutRef.current)),
   });
   const digest = useSessionDigest(workspaceId, session?.id ?? null);
-  const setViewedWorkspace = useCodeUpdatesStore(
-    (state) => state.setViewedWorkspace,
-  );
   // An agent's edit moves its session's revision; a save from the file
   // viewer moves the workspace's. Views that read the worktree follow both.
   const contentRevision =
@@ -384,63 +315,15 @@ function CodeWorkspaceBody({
     digest?.pr_state,
     !isArchivedLocalWorkspace(workspace),
   );
-  // Undo, revert, discard, and commit change the live worktree. A sandbox
-  // workspace has none here, and a running turn holds it: the server refuses
-  // then, and the controls say why before the reader tries.
-  const undo = useWorktreeUndo({ client, workspaceId });
-  const turnRunning = useWorkspaceTurnRunning(workspaceId);
-  const worktreeChangeable =
-    workspace?.status === "active" &&
-    !isRemoteWorktreePath(workspace.worktree_path);
-  const worktreeUnavailableReason = turnRunning
-    ? TURN_RUNNING_REASON
-    : undefined;
-  const { restore: restoreCheckpoint } = undo;
-  const restoreBeforeTurn = useCallback(
-    (turnId: string) =>
-      void restoreCheckpoint({ kind: "before_turn", turn_id: turnId }),
-    [restoreCheckpoint],
-  );
-  const undoRestore = useCallback(
-    (restoreId: string) =>
-      void restoreCheckpoint({
-        kind: "before_restore",
-        restore_id: restoreId,
-      }),
-    [restoreCheckpoint],
-  );
-  const changeActions = useMemo<ChangeRowActions | undefined>(
-    () =>
-      worktreeChangeable
-        ? {
-            onRevertFile: undo.revertFile,
-            onDiscard: undo.discard,
-            unavailableReason: worktreeUnavailableReason,
-          }
-        : undefined,
-    [
-      worktreeChangeable,
-      undo.revertFile,
-      undo.discard,
-      worktreeUnavailableReason,
-    ],
-  );
-  const diffRevert = useMemo<DiffRevertActions | undefined>(
-    () =>
-      worktreeChangeable
-        ? {
-            onRevertFile: undo.revertFile,
-            onRevertHunk: undo.revertHunk,
-            unavailableReason: worktreeUnavailableReason,
-          }
-        : undefined,
-    [
-      worktreeChangeable,
-      undo.revertFile,
-      undo.revertHunk,
-      worktreeUnavailableReason,
-    ],
-  );
+  const {
+    undo,
+    worktreeChangeable,
+    worktreeUnavailableReason,
+    restoreBeforeTurn,
+    undoRestore,
+    changeActions,
+    diffRevert,
+  } = useWorktreeActions({ client, workspaceId, workspace });
   const renderCommitBox = worktreeChangeable
     ? (files: CodeWorkspaceFiles | null) => (
         <WorkspaceCommitBox
@@ -456,17 +339,7 @@ function CodeWorkspaceBody({
     (state) => state.workspaceStartups[workspaceId] ?? null,
   );
 
-  useEffect(() => {
-    setViewedWorkspace(workspaceId);
-    return () => setViewedWorkspace(null);
-  }, [setViewedWorkspace, workspaceId]);
-
-  useEffect(() => {
-    return () => {
-      useCodeUiStore.getState().setInspectorScope(null);
-      useCodeUiStore.getState().finishComposerAction(workspaceId);
-    };
-  }, [workspaceId]);
+  useViewedWorkspace(workspaceId);
 
   // Browser tabs survive leaving the workspace; their native views hide.
   const {
@@ -609,130 +482,27 @@ function CodeWorkspaceBody({
   const activeSplitEditor =
     splitEditorTabs[chrome.splitEditors.activeIndex] ?? null;
 
-  function editorPanel(
-    panel: PanelContent,
-    region: CodeEditorRegion,
-    index: number,
-  ) {
-    const id = region === "primary" ? EDITOR_PANEL_ID : SPLIT_EDITOR_PANEL_ID;
-    return (
-      <div
-        className="flex min-h-0 flex-1 flex-col overflow-hidden"
-        id={id}
-        role="tabpanel"
-        aria-labelledby={centerEditorTabId(index, region)}
-      >
-        {panel.type === "file" ? (
-          <Suspense fallback={<Skeleton className="h-full w-full" />}>
-            <FileViewer
-              client={client}
-              workspaceId={workspaceId}
-              path={panel.path}
-              contentRevision={contentRevision}
-              readOnlyReason={
-                isRemoteWorktreePath(workspace?.worktree_path)
-                  ? "Sandbox files are read-only"
-                  : undefined
-              }
-              revealLine={
-                fileReveal?.path === panel.path ? fileReveal.line : undefined
-              }
-              revealRevision={fileReveal?.revision}
-              onOpenInEditor={
-                hostAccess && canOpenInExternalEditor()
-                  ? (path, line) =>
-                      openWorkspaceFileInEditor({
-                        workspaceId,
-                        relativePath: path,
-                        line,
-                      })
-                  : undefined
-              }
-            />
-          </Suspense>
-        ) : panel.type === "diff" ? (
-          <DiffPanel
-            client={client}
-            workspaceId={workspaceId}
-            turnId={panel.turnId}
-            file={panel.path}
-            contentRevision={contentRevision}
-            revert={diffRevert}
-            reviewer={reviewer}
-            onStepFile={(next) => {
-              if (panel.path) stepFileDiff(panel.path, next, panel.turnId);
-            }}
-            onOpenFile={(path) => openFile(path, undefined, region)}
-            onOpenInEditor={
-              hostAccess && canOpenInExternalEditor()
-                ? (path) =>
-                    openWorkspaceFileInEditor({
-                      workspaceId,
-                      relativePath: path,
-                    })
-                : undefined
-            }
-          />
-        ) : (panel.type === "browser" || panel.type === "terminal") &&
-          !hostAccess ? (
-          <p className="p-4 text-muted-foreground">
-            Host tools are available only to the workspace owner.
-          </p>
-        ) : panel.type === "browser" ? (
-          <Suspense fallback={<Skeleton className="h-full w-full" />}>
-            <CodeBrowserTab
-              workspaceId={workspaceId}
-              browserId={panel.browserId}
-              initialUrl={browserInitialUrls[panel.browserId]}
-              obscured={workspaceOverlayOpen}
-              onTitleChange={(title) => setBrowserTitle(panel.browserId, title)}
-            />
-          </Suspense>
-        ) : panel.type === "terminal" ? (
-          <Suspense fallback={<Skeleton className="h-full w-full" />}>
-            <TerminalPane
-              client={client}
-              workspaceId={workspaceId}
-              terminalId={panel.terminalId}
-              onAttach={(terminalId) =>
-                adoptTerminal(panel.terminalId, terminalId)
-              }
-              hideHeader
-            />
-          </Suspense>
-        ) : panel.type === "source_control" ? (
-          <div
-            className="flex min-h-0 flex-1 flex-col overflow-hidden"
-            data-testid="source-control-panel"
-          >
-            <DiffOverview
-              client={client}
-              workspaceId={workspaceId}
-              contentRevision={contentRevision}
-              actions={changeActions}
-              commit={renderCommitBox}
-              onOpenFile={(path) => openFileDiff(path)}
-            />
-          </div>
-        ) : panel.type === "pr" ? (
-          <div
-            className="flex min-h-0 flex-1 flex-col overflow-hidden"
-            data-testid="pr-details-panel"
-          >
-            <WorkspaceDeliveryPrTab
-              workspaceOnly={!hostAccess}
-              allowMerge={!isRemoteWorktreePath(workspace?.worktree_path)}
-              client={client}
-              workspaceId={workspaceId}
-              pr={prResource.data === null ? pr : prResource.data.pr}
-              branch={workspace?.branch_name}
-              prResource={prResource}
-            />
-          </div>
-        ) : null}
-      </div>
-    );
-  }
+  const editorPanelProps = {
+    client,
+    workspaceId,
+    workspace,
+    hostAccess,
+    contentRevision,
+    fileReveal,
+    diffRevert,
+    reviewer,
+    changeActions,
+    renderCommitBox,
+    stepFileDiff,
+    openFile,
+    openFileDiff,
+    browserInitialUrls,
+    workspaceOverlayOpen,
+    setBrowserTitle,
+    adoptTerminal,
+    prResource,
+    pr,
+  };
 
   const primaryEditorGroup = (
     <div
@@ -959,9 +729,14 @@ function CodeWorkspaceBody({
           renderPanel={() => renderCodePanel()}
         />
       </div>
-      {!showingChat &&
-        activeEditor &&
-        editorPanel(activeEditor, "primary", chrome.editors.activeIndex)}
+      {!showingChat && activeEditor && (
+        <WorkspaceEditorPanel
+          {...editorPanelProps}
+          panel={activeEditor}
+          region="primary"
+          index={chrome.editors.activeIndex}
+        />
+      )}
     </div>
   );
 
@@ -1033,11 +808,12 @@ function CodeWorkspaceBody({
         }
         onCloseGroup={() => setWorkspaceLayout(mergeEditorSplit(layout))}
       />
-      {editorPanel(
-        activeSplitEditor,
-        "secondary",
-        chrome.splitEditors.activeIndex,
-      )}
+      <WorkspaceEditorPanel
+        {...editorPanelProps}
+        panel={activeSplitEditor}
+        region="secondary"
+        index={chrome.splitEditors.activeIndex}
+      />
     </div>
   ) : null;
 

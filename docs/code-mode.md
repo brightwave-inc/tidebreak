@@ -732,7 +732,7 @@ of its own: registering one opens the new-workspace dialog, and picking one on
   once in the shell; `RepositoryTrustSettings` shows and revokes the decision
   in the repository's settings.
 - Wire: generated types plus hand-written validators in
-  `ui/src/code/parsers.ts`, per [`docs/wire-types.md`](wire-types.md).
+  `ui/src/code/parsers/`, per [`docs/wire-types.md`](wire-types.md).
 
 ## Reviewing the diff
 

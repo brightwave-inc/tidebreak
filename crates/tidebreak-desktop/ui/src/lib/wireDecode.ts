@@ -1,6 +1,6 @@
 /**
  * Primitive readers shared by the hand-written decoders over the generated
- * wire types (`api/parsers.ts` and `code/parsers.ts`).
+ * wire types (`api/parsers.ts` and `code/parsers/`).
  *
  * Each parser file used to carry its own copy of these, so a fix to one
  * primitive reached one decoder and not the other. Everything here is a type
