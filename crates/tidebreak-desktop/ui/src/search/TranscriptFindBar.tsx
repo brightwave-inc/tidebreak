@@ -12,9 +12,9 @@ import { findCountLabel, type TranscriptFindState } from "./useTranscriptFind";
  * two steps through them.
  *
  * It floats over the transcript's top edge, the way a browser's find bar
- * does, so opening it moves nothing the reader was looking at. Enter steps
- * up the conversation to the next older match and Shift+Enter back down;
- * Escape closes it and hands focus back.
+ * does; `TranscriptFindOverlay` places it and keeps the first message out
+ * from under it. Enter steps up the conversation to the next older match and
+ * Shift+Enter back down; Escape closes it and hands focus back.
  */
 export const TranscriptFindBar = forwardRef<
   HTMLInputElement,

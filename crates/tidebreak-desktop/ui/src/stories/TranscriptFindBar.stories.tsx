@@ -1,17 +1,19 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState, type ReactNode } from "react";
-import { expect, fn, userEvent, within } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 
 import { INCOGNITO_FIND_NOTE } from "@/search/loadedFind";
 import { TranscriptFindBar } from "@/search/TranscriptFindBar";
+import { TranscriptFindOverlay } from "@/search/TranscriptFindOverlay";
 import type { TranscriptFindState } from "@/search/useTranscriptFind";
 import { UserMessage } from "@/UserMessage";
 import { messageSearchHit, messageSearchIndexed } from "./fixtures";
 
 /**
  * Find in the open conversation (Cmd+F). The bar floats over the
- * transcript's top edge, the way a browser's find bar does, so opening it
- * moves nothing the reader was looking at.
+ * transcript's top edge, the way a browser's find bar does. A transcript
+ * scrolled down keeps the reader's place when it opens; one at its top makes
+ * room, so the bar never covers the first message.
  *
  * Matches run newest first: the first one shown is nearest the reader, Enter
  * steps up to the next older match and Shift+Enter back down, and the count
@@ -41,14 +43,18 @@ function state(
   };
 }
 
-/** The transcript the bar floats over, so it is judged in place. */
+/**
+ * The transcript the bar floats over, so it is judged in place. It is short,
+ * the way a new conversation is: its first message starts below the bar.
+ */
 function TranscriptBehind({ children }: { children: ReactNode }) {
+  const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
   return (
     <div className="message-view relative min-h-[22rem] bg-background">
-      <div className="pointer-events-none absolute inset-x-0 top-2 z-[3] flex justify-end px-3">
+      <TranscriptFindOverlay scrollElement={scroller}>
         {children}
-      </div>
-      <div className="messages">
+      </TranscriptFindOverlay>
+      <div className="messages" ref={setScroller}>
         <div className="messages-column">
           <UserMessage text="What did we decide about the harbour fees?" />
           <article className="message message-assistant" aria-label="Assistant">
@@ -62,6 +68,21 @@ function TranscriptBehind({ children }: { children: ReactNode }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** The bar, with a note under its field, sits clear of the first message. */
+async function clearsTheFirstMessage({
+  canvasElement,
+}: {
+  canvasElement: HTMLElement;
+}) {
+  const bar = within(canvasElement).getByRole("search");
+  const first = canvasElement.querySelector(".messages-column > *");
+  await waitFor(() =>
+    expect(first?.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+      bar.getBoundingClientRect().bottom,
+    ),
   );
 }
 
@@ -121,6 +142,7 @@ export const StillIndexing: Story = {
       },
     }),
   },
+  play: clearsTheFirstMessage,
 };
 
 /**
@@ -135,6 +157,7 @@ export const LoadedOnly: Story = {
       loadedOnly: INCOGNITO_FIND_NOTE,
     }),
   },
+  play: clearsTheFirstMessage,
 };
 
 /** The search failed. */

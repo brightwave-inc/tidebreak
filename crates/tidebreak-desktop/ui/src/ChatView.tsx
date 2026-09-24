@@ -93,6 +93,7 @@ import {
 import { messageWithPastedText } from "./PastedText";
 import { EarlierHistoryNotice } from "./search/EarlierHistoryNotice";
 import { TranscriptFindBar } from "./search/TranscriptFindBar";
+import { TranscriptFindOverlay } from "./search/TranscriptFindOverlay";
 import { useChatTranscriptSearch } from "./search/useChatTranscriptSearch";
 import { Button } from "@/components/ui/button";
 import {
@@ -754,7 +755,7 @@ export function ChatView({
         onPointerDownCapture={findBar.activate}
       >
         {findBar.open && (
-          <div className="pointer-events-none absolute inset-x-0 top-2 z-[3] flex justify-end px-3">
+          <TranscriptFindOverlay scrollElement={scrollElement}>
             <TranscriptFindBar
               ref={findBar.inputRef}
               className="pointer-events-auto"
@@ -765,7 +766,7 @@ export function ChatView({
               onNewer={findBar.newer}
               onClose={findBar.close}
             />
-          </div>
+          </TranscriptFindOverlay>
         )}
         {hydrationError ? (
           <Empty role="alert" className="h-full">

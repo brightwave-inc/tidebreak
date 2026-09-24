@@ -648,6 +648,10 @@ body {
     flex-direction: column;
     align-items: center;
     padding: 2.5rem clamp(0.5rem, 4%, 5rem) 1.5rem;
+    /* While the find bar floats over the top edge, the first row starts
+       below it. The room is the bar's bottom edge; the column's own 1.5rem
+       top padding, less a 0.5rem gap, already covers the rest. */
+    padding-top: max(2.5rem, calc(var(--transcript-find-room, 0px) - 1rem));
     scrollbar-gutter: stable;
   }
 

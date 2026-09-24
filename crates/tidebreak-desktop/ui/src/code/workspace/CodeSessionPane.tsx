@@ -66,6 +66,7 @@ import { useStreamStalled } from "@/useStreamStalled";
 import { useTranscriptFollow } from "@/useTranscriptFollow";
 import { EarlierHistoryNotice } from "@/search/EarlierHistoryNotice";
 import { TranscriptFindBar } from "@/search/TranscriptFindBar";
+import { TranscriptFindOverlay } from "@/search/TranscriptFindOverlay";
 import { useCodeTranscriptSearch } from "@/search/useCodeTranscriptSearch";
 
 /**
@@ -625,7 +626,7 @@ export function CodeSessionPane({
         onPointerDownCapture={findBar.activate}
       >
         {findBar.open && (
-          <div className="pointer-events-none absolute inset-x-0 top-2 z-[3] flex justify-end px-3">
+          <TranscriptFindOverlay scrollElement={follow.scrollElement}>
             <TranscriptFindBar
               ref={findBar.inputRef}
               className="pointer-events-auto"
@@ -636,7 +637,7 @@ export function CodeSessionPane({
               onNewer={findBar.newer}
               onClose={findBar.close}
             />
-          </div>
+          </TranscriptFindOverlay>
         )}
         {connectionState === "reconnecting" && (
           <p
