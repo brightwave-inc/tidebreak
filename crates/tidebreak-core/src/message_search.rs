@@ -9,13 +9,22 @@
 //! words run, so a query matches the same rows on both, and [`SearchTerms`]
 //! finds the same words again when it cuts a snippet.
 //!
-//! A term is a run of letters and digits, folded: compatibility-decomposed,
+//! A word is a run of letters and digits, folded: compatibility-decomposed,
 //! stripped of combining marks, and lowercased, so `Café` and `cafe` are one
-//! term and `ﬁle` is `file`. A Han or kana character is a term by itself,
+//! word and `ﬁle` is `file`. A Han or kana character is a word by itself,
 //! because those scripts do not put spaces between words. Everything else
-//! separates terms. A query's quotes, parentheses, `*`, `-`, and `:` are
-//! therefore never operators, and `AND`, `OR`, `NOT`, and `NEAR` are ordinary
-//! words: every term must appear, and the last one also matches as a prefix.
+//! separates words, so the segments of a dotted or slashed path, and of a
+//! `snake_case` or `kebab-case` name, are words of their own. A query's quotes,
+//! parentheses, `*`, `-`, and `:` are therefore never operators, and `AND`,
+//! `OR`, `NOT`, and `NEAR` are ordinary words: every word must appear, and the
+//! last one also matches as a prefix.
+//!
+//! The index keeps more terms than a query reads, so a word finds the names it
+//! is part of. Beside each word it keeps the parts of a word written in
+//! camelCase (`SubmitButton` is also `submit` and `button`), and a name joined
+//! with `_` or `-` as one word (`submit_button` is also `submitbutton`). A
+//! query is read as whole words only, so `SubmitButton` still means that one
+//! word and finds `SubmitButton`, `submitButton`, and `submit_button`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -28,9 +37,19 @@ use crate::id::{MessageId, SessionId, TurnId};
 /// How much of one piece of text is indexed, in characters. Text past this
 /// is stored with its message but is not searchable.
 pub const MAX_INDEXED_CHARS: usize = 65_536;
+/// Most bytes of terms one piece of text puts in the index, separating spaces
+/// included. Folding can make text longer (one ligature can fold to fifteen
+/// letters), and PostgreSQL refuses a `tsvector` whose words add up to a
+/// mebibyte, which would fail the write that carries the text. Terms past
+/// this are left out, so the end of such a text is not searchable.
+pub const MAX_INDEXED_TERM_BYTES: usize = 512 * 1024;
 /// Longest term, in folded characters. A longer run of letters and digits is
 /// indexed as its first this-many characters, so a prefix still finds it.
 pub const MAX_TERM_CHARS: usize = 64;
+/// Longest run of letters and digits, in characters, that is read as a name
+/// and split into its camelCase parts. A longer run is data, such as a hash
+/// or an encoded blob, and splitting it would only fill the index with noise.
+pub const MAX_NAME_CHARS: usize = 128;
 /// Longest query the search route accepts, in characters.
 pub const MAX_QUERY_CHARS: usize = 500;
 /// Most terms one query matches on. Past this, the query keeps its first
@@ -266,6 +285,7 @@ fn fold_into(c: char, out: &mut String) {
 }
 
 /// One term, with where it sits in the text it came from.
+#[derive(Debug, Clone)]
 struct Token {
     /// Index of its first character.
     start: usize,
@@ -273,39 +293,140 @@ struct Token {
     end: usize,
     /// The folded term, at most [`MAX_TERM_CHARS`] characters.
     folded: String,
+    /// Whether `folded` stops short of the text: the text folds to more than
+    /// [`MAX_TERM_CHARS`] characters.
+    cut: bool,
 }
 
-fn push_token(out: &mut Vec<Token>, chars: &[char], start: usize, end: usize) {
+/// Fold `chars[start..end]` into one term, or `None` when nothing in it is a
+/// letter or a digit.
+fn fold_token(chars: &[char], start: usize, end: usize) -> Option<Token> {
     let mut folded = String::new();
+    let mut count = 0;
+    let mut cut = false;
     for &c in &chars[start..end] {
+        let before = folded.len();
         fold_into(c, &mut folded);
+        count += folded[before..].chars().count();
+        if count > MAX_TERM_CHARS {
+            // One more character than a term holds is enough to know the
+            // term is cut; folding the rest of a long run would be waste.
+            cut = true;
+            break;
+        }
     }
-    if let Some((cut, _)) = folded.char_indices().nth(MAX_TERM_CHARS) {
-        folded.truncate(cut);
+    if let Some((at, _)) = folded.char_indices().nth(MAX_TERM_CHARS) {
+        folded.truncate(at);
     }
-    if !folded.is_empty() {
-        out.push(Token { start, end, folded });
-    }
+    (!folded.is_empty()).then_some(Token {
+        start,
+        end,
+        folded,
+        cut,
+    })
 }
 
-/// Split `chars` into terms.
-fn tokens(chars: &[char]) -> Vec<Token> {
+/// Split `chars` into words: runs of letters and digits, and each Han or kana
+/// character on its own. This is how a query is read.
+fn words(chars: &[char]) -> Vec<Token> {
     let mut out = Vec::new();
     let mut open: Option<usize> = None;
     for (index, &c) in chars.iter().enumerate() {
         if stands_alone(c) {
             if let Some(start) = open.take() {
-                push_token(&mut out, chars, start, index);
+                out.extend(fold_token(chars, start, index));
             }
-            push_token(&mut out, chars, index, index + 1);
+            out.extend(fold_token(chars, index, index + 1));
         } else if c.is_alphanumeric() || (open.is_some() && is_combining_mark(c)) {
             open.get_or_insert(index);
         } else if let Some(start) = open.take() {
-            push_token(&mut out, chars, start, index);
+            out.extend(fold_token(chars, start, index));
         }
     }
     if let Some(start) = open {
-        push_token(&mut out, chars, start, chars.len());
+        out.extend(fold_token(chars, start, chars.len()));
+    }
+    out
+}
+
+/// Where a word written in camelCase splits, as `(start, end)` ranges of
+/// `chars`, or nothing when the word is one part.
+///
+/// A part starts at a capital that follows a lowercase letter or a digit
+/// (`submitButton`, `utf8Decoder`), or at the last capital of a run of
+/// capitals that a lowercase letter follows (`HTTPServer`). Combining marks
+/// stay with the letter before them.
+fn camel_parts(chars: &[char], start: usize, end: usize) -> Vec<(usize, usize)> {
+    if end - start > MAX_NAME_CHARS {
+        return Vec::new();
+    }
+    let base = |from: usize| {
+        chars[from..end]
+            .iter()
+            .copied()
+            .find(|c| !is_combining_mark(*c))
+    };
+    let mut starts = vec![start];
+    let mut previous: Option<char> = None;
+    for index in start..end {
+        let c = chars[index];
+        if is_combining_mark(c) {
+            continue;
+        }
+        if let Some(previous) = previous {
+            let splits = c.is_uppercase()
+                && (previous.is_lowercase()
+                    || previous.is_numeric()
+                    || (previous.is_uppercase()
+                        && base(index + 1).is_some_and(char::is_lowercase)));
+            if splits {
+                starts.push(index);
+            }
+        }
+        previous = Some(c);
+    }
+    if starts.len() < 2 {
+        return Vec::new();
+    }
+    starts
+        .iter()
+        .zip(starts.iter().skip(1).chain([&end]))
+        .map(|(&from, &to)| (from, to))
+        .collect()
+}
+
+/// Whether `left` and `right` are one name joined by a single `_` or `-`, as
+/// in `snake_case` or `kebab-case`.
+fn joined(chars: &[char], left: &Token, right: &Token) -> bool {
+    right.start == left.end + 1
+        && matches!(chars[left.end], '_' | '-')
+        && !stands_alone(chars[left.start])
+        && !stands_alone(chars[right.start])
+}
+
+/// Every term the index keeps for `chars`, in the order the text holds them:
+/// each word, the camelCase parts of a word, and a name joined with `_` or `-`
+/// as one word, after its last segment.
+fn index_tokens(chars: &[char]) -> Vec<Token> {
+    let words = words(chars);
+    let mut out = Vec::with_capacity(words.len());
+    let mut first = 0;
+    for (index, word) in words.iter().enumerate() {
+        out.push(word.clone());
+        for (start, end) in camel_parts(chars, word.start, word.end) {
+            out.extend(fold_token(chars, start, end));
+        }
+        if words
+            .get(index + 1)
+            .is_some_and(|next| joined(chars, word, next))
+        {
+            continue;
+        }
+        let name = (words[first].start, word.end);
+        if index > first && name.1 - name.0 <= MAX_NAME_CHARS {
+            out.extend(fold_token(chars, name.0, name.1));
+        }
+        first = index + 1;
     }
     out
 }
@@ -313,12 +434,17 @@ fn tokens(chars: &[char]) -> Vec<Token> {
 /// The terms the index stores for `text`, space-separated, in order.
 ///
 /// Empty when the text holds nothing searchable, and then nothing is indexed.
+/// At most [`MAX_INDEXED_TERM_BYTES`] long, whatever the text holds.
 #[must_use]
 pub fn index_terms(text: &str) -> String {
     let chars: Vec<char> = text.chars().take(MAX_INDEXED_CHARS).collect();
     let mut terms = String::new();
-    for token in tokens(&chars) {
-        if !terms.is_empty() {
+    for token in index_tokens(&chars) {
+        let separator = usize::from(!terms.is_empty());
+        if terms.len() + separator + token.folded.len() > MAX_INDEXED_TERM_BYTES {
+            break;
+        }
+        if separator == 1 {
             terms.push(' ');
         }
         terms.push_str(&token.folded);
@@ -346,7 +472,7 @@ impl SearchTerms {
     #[must_use]
     pub fn parse(query: &str) -> Self {
         let chars: Vec<char> = query.chars().take(MAX_QUERY_CHARS).collect();
-        let tokens = tokens(&chars);
+        let tokens = words(&chars);
         let last = tokens.len().checked_sub(1);
         let mut terms: Vec<SearchTerm> = Vec::new();
         for (index, token) in tokens.into_iter().enumerate() {
@@ -440,10 +566,13 @@ impl SearchTerms {
     ///
     /// Runs of whitespace become one space. The excerpt keeps up to `lead`
     /// characters before the first match and is at most `width` characters
-    /// long, cut at spaces, with `…` where it was cut. Text with no match
-    /// gives its start and no ranges.
+    /// long, even when the match itself is longer, cut at spaces where it can
+    /// be, with `…` where it was cut. A match reaches only as far as the
+    /// excerpt does. Text with no match gives its start and no ranges.
     #[must_use]
     pub fn excerpt(&self, text: &str, width: usize, lead: usize) -> Excerpt {
+        let width = width.max(1);
+        let lead = lead.min(width - 1);
         let capped: String = text.chars().take(MAX_INDEXED_CHARS).collect();
         let compact: Vec<char> = capped
             .split_whitespace()
@@ -452,17 +581,21 @@ impl SearchTerms {
             .chars()
             .collect();
         let mut matches: Vec<(usize, usize)> = Vec::new();
-        for token in tokens(&compact) {
+        for token in index_tokens(&compact) {
             let Some(matched) = self.matched_chars(&token.folded) else {
                 continue;
             };
-            let end = if matched >= token.folded.chars().count() {
+            let end = if matched >= token.folded.chars().count() && !token.cut {
                 token.end
             } else {
+                // A prefix, or a term cut short of its run: the match ends
+                // where the matched characters do, not at the run's end.
                 prefix_end(&compact, token.start, token.end, matched)
             };
             matches.push((token.start, end));
         }
+        // A camelCase part or a joined name sits inside or around its words.
+        matches.sort_unstable();
         let len = compact.len();
         let (first_start, first_end) = matches.first().copied().unwrap_or((0, 0));
         let mut start = first_start.saturating_sub(lead);
@@ -473,10 +606,11 @@ impl SearchTerms {
                 .position(|c| c.is_whitespace())
                 .map_or(first_start, |space| start + space + 1);
         }
-        let mut end = (start + width).max(first_end).min(len);
-        if end < len && !compact[end].is_whitespace() {
-            // End after a word, not inside one.
-            let floor = first_end.max(start);
+        let mut end = (start + width).min(len);
+        let floor = first_end.max(start);
+        if end < len && !compact[end].is_whitespace() && floor < end {
+            // End after a word, not inside one, unless that word is the
+            // first match and runs past the width.
             if let Some(space) = compact[floor..end].iter().rposition(|c| c.is_whitespace()) {
                 end = floor + space;
             }
@@ -500,9 +634,10 @@ impl SearchTerms {
         }
         let mut ranges: Vec<MessageSearchRange> = Vec::new();
         for (match_start, match_end) in matches {
-            if match_start < start || match_end > end {
+            if match_start < start || match_start >= end {
                 continue;
             }
+            let match_end = match_end.min(end);
             let range = MessageSearchRange {
                 start: lead_units + units[match_start] - units[start],
                 end: lead_units + units[match_end] - units[start],
@@ -644,10 +779,107 @@ mod tests {
     fn punctuation_separates_terms() {
         assert_eq!(
             index_terms("src/main.rs --flag=\"x\" (a*b) foo_bar"),
-            "src main rs flag x a b foo bar"
+            "src main rs flag x a b foo bar foobar"
         );
         assert_eq!(index_terms("  \n\t "), "");
         assert_eq!(index_terms("*** \"\" ()"), "");
+    }
+
+    /// A name is found by its parts and by itself: `button`, `submit`, and
+    /// `submitbutton` all find `SubmitButton.tsx`, however the name is
+    /// written.
+    #[test]
+    fn names_are_indexed_by_their_parts_and_whole() {
+        assert_eq!(
+            index_terms("SubmitButton.tsx"),
+            "submitbutton submit button tsx"
+        );
+        assert_eq!(
+            index_terms("HTTPServer utf8Decoder getX"),
+            "httpserver http server utf8decoder utf8 decoder getx get x"
+        );
+        assert_eq!(
+            index_terms("snake_case kebab-case a__b"),
+            "snake case snakecase kebab case kebabcase a b"
+        );
+        assert_eq!(index_terms("ÉcoleNormale"), "ecolenormale ecole normale");
+        // A long run is data, not a name, so it is not split.
+        assert_eq!(index_terms(&"aB".repeat(100)), "ab".repeat(32));
+
+        // A query reads whole words: a name typed as one word is one term.
+        assert_eq!(
+            SearchTerms::parse("SubmitButton").terms(),
+            [SearchTerm {
+                text: "submitbutton".into(),
+                prefix: true
+            }]
+        );
+
+        for (query, text, marked) in [
+            ("button", "Open SubmitButton.tsx now", vec!["Button"]),
+            ("submit", "Open SubmitButton.tsx now", vec!["Submit"]),
+            (
+                "submitbutton",
+                "Open SubmitButton.tsx now",
+                vec!["SubmitButton"],
+            ),
+            ("SubmitBut", "Open SubmitButton.tsx now", vec!["SubmitBut"]),
+            (
+                "submitbutton",
+                "fix submit_button here",
+                vec!["submit_button"],
+            ),
+            ("server http", "an HTTPServer", vec!["HTTPServer"]),
+        ] {
+            assert_eq!(excerpt(query, text).1, marked, "{query} in {text}");
+        }
+    }
+
+    /// PostgreSQL refuses a `tsvector` whose words add up to a mebibyte, and
+    /// folding can grow text fifteenfold, so the terms are capped by bytes.
+    #[test]
+    fn the_terms_of_one_text_are_capped_by_bytes() {
+        let text = "\u{FDFA}\u{4E2D}".repeat(MAX_INDEXED_CHARS / 2);
+        let uncapped: usize = index_tokens(&text.chars().collect::<Vec<_>>())
+            .iter()
+            .map(|token| token.folded.len())
+            .sum();
+        assert!(uncapped > 1_048_575, "{uncapped} bytes fit a tsvector");
+        let terms = index_terms(&text);
+        assert!(terms.len() <= MAX_INDEXED_TERM_BYTES, "{}", terms.len());
+        let ligature = index_terms("\u{FDFA}");
+        assert_eq!(ligature.chars().count(), 15, "{ligature}");
+        assert!(terms.starts_with(&format!("{ligature} \u{4E2D} {ligature} ")));
+    }
+
+    /// A 64-character query matches a 20,000-character run exactly, because
+    /// both are cut to one term. The snippet still stops at its width.
+    #[test]
+    fn a_match_longer_than_the_snippet_is_cut_to_it() {
+        let run = "abcdefgh".repeat(2_500);
+        let query: String = run.chars().take(MAX_TERM_CHARS).collect();
+        let (snippet, matched) = excerpt(&query, &format!("see {run} there"));
+        assert!(
+            snippet.chars().count() <= SNIPPET_CHARS + 1,
+            "{} characters",
+            snippet.chars().count()
+        );
+        assert_eq!(matched, [query.clone()]);
+
+        // A match whose accents make it longer than the snippet is cut at the
+        // snippet's end, and so is its range.
+        let accented = "e\u{301}".repeat(MAX_TERM_CHARS);
+        let terms = SearchTerms::parse(&"e".repeat(MAX_TERM_CHARS));
+        let cut = terms.excerpt(&accented, 50, 10);
+        assert_eq!(cut.text.chars().count(), 51, "{}", cut.text);
+        let units = u32::try_from(cut.text.encode_utf16().count()).unwrap();
+        assert_eq!(
+            cut.ranges,
+            [MessageSearchRange {
+                start: 0,
+                end: units - 1
+            }]
+        );
     }
 
     #[test]
