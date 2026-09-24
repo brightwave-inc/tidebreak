@@ -76,9 +76,9 @@ describe("what a hit opens", () => {
     const target = hitTarget(hit)!;
     expect(target).toMatchObject({ kind: "code", eventSeq: 42 });
     expect(hitRoute(target)).toBe(`/code/w/ws-1?task=${hit.session_id}`);
-    expect(
-      hitRoute(hitTarget({ ...hit, workspace_id: undefined })!),
-    ).toBe(`/code/s/${hit.session_id}`);
+    expect(hitRoute(hitTarget({ ...hit, workspace_id: undefined })!)).toBe(
+      `/code/s/${hit.session_id}`,
+    );
   });
 
   it("keys hits apart by where they point", () => {

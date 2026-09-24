@@ -12,7 +12,10 @@ import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { STATUS_DOT } from "./code/statusTone";
 import type { MessageSearchHit } from "./generated/wire";
-import { MessageSearchSection } from "./search/MessageSearchSection";
+import {
+  MessageSearchSection,
+  messageSearchAnnouncement,
+} from "./search/MessageSearchSection";
 import {
   IDLE_MESSAGE_SEARCH,
   type MessageSearchState,
@@ -147,6 +150,10 @@ export function CommandPaletteList({
           now={now}
         />
       </CommandList>
+      {/* Outside the listbox, which may hold only options and groups. */}
+      <p className="sr-only" role="status">
+        {messageSearchAnnouncement(messages)}
+      </p>
 
       <PaletteFooter scoped={Boolean(scopeLabel)} />
     </Command>

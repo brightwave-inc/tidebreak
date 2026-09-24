@@ -57,9 +57,7 @@ function transcriptOf(
  * through 400. The page before it starts at message sequence 721.
  */
 function heldNewestPage(): ChatSessionState {
-  const page = presentChatTranscript(
-    transcriptOf(361, 400, { earlier: 721 }),
-  );
+  const page = presentChatTranscript(transcriptOf(361, 400, { earlier: 721 }));
   return {
     ...initialChatSessionState(),
     messages: page.messages,

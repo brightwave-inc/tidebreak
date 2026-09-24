@@ -3,14 +3,8 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { MessageSearchPage } from "../generated/wire";
-import {
-  messageSearchHit,
-  messageSearchIndexed,
-} from "../stories/fixtures";
-import {
-  MESSAGE_SEARCH_DELAY_MS,
-  useMessageSearch,
-} from "./useMessageSearch";
+import { messageSearchHit, messageSearchIndexed } from "../stories/fixtures";
+import { MESSAGE_SEARCH_DELAY_MS, useMessageSearch } from "./useMessageSearch";
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());

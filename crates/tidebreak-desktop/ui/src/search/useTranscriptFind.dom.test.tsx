@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  renderHook,
+  screen,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -144,9 +150,7 @@ describe("the find bar", () => {
       onNewer: vi.fn(),
       onClose: vi.fn(),
     };
-    render(
-      <TranscriptFindBar query="harbour" state={state} {...props} />,
-    );
+    render(<TranscriptFindBar query="harbour" state={state} {...props} />);
     return props;
   }
 

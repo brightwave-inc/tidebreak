@@ -81,7 +81,9 @@ describe("the palette's Messages section", () => {
 
   it("says nothing matched, in the reader's words", () => {
     mount(state({ hits: [] }));
-    expect(screen.getByText("No messages match “harbour”.")).toBeInTheDocument();
+    expect(
+      screen.getByText("No messages match “harbour”."),
+    ).toBeInTheDocument();
   });
 
   it("says the index is still catching up, so a miss is not final", () => {
@@ -95,9 +97,12 @@ describe("the palette's Messages section", () => {
         },
       }),
     );
-    expect(
-      screen.getByText(/Still indexing 12 conversations/),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("listbox")).toHaveTextContent(
+      /Still indexing 12 conversations/,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "No messages match. Still indexing 12 conversations.",
+    );
   });
 
   it("notes, quietly, conversations the index could not add", () => {
@@ -118,6 +123,23 @@ describe("the palette's Messages section", () => {
 
   it("says a search failed without taking the rest of the palette down", () => {
     mount(state({ status: "error", error: "Could not search messages." }));
-    expect(screen.getByText("Could not search messages.")).toBeInTheDocument();
+    expect(screen.getByRole("listbox")).toHaveTextContent(
+      "Could not search messages.",
+    );
+  });
+
+  it("announces the search from outside the list, which holds only options", () => {
+    mount(state({ hits: messageSearchHits }));
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("3 messages match");
+    expect(screen.getByRole("listbox")).not.toContainElement(status);
+    // Every row the list draws that is not a hit carries no role at all.
+    for (const node of screen
+      .getByRole("listbox")
+      .querySelectorAll("[role]")) {
+      expect(["option", "group", "presentation", "listbox"]).toContain(
+        node.getAttribute("role"),
+      );
+    }
   });
 });

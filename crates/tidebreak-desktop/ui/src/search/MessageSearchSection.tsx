@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 
 import { CommandGroup, CommandItem } from "@/components/ui/command";
 import { Spinner } from "@/components/ui/spinner";
+import { cn } from "@/lib/utils";
 import type { MessageSearchHit } from "../generated/wire";
 import {
   hitKey,
@@ -56,14 +57,14 @@ export function MessageSearchSection({
         />
       ))}
       {searching && state.hits.length === 0 && (
-        <StatusRow>
-          <Spinner className="size-3.5" aria-hidden />
+        <StatusRow icon={<Spinner className="size-3.5" aria-hidden />}>
           Searching messages…
         </StatusRow>
       )}
       {state.status === "error" && (
-        <StatusRow>
-          <CircleAlert className="size-3.5 text-critical" aria-hidden />
+        <StatusRow
+          icon={<CircleAlert className="size-3.5 text-critical" aria-hidden />}
+        >
           {state.error ?? "Could not search messages."}
         </StatusRow>
       )}
@@ -87,15 +88,53 @@ export function MessageSearchSection({
   );
 }
 
-function StatusRow({ children }: { children: ReactNode }) {
+/**
+ * A line of status in the section, laid out like a hit so its words start
+ * where the hits' titles do. The icon column is empty unless the status has
+ * a mark of its own.
+ *
+ * Plain text rather than a live region: the list is a listbox, which may
+ * only hold options and groups. `messageSearchAnnouncement` says the same
+ * thing from a live region outside it.
+ */
+function StatusRow({
+  icon,
+  children,
+}: {
+  icon?: ReactNode;
+  children: ReactNode;
+}) {
   return (
-    <p
-      role="status"
-      className="flex items-center gap-2 px-2.5 py-2 text-xs text-muted-foreground"
-    >
-      {children}
-    </p>
+    <div className="flex items-start gap-2.5 px-2.5 py-2 text-xs text-muted-foreground">
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1 pt-px">{children}</span>
+    </div>
   );
+}
+
+/** What a screen reader hears about the search, in a few words. */
+export function messageSearchAnnouncement(state: MessageSearchState): string {
+  switch (state.status) {
+    case "idle":
+      return "";
+    case "loading":
+      return "Searching messages";
+    case "error":
+      return state.error ?? "Could not search messages.";
+    case "ready": {
+      const count = state.hits.length;
+      const found =
+        count === 0
+          ? "No messages match"
+          : `${count} ${count === 1 ? "message matches" : "messages match"}`;
+      const pending = state.indexing?.pending_conversations ?? 0;
+      return pending > 0
+        ? `${found}. Still indexing ${pending} ${pending === 1 ? "conversation" : "conversations"}.`
+        : found;
+    }
+  }
 }
 
 /** One hit: where it was said, who said it, and the words around it. */
@@ -129,7 +168,14 @@ function MessageHitRow({
             {hit.archived && " · Archived"}
           </span>
         </span>
-        <span className="line-clamp-2 text-xs text-muted-foreground break-words [overflow-wrap:anywhere]">
+        <span
+          className={cn(
+            "line-clamp-2 text-xs text-muted-foreground break-words [overflow-wrap:anywhere]",
+            // What a tool call acted on is a command, a path, or a query:
+            // the machine's voice.
+            hit.source === "tool" && "font-mono",
+          )}
+        >
           <span className="sr-only">{hitSourceLabel(hit)}: </span>
           {/* Runs of one snippet never reorder, so their place is their key. */}
           {segments.map((segment, index) =>

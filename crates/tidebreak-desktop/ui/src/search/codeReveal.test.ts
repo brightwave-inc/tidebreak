@@ -116,7 +116,10 @@ describe("a window of an old session's journal", () => {
               detail: { kind: "file_read", path: "src/harbour.rs" },
             },
           ],
-          [502, { type: "assistant_message", text: "Harbour fees round down." }],
+          [
+            502,
+            { type: "assistant_message", text: "Harbour fees round down." },
+          ],
           [
             503,
             {
