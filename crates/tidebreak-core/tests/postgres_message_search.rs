@@ -117,6 +117,7 @@ async fn search(store: &DbStore, owner: &OwnerId, query: &str) -> MessageSearchP
                 query: query.into(),
                 limit: 50,
                 cursor: None,
+                session_id: None,
             },
         )
         .await
@@ -571,6 +572,169 @@ async fn postgres_a_failed_backfill_is_tried_again_and_reported_once_given_up() 
     assert!(!page.indexing.complete);
     assert_eq!(page.indexing.pending_conversations, 0);
     assert_eq!(page.indexing.failed_conversations, 1);
+
+    store.close().await.unwrap();
+    drop_database(&url, &name).await;
+}
+
+/// `(attempts, gave up)` of a queued conversation.
+async fn queued(url: &str, name: &str, session: SessionId) -> Option<(i32, bool)> {
+    let (prefix, _, query) = split_postgres_url(url);
+    let connection = Database::connect(&format!("{prefix}{name}{query}"))
+        .await
+        .unwrap();
+    let row = connection
+        .query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            "SELECT attempts, failed_at_micros FROM message_search_backfill \
+             WHERE session_id = $1",
+            [session.0.into()],
+        ))
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    row.map(|row| {
+        (
+            row.try_get("", "attempts").unwrap(),
+            row.try_get::<Option<i64>>("", "failed_at_micros")
+                .unwrap()
+                .is_some(),
+        )
+    })
+}
+
+/// A rebuild whose connection drops fails its rollback too. The attempt
+/// still counts, on another connection, so the conversation waits its turn
+/// and the ones behind it are added in the same step.
+#[tokio::test]
+async fn postgres_a_rebuild_whose_connection_drops_counts_and_blocks_nothing() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let Some((store, url, name)) = fresh_store("dropped").await else {
+        return;
+    };
+    let owner = OwnerId::local();
+    let steady = chat("Steady");
+    store.create_chat(&steady).await.unwrap();
+    say(&store, steady.id, Role::User, "steady harbour").await;
+    // Newer, so the queue reads it first.
+    let dropping = chat("Dropping");
+    store.create_chat(&dropping).await.unwrap();
+    say(&store, dropping.id, Role::User, "dropping harbour").await;
+    execute(
+        &url,
+        &name,
+        &[
+            "DELETE FROM message_search".to_owned(),
+            "INSERT INTO message_search_backfill (session_id) SELECT id FROM session".to_owned(),
+            "CREATE FUNCTION drop_connection() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN PERFORM pg_terminate_backend(pg_backend_pid()); \
+             PERFORM pg_sleep(1); RETURN NEW; END $$"
+                .to_owned(),
+            format!(
+                "CREATE TRIGGER drop_connection BEFORE INSERT ON message_search \
+                 FOR EACH ROW WHEN (NEW.session_id = '{}') EXECUTE FUNCTION drop_connection()",
+                dropping.id.0
+            ),
+        ],
+    )
+    .await;
+
+    let state = store.backfill_message_search(10).await.unwrap();
+    assert_eq!((state.waiting, state.failed), (1, 0));
+    assert!(state.next_attempt_at.is_some(), "it waits to try again");
+    assert_eq!(queued(&url, &name, dropping.id).await, Some((1, false)));
+    let page = search(&store, &owner, "harbour").await;
+    assert_eq!(
+        page.hits
+            .iter()
+            .map(|hit| hit.session_id)
+            .collect::<Vec<_>>(),
+        [steady.id]
+    );
+
+    store.close().await.unwrap();
+    drop_database(&url, &name).await;
+}
+
+/// A conversation the backfill gave up on is tried again when something new
+/// is written to it, when a newer app version starts, and when turning
+/// memory incognito off rebuilds it.
+#[tokio::test]
+async fn postgres_a_given_up_conversation_is_tried_again() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let Some((store, url, name)) = fresh_store("given_up").await else {
+        return;
+    };
+    let owner = OwnerId::local();
+    let lost = chat("Lost");
+    store.create_chat(&lost).await.unwrap();
+    say(&store, lost.id, Role::User, "written long ago").await;
+    let give_up = |statements: Vec<String>| {
+        let url = url.clone();
+        let name = name.clone();
+        async move {
+            let mut all = statements;
+            all.push("UPDATE message_search_backfill SET attempts = 8, retry_at_micros = NULL, failed_at_micros = 1".to_owned());
+            execute(&url, &name, &all).await;
+        }
+    };
+    give_up(vec![
+        "DELETE FROM message_search".to_owned(),
+        "INSERT INTO message_search_backfill (session_id) SELECT id FROM session".to_owned(),
+    ])
+    .await;
+    assert_eq!(queued(&url, &name, lost.id).await, Some((8, true)));
+
+    // New content.
+    say(&store, lost.id, Role::User, "written today").await;
+    assert_eq!(queued(&url, &name, lost.id).await, Some((0, false)));
+    store.backfill_message_search(10).await.unwrap();
+    assert_eq!(search(&store, &owner, "long").await.hits.len(), 1);
+    assert_eq!(queued(&url, &name, lost.id).await, None);
+
+    // A newer version, and only a newer one.
+    give_up(vec![
+        "DELETE FROM message_search".to_owned(),
+        "INSERT INTO message_search_backfill (session_id) SELECT id FROM session".to_owned(),
+    ])
+    .await;
+    assert_eq!(
+        store
+            .retry_message_search_after_upgrade("2.0.0")
+            .await
+            .unwrap(),
+        1
+    );
+    give_up(Vec::new()).await;
+    assert_eq!(
+        store
+            .retry_message_search_after_upgrade("2.0.0")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .retry_message_search_after_upgrade("2.0.1")
+            .await
+            .unwrap(),
+        1
+    );
+
+    // Incognito off rebuilds the history and settles the queue.
+    give_up(Vec::new()).await;
+    assert!(store
+        .set_chat_memory_incognito(lost.id, true)
+        .await
+        .unwrap());
+    assert!(store
+        .set_chat_memory_incognito(lost.id, false)
+        .await
+        .unwrap());
+    assert_eq!(queued(&url, &name, lost.id).await, None);
+    let page = search(&store, &owner, "long").await;
+    assert_eq!(page.hits.len(), 1);
+    assert!(page.indexing.complete);
 
     store.close().await.unwrap();
     drop_database(&url, &name).await;

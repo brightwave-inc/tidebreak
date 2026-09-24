@@ -74,7 +74,16 @@ pub struct TranscriptPage {
     pub before: Option<i64>,
     /// Read at most this many turns before the cursor.
     pub turns: Option<u32>,
+    /// Read the page that holds this message instead of the newest one: the
+    /// message's turn, up to [`TURNS_AFTER_FOUND_MESSAGE`] turns after it, and
+    /// the turns before them up to `turns`. On a page shorter than that, fewer
+    /// turns follow, so the message's own turn stays on it. Replaces `before`.
+    pub around: Option<MessageId>,
 }
+
+/// How many turns after a found message the page holding it also reads, so
+/// the answer to a question, and what came of it, is on the page too.
+pub const TURNS_AFTER_FOUND_MESSAGE: u32 = 3;
 
 /// One page of a chat's transcript.
 ///
@@ -87,6 +96,10 @@ pub struct ChatTranscriptPage {
     /// The cursor that reads the page just before this one, or `None` when
     /// this page reaches the start of the conversation.
     pub earlier: Option<i64>,
+    /// Where the conversation goes on after this page: the sequence number of
+    /// the first message a newer page holds, or `None` when this page reaches
+    /// the end of the conversation.
+    pub later: Option<i64>,
 }
 
 /// The skills one user message explicitly invoked, in submitted order.

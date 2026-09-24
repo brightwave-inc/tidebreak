@@ -720,6 +720,13 @@ pub struct ChatTranscript {
     /// Pass as `before` to read the page just older than this one. Set exactly
     /// when `has_more` is.
     pub earlier_cursor: Option<i64>,
+    /// Where the conversation goes on after this page: the sequence number of
+    /// the first message a newer page holds. Absent when this page reaches the
+    /// newest message. A page read with `around` can end before the newest
+    /// page a reader already holds; this says whether the two meet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub later_cursor: Option<i64>,
     /// Earlier answers to messages that were answered again, oldest first.
     ///
     /// `messages`, `tool_activity`, and `terminal_turns` hold the conversation
@@ -764,6 +771,13 @@ pub struct ChatTranscriptQuery {
     /// message, so a page never starts mid-exchange.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Read the page that holds this message rather than the newest one: its
+    /// turn, up to three turns after it, and the turns before them up to
+    /// `limit`, which this needs. Not with `before`. A message that is not in
+    /// this chat, because it was deleted or its turn was edited away, reads
+    /// the newest page.
+    #[serde(default)]
+    pub around: Option<MessageId>,
 }
 
 /// The most turns one transcript page may ask for.
@@ -859,6 +873,16 @@ pub async fn list_chat_messages(
             "transcript cursor must be a positive message sequence",
         ));
     }
+    if query.around.is_some() && query.before.is_some() {
+        return Err(ServerError::bad_request(
+            "read a transcript page around a message or before a cursor, not both",
+        ));
+    }
+    if query.around.is_some() && query.limit.is_none() {
+        return Err(ServerError::bad_request(
+            "a transcript page around a message needs a limit",
+        ));
+    }
     if let Some(runtime) = state.code.as_ref() {
         if let Some(session) = tidebreak_core::db::code::get_session_all_owners(
             &runtime.db,
@@ -880,11 +904,13 @@ pub async fn list_chat_messages(
             tidebreak_core::TranscriptPage {
                 before: query.before,
                 turns: query.limit,
+                around: query.around,
             },
         )
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
     let earlier_cursor = page.earlier;
+    let later_cursor = page.later;
     let transcript = page.transcript;
     let mut citations_by_message = std::collections::HashMap::new();
     for citation in transcript.citations {
@@ -1182,6 +1208,7 @@ pub async fn list_chat_messages(
         last_event_seq: transcript.last_event_seq,
         has_more: earlier_cursor.is_some(),
         earlier_cursor,
+        later_cursor,
         answer_versions,
     }))
 }

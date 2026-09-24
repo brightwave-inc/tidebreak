@@ -1108,6 +1108,7 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
             query: "hello".into(),
             limit: 10,
             cursor: None,
+            session_id: None,
         };
         let before = store
             .search_messages_scoped(&owner, &request)

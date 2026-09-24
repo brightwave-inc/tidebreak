@@ -2097,6 +2097,87 @@ async fn transcript_pages_read_the_newest_turns_first() {
     assert_eq!(newest["last_event_seq"], whole["last_event_seq"]);
 }
 
+/// A search hit on an old message opens the page that holds it, without
+/// reading the turns between it and the end. The page holds the message's
+/// turn and a few after it, and says where it stops, so a reader holding
+/// the newest page can tell whether the two meet.
+#[tokio::test]
+async fn a_transcript_page_around_a_message_holds_that_message() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let asked = ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"];
+    for (index, question) in asked.into_iter().enumerate() {
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, question).await,
+            StatusCode::ACCEPTED
+        );
+        wait_for_terminal_turns(&store, chat.id, index + 1).await;
+    }
+    let message = |content: &str| {
+        let store = store.clone();
+        let content = content.to_owned();
+        async move {
+            store
+                .list_messages(chat.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|message| message.content == content)
+                .expect("the question exists")
+                .id
+        }
+    };
+    let q2 = message("q2").await;
+
+    // A long page keeps three turns after the message's own.
+    let (status, page) =
+        transcript_page(&router, &bearer, chat.id, &format!("?around={q2}&limit=40")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(questions(&page), ["q1", "q2", "q3", "q4", "q5"]);
+    assert_eq!(page["has_more"], false);
+    let later = page["later_cursor"].as_i64().expect("newer turns follow");
+
+    // A short page keeps the message's own turn and fewer after it.
+    let (_, short) =
+        transcript_page(&router, &bearer, chat.id, &format!("?around={q2}&limit=2")).await;
+    assert_eq!(questions(&short), ["q2", "q3"]);
+    assert_eq!(short["has_more"], true);
+    assert!(short["earlier_cursor"].as_i64().is_some());
+
+    // The newest three turns start exactly where the page around q2 stops.
+    let (_, newest) = transcript_page(&router, &bearer, chat.id, "?limit=3").await;
+    assert_eq!(questions(&newest), ["q6", "q7", "q8"]);
+    assert_eq!(newest["earlier_cursor"].as_i64(), Some(later));
+    assert!(newest["later_cursor"].is_null());
+
+    // A message among the newest turns reaches the end.
+    let q7 = message("q7").await;
+    let (_, end) =
+        transcript_page(&router, &bearer, chat.id, &format!("?around={q7}&limit=2")).await;
+    assert_eq!(questions(&end), ["q7", "q8"]);
+    assert!(end["later_cursor"].is_null());
+
+    // A message this chat does not hold reads the newest page.
+    let (status, gone) = transcript_page(
+        &router,
+        &bearer,
+        chat.id,
+        &format!("?around={}&limit=1", MessageId::new()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(questions(&gone), ["q8"]);
+
+    for query in [
+        format!("?around={q2}"),
+        format!("?around={q2}&limit=2&before={later}"),
+    ] {
+        let (status, _) = transcript_page(&router, &bearer, chat.id, &query).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+    }
+}
+
 #[tokio::test]
 async fn transcript_paging_refuses_an_unusable_page() {
     let (router, token, _store, _dir) = test_app().await;

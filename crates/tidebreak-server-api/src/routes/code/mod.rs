@@ -97,7 +97,7 @@ pub(crate) use repos::{
     get_workspace_trust, list_github_repositories, list_repos, normalize_quick_actions, patch_repo,
     put_repo_trust, repo_sources, start_clone,
 };
-pub(crate) use session_events::session_events;
+pub(crate) use session_events::{session_events, session_journal};
 pub(crate) use sessions::{
     create_internal_session, create_remote_session, create_session, delete_queued_turn,
     fork_session, get_session, get_session_debug, get_session_image, interrupt_session,

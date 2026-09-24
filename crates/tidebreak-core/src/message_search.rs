@@ -233,6 +233,9 @@ pub struct MessageSearchRequest {
     pub limit: u32,
     /// Where the previous page stopped.
     pub cursor: Option<MessageSearchCursor>,
+    /// Search only this conversation. `None` searches every conversation
+    /// the caller owns.
+    pub session_id: Option<SessionId>,
 }
 
 /// Where a page of results stopped: the last hit's time and index row.

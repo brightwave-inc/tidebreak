@@ -236,6 +236,21 @@ impl DbStore {
         ops::message_search::backfill(self, sessions, Utc::now()).await
     }
 
+    /// Give every conversation the message index's backfill gave up on
+    /// another try, when `version` is newer than the version that last ran
+    /// the backfill. Answers how many it retried. The server calls this once
+    /// at startup, before it works through the queue.
+    pub async fn retry_message_search_after_upgrade(&self, version: &str) -> Result<u64> {
+        ops::message_search::retry_after_upgrade(self, version).await
+    }
+
+    /// Wait until a conversation the message index's backfill gave up on is
+    /// due again, because something new was written to it. The wake can come
+    /// a moment before that write commits.
+    pub async fn message_search_backfill_woken() {
+        ops::message_search::backfill_woken().await;
+    }
+
     fn from_connection(conn: StoreConnection) -> Self {
         Self {
             conn,

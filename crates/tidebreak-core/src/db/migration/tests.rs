@@ -254,6 +254,7 @@ VALUES
         query: "harbour".into(),
         limit: 10,
         cursor: None,
+        session_id: None,
     };
     let page = crate::Store::search_messages_scoped(&store, &owner, &request)
         .await
