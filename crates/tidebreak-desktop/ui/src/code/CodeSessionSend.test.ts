@@ -495,7 +495,7 @@ describe("sendCodeComposer with diff comments", () => {
       ),
     ).toBe(true);
     expect(message).toContain(
-      '<comment path="src/queue.ts" lines="23" old_lines="22">\n```diff\n-const MAX = 10;\n+const MAX = 20;\n```\nWhy double it?\n</comment>',
+      '<comment path="src/queue.ts" diff="working tree" lines="23" old_lines="22">\n```diff\n-const MAX = 10;\n+const MAX = 20;\n```\nWhy double it?\n</comment>',
     );
     expect(message).toContain("Keep the old name.");
     expect(message.endsWith("</review_comments>")).toBe(true);
@@ -571,6 +571,96 @@ describe("sendCodeComposer with diff comments", () => {
         .getState()
         .byWorkspace[WORKSPACE]?.map((item) => item.id),
     ).toEqual(["c2"]);
+  });
+
+  it("claims the comments before the session starts, so a second send carries none", async () => {
+    useComposerDrafts.getState().setDraft("start", "Fix these.");
+    useComposerDrafts.getState().setDraft("sess-2", "Unrelated.");
+    usePendingReviewStore.getState().add(WORKSPACE, comment("c1", "First."));
+    let startSession: (id: string) => void = () => {};
+    const send = vi.fn(async (_session: string, _message: string) => {});
+    const first = sendCodeComposer({
+      client,
+      key: "start",
+      session: () =>
+        new Promise<string>((resolve) => {
+          startSession = resolve;
+        }),
+      reviewWorkspaceId: WORKSPACE,
+      send,
+    });
+    // Another conversation in the workspace sends while the first waits.
+    await sendCodeComposer({
+      client,
+      key: "sess-2",
+      session: "sess-2",
+      reviewWorkspaceId: WORKSPACE,
+      send,
+    });
+    startSession("sess-1");
+    await first;
+
+    const messages = new Map(
+      send.mock.calls.map(([session, message]) => [session, message]),
+    );
+    expect(messages.get("sess-2")).toBe("Unrelated.");
+    expect(messages.get("sess-1")).toContain("First.");
+    expect(
+      usePendingReviewStore.getState().byWorkspace[WORKSPACE],
+    ).toBeUndefined();
+  });
+
+  it("puts the comments back when the session cannot start", async () => {
+    usePendingReviewStore.getState().add(WORKSPACE, comment("c1", "First."));
+    const sent = await sendCodeComposer({
+      client,
+      key: "start",
+      session: async () => {
+        throw new Error("no engine");
+      },
+      reviewWorkspaceId: WORKSPACE,
+      send: vi.fn(),
+    });
+    expect(sent).toBe(false);
+    expect(usePendingReviewStore.getState().sending[WORKSPACE]).toBeUndefined();
+    expect(
+      usePendingReviewStore
+        .getState()
+        .byWorkspace[WORKSPACE]?.map((item) => item.id),
+    ).toEqual(["c1"]);
+  });
+
+  it("keeps a comment edited while its send was out, with the new words", async () => {
+    useComposerDrafts.getState().setDraft("sess-1", "Fix these.");
+    usePendingReviewStore.getState().add(WORKSPACE, comment("c1", "First."));
+    const send = vi.fn(async () => {
+      usePendingReviewStore.getState().edit(WORKSPACE, "c1", "Better.");
+    });
+    await sendCodeComposer({
+      client,
+      key: "sess-1",
+      session: "sess-1",
+      reviewWorkspaceId: WORKSPACE,
+      send,
+    });
+    expect(usePendingReviewStore.getState().byWorkspace[WORKSPACE]).toEqual([
+      expect.objectContaining({ id: "c1", body: "Better." }),
+    ]);
+  });
+
+  it("names the turn a comment's diff came from, or says it is another turn", async () => {
+    usePendingReviewStore
+      .getState()
+      .add(WORKSPACE, { ...comment("c1", "First."), turnId: "turn-x" });
+    const send = vi.fn(async (_session: string, _message: string) => {});
+    await sendCodeComposer({
+      client,
+      key: "sess-unknown",
+      session: "sess-unknown",
+      reviewWorkspaceId: WORKSPACE,
+      send,
+    });
+    expect(send.mock.calls[0]?.[1]).toContain('diff="an earlier turn"');
   });
 
   it("sends nothing when there is neither text nor a comment", async () => {

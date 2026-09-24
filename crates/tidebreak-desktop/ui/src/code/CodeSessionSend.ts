@@ -24,7 +24,10 @@ import {
   commentsReadyToSend,
   usePendingReviewStore,
 } from "./diff/pendingReview";
-import { messageWithReviewComments } from "./diff/reviewComments";
+import {
+  messageWithReviewComments,
+  type TurnNamer,
+} from "./diff/reviewComments";
 import { messageWithWorkspaceFiles } from "./fork";
 import type { CodeTurnSubmission } from "./parsers";
 
@@ -215,8 +218,10 @@ export function seedCodeComposer(
  * leave with the message. A refused send puts them back and says why.
  *
  * The workspace's pending diff comments go too, in one block after the
- * text, and a message may be only that block. They are marked as sending
- * while the request is out and leave the review once the server accepts it.
+ * text, and a message may be only that block. The send claims them in the
+ * step that reads them, so a second send in flight never carries them too.
+ * They leave the review once the server accepts the message and go back to
+ * waiting when anything on the way refuses it.
  *
  * Returns whether the server accepted the message.
  */
@@ -241,14 +246,11 @@ export async function sendCodeComposer(input: {
     drafts.drafts[key] ?? "",
     drafts.attachments[key]?.pastedTexts ?? [],
   );
-  const review = input.reviewWorkspaceId
-    ? commentsReadyToSend(input.reviewWorkspaceId)
-    : [];
-  if (!typed && review.length === 0) return false;
-  const message = messageWithReviewComments(
-    messageWithWorkspaceFiles(typed, input.workspaceFiles ?? []),
-    review,
-  );
+  const reviewWorkspace = input.reviewWorkspaceId;
+  const reviewReady =
+    reviewWorkspace !== undefined &&
+    commentsReadyToSend(reviewWorkspace).length > 0;
+  if (!typed && !reviewReady) return false;
   const images = drafts.attachments[key]?.images ?? [];
   if (
     images.some(
@@ -266,6 +268,30 @@ export async function sendCodeComposer(input: {
     return false;
   }
 
+  // The comments this message carries are the ones claimed here, before the
+  // first wait: an edit made while the send is out stays for the next one.
+  const review = reviewWorkspace
+    ? usePendingReviewStore.getState().claim(reviewWorkspace)
+    : [];
+  const settleReview = (accepted: boolean) => {
+    if (reviewWorkspace && review.length > 0) {
+      usePendingReviewStore
+        .getState()
+        .finishSend(reviewWorkspace, review, accepted);
+    }
+  };
+  if (!typed && review.length === 0) return false;
+  const message = messageWithReviewComments(
+    messageWithWorkspaceFiles(typed, input.workspaceFiles ?? []),
+    review,
+    {
+      turnName:
+        typeof input.session === "string"
+          ? turnNamer(input.session)
+          : undefined,
+    },
+  );
+
   setSending(key, true, null);
   let sessionId: string;
   if (typeof input.session === "string") {
@@ -274,6 +300,7 @@ export async function sendCodeComposer(input: {
     try {
       sessionId = await input.session();
     } catch (error) {
+      settleReview(false);
       if (error instanceof SessionStartedUnsent) {
         // The session exists but the send did not go. Its composer holds the
         // message, which is where the reader finds the session next time.
@@ -287,6 +314,7 @@ export async function sendCodeComposer(input: {
       return false;
     }
     if (!sessionId) {
+      settleReview(false);
       setSending(key, false, "The session could not start.");
       return false;
     }
@@ -305,6 +333,7 @@ export async function sendCodeComposer(input: {
       await publishHeldImages(input.client, key, sessionId, "code");
     } catch (error) {
       // The failed chip stays, with its reason and a retry.
+      settleReview(false);
       setSending(key, false, codeSendFailure(error));
       return false;
     }
@@ -325,18 +354,6 @@ export async function sendCodeComposer(input: {
   state.setDraft(key, "");
   state.setPastedTexts(key, []);
   state.setImages(key, []);
-  const reviewIds = review.map((comment) => comment.id);
-  const reviewWorkspace = input.reviewWorkspaceId;
-  if (reviewWorkspace && reviewIds.length > 0) {
-    usePendingReviewStore.getState().beginSend(reviewWorkspace, reviewIds);
-  }
-  const settleReview = (accepted: boolean) => {
-    if (reviewWorkspace && reviewIds.length > 0) {
-      usePendingReviewStore
-        .getState()
-        .finishSend(reviewWorkspace, reviewIds, accepted);
-    }
-  };
   try {
     await input.send(
       sessionId,
@@ -381,6 +398,19 @@ function answerMayBeLost(error: unknown): boolean {
 const GATEWAY_STATUSES = new Set([502, 503, 504]);
 
 /** The turns a session's open transcript already shows. */
+/**
+ * How a review block names a turn's diff to the conversation it goes to:
+ * "turn 3" for one of its own turns, null for another conversation's.
+ */
+function turnNamer(sessionId: string): TurnNamer {
+  return (turnId) => {
+    const ordinal = peekCodeSession(sessionId)
+      ?.store.getState()
+      .turnOrdinals.get(turnId);
+    return ordinal ? `turn ${ordinal}` : null;
+  };
+}
+
 function knownTurnIds(sessionId: string): ReadonlySet<string> {
   const state = peekCodeSession(sessionId)?.store.getState();
   const known = new Set<string>(state?.turnOrdinals.keys() ?? []);

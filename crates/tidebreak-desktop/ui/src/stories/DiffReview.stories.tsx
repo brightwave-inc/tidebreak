@@ -152,11 +152,10 @@ function seedReview(
 ) {
   return async () => {
     useDiffPreferences.getState().setLayout(layout);
-    const store = usePendingReviewStore.getState();
-    store.finishSend(workspaceId, store.sending[workspaceId] ?? [], false);
-    store.clear(workspaceId);
-    for (const item of comments) store.add(workspaceId, item);
-    if (sending.length > 0) store.beginSend(workspaceId, sending);
+    usePendingReviewStore.setState((state) => ({
+      byWorkspace: { ...state.byWorkspace, [workspaceId]: [...comments] },
+      sending: { ...state.sending, [workspaceId]: [...sending] },
+    }));
     return {};
   };
 }

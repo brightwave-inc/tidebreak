@@ -53,9 +53,10 @@ describe("pending review", () => {
     const storage = memoryStorage();
     const store = createPendingReviewStore(storage);
     store.getState().add("ws-1", comment("c1"));
+    const claimed = store.getState().claim("ws-1");
     store.getState().add("ws-1", comment("c2"));
-    store.getState().beginSend("ws-1", ["c1"]);
 
+    expect(claimed.map((item) => item.id)).toEqual(["c1"]);
     expect(commentsReadyToSend("ws-1", store).map((item) => item.id)).toEqual([
       "c2",
     ]);
@@ -66,7 +67,7 @@ describe("pending review", () => {
       ),
     ).toEqual({ count: 1, files: 1, sending: 1 });
 
-    store.getState().finishSend("ws-1", ["c1"], true);
+    store.getState().finishSend("ws-1", claimed, true);
     expect(
       createPendingReviewStore(storage)
         .getState()
@@ -74,19 +75,73 @@ describe("pending review", () => {
     ).toEqual(["c2"]);
   });
 
-  it("puts refused comments back, and clears only the ones not sending", () => {
+  it("gives each comment to one send, however many start at once", () => {
+    const store = createPendingReviewStore(memoryStorage());
+    store.getState().add("ws-1", comment("c1"));
+    const first = store.getState().claim("ws-1");
+    const second = store.getState().claim("ws-1");
+    expect(first.map((item) => item.id)).toEqual(["c1"]);
+    expect(second).toEqual([]);
+  });
+
+  it("keeps a comment edited while its send was out, for the next message", () => {
     const store = createPendingReviewStore(memoryStorage());
     store.getState().add("ws-1", comment("c1"));
     store.getState().add("ws-1", comment("c2"));
-    store.getState().beginSend("ws-1", ["c1"]);
+    const claimed = store.getState().claim("ws-1");
+    store.getState().edit("ws-1", "c2", "Said better");
+    store.getState().finishSend("ws-1", claimed, true);
+    expect(store.getState().byWorkspace["ws-1"]).toEqual([
+      { ...comment("c2"), body: "Said better" },
+    ]);
+    expect(commentsReadyToSend("ws-1", store)).toHaveLength(1);
+  });
+
+  it("puts refused comments back, and clears only the ones not sending", () => {
+    const store = createPendingReviewStore(memoryStorage());
+    store.getState().add("ws-1", comment("c1"));
+    const claimed = store.getState().claim("ws-1");
+    store.getState().add("ws-1", comment("c2"));
     store.getState().clear("ws-1");
     expect(
       store.getState().byWorkspace["ws-1"]?.map((item) => item.id),
     ).toEqual(["c1"]);
-    store.getState().finishSend("ws-1", ["c1"], false);
+    store.getState().finishSend("ws-1", claimed, false);
     expect(commentsReadyToSend("ws-1", store).map((item) => item.id)).toEqual([
       "c1",
     ]);
+  });
+
+  it("records where a comment's lines went, and writes nothing when they stayed", () => {
+    const store = createPendingReviewStore(memoryStorage());
+    store.getState().add("ws-1", comment("c1"));
+    const before = store.getState().byWorkspace;
+    store.getState().relocate("ws-1", "c1", {
+      lines: comment("c1").lines,
+      outdated: false,
+    });
+    expect(store.getState().byWorkspace).toBe(before);
+
+    store.getState().relocate("ws-1", "c1", {
+      lines: [{ kind: "add", oldNo: null, newNo: 4, text: "const MAX = 20;" }],
+      outdated: false,
+    });
+    expect(store.getState().byWorkspace["ws-1"]?.[0]?.lines[0]?.newNo).toBe(4);
+
+    store.getState().relocate("ws-1", "c1", { outdated: true });
+    expect(store.getState().byWorkspace["ws-1"]?.[0]).toMatchObject({
+      outdated: true,
+      lines: [{ newNo: 4, text: "const MAX = 20;" }],
+    });
+  });
+
+  it("takes comments back without doubling one it already holds", () => {
+    const store = createPendingReviewStore(memoryStorage());
+    store.getState().add("ws-1", comment("c1"));
+    store.getState().restore("ws-1", [comment("c1"), comment("c2")]);
+    expect(
+      store.getState().byWorkspace["ws-1"]?.map((item) => item.id),
+    ).toEqual(["c1", "c2"]);
   });
 
   it("drops stored comments that no longer read as comments", () => {

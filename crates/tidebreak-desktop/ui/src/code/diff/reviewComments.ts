@@ -15,6 +15,11 @@ export type ReviewCommentLine = {
   readonly oldNo: number | null;
   readonly newNo: number | null;
   readonly text: string;
+  /**
+   * A line that hiding whitespace drew as unchanged, though its whitespace
+   * changed, keeps the old line's text here; `text` is the new line's.
+   */
+  readonly oldText?: string;
 };
 
 /**
@@ -24,16 +29,46 @@ export type ReviewCommentLine = {
  */
 export type ReviewCommentAuthor = { readonly kind: "person" };
 
+/** The code on either side of a comment's lines, nearest line first. */
+export type ReviewCommentContext = {
+  readonly before: readonly string[];
+  readonly after: readonly string[];
+};
+
+/** A comment stores at most this many quoted lines. */
+export const MAX_QUOTED_LINES = 200;
+
 export type ReviewComment = {
   readonly id: string;
   readonly author: ReviewCommentAuthor;
   readonly path: string;
   /** The turn whose diff it was written on; absent for the workspace diff. */
   readonly turnId?: string;
-  /** The lines it is about, in diff order. Never empty. */
+  /**
+   * The lines it is about, in diff order: their text as it was when the
+   * comment was written, and their numbers as the diff last placed them.
+   * Never empty, and never more than `MAX_QUOTED_LINES`.
+   */
   readonly lines: readonly ReviewCommentLine[];
+  /** Lines the comment covers after the quote stops. */
+  readonly unquoted?: number;
+  /**
+   * Where the whole range sits, when the quote stops short of its end: the
+   * spans `commentLineSpans` would give for every line it covers.
+   */
+  readonly span?: CommentLineSpans;
+  /** The code around the lines, which tells two places with the same lines apart. */
+  readonly context?: ReviewCommentContext;
+  /** The lines it quotes changed, or left the diff, after it was written. */
+  readonly outdated?: boolean;
   readonly body: string;
   readonly createdAt: string;
+};
+
+/** The new-file and old-file spans a comment covers, such as "12-14". */
+export type CommentLineSpans = {
+  readonly lines: string | null;
+  readonly oldLines: string | null;
 };
 
 function span(numbers: readonly number[]): string | null {
@@ -48,10 +83,9 @@ function span(numbers: readonly number[]): string | null {
  * line numbers name added and unchanged lines, because that is the file the
  * agent can open; removed lines only have old numbers.
  */
-export function commentLineSpans(lines: readonly ReviewCommentLine[]): {
-  lines: string | null;
-  oldLines: string | null;
-} {
+export function commentLineSpans(
+  lines: readonly ReviewCommentLine[],
+): CommentLineSpans {
   const newNumbers = lines.flatMap((line) =>
     line.kind !== "del" && line.newNo !== null ? [line.newNo] : [],
   );
@@ -61,12 +95,21 @@ export function commentLineSpans(lines: readonly ReviewCommentLine[]): {
   return { lines: span(newNumbers), oldLines: span(oldNumbers) };
 }
 
+/** A comment's spans: its whole range, even where the quote stops short. */
+export function spansOf(
+  comment: Pick<ReviewComment, "lines" | "span">,
+): CommentLineSpans {
+  return comment.span ?? commentLineSpans(comment.lines);
+}
+
 /**
  * "Line 12", "Lines 12–14", "Deleted lines 3–4", or both halves of a range
  * that takes in a change: "Line 12 and deleted line 12".
  */
-export function commentLinesLabel(lines: readonly ReviewCommentLine[]): string {
-  const spans = commentLineSpans(lines);
+export function commentLinesLabel(
+  lines: readonly ReviewCommentLine[] | CommentLineSpans,
+): string {
+  const spans = "lines" in lines ? lines : commentLineSpans(lines);
   const words = (value: string, prefix: string) => {
     const [first, last] = value.split("-");
     return last ? `${prefix}lines ${first}–${last}` : `${prefix}line ${first}`;
@@ -82,16 +125,24 @@ export function commentLinesLabel(lines: readonly ReviewCommentLine[]): string {
 
 const MARKER = { add: "+", del: "-", context: " " } as const;
 
+/**
+ * An attribute value on one line. The block is read back line by line, so a
+ * newline in a path is written as a character reference like the rest.
+ */
 function escapeAttribute(value: string): string {
   return value
     .replace(/&/g, "&amp;")
     .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(/>/g, "&gt;")
+    .replace(/\n/g, "&#10;")
+    .replace(/\r/g, "&#13;");
 }
 
 function unescapeAttribute(value: string): string {
   return value
+    .replace(/&#10;/g, "\n")
+    .replace(/&#13;/g, "\r")
     .replace(/&quot;/g, '"')
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
@@ -119,15 +170,34 @@ function fenceFor(lines: readonly string[]): string {
 const OPEN = "<review_comments>";
 const CLOSE = "</review_comments>";
 const PREAMBLE =
-  "The person reviewing your changes left these comments on the diff. Each one names a file and its lines, quotes those lines with diff markers (+ added, - removed), and then gives the comment. Address every comment.";
+  "The person reviewing your changes left these comments on a diff. Each comment names a file and the diff it was written on: the working tree against its base branch, or the changes one turn made. It quotes its lines with diff markers (+ added, - removed) and then gives the comment. Line numbers are from the diff as the reviewer last saw it, so if the file has changed since, find the lines by their quote. A comment marked outdated quotes code that has changed since it was written. Address every comment.";
+
+/** The diff a comment was written on, as the block names it. */
+const WORKING_TREE = "working tree";
+
+/**
+ * How the block names the diff of a turn: "turn 3" when the conversation
+ * the message goes to knows the turn, or null when it does not.
+ */
+export type TurnNamer = (turnId: string) => string | null;
+
+function diffName(comment: ReviewComment, turnName?: TurnNamer): string {
+  if (!comment.turnId) return WORKING_TREE;
+  return turnName?.(comment.turnId) ?? "an earlier turn";
+}
 
 /** One comment as the agent reads it. */
-function commentBlock(comment: ReviewComment): string {
-  const spans = commentLineSpans(comment.lines);
+function commentBlock(comment: ReviewComment, turnName?: TurnNamer): string {
+  const spans = spansOf(comment);
+  const quoted = comment.lines.length;
+  const covered = quoted + (comment.unquoted ?? 0);
   const attributes = [
     `path="${escapeAttribute(comment.path)}"`,
+    `diff="${escapeAttribute(diffName(comment, turnName))}"`,
     spans.lines ? `lines="${spans.lines}"` : null,
     spans.oldLines ? `old_lines="${spans.oldLines}"` : null,
+    covered > quoted ? `quote="first ${quoted} of ${covered} lines"` : null,
+    comment.outdated ? 'outdated="true"' : null,
   ]
     .filter(Boolean)
     .join(" ");
@@ -144,6 +214,20 @@ function commentBlock(comment: ReviewComment): string {
   ].join("\n");
 }
 
+/** The block a message carries its review comments in. */
+export function reviewCommentsBlock(
+  comments: readonly ReviewComment[],
+  options: { turnName?: TurnNamer } = {},
+): string {
+  return [
+    OPEN,
+    PREAMBLE,
+    "",
+    ...comments.map((comment) => commentBlock(comment, options.turnName)),
+    CLOSE,
+  ].join("\n");
+}
+
 /**
  * The message with its review comments after it, in one block. With no
  * comments it is the message exactly as typed.
@@ -151,11 +235,10 @@ function commentBlock(comment: ReviewComment): string {
 export function messageWithReviewComments(
   message: string,
   comments: readonly ReviewComment[],
+  options: { turnName?: TurnNamer } = {},
 ): string {
   if (comments.length === 0) return message;
-  const block = [OPEN, PREAMBLE, "", ...comments.map(commentBlock)]
-    .join("\n")
-    .concat(`\n${CLOSE}`);
+  const block = reviewCommentsBlock(comments, options);
   const text = message.trim();
   return text ? `${text}\n\n${block}` : block;
 }
@@ -163,12 +246,17 @@ export function messageWithReviewComments(
 /** A comment read back out of a sent message. */
 export type SentReviewComment = {
   readonly path: string;
+  /** The diff it was written on: "working tree", or a turn. */
+  readonly diff: string | null;
   /** The new-file span, "12" or "12-14", when the comment has one. */
   readonly lines: string | null;
   /** The old-file span of removed lines, when the comment has any. */
   readonly oldLines: string | null;
   /** The quoted lines, each with its diff marker. */
   readonly quote: readonly string[];
+  /** Lines the comment covered past its quote. */
+  readonly unquoted: number;
+  readonly outdated: boolean;
   readonly body: string;
 };
 
@@ -204,11 +292,17 @@ function parseComments(inner: readonly string[]): SentReviewComment[] {
       index += 1;
     }
     index += 1;
+    const cut = /^first (\d+) of (\d+) lines$/.exec(
+      attribute(tag, "quote") ?? "",
+    );
     comments.push({
       path: attribute(tag, "path") ?? "",
+      diff: attribute(tag, "diff"),
       lines: attribute(tag, "lines"),
       oldLines: attribute(tag, "old_lines"),
       quote,
+      unquoted: cut ? Math.max(0, Number(cut[2]) - Number(cut[1])) : 0,
+      outdated: attribute(tag, "outdated") === "true",
       body: body.join("\n").trim(),
     });
   }
@@ -250,4 +344,82 @@ export function splitReviewComments(message: string): {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return { prose, comments };
+}
+
+function spanStart(value: string | null): number | null {
+  if (!value) return null;
+  const first = Number(value.split("-")[0]);
+  return Number.isInteger(first) ? first : null;
+}
+
+/**
+ * Pending comments again, from the block a message carried: what a queued
+ * message gives back when it is deleted before it runs. The block keeps the
+ * quote and the spans, so the lines are numbered from where the spans start.
+ */
+export function reviewCommentsFromSent(
+  sent: readonly SentReviewComment[],
+  options: {
+    /** The turn a block's `diff` names, when it names one this app knows. */
+    turnFor?: (diff: string) => string | null;
+    newId?: () => string;
+    now?: () => string;
+  } = {},
+): ReviewComment[] {
+  const newId = options.newId ?? (() => crypto.randomUUID());
+  const now = options.now ?? (() => new Date().toISOString());
+  return sent.flatMap((comment): ReviewComment[] => {
+    let nextNew = spanStart(comment.lines);
+    let nextOld = spanStart(comment.oldLines);
+    let seenRemoved = false;
+    const lines = comment.quote.flatMap((quoted): ReviewCommentLine[] => {
+      const text = quoted.slice(1);
+      switch (quoted[0]) {
+        case "-": {
+          seenRemoved = true;
+          const oldNo = nextOld;
+          if (nextOld !== null) nextOld += 1;
+          return [{ kind: "del", oldNo, newNo: null, text }];
+        }
+        case "+": {
+          const newNo = nextNew;
+          if (nextNew !== null) nextNew += 1;
+          return [{ kind: "add", oldNo: null, newNo, text }];
+        }
+        case " ": {
+          const newNo = nextNew;
+          if (nextNew !== null) nextNew += 1;
+          // Old numbers are only known from the first removed line on.
+          const oldNo = seenRemoved ? nextOld : null;
+          if (seenRemoved && nextOld !== null) nextOld += 1;
+          return [{ kind: "context", oldNo, newNo, text }];
+        }
+        default:
+          return [];
+      }
+    });
+    if (lines.length === 0) return [];
+    const turnId =
+      comment.diff && comment.diff !== WORKING_TREE
+        ? (options.turnFor?.(comment.diff) ?? null)
+        : null;
+    return [
+      {
+        id: newId(),
+        author: { kind: "person" },
+        path: comment.path,
+        ...(turnId ? { turnId } : {}),
+        lines,
+        ...(comment.unquoted > 0
+          ? {
+              unquoted: comment.unquoted,
+              span: { lines: comment.lines, oldLines: comment.oldLines },
+            }
+          : {}),
+        ...(comment.outdated ? { outdated: true } : {}),
+        body: comment.body,
+        createdAt: now(),
+      },
+    ];
+  });
 }
