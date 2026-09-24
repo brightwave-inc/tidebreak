@@ -16,6 +16,10 @@ import { SearchInput } from "@/components/SearchInput";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  isWorkspaceArchivedError,
+  WORKSPACE_ARCHIVED_MESSAGE,
+} from "../api/client/http";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { CodeFileIcon } from "./CodeFileIcon";
 import { useCodeUiStore } from "./CodeUiStore";
@@ -117,7 +121,9 @@ export function FilesPanel({
         .catch((caught) => {
           if (cancelled) return;
           setSearchError(
-            friendlyErrorMessage(caught, "Could not search files"),
+            isWorkspaceArchivedError(caught)
+              ? WORKSPACE_ARCHIVED_MESSAGE
+              : friendlyErrorMessage(caught, "Could not search files"),
           );
           setSearching(false);
         });
@@ -317,10 +323,26 @@ export function FilesPanel({
         </div>
       )}
       {!searchMode && error && (
-        <p className="text-critical px-3 py-2 text-sm">{error}</p>
+        <p
+          className={
+            error === WORKSPACE_ARCHIVED_MESSAGE
+              ? "text-muted-foreground px-3 py-2 text-sm"
+              : "text-critical px-3 py-2 text-sm"
+          }
+        >
+          {error}
+        </p>
       )}
       {searchMode && searchError && (
-        <p className="text-critical px-3 py-2 text-sm">{searchError}</p>
+        <p
+          className={
+            searchError === WORKSPACE_ARCHIVED_MESSAGE
+              ? "text-muted-foreground px-3 py-2 text-sm"
+              : "text-critical px-3 py-2 text-sm"
+          }
+        >
+          {searchError}
+        </p>
       )}
       {truncated && (
         <p className="text-muted-foreground px-3 py-2 text-xs">

@@ -1,5 +1,8 @@
 import { workspaceCommandsForAccess } from "./workspaceAccess";
-import { isRemoteWorktreePath } from "./workspaceRemote";
+import {
+  isArchivedLocalWorkspace,
+  isRemoteWorktreePath,
+} from "./workspaceRemote";
 import { CodeEditorGroups } from "./CodeEditorGroups";
 import { Button } from "@/components/ui/button";
 import {
@@ -378,6 +381,7 @@ function CodeWorkspaceBody({
     workspaceId,
     contentRevision,
     digest?.pr_state,
+    !isArchivedLocalWorkspace(workspace),
   );
   // Undo, revert, discard, and commit change the live worktree. A sandbox
   // workspace has none here, and a running turn holds it: the server refuses

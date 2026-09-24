@@ -27,6 +27,7 @@ import {
 import { toast } from "sonner";
 
 import { HttpError, type ApiClient } from "../api/client";
+import { WORKSPACE_ARCHIVED_MESSAGE } from "../api/client/http";
 import type {
   CodePrMergeMethod,
   CodeWorkspaceFiles,
@@ -84,7 +85,10 @@ import {
   workspacePullRequestTarget,
 } from "./workspaceWorkflow";
 import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
-import { isRemoteWorktreePath } from "./workspaceRemote";
+import {
+  isArchivedLocalWorkspace,
+  isRemoteWorktreePath,
+} from "./workspaceRemote";
 import {
   PULL_REQUEST_LIFECYCLE_TONE,
   STATUS_TONE_BADGE_VARIANT,
@@ -155,6 +159,9 @@ export function CodeInspector({
   const remote =
     prResource?.data?.remote === true ||
     isRemoteWorktreePath(workspace?.worktree_path);
+  const archivedLocal =
+    isArchivedLocalWorkspace(workspace) ||
+    prResource?.error === WORKSPACE_ARCHIVED_MESSAGE;
   const worktreeReady = !prResource || prResource.data !== null || remote;
   // Retained sandbox checkpoints have no per-turn history. Requesting a turn
   // would 400; inspect the latest retained ref instead.
@@ -164,8 +171,10 @@ export function CodeInspector({
     workspaceId,
     turnId: filesTurnId,
     contentRevision,
-    enabled: worktreeReady,
+    enabled: worktreeReady && !archivedLocal,
   });
+  const filesUnavailable =
+    archivedLocal || changedFiles.error === WORKSPACE_ARCHIVED_MESSAGE;
 
   useEffect(() => {
     if (!scope) return;
@@ -289,7 +298,9 @@ export function CodeInspector({
           value="files"
           className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
         >
-          {worktreeReady ? (
+          {filesUnavailable ? (
+            <WorkspaceFilesUnavailable archived />
+          ) : worktreeReady ? (
             <FilesPanel
               client={client}
               workspaceId={workspaceId}
@@ -312,7 +323,9 @@ export function CodeInspector({
           className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
         >
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            {worktreeReady ? (
+            {filesUnavailable ? (
+              <WorkspaceFilesUnavailable archived />
+            ) : worktreeReady ? (
               <DiffOverviewContent
                 resource={changedFiles}
                 turnId={filesTurnId}
@@ -352,16 +365,25 @@ export function CodeInspector({
 }
 
 export function WorkspaceFilesUnavailable({
-  remote,
+  remote = false,
   error,
-  hasPr,
+  hasPr = false,
   onReview,
+  archived = false,
 }: {
-  remote: boolean;
+  remote?: boolean;
   error?: string | null;
-  hasPr: boolean;
-  onReview: () => void;
+  hasPr?: boolean;
+  onReview?: () => void;
+  archived?: boolean;
 }) {
+  if (archived) {
+    return (
+      <p className="p-4 text-sm text-muted-foreground">
+        {WORKSPACE_ARCHIVED_MESSAGE}
+      </p>
+    );
+  }
   if (!remote) {
     return error ? (
       <p
@@ -393,7 +415,7 @@ export function WorkspaceFilesUnavailable({
             : "When the task opens a pull request, you can review it here."}
         </EmptyDescription>
       </EmptyHeader>
-      {hasPr && (
+      {hasPr && onReview && (
         <Button variant="outline" size="sm" onClick={onReview}>
           Review pull request
         </Button>

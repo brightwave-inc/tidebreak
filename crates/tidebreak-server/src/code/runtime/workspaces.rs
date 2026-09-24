@@ -1061,6 +1061,7 @@ impl CodeRuntime {
             .await?;
             return Ok((paths, truncated, Some(checkout.source)));
         }
+        refuse_archived_local_workspace(&workspace)?;
         let (paths, truncated) = worktree::list_tree_paths(
             std::path::Path::new(&workspace.worktree_path),
             query,
@@ -1080,6 +1081,8 @@ impl CodeRuntime {
         exclude: &str,
         limit: Option<u32>,
     ) -> Result<(Vec<worktree::WorktreeSearchMatch>, bool), ServerError> {
+        let workspace = self.get_workspace(owner, workspace_id).await?;
+        refuse_archived_local_workspace(&workspace)?;
         let workspace = self.require_live_workspace(owner, workspace_id).await?;
         worktree::search_worktree_contents(
             std::path::Path::new(&workspace.worktree_path),
@@ -1123,6 +1126,7 @@ impl CodeRuntime {
                 crate::code::sandbox_checkout::list_checkout_files(&checkout).await?;
             return Ok((files, truncated, stat, None, Some(checkout.source), None));
         }
+        refuse_archived_local_workspace(&workspace)?;
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
             .map_err(map_checkpoint)?;
@@ -1178,6 +1182,7 @@ impl CodeRuntime {
             let blob = crate::code::sandbox_checkout::read_checkout_blob(&checkout, path).await?;
             return Ok((blob, Some(checkout.source)));
         }
+        refuse_archived_local_workspace(&workspace)?;
         let workspace = self.require_live_workspace(owner, workspace_id).await?;
         let blob =
             worktree::read_worktree_file(std::path::Path::new(&workspace.worktree_path), path)
@@ -1197,6 +1202,7 @@ impl CodeRuntime {
             let checkout = self.remote_checkout(owner, &workspace).await?;
             return crate::code::sandbox_checkout::read_checkout_file(&checkout, path).await;
         }
+        refuse_archived_local_workspace(&workspace)?;
         let workspace = self.require_live_workspace(owner, workspace_id).await?;
         worktree::read_worktree_file_bytes(std::path::Path::new(&workspace.worktree_path), path)
             .await
@@ -1279,6 +1285,7 @@ impl CodeRuntime {
                 crate::code::sandbox_checkout::produce_checkout_diff(&checkout, file).await?;
             return Ok((diff, truncated, stat, None, Some(checkout.source)));
         }
+        refuse_archived_local_workspace(&workspace)?;
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
             .map_err(map_checkpoint)?;

@@ -113,6 +113,24 @@ mod workspaces;
 
 use settings::{normalize_model, refuse_ceiling_with_no_offered_mode, refuse_unhonored_mode};
 
+/// Local archived and released workspaces have no worktree. Reads that would
+/// spawn git against the checkout answer this instead of a spawn error.
+fn refuse_archived_local_workspace(workspace: &CodeWorkspace) -> Result<(), ServerError> {
+    if workspace.is_remote() {
+        return Ok(());
+    }
+    if matches!(
+        workspace.status,
+        CodeWorkspaceStatus::Archived | CodeWorkspaceStatus::Released
+    ) {
+        return Err(ServerError::conflict_kind(
+            "workspace_archived",
+            "This workspace is archived. Its files come back when you restore it.",
+        ));
+    }
+    Ok(())
+}
+
 /// Optional metadata on `POST /code/repos`. Every field left `None` takes
 /// the value [`CodeRuntime::register_repo`] derives from the checkout.
 #[derive(Debug, Default)]
