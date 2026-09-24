@@ -906,10 +906,7 @@ export function ConnectedAppsPanel({
   }
 
   const restRow = (entry: RestEntry) => (
-    <li
-      key={entry.id}
-      className="flex items-start justify-between gap-4 py-3"
-    >
+    <li key={entry.id} className="flex items-start justify-between gap-4 py-3">
       <div className="min-w-0 flex-1">
         <p className="text-sm font-bold">{entry.name}</p>
         <p className="truncate text-xs text-muted-foreground">

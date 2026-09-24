@@ -890,11 +890,7 @@ function MachineSections({
         <ul className="flex flex-col gap-2 text-sm">
           {HOST_AUTHORITIES.map((authority) => (
             <li key={authority} className="flex items-center gap-2">
-              <Laptop
-                size={16}
-                aria-hidden
-                className="text-muted-foreground"
-              />
+              <Laptop size={16} aria-hidden className="text-muted-foreground" />
               <span className={remote ? "text-muted-foreground" : undefined}>
                 {hostAuthorityLabel(authority)}
                 {remote ? " · Not available here" : null}
