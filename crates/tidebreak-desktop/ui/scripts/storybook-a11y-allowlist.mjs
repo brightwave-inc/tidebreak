@@ -7,7 +7,9 @@
 // before axe can run: it throws, its play function fails, or it times out.
 //
 // Fix the story or component, then delete its entry. The check reports an
-// entry that matched nothing in a run, so you can see when one is done.
+// entry that matched nothing in a run, so you can see when one is done. CI
+// runs on Linux, where a few stories render differently than on a Mac, so an
+// entry can match in CI and not locally.
 export const allowlist = [
   // Stories that are broken on main: each fails the same way in the
   // Storybook UI, so axe never runs on them.
@@ -229,6 +231,13 @@ export const allowlist = [
     story: "code-file-viewer--*",
     rule: "color-contrast",
     reason: "Monaco's syntax token colors (.mtk7) fall below AA on the editor background.",
+  },
+  {
+    story: "code-new-workspace--*",
+    rule: "color-contrast",
+    reason:
+      "The Create button's shortcut hint (text-2xs at opacity-60) falls below AA. axe skips " +
+      "symbols, so it measures the hint only off macOS, where it reads Ctrl instead of ⌘.",
   },
   {
     story: "code-workspace-card--*",
