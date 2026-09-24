@@ -26,11 +26,15 @@ pub enum Command {
     Show,
     Backup {
         destination: PathBuf,
+        /// Replace a file already at `destination`.
+        force: bool,
     },
     Export {
         destination: PathBuf,
         format: ConversationExportFormat,
         chats: Vec<SessionId>,
+        /// Replace a file already at `destination`.
+        force: bool,
     },
 }
 
@@ -42,8 +46,10 @@ pub fn parse(args: Vec<String>) -> std::result::Result<(Command, OutputFormat), 
     let mut output = OutputFormat::Text;
     let mut format = None;
     let mut chats = Vec::new();
+    let mut force = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--force" if subcommand == "backup" || subcommand == "export" => force = true,
             "--output-format" => {
                 let value = args.next().ok_or("--output-format requires text or json")?;
                 output =
@@ -79,11 +85,13 @@ pub fn parse(args: Vec<String>) -> std::result::Result<(Command, OutputFormat), 
         }
         "backup" => Command::Backup {
             destination: one_destination("backup", positional)?,
+            force,
         },
         "export" => Command::Export {
             destination: one_destination("export", positional)?,
             format: format.unwrap_or(ConversationExportFormat::Markdown),
             chats,
+            force,
         },
         _ => return Err("data accepts show, backup, or export".to_owned()),
     };
@@ -116,7 +124,8 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
             print!("{}", render_overview(&overview));
             Ok(())
         }
-        Command::Backup { destination } => {
+        Command::Backup { destination, force } => {
+            refuse_existing(&destination, force)?;
             let file = client.data_backup(&destination).await?;
             if format == OutputFormat::Json {
                 return crate::json_output::print_document(&serde_json::json!({
@@ -137,7 +146,9 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
             destination,
             format: export_format,
             chats,
+            force,
         } => {
+            refuse_existing(&destination, force)?;
             let request = ConversationExportRequest {
                 format: export_format,
                 chat_ids: (!chats.is_empty()).then_some(chats),
@@ -163,6 +174,18 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
             Ok(())
         }
     }
+}
+
+/// Refuse to write over a file that is already at `destination`, unless the
+/// caller passed `--force`. Checked before the server builds anything.
+fn refuse_existing(destination: &Path, force: bool) -> Result<()> {
+    if force || std::fs::symlink_metadata(destination).is_err() {
+        return Ok(());
+    }
+    Err(AgentError::msg(format!(
+        "{} already exists. Pass --force to replace it.",
+        destination.display()
+    )))
 }
 
 fn category_label(category: DataCategory) -> &'static str {
@@ -340,7 +363,8 @@ mod tests {
             parse(words("backup /tmp/profile.tar.gz")).unwrap(),
             (
                 Command::Backup {
-                    destination: PathBuf::from("/tmp/profile.tar.gz")
+                    destination: PathBuf::from("/tmp/profile.tar.gz"),
+                    force: false,
                 },
                 OutputFormat::Text
             )
@@ -348,7 +372,7 @@ mod tests {
         let chat = SessionId::new();
         assert_eq!(
             parse(words(&format!(
-                "export /tmp/chats.json --format json --chat {chat}"
+                "export /tmp/chats.json --format json --chat {chat} --force"
             )))
             .unwrap(),
             (
@@ -356,6 +380,7 @@ mod tests {
                     destination: PathBuf::from("/tmp/chats.json"),
                     format: ConversationExportFormat::Json,
                     chats: vec![chat],
+                    force: true,
                 },
                 OutputFormat::Text
             )
@@ -386,6 +411,23 @@ mod tests {
         assert_eq!(
             parse(words("wipe")).unwrap_err(),
             "data accepts show, backup, or export"
+        );
+    }
+
+    #[test]
+    fn a_file_already_at_the_destination_stays_unless_forced() {
+        let directory = tempfile::tempdir().unwrap();
+        let existing = directory.path().join("backup.tar.gz");
+        std::fs::write(&existing, b"an earlier backup").unwrap();
+
+        let refused = refuse_existing(&existing, false).unwrap_err().to_string();
+        assert!(refused.contains("Pass --force to replace it."), "{refused}");
+        assert!(refuse_existing(&existing, true).is_ok());
+        assert!(refuse_existing(&directory.path().join("new.tar.gz"), false).is_ok());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"an earlier backup");
+        assert_eq!(
+            parse(words("show --force")).unwrap_err(),
+            "unknown data show argument \"--force\""
         );
     }
 

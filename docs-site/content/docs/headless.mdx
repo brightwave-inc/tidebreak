@@ -136,8 +136,8 @@ tidebreak diagnostics metrics
 tidebreak diagnostics export <path>
 
 tidebreak data show
-tidebreak data backup <path>
-tidebreak data export <path> [--format markdown|json] [--chat <id>]…
+tidebreak data backup <path> [--force]
+tidebreak data export <path> [--format markdown|json] [--chat <id>]… [--force]
 
 tidebreak folder connect <path> --chat <id>
 tidebreak folder list [--chat <id>]
@@ -530,19 +530,27 @@ cargo run -p tidebreak-cli -- data export ./chat.json --format json --chat <chat
 `show` prints the data folder and how much disk its database, attachments,
 outputs, logs, engine tools, and backups use.
 
-`backup` writes one `.tar.gz` with the database, the files attached to
-conversations, and the files Tidebreak made. It copies the database with
-SQLite's own `VACUUM INTO` while the server keeps running, so the copy is
-consistent without stopping anything. Keys stay in the keychain and are never
-in the archive. To restore, quit Tidebreak, move the data folder aside, and
-extract the archive into an empty folder of the same name. A server on
-PostgreSQL refuses `backup`: back that database up with its own tools, as
+`backup` writes the data folder as one `.tar.gz`: the database, the files
+attached to conversations, the files Tidebreak made, skills, plugins, folder
+permissions, and coding session files. It copies the database with SQLite's own
+`VACUUM INTO` while the server keeps running, so the copy is consistent without
+stopping anything. It leaves out keys, which stay in the keychain, and logs,
+engine tools, earlier backups, working files, and worktrees from before version
+0.59. `tidebreak-backup.json` in the archive lists both. A server on PostgreSQL
+refuses `backup`: back that database up with its own tools, as
 [Self-hosting](#self-hosting) describes.
 
-`export` writes your conversations: a `.zip` with one Markdown file per
-conversation, or one JSON document with `--format json`. Each `--chat` limits
-the export to that conversation. Both write the file in full before they
-replace anything at the path.
+To restore a backup, quit Tidebreak and rename the data folder; do not delete
+it. Create an empty folder with the old name, extract the archive into it, and
+copy back anything the archive leaves out that you still want.
+
+`export` writes your chats: a `.zip` with one Markdown file per chat, or one
+JSON document with `--format json`. Each holds the messages and the names of
+attached files. Coding sessions, tool activity, and attachment contents are not
+in it. Each `--chat` limits the export to that chat.
+
+Neither command replaces a file already at the path unless you pass `--force`.
+Both write the file in full before they put it at the path.
 
 ### `mcp`
 

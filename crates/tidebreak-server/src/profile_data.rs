@@ -22,8 +22,6 @@ use crate::scoped_store::ScopedStore;
 
 /// Where the local SQLite database lives inside a desktop data directory.
 pub const DATABASE_FILE: &str = "tidebreak.db";
-/// The schema marker the desktop lifecycle keeps beside the database.
-const SCHEMA_MARKER_FILE: &str = "tidebreak-schema.json";
 const BLOBS_DIRECTORY: &str = "blobs";
 const SCRATCH_DIRECTORY: &str = "scratch";
 const OUTPUTS_DIRECTORY: &str = "outputs";
@@ -38,15 +36,62 @@ const BACKUP_MANIFEST: &str = "tidebreak-backup.json";
 const BACKUP_README: &str = "README.txt";
 const BACKUP_README_TEXT: &str = "\
 This is a Tidebreak backup. It holds the database with your conversations,
-memory, and settings, the files you attached, and the files Tidebreak made.
+memory, and settings, the files you attached, the files Tidebreak made, your
+skills and plugins, folder permissions, and coding session files.
+tidebreak-backup.json lists what it holds and what it leaves out.
 
-It does not hold your keys. They stay in this computer's keychain. On another
-computer, enter them again in Settings.
+It leaves out your keys, which stay in this computer's keychain. On another
+computer, enter them again in Settings. It also leaves out logs, downloaded
+engine tools, earlier backups, working files, and worktrees from before
+version 0.59, which are Git checkouts.
 
-To restore it, quit Tidebreak and move your data folder somewhere safe. Create
-an empty folder with the same name, extract this archive into it, and open
-Tidebreak.
+To restore it, quit Tidebreak and rename your data folder. Do not delete it.
+Create an empty folder with the old name and extract this archive into it.
+Copy back anything from the renamed folder that the archive leaves out and you
+still want, then open Tidebreak.
 ";
+
+/// Top-level entries of the data folder a backup leaves out: the live
+/// database, which the archive holds as a consistent copy instead, earlier
+/// backups, logs, engine tools a feature downloads again, and files that only
+/// mean something to the process that wrote them.
+const BACKUP_SKIPS: [&str; 15] = [
+    DATABASE_FILE,
+    "tidebreak.db-wal",
+    "tidebreak.db-shm",
+    "tidebreak.db-journal",
+    BACKUPS_DIRECTORY,
+    "logs",
+    "boot-failures.log",
+    "tools",
+    "tidebreak.lock",
+    "host-broker.lock",
+    "blob-locks",
+    "file-preview-temp",
+    "computer-use-control",
+    "running.json",
+    "listen.json",
+];
+/// Inside `code/`, the worktrees from before version 0.59. They are Git
+/// checkouts; Git is what backs them up.
+const LEGACY_WORKTREES_DIRECTORY: &str = "worktrees";
+const CODE_DIRECTORY: &str = "code";
+
+/// What a backup's manifest says it holds.
+const BACKUP_CONTENTS: [&str; 2] = [
+    "tidebreak.db, a consistent copy of the database",
+    "the rest of the data folder, except what excludes names",
+];
+/// What a backup's manifest says it leaves out.
+const BACKUP_EXCLUDES: [&str; 7] = [
+    "keys, which stay in the keychain",
+    "logs/ and boot-failures.log",
+    "tools/, which a feature downloads again",
+    "backups/",
+    "scratch/<conversation>/ working files, except outputs/",
+    "code/worktrees/, worktrees from before version 0.59",
+    "lock files and files that describe the running app",
+];
 
 /// What `GET /data` answers: where the profile lives and what it holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -227,14 +272,14 @@ struct BackupManifest {
     tidebreak_backup: u32,
     created_at: DateTime<Utc>,
     tidebreak_version: &'static str,
-    contents: [&'static str; 4],
-    excludes: [&'static str; 4],
+    contents: [&'static str; 2],
+    excludes: [&'static str; 7],
 }
 
 /// Build a backup of the SQLite profile in `data_dir` whose database file is
 /// `database`: a consistent copy of the database, taken with SQLite's own
-/// `VACUUM INTO` while Tidebreak keeps running, plus the attached files and
-/// outputs it points at, as one `.tar.gz`.
+/// `VACUUM INTO` while Tidebreak keeps running, plus the rest of the data
+/// folder except [`BACKUP_SKIPS`], as one `.tar.gz`.
 ///
 /// The copy and the archive are built under `backups/` in the data directory,
 /// on the same disk as the profile. The copy is removed once it is in the
@@ -287,13 +332,8 @@ fn write_backup_archive(
         tidebreak_backup: BACKUP_FORMAT,
         created_at: now,
         tidebreak_version: tidebreak_core::VERSION,
-        contents: [
-            DATABASE_FILE,
-            SCHEMA_MARKER_FILE,
-            "blobs/",
-            "scratch/<conversation>/outputs/",
-        ],
-        excludes: ["keys", "logs", "engine tools", "earlier backups"],
+        contents: BACKUP_CONTENTS,
+        excludes: BACKUP_EXCLUDES,
     };
     let manifest = serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?;
     append_bytes(&mut tar, BACKUP_MANIFEST, &manifest, now)?;
@@ -304,32 +344,25 @@ fn write_backup_archive(
     } else {
         return Err(io::Error::other("the database copy disappeared"));
     }
-    if append_file(
-        &mut tar,
-        &data_dir.join(SCHEMA_MARKER_FILE),
-        Path::new(SCHEMA_MARKER_FILE),
-    )? {
-        files += 1;
-    }
-    files += append_tree(
-        &mut tar,
-        &data_dir.join(BLOBS_DIRECTORY),
-        Path::new(BLOBS_DIRECTORY),
-    )?;
-    let scratch = data_dir.join(SCRATCH_DIRECTORY);
-    if let Ok(chats) = std::fs::read_dir(&scratch) {
-        let mut chats: Vec<_> = chats.flatten().map(|entry| entry.file_name()).collect();
-        chats.sort();
-        for chat in chats {
-            let outputs = scratch.join(&chat).join(OUTPUTS_DIRECTORY);
-            files += append_tree(
-                &mut tar,
-                &outputs,
-                &Path::new(SCRATCH_DIRECTORY)
-                    .join(&chat)
-                    .join(OUTPUTS_DIRECTORY),
-            )?;
+    for name in sorted_children(data_dir)? {
+        let Some(text) = name.to_str() else {
+            files += append_tree(&mut tar, &data_dir.join(&name), Path::new(&name))?;
+            continue;
+        };
+        if BACKUP_SKIPS.contains(&text) {
+            continue;
         }
+        let path = data_dir.join(&name);
+        files += match text {
+            SCRATCH_DIRECTORY => append_outputs(&mut tar, &path)?,
+            CODE_DIRECTORY => append_tree_except(
+                &mut tar,
+                &path,
+                Path::new(CODE_DIRECTORY),
+                LEGACY_WORKTREES_DIRECTORY,
+            )?,
+            _ => append_tree(&mut tar, &path, Path::new(&name))?,
+        };
     }
     let mut out = tar.into_inner()?.finish()?;
     out.flush()?;
@@ -380,6 +413,57 @@ fn append_file<W: Write>(tar: &mut tar::Builder<W>, path: &Path, name: &Path) ->
     header.set_cksum();
     tar.append_data(&mut header, name, file.take(metadata.len()))?;
     Ok(true)
+}
+
+/// The names in `dir`, sorted. A missing folder has none.
+fn sorted_children(dir: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut names: Vec<_> = entries.flatten().map(|entry| entry.file_name()).collect();
+    names.sort();
+    Ok(names)
+}
+
+/// Add each conversation's `outputs/` under `scratch/`, and none of its
+/// working files.
+fn append_outputs<W: Write>(tar: &mut tar::Builder<W>, scratch: &Path) -> io::Result<u64> {
+    if !std::fs::symlink_metadata(scratch).is_ok_and(|metadata| metadata.is_dir()) {
+        return Ok(0);
+    }
+    let mut added = 0;
+    for chat in sorted_children(scratch)? {
+        added += append_tree(
+            tar,
+            &scratch.join(&chat).join(OUTPUTS_DIRECTORY),
+            &Path::new(SCRATCH_DIRECTORY)
+                .join(&chat)
+                .join(OUTPUTS_DIRECTORY),
+        )?;
+    }
+    Ok(added)
+}
+
+/// Add the tree at `root` beneath `name`, leaving out its child `skip`.
+fn append_tree_except<W: Write>(
+    tar: &mut tar::Builder<W>,
+    root: &Path,
+    name: &Path,
+    skip: &str,
+) -> io::Result<u64> {
+    if !std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
+        return append_tree(tar, root, name);
+    }
+    let mut added = 0;
+    for child in sorted_children(root)? {
+        if child == skip {
+            continue;
+        }
+        added += append_tree(tar, &root.join(&child), &name.join(&child))?;
+    }
+    Ok(added)
 }
 
 /// Add every regular file under `root` beneath `name`, in a stable order.
@@ -724,6 +808,9 @@ mod tests {
     use super::*;
     use tidebreak_core::Store as _;
 
+    /// The schema marker the desktop lifecycle keeps beside the database.
+    const SCHEMA_MARKER_FILE: &str = "tidebreak-schema.json";
+
     fn write(path: &Path, bytes: usize) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, vec![b'x'; bytes]).unwrap();
@@ -799,7 +886,7 @@ mod tests {
     /// holds the rows, and the bytes it points at come along. Logs, engine
     /// tools, earlier backups, and links out of the profile stay behind.
     #[tokio::test]
-    async fn a_backup_holds_the_database_attachments_and_outputs() {
+    async fn a_backup_holds_what_a_person_made_and_leaves_out_run_state() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let database = root.join(DATABASE_FILE);
@@ -821,6 +908,16 @@ mod tests {
             &root.join("backups/pre-migration-0.1.0-20260101T000000Z.db"),
             16,
         );
+        // What a person made or chose, which a restore must bring back.
+        write(&root.join("skills/briefing/SKILL.md"), 17);
+        write(&root.join("plugins/notes/plugin.json"), 18);
+        write(&root.join("prompts/weekly.md"), 19);
+        write(&root.join("host-broker-state.json"), 20);
+        write(&root.join("code/private/sessions/s-1/memory/MEMORY.md"), 21);
+        // A pre-0.59 worktree, a lock, and the run marker stay out.
+        write(&root.join("code/worktrees/repo/ws-1/README.md"), 22);
+        write(&root.join("tidebreak.lock"), 23);
+        write(&root.join("running.json"), 24);
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("logs"), root.join("blobs/escape")).unwrap();
 
@@ -836,12 +933,17 @@ mod tests {
                 BACKUP_MANIFEST,
                 BACKUP_README,
                 DATABASE_FILE,
-                SCHEMA_MARKER_FILE,
                 "blobs/ab/blob-1",
+                "code/private/sessions/s-1/memory/MEMORY.md",
+                "host-broker-state.json",
+                "plugins/notes/plugin.json",
+                "prompts/weekly.md",
                 "scratch/chat-a/outputs/out-1/rev-1",
+                "skills/briefing/SKILL.md",
+                SCHEMA_MARKER_FILE,
             ]
         );
-        assert_eq!(files, 6);
+        assert_eq!(files, 11);
         let manifest: serde_json::Value = serde_json::from_slice(&entries[0].1).unwrap();
         assert_eq!(manifest["tidebreak_backup"], BACKUP_FORMAT);
 

@@ -229,17 +229,20 @@ branch is refused. The plugin's files run with the agent's permissions.
 
 const DATA_USAGE: &str = "\
 usage: tidebreak data show [--output-format text|json]
-       tidebreak data backup <path> [--output-format text|json]
+       tidebreak data backup <path> [--force] [--output-format text|json]
        tidebreak data export <path> [--format markdown|json] [--chat <id>]…
-                  [--output-format text|json]
+                  [--force] [--output-format text|json]
 
 show prints where the profile lives and how much disk each part uses. backup
-writes the database, the files attached to conversations, and the files
-Tidebreak made, as one .tar.gz. It copies the database with SQLite's own
-VACUUM INTO while Tidebreak keeps running, and it never holds keys. A server
-on PostgreSQL refuses it; back that database up with its own tools. export
-writes your conversations as a .zip of Markdown files, or as one JSON file
-with --format json; --chat limits it to the conversations you name.
+writes the data folder as one .tar.gz: the database, attachments, outputs,
+skills, plugins, and the rest, without keys, logs, engine tools, earlier
+backups, or working files. It copies the database with SQLite's own VACUUM
+INTO while Tidebreak keeps running. A server on PostgreSQL refuses it; back
+that database up with its own tools. export writes your chats as a .zip of
+Markdown files, or as one JSON file with --format json: the messages and the
+names of attached files, without coding sessions, tool activity, or
+attachment contents. --chat limits it to the chats you name. Neither replaces
+a file already at <path> unless you pass --force.
 These commands take --server <url> [--server-token-env <var>] or --attach.";
 
 const FOLDER_USAGE: &str = "\
