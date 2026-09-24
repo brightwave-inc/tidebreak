@@ -80,6 +80,7 @@ jobs:
     outputs:
       docs_site: ${{ steps.scope.outputs.docs_site }}
       e2b_cli: ${{ steps.scope.outputs.e2b_cli }}
+      e2e: ${{ steps.scope.outputs.e2e }}
       notices: ${{ steps.scope.outputs.notices }}
       rust: ${{ steps.scope.outputs.rust }}
       ui: ${{ steps.scope.outputs.ui }}
@@ -101,6 +102,7 @@ jobs:
             {
               echo "docs_site=true"
               echo "e2b_cli=true"
+              echo "e2e=true"
               echo "notices=true"
               echo "rust=true"
               echo "ui=true"
@@ -142,9 +144,12 @@ jobs:
           # when a change cannot reach them. `workspace` implies `rust`; the
           # gate below asserts that. `notices` gates the third-party notice
           # regeneration check, which only the two dependency graphs, the
-          # generator, and the checked-in artifact can change.
+          # generator, and the checked-in artifact can change. `e2e` gates the
+          # end-to-end lane: the server (`workspace`), the renderer (`ui`), or
+          # the flows themselves.
           docs_site=false
           e2b_cli=false
+          e2e=false
           notices=false
           rust=false
           ui=false
@@ -156,6 +161,9 @@ jobs:
               docs-site/*) docs_site=true ;;
               .github/e2b-cli/*|.github/workflows/publish-e2b-template.yml)
                 e2b_cli=true ;;
+              # The flows and their runner reach no crate, so they must be
+              # matched before the catch-all turns them into a Rust change.
+              e2e/*|scripts/e2e.sh) e2e=true ;;
               # The generated notices are markdown, so they must be matched
               # before the documentation carve-out swallows them.
               legal/*|scripts/generate-third-party-notices.mjs|scripts/license-texts/*)
@@ -165,6 +173,7 @@ jobs:
               .github/workflows/ci.yml)
                 docs_site=true
                 e2b_cli=true
+                e2e=true
                 notices=true
                 rust=true
                 ui=true
@@ -204,10 +213,16 @@ jobs:
             echo "workspace scope without Rust scope; the detector is wrong." >&2
             exit 1
           fi
+          # The flows drive the server and the renderer, so a change to either
+          # runs them.
+          if [[ "$workspace" == true || "$ui" == true ]]; then
+            e2e=true
+          fi
 
           {
             echo "docs_site=$docs_site"
             echo "e2b_cli=$e2b_cli"
+            echo "e2e=$e2e"
             echo "notices=$notices"
             echo "rust=$rust"
             echo "ui=$ui"
@@ -853,7 +868,9 @@ jobs:
   self-host-build:
     name: self-host server build
     needs: changes
-    if: ${{ needs.changes.outputs.workspace == 'true' }}
+    # The end-to-end lane drives this lane's binary, so a renderer-only change
+    # builds it too; the compile is all compiler-cache hits then.
+    if: ${{ needs.changes.outputs.workspace == 'true' || needs.changes.outputs.e2e == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -895,11 +912,108 @@ jobs:
         run: >-
           cargo build --locked -p tidebreak-cli
           --features tidebreak-server/postgres
+      # A debug binary carries the scripted provider and coding engine, which
+      # is what lets the end-to-end lane run real turns with no model. Handing
+      # it over saves that lane a second compile.
+      - name: Hand the debug server to the end-to-end lane
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: e2e-server-${{ github.run_id }}
+          path: target/debug/tidebreak
+          if-no-files-found: error
+          # The binary is several hundred megabytes, so it lives one day.
+          # Re-running only the end-to-end lane after that finds no binary;
+          # "Re-run all jobs" builds it again.
+          retention-days: 1
+          overwrite: true
       # Every download the image pins by SHA-256 is checked against the
       # publisher's own checksum list, so a pin that was typed rather than
       # copied fails here instead of in the release image build.
       - name: Verify the image's download pins against their publishers
         run: bash deploy/self-host/check-pins.sh
+
+  end-to-end:
+    name: end-to-end
+    needs: [changes, self-host-build]
+    # Drives the built renderer against a debug self-host machine with the
+    # scripted provider and coding engine, through Chromium: first run, chat,
+    # approvals, repositories, code turns, commits, and archive. Not a
+    # required check yet; it becomes one once it has run green for a week.
+    # `scripts/e2e.sh` runs the same flows locally.
+    #
+    # `always()` because a skipped check reads as success: were the server
+    # build to fail, a plain `if:` would skip this lane and pass it. Like the
+    # `test` aggregator, the lane runs whenever its scope is on and fails in
+    # its first step when the build did not succeed.
+    if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
+    runs-on: ubuntu-latest
+    # Room for the setup steps, the flows step's own limit below, and the
+    # trace upload after it.
+    timeout-minutes: 25
+    env:
+      # Corepack switches to e2e/package.json's pnpm inside that directory;
+      # a runner has no terminal to answer its download prompt.
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+    steps:
+      - name: Require the debug server build
+        env:
+          BUILD_RESULT: ${{ needs.self-host-build.result }}
+        run: |
+          if [[ "$BUILD_RESULT" != success ]]; then
+            echo "The self-host server build ended with $BUILD_RESULT, so there is no debug server to drive." >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Download the debug server
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: e2e-server-${{ github.run_id }}
+          path: ${{ runner.temp }}/e2e-server
+      # Artifacts do not keep file modes.
+      - name: Make the server executable
+        run: chmod +x "$RUNNER_TEMP/e2e-server/tidebreak"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack install --global pnpm@10.18.3
+          node -e 'const version = require("node:child_process").execFileSync("pnpm", ["--version"], { encoding: "utf8" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
+      - name: Build the desktop renderer
+        working-directory: crates/tidebreak-desktop/ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Install the end-to-end tools
+        working-directory: e2e
+        run: pnpm install --frozen-lockfile
+      - name: Type-check the flows
+        working-directory: e2e
+        run: pnpm typecheck
+      # The locked Playwright version picks the Chromium build.
+      - name: Install headless Chromium
+        working-directory: e2e
+        run: pnpm exec playwright install --only-shell chromium
+      - name: Run the flows
+        working-directory: e2e
+        # Well inside the job's limit, so a run that hangs fails this step
+        # and still uploads its traces below; a job timeout would cancel the
+        # job instead, and `failure()` is false then. Playwright's own global
+        # timeout usually ends the run first.
+        timeout-minutes: 12
+        env:
+          TIDEBREAK_E2E_BINARY: ${{ runner.temp }}/e2e-server/tidebreak
+          TIDEBREAK_E2E_UI_DIST: ${{ github.workspace }}/crates/tidebreak-desktop/ui/dist
+        run: pnpm test
+      - name: Upload Playwright traces
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: end-to-end-traces-${{ github.run_attempt }}
+          path: e2e/test-results
+          if-no-files-found: ignore
+          retention-days: 7
 
   ui:
     name: desktop UI

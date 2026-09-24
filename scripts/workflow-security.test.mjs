@@ -757,6 +757,65 @@ test("UI tests and production build each gate the UI lane", () => {
   assert.doesNotMatch(a11y, /continue-on-error|\|\| true/);
 });
 
+test("the end-to-end lane drives the self-host build and keeps failed traces", () => {
+  const ci = workflows["ci.yml"];
+  const changes = workflowJob(ci, "changes");
+  const build = workflowJob(ci, "self-host-build");
+  const e2e = workflowJob(ci, "end-to-end");
+
+  // The flows run for the server, the renderer, and their own files.
+  assert.match(changes, /e2e\/\*\|scripts\/e2e\.sh\) e2e=true ;;/);
+  assert.match(changes, /echo "e2e=true"/);
+  assert.match(
+    changes,
+    /if \[\[ "\$workspace" == true \|\| "\$ui" == true \]\]; then\n\s+e2e=true/,
+  );
+  assert.match(e2e, /^ {4}name: end-to-end$/m);
+
+  // A skipped check reads as success, so a failed build must fail this lane
+  // rather than skip it: the lane runs under always() whenever its scope is
+  // on, and its first step requires the build, the way `test` requires its
+  // partitions.
+  assert.match(
+    e2e,
+    /^ {4}if: \$\{\{ always\(\) && needs\.changes\.outputs\.e2e == 'true' \}\}$/m,
+  );
+  const firstStep = e2e.split(/^ {4}steps:\n/m)[1]?.split(/\n(?= {6}- )/)[0];
+  assert.ok(firstStep, "the lane must have steps");
+  assert.match(firstStep, /- name: Require the debug server build/);
+  assert.match(
+    firstStep,
+    /BUILD_RESULT: \$\{\{ needs\.self-host-build\.result \}\}/,
+  );
+  assert.match(
+    firstStep,
+    /if \[\[ "\$BUILD_RESULT" != success \]\]; then[\s\S]*exit 1/,
+  );
+  assert.doesNotMatch(firstStep, /^ {8}if:/m);
+
+  // One debug compile serves both lanes.
+  assert.match(e2e, /needs: \[changes, self-host-build\]/);
+  assert.match(build, /needs\.changes\.outputs\.e2e == 'true'/);
+  assert.match(build, /path: target\/debug\/tidebreak/);
+  assert.match(e2e, /TIDEBREAK_E2E_BINARY: \$\{\{ runner\.temp \}\}\/e2e-server\/tidebreak/);
+  assert.doesNotMatch(e2e, /cargo build/);
+
+  const upload = e2e.match(/- name: Upload Playwright traces[\s\S]*$/)?.[0];
+  assert.ok(upload, "the lane must upload traces from failed flows");
+  assert.match(upload, /if: \$\{\{ failure\(\) \}\}/);
+  assert.match(upload, /path: e2e\/test-results/);
+  // A job timeout cancels the job, and `failure()` is false then. The flows
+  // step times out first, so a hung run fails the step and still uploads.
+  const jobTimeout = Number(/^ {4}timeout-minutes: (\d+)$/m.exec(e2e)?.[1]);
+  const flows = e2e.match(/- name: Run the flows[\s\S]*?(?=\n {6}- )/)?.[0];
+  const flowsTimeout = Number(/timeout-minutes: (\d+)/.exec(flows ?? "")?.[1]);
+  assert.ok(
+    flowsTimeout > 0 && flowsTimeout < jobTimeout,
+    "the flows step must time out before the job does",
+  );
+  assert.doesNotMatch(e2e, /continue-on-error|\|\| true|secrets\./);
+});
+
 test("macOS CI lints and tests the desktop with the Linux desktop selection", () => {
   const ci = workflows["ci.yml"];
   const macos = workflowJob(ci, "macos-desktop");
