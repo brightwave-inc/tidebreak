@@ -257,6 +257,7 @@ export function DiffPanel({
         ref={scrollerRef}
         className="min-h-0 flex-1 overflow-y-auto"
         tabIndex={0}
+        role="region"
         aria-label="Diff"
       >
         {!payload && !error && (

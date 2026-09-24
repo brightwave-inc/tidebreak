@@ -753,7 +753,7 @@ request's files, so all three read the same way.
   left with no change goes.
 - Split view is the reader's remembered choice. Below 800 pixels the view
   draws unified.
-- A long diff mounts one chunk of 160 rows on its first frame and two more
+- A long diff mounts one chunk of 160 rows on its first frame and one more
   each frame after, and each chunk colors its own hunks. The
   `Code/Diff review/Very long file` story measures a 5,000-line diff in the
   browser.

@@ -52,7 +52,12 @@ import {
 export const DIFF_CHUNK_ROWS = 160;
 /** Chunks mounted on the first render, before the rest arrive frame by frame. */
 const FIRST_CHUNKS = 1;
-const CHUNKS_PER_FRAME = 2;
+/**
+ * One chunk a frame keeps each frame's work to a chunk's worth of rows,
+ * well under a frame on a slow machine; `content-visibility` spares the
+ * layout of chunks mounted off screen.
+ */
+const CHUNKS_PER_FRAME = 1;
 /** A hunk this small is colored during render, so short diffs never flash plain. */
 const SYNC_HIGHLIGHT_LINES = 400;
 
@@ -549,17 +554,23 @@ export function DiffView({
     isCodeRow(model.rows[active.row]!)
       ? active.row
       : firstTarget;
-  const tabStop =
+  const stopColumnNow =
     stopRow >= 0
-      ? {
-          row: stopRow,
-          column: stopColumn(
-            layout,
-            model.rows[stopRow]!,
-            active?.row === stopRow ? active.column : null,
-          ),
-        }
+      ? stopColumn(
+          layout,
+          model.rows[stopRow]!,
+          active?.row === stopRow ? active.column : null,
+        )
       : null;
+  // One object for as long as the stop stays put, so the chunk holding it
+  // is not redrawn on every frame of a long diff's mounting.
+  const tabStop = useMemo(
+    () =>
+      stopRow >= 0 && stopColumnNow
+        ? { row: stopRow, column: stopColumnNow }
+        : null,
+    [stopRow, stopColumnNow],
+  );
 
   const style = {
     "--diff-number": `calc(${model.gutterDigits}ch + 0.75rem)`,
@@ -823,6 +834,14 @@ const DiffChunk = memo(function DiffChunk({
 
   const rows: ReactNode[] = [];
   for (let display = start; display < end; display += 1) {
+    // Each line gets the selection and the tab stop only when they touch
+    // it, so moving either redraws the lines involved and no others.
+    const lineRows = displayRows(model, layout, display);
+    const touches = (range: { start: number; end: number } | null) =>
+      range !== null &&
+      lineRows.some((row) => row >= range.start && row <= range.end);
+    const lineSelected = touches(selected) ? selected : null;
+    const lineStop = tabStop && lineRows.includes(tabStop.row) ? tabStop : null;
     rows.push(
       layout === "split" ? (
         <SplitLine
@@ -833,8 +852,8 @@ const DiffChunk = memo(function DiffChunk({
           syntaxVersion={syntaxVersion}
           hunkAction={hunkAction}
           commentable={commentable}
-          selected={selected}
-          tabStop={tabStop}
+          selected={lineSelected}
+          tabStop={lineStop}
         />
       ) : (
         <UnifiedLine
@@ -845,8 +864,8 @@ const DiffChunk = memo(function DiffChunk({
           syntaxVersion={syntaxVersion}
           hunkAction={hunkAction}
           commentable={commentable}
-          selected={selected}
-          tabStop={tabStop}
+          selected={lineSelected}
+          tabStop={lineStop}
         />
       ),
     );
