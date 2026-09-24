@@ -30,6 +30,7 @@ pub mod chat_titling;
 pub mod chatgpt_runtime;
 pub mod code;
 mod empty_chat_pruner;
+mod message_search_backfill;
 pub use code::chrome;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
@@ -430,6 +431,7 @@ pub struct Server {
     _empty_chat_pruner: AbortTask,
     _approval_judge_worker: AbortTask,
     _memory_sweep: AbortTask,
+    _message_search_backfill: AbortTask,
     /// The saved MCP servers' first connections after boot.
     _mcp_boot: AbortTask,
     _mcp_supervisor: AbortTask,
@@ -2006,6 +2008,11 @@ async fn bind_inner(
         memory_sweep_worker,
         |worker| worker.run(),
     );
+    // Conversations older than the message index join it in the background;
+    // new messages are indexed as they are written. The task ends once the
+    // queue is empty, so it runs outside the supervisor, which would restart
+    // it.
+    let message_search_backfill = tokio::spawn(message_search_backfill::run(db.clone()));
     let mcp_supervisor = {
         let mcp = mcp_runtime.clone();
         worker_supervisor::spawn_supervised(worker_health.clone(), "mcp_supervisor", move || {
@@ -2056,6 +2063,7 @@ async fn bind_inner(
         _empty_chat_pruner: AbortTask(empty_chat_pruner),
         _approval_judge_worker: AbortTask(approval_judge_worker),
         _memory_sweep: AbortTask(memory_sweep_worker),
+        _message_search_backfill: AbortTask(message_search_backfill),
         _mcp_boot: AbortTask(mcp_boot),
         _mcp_supervisor: AbortTask(mcp_supervisor),
         _gateway_model_sync: AbortTask(gateway_model_sync),

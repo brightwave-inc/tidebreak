@@ -95,6 +95,7 @@ mod lifecycle;
 #[cfg(feature = "keychain")]
 mod listener;
 mod memory;
+mod message_search;
 mod outputs;
 mod renderer_errors;
 mod root_attachment;

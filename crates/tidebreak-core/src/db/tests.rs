@@ -28,6 +28,7 @@ mod file_change_journal;
 mod journal_writer;
 mod memory;
 mod message_attachment;
+mod message_search;
 mod multi_agent_wait;
 mod notification;
 mod operation_log;

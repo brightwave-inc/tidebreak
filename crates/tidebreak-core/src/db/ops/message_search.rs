@@ -688,24 +688,48 @@ pub(in crate::db) async fn backfill(store: &DbStore, sessions: u64) -> Result<u6
         ))
         .await
         .map_err(store_err)?;
+    let done = |session_id: uuid::Uuid| {
+        Statement::from_sql_and_values(
+            backend,
+            format!(
+                "DELETE FROM \"message_search_backfill\" WHERE \"session_id\" = {}",
+                placeholder(backend, 1)
+            ),
+            [session_id.into()],
+        )
+    };
     for row in waiting {
         let session_id: uuid::Uuid = row.try_get("", "session_id").map_err(store_err)?;
         let transaction = store.conn.begin().await.map_err(store_err)?;
-        if super::acquire_session_write_lock(&transaction, session_id).await? {
-            rebuild_session_on(&transaction, SessionId(session_id)).await?;
+        let rebuilt = async {
+            if super::acquire_session_write_lock(&transaction, session_id).await? {
+                rebuild_session_on(&transaction, SessionId(session_id)).await?;
+            }
+            transaction
+                .execute_raw(done(session_id))
+                .await
+                .map_err(store_err)?;
+            Ok::<(), AgentError>(())
         }
-        transaction
-            .execute_raw(Statement::from_sql_and_values(
-                backend,
-                format!(
-                    "DELETE FROM \"message_search_backfill\" WHERE \"session_id\" = {}",
-                    placeholder(backend, 1)
-                ),
-                [session_id.into()],
-            ))
-            .await
-            .map_err(store_err)?;
-        transaction.commit().await.map_err(store_err)?;
+        .await;
+        match rebuilt {
+            Ok(()) => transaction.commit().await.map_err(store_err)?,
+            Err(error) => {
+                // One session that cannot be rebuilt must not hold back every
+                // other. Its new messages are still indexed as they land.
+                transaction.rollback().await.map_err(store_err)?;
+                tracing::warn!(
+                    session = %session_id,
+                    %error,
+                    "could not add a conversation's history to the message index"
+                );
+                store
+                    .conn
+                    .execute_raw(done(session_id))
+                    .await
+                    .map_err(store_err)?;
+            }
+        }
     }
     let remaining = store
         .conn

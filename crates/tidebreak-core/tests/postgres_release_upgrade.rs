@@ -767,6 +767,10 @@ struct ConversationMergeSnapshot {
     /// What the chat replay read serves for the seeded conversation after
     /// the journal moved into `event`.
     replayed: Vec<tidebreak_core::SequencedAgentEvent>,
+    /// What a search for the seeded answer found before and after the
+    /// message index's backfill: `(hits, pending conversations)`.
+    search_before_backfill: (usize, u64),
+    search_after_backfill: Vec<(tidebreak_core::MessageSearchSource, String)>,
 }
 
 /// The one journal row the v0.60 conversation carries: its turn's terminal
@@ -866,6 +870,10 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("exec_file_change".to_owned(), "r".to_owned()),
             ("message".to_owned(), "a".to_owned()),
             ("message_identity".to_owned(), "a".to_owned()),
+            // A search row and a queued backfill die with their session, so
+            // deleting a conversation empties its part of the index.
+            ("message_search".to_owned(), "c".to_owned()),
+            ("message_search_backfill".to_owned(), "c".to_owned()),
             ("output".to_owned(), "c".to_owned()),
             ("root_attachment_change".to_owned(), "r".to_owned()),
             // Decision 0086: an access row dies with its session, so a
@@ -880,6 +888,13 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
     assert!(
         snapshot.orphan_rejected,
         "a message may name a missing session"
+    );
+    // The upgrade queues the conversation for the message index, a search
+    // says so, and the backfill makes its messages searchable.
+    assert_eq!(snapshot.search_before_backfill, (0, 1));
+    assert_eq!(
+        snapshot.search_after_backfill,
+        [(tidebreak_core::MessageSearchSource::Assistant, "hello".to_owned())]
     );
 }
 
@@ -1081,6 +1096,38 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
             .await
             .map_err(|error| error.to_string())?
     };
+    let (search_before_backfill, search_after_backfill) = {
+        use tidebreak_core::Store as _;
+        let owner = tidebreak_core::OwnerId::local();
+        let request = tidebreak_core::MessageSearchRequest {
+            query: "hello".into(),
+            limit: 10,
+            cursor: None,
+        };
+        let before = store
+            .search_messages_scoped(&owner, &request)
+            .await
+            .map_err(|error| error.to_string())?;
+        let remaining = store
+            .backfill_message_search(10)
+            .await
+            .map_err(|error| error.to_string())?;
+        if remaining != 0 {
+            return Err(format!("{remaining} conversations still wait for the index"));
+        }
+        let after = store
+            .search_messages_scoped(&owner, &request)
+            .await
+            .map_err(|error| error.to_string())?;
+        (
+            (before.hits.len(), before.indexing.pending_conversations),
+            after
+                .hits
+                .into_iter()
+                .map(|hit| (hit.source, hit.snippet))
+                .collect::<Vec<_>>(),
+        )
+    };
     let snapshot = ConversationMergeSnapshot {
         chat_table_present,
         session_columns,
@@ -1088,6 +1135,8 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
         foreign_keys,
         orphan_rejected,
         replayed,
+        search_before_backfill,
+        search_after_backfill,
     };
     verifier.close().await.map_err(|error| error.to_string())?;
     store.close().await.map_err(|error| error.to_string())?;

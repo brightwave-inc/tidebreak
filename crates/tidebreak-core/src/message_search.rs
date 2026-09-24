@@ -239,11 +239,18 @@ fn stands_alone(c: char) -> bool {
 
 /// Append the folded form of `c` to `out`: compatibility-decomposed, without
 /// combining marks, lowercased, and only letters and digits.
+///
+/// A Han or kana character is kept as it is. Its voicing marks change the
+/// word, so `で` must not fold to `て` the way `é` folds to `e`.
 fn fold_into(c: char, out: &mut String) {
     if c.is_ascii() {
         if c.is_ascii_alphanumeric() {
             out.push(c.to_ascii_lowercase());
         }
+        return;
+    }
+    if stands_alone(c) {
+        out.push(c);
         return;
     }
     decompose_compatible(c, |part| {
@@ -648,6 +655,8 @@ mod tests {
     fn han_and_kana_characters_are_terms_by_themselves() {
         assert_eq!(index_terms("東京タワーで"), "東 京 タ ワ ー で");
         assert_eq!(index_terms("see 東京 now"), "see 東 京 now");
+        // A voicing mark changes the word, so it is not folded away.
+        assert_ne!(index_terms("で"), index_terms("て"));
     }
 
     #[test]
