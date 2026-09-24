@@ -59,8 +59,11 @@ To start a deployment, do the following on the machine:
    ```
 
    Compose pulls the release that `setup.sh` recorded in `.env` and starts
-   PostgreSQL, the server, and, with a domain, Caddy. It never compiles
-   anything.
+   PostgreSQL, the server, and, with a domain, Caddy. The stack keeps blobs
+   on local disk, which needs release 0.117.0 or later. Until such a release
+   is published, `setup.sh` sets the stack to build the server image from
+   this checkout instead, and says so. The first `up` then compiles, which
+   takes a while and several GB of memory.
 
 4. Open `https://tidebreak.example.com`, or `http://127.0.0.1:8080` without a
    domain, and paste the admin token to sign in.
@@ -70,7 +73,7 @@ the release and the API level it runs:
 
 ```sh
 curl -fsS http://127.0.0.1:8080/healthz
-# -> {"status":"ok","version":"0.116.0","api_level":1}
+# -> {"status":"ok","version":"0.117.0","api_level":1}
 ```
 
 `/healthz` and `/version` answer without a token, and so do the sign-in routes
@@ -96,14 +99,24 @@ fallback.
 
 | File | Mode | What it holds |
 | --- | --- | --- |
-| `.env` | `0600` | `TIDEBREAK_VERSION`, the release Compose runs; a random `POSTGRES_PASSWORD`; `TIDEBREAK_HOST_GID`; and, with a domain, `TIDEBREAK_DOMAIN`, `TIDEBREAK_PUBLIC_URL`, and `COMPOSE_PROFILES=tls`. |
+| `.env` | `0600` | `TIDEBREAK_VERSION`, the release Compose runs; a random `POSTGRES_PASSWORD`; `TIDEBREAK_HOST_GID`; with a domain, `TIDEBREAK_DOMAIN`, `TIDEBREAK_PUBLIC_URL`, and `COMPOSE_PROFILES=tls`; and, when the stack builds from source, `COMPOSE_FILE`. |
 | `tokens` | `0640` | One admin line: the user id you named and a random 64-character token. |
 | `secret.key` | `0640` | 32 random bytes in base64: the key that encrypts stored credentials. |
 
-`--version X.Y.Z` picks the release; without it, the script asks GitHub for
-the latest one. The script never overwrites a file. When you run it again, it
-keeps every file that exists, says which ones it kept, and writes only the
-missing ones. Git ignores all three files.
+`--version X.Y.Z` picks the release, which must be 0.117.0 or later; an
+older server cannot keep blobs on local disk and refuses to start. Without
+`--version`, the script asks GitHub for the latest release. When that release
+is older than 0.117.0, or when you pass `--build`, the script writes
+`COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` to `.env`, so every
+Compose command builds the server image from this checkout. To pull a
+published release later, delete that line and set `TIDEBREAK_VERSION` to
+0.117.0 or later.
+
+The script never overwrites a file. When you run it again, it keeps every file
+that exists, says which ones it kept, and writes only the missing ones. A kept
+`.env` that lacks `TIDEBREAK_HOST_GID` or `TIDEBREAK_VERSION`, such as one
+written for an earlier version of this stack, gets the missing lines added at
+the end, and the script names each one. Git ignores all three files.
 
 The server runs as uid 10001 inside its container, so on a Linux host it
 cannot read a file that only your user can read. That is why `setup.sh` makes
@@ -112,10 +125,14 @@ cannot read a file that only your user can read. That is why `setup.sh` makes
 can then read both files, while other users of the host still cannot. This
 assumes that your primary group holds only you, which is the default on
 Debian, Ubuntu, and Fedora, where each user gets a group of the same name. The
-script warns when your group has a different name. On macOS, Docker Desktop
-and OrbStack share files with the container's user already, so there both
-files stay `0600`. Rootless Docker and Podman map groups differently, and this
-setup is untested with them.
+script warns when your group has a different name. Run as root, the script
+gives both files to uid 10001 with mode `0600` instead. On macOS, Docker
+Desktop and OrbStack share files with the container's user already, so there
+both files stay `0600`. Rootless Docker and Podman map groups differently, and
+this setup is untested with them.
+
+Keep the group read on both files. `chmod g-r tokens` or `chmod g-r
+secret.key` takes the server's only way in, and the server then stops at boot.
 
 If you create or replace these files by hand on Linux, keep the same shape:
 
@@ -129,8 +146,9 @@ tokens file /run/tidebreak/tokens: Permission denied`.
 
 ### Build the image from source
 
-`docker compose up -d` only pulls the published image. To build the server
-image from this checkout instead, add the build file to the command:
+Unless `.env` sets `COMPOSE_FILE`, `docker compose up -d` only pulls the
+published image. To build the server image from this checkout instead, add the
+build file to the command:
 
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
@@ -140,7 +158,10 @@ A cold build compiles the Rust workspace and the desktop renderer, which takes
 a while and several GB of memory. The image is tagged
 `tidebreak-self-host:local` and reports its version as `0.0.0-unreleased`.
 Pass the same two `-f` flags to every later Compose command, or the next `up`
-switches back to the published image.
+switches back to the published image. To make the build file the default for
+every command, add
+`COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` to `.env`, as
+`setup.sh --build` does.
 
 ## Identity
 
@@ -332,6 +353,27 @@ Back up `secret.key` separately from the database. A database backup without
 the key restores no stored credential, so you would enter each one again. Keep
 the two backups in different places, so one stolen backup never holds both.
 
+The server logs a warning at every boot that `secret.key` can be read by
+members of its group, and names the group's id. With the files `setup.sh`
+writes, that warning is expected. The group is the setup account's own
+primary group, which on most Linux distributions holds only that account, and
+it is how the server's uid reads the file. Do not follow the warning's
+`chmod g-r` advice for this file, or for `tokens`, which the server reads the
+same way: the server can then read neither and stops at boot. If your group
+holds other accounts, give both files to the server's uid instead:
+
+```sh
+sudo chown 10001 tokens secret.key
+sudo chmod 0600 tokens secret.key
+```
+
+A member who can use Code mode can read `tokens`, `secret.key`, and the
+database URL: workspace terminals and coding engines run as the server's uid
+and inherit its environment. Until members' code sessions are kept away from
+the deployment's secrets
+([#3590](https://github.com/brightwave-inc/tidebreak/issues/3590)), give
+self-host accounts only to people you would trust with those secrets.
+
 Credentials you pass as environment variables, such as `ANTHROPIC_API_KEY` in
 `.env`, stay fallbacks: the server reads them when nothing is stored for that
 provider.
@@ -408,12 +450,22 @@ documents, images, and generated artifacts.
 
 The stock stack keeps blobs on local disk. `TIDEBREAK_BLOB_STORE_URL` defaults
 to `file:///var/lib/tidebreak/blobs`, a directory on the `tidebreak-data`
-volume, and the server creates that directory, readable by its own user only,
-the first time it starts. Local disk means the data volume holds part of your
-data: back it up together with the database, as [Backup](#backup) describes.
+volume. Local disk means the data volume holds part of your data: back it up
+together with the database, as [Backup](#backup) describes.
 
-A `file://` URL must name one absolute directory: `file:///absolute/path`, with
-no host, no `.` or `..` segments, no query or fragment, and special characters
+The server creates the directory the first time it starts, readable by its own
+user only. It writes every blob with mode `0600`, including in a directory you
+created yourself, whose permissions it leaves alone. Uploads stage in the
+directory's `_uploads/` folder, also private to the server's user, and publish
+from there. At every boot, the server checks that it can write, delete, and
+list in the directory. When it cannot, it refuses to start and names the
+reason, such as `permission denied`, without the path's contents. Only the
+top level of the directory holds blobs, so a folder the server cannot read
+there, such as `lost+found` at the root of a mounted volume, does no harm.
+
+A `file://` URL must name one absolute directory below the root:
+`file:///absolute/path`, with no host, no `.` or `..` segments, no encoded
+separators such as `%2F`, no query or fragment, and special characters
 percent-encoded. The server refuses to start with anything else and says what
 it expected.
 
@@ -441,10 +493,16 @@ the data volume into the bucket prefix before you start it again.
 
 Grant `s3:ListBucket` for the configured prefix. Grant `s3:GetObject`,
 `s3:PutObject`, `s3:DeleteObject`, and `s3:AbortMultipartUpload` only for
-objects below that prefix. Configure the bucket to abort incomplete multipart
-uploads after a day. Also expire completed objects in the `_uploads/` path
-below that prefix after a day because streamed writes publish through that
-temporary path.
+objects below that prefix. The boot check writes and deletes a small object
+below `_uploads/`, so the server needs those grants to start. Configure the
+bucket to abort incomplete multipart uploads after a day. Also expire completed
+objects in the `_uploads/` path below that prefix after a day because streamed
+writes publish through that temporary path.
+
+On local disk, the server does that cleanup itself. A failed upload removes
+what it staged in `_uploads/` at once. A crash can still leave staged parts
+behind, so at every boot the server deletes the entries in `_uploads/` that
+are more than a day old.
 
 ## HTTPS and network exposure
 
@@ -651,11 +709,12 @@ and the listen address itself; to change those, edit `docker-compose.yml`.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `TIDEBREAK_VERSION` | none; required | The release of `ghcr.io/brightwave-inc/tidebreak-server` that `up` pulls, such as `0.116.0`. |
+| `TIDEBREAK_VERSION` | none; required | The release of `ghcr.io/brightwave-inc/tidebreak-server` that `up` pulls: 0.117.0 or later for the local-disk default. |
 | `POSTGRES_PASSWORD` | none; required | The database password. Only PostgreSQL and the server use it. |
 | `TIDEBREAK_HOST_GID` | `10001` | The host group that owns `tokens` and `secret.key`. Compose adds it to the server so the server can read them. |
 | `TIDEBREAK_DOMAIN` | unset | The domain Caddy serves over HTTPS. |
 | `COMPOSE_PROFILES` | unset | `tls` starts the `caddy` service. Set it together with `TIDEBREAK_DOMAIN`. |
+| `COMPOSE_FILE` | `docker-compose.yml` | `docker-compose.yml:docker-compose.build.yml` builds the server image from this checkout for every command. |
 | `TIDEBREAK_BLOB_STORE_URL` | `file:///var/lib/tidebreak/blobs` | Overrides the blob store; see [Storage](#storage). |
 | `TIDEBREAK_LOG` | `info` | The server's log filter. |
 
@@ -1123,16 +1182,24 @@ both to the same release. To upgrade, do the following in `deploy/self-host/`:
    git checkout v<version>
    ```
 
-3. Set `TIDEBREAK_VERSION=<version>` in `.env`.
-4. Pull the image and recreate the stack:
+3. Set `TIDEBREAK_VERSION=<version>` in `.env`. If `.env` sets `COMPOSE_FILE`
+   because no release could keep blobs on local disk when you set up, delete
+   that line now.
+4. Run `./setup.sh` again. It keeps your files, and adds any setting that the
+   new `docker-compose.yml` needs and your `.env` lacks, such as
+   `TIDEBREAK_HOST_GID` for a stack set up before `setup.sh` existed.
+5. Pull the image and recreate the stack:
 
    ```sh
    docker compose pull
    docker compose up -d
    ```
 
+A stack from before local-disk storage keeps its blobs in S3 through
+`TIDEBREAK_BLOB_STORE_URL` in `.env`, and keeps doing so after the upgrade.
+
 To build from source instead, pull the checkout and rebuild with the build
-file:
+file, or run `docker compose up -d --build` when `.env` sets `COMPOSE_FILE`:
 
 ```sh
 git pull

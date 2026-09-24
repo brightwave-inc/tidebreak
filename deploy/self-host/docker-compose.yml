@@ -4,10 +4,14 @@
 #   ./setup.sh             # once: writes .env, tokens, and secret.key
 #   docker compose up -d
 #
-# `up` pulls the published server image named by TIDEBREAK_VERSION in .env; it
-# never compiles. To build this checkout instead, add the build file:
+# `up` pulls the published server image named by TIDEBREAK_VERSION in .env. It
+# compiles only when you add the build file:
 #
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml in .env does the
+# same for every command. setup.sh writes that line while no published release
+# keeps blobs on local disk, and says so.
 #
 # Where things live:
 #   - PostgreSQL keeps chats, projects, document records, and the stored
@@ -38,8 +42,8 @@ services:
       POSTGRES_USER: tidebreak
       POSTGRES_DB: tidebreak
       # No default: an unset password would silently produce a trust-auth
-      # database. setup.sh writes a random one to .env.
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (setup.sh writes it)}
+      # database. setup.sh writes a random one to a new .env.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       # Back this up with tidebreak-data. See docs/self-hosting.md.
       - tidebreak-postgres:/var/lib/postgresql/data
@@ -54,7 +58,7 @@ services:
       - "5432"
 
   server:
-    image: ghcr.io/brightwave-inc/tidebreak-server:${TIDEBREAK_VERSION:?set TIDEBREAK_VERSION in .env (setup.sh writes it)}
+    image: ghcr.io/brightwave-inc/tidebreak-server:${TIDEBREAK_VERSION:?set TIDEBREAK_VERSION in .env (0.117.0 or later), or run ./setup.sh to add it}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -69,7 +73,7 @@ services:
       - .env
     environment:
       TIDEBREAK_PROFILE: self_host
-      TIDEBREAK_DATABASE_URL: postgres://tidebreak:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (setup.sh writes it)}@postgres:5432/tidebreak
+      TIDEBREAK_DATABASE_URL: postgres://tidebreak:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/tidebreak
       # Local disk on the data volume unless .env names a bucket.
       TIDEBREAK_BLOB_STORE_URL: ${TIDEBREAK_BLOB_STORE_URL:-file:///var/lib/tidebreak/blobs}
       TIDEBREAK_AUTH_TOKENS_FILE: /run/tidebreak/tokens
@@ -91,8 +95,9 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     # The server runs as uid 10001, which does not own ./tokens or
     # ./secret.key on a Linux host. setup.sh makes both files readable by
-    # your own group (mode 0640) and records that group here, so the server
-    # can read them and other users of the host cannot.
+    # your own group (mode 0640) and records that group in .env, so the server
+    # can read them and other users of the host cannot. Removing that group
+    # read locks the server out. The 10001 default adds nothing.
     group_add:
       - "${TIDEBREAK_HOST_GID:-10001}"
     volumes:
