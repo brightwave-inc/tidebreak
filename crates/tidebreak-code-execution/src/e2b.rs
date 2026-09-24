@@ -1510,7 +1510,7 @@ mod tests {
         // default to E2B's public template silently costs every document run
         // an in-sandbox dependency install, and moving it back to the human
         // alias breaks every account but the one that published the template.
-        assert_eq!(create["templateID"], "yarxjy39quzg6wm78u1a");
+        assert_eq!(create["templateID"], "aix1bq97e266dpdjh1sz");
         assert_eq!(create["metadata"]["tidebreak_workspace_id"], "workspace-1");
         assert_eq!(create["secure"], true);
         assert_eq!(create["allow_internet_access"], true);
