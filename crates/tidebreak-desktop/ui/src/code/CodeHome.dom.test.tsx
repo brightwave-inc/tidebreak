@@ -1,12 +1,21 @@
 // @vitest-environment jsdom
-import { act, cleanup, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { renderWithRouter } from "@/test/router";
 import type {
+  Attention,
   CodeRepoSnapshot,
+  CodeSessionDigest,
   CodeWorkspaceSnapshot,
   HarnessDoctorEntry,
   HarnessDoctorReport,
@@ -355,11 +364,271 @@ describe("CodeHome", () => {
     });
 
     expect(
-      await screen.findByRole("heading", { name: "Repos" }),
+      await screen.findByRole("heading", { name: /^Repositories/ }),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("Start with a repository"),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+});
+
+const approval: Attention = {
+  state: {
+    type: "needs_you",
+    prompt: "an approval is waiting",
+    source: "structured",
+  },
+  source: "structured",
+};
+
+function workspace(
+  id: string,
+  title: string,
+  overrides: Partial<CodeWorkspaceSnapshot> = {},
+): CodeWorkspaceSnapshot {
+  return {
+    id,
+    repo_id: REPO.id,
+    title,
+    worktree_path: `/tmp/worktrees/${id}`,
+    branch_name: `tidebreak/${id}`,
+    base_ref: "main",
+    status: "active",
+    created_at: "2026-09-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function digest(
+  workspaceId: string | null,
+  overrides: Partial<CodeSessionDigest> = {},
+): CodeSessionDigest {
+  return {
+    workspace: workspaceId,
+    session: `sess-${workspaceId}`,
+    kind: "interactive",
+    lifecycle: "idle",
+    attention: { state: { type: "done_unreviewed" }, source: "lifecycle" },
+    title: "",
+    turn_count: 2,
+    trigger_target_at: "2026-09-20T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** What the rail's socket delivers on connect; the home only reads it. */
+function deliverSnapshot(sessions: CodeSessionDigest[]) {
+  act(() => {
+    useCodeUpdatesStore.getState().apply({ type: "snapshot", sessions });
+  });
+}
+
+function section(name: RegExp) {
+  const region = screen.getByRole("region", { name });
+  return within(region);
+}
+
+describe("CodeHome for a returning reader", () => {
+  const WORKSPACES = [
+    workspace("ws-ask", "Answer the approval"),
+    workspace("ws-suite", "Run the suite"),
+    workspace("ws-fix", "Ship the fix", {
+      pr: {
+        number: 41,
+        url: "https://github.com/acme/app/pull/41",
+        state: "open",
+        title: "Ship the fix",
+        mergeable: "mergeable",
+        merge_state_status: "clean",
+        check_counts: { passing: 3, pending: 0, failing: 0, skipped: 0 },
+      },
+    }),
+    workspace("ws-idea", "Parked idea"),
+    workspace("ws-shelved", "Put away", { status: "archived" }),
+  ];
+  const SESSIONS = [
+    digest("ws-ask", { attention: approval }),
+    digest("ws-suite", {
+      lifecycle: "running",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+    }),
+    digest(null, {
+      session: "sess-slack",
+      title: "Triage the alert",
+      attention: approval,
+    }),
+  ];
+
+  async function renderReturning(
+    overrides: Partial<AppContextValue["client"]> = {},
+  ) {
+    const rendered = await renderHome(
+      app({
+        listCodeRepos: vi.fn(async () => [REPO]),
+        listCodeWorkspaces: vi.fn(async () => WORKSPACES),
+        ...overrides,
+      }),
+    );
+    await screen.findByRole("heading", { name: /^Repositories/ });
+    return rendered;
+  }
+
+  it("leads with needs, running work, ready pull requests, and recent work", async () => {
+    await renderReturning();
+    deliverSnapshot(SESSIONS);
+
+    const headings = screen
+      .getAllByRole("heading", { level: 2 })
+      .map((heading) => heading.textContent);
+    expect(headings).toEqual([
+      "Needs you2",
+      "Running1",
+      "Ready to merge1",
+      "Recent work1",
+      "Repositories1",
+    ]);
+    expect(
+      section(/^Needs you/).getByRole("button", {
+        name: /^Answer the approval · An approval is waiting · app/,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      section(/^Needs you/).getByRole("button", { name: /^Triage the alert/ }),
+    ).toBeInTheDocument();
+    expect(
+      section(/^Running/).getByRole("button", { name: /^Run the suite/ }),
+    ).toBeInTheDocument();
+    expect(
+      section(/^Ready to merge/).getByRole("button", {
+        name: /^Ship the fix · 3 checks passed · app · #41$/,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      section(/^Recent work/).getByRole("button", { name: /^Parked idea/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Put away")).not.toBeInTheDocument();
+  });
+
+  it("opens the workspace, the conversation, and the pull request in Delivery", async () => {
+    const { router } = await renderReturning();
+    deliverSnapshot(SESSIONS);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /^Answer the approval/ }),
+    );
+    expect(router.state.location.pathname).toBe("/code/w/ws-ask");
+
+    await act(() => router.navigate({ to: "/code" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^Triage the alert/ }),
+    );
+    expect(router.state.location.pathname).toBe("/code/s/sess-slack");
+
+    await act(() => router.navigate({ to: "/code" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^Ship the fix/ }),
+    );
+    expect(router.state.location.pathname).toBe("/code/delivery/pull-requests");
+    expect(router.state.location.search).toEqual({
+      repoHost: "github.com",
+      repoOwner: "acme",
+      repoName: "app",
+      pr: 41,
+    });
+  });
+
+  it("shows five items a section and the rest behind View all", async () => {
+    const many = Array.from({ length: 7 }, (_, index) =>
+      workspace(`ws-need-${index + 1}`, `Need ${index + 1}`),
+    );
+    await renderReturning({ listCodeWorkspaces: vi.fn(async () => many) });
+    deliverSnapshot(
+      many.map((item) => digest(item.id, { attention: approval })),
+    );
+
+    const needs = section(/^Needs you/);
+    expect(needs.getAllByRole("button", { name: /^Need \d/ })).toHaveLength(5);
+    const viewAll = needs.getByRole("button", {
+      name: "View all 7 in Needs you",
+    });
+    expect(viewAll).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(viewAll);
+    expect(needs.getAllByRole("button", { name: /^Need \d/ })).toHaveLength(7);
+    expect(
+      needs.getByRole("button", { name: "Show fewer in Needs you" }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("says nothing needs you only once the live snapshot has landed", async () => {
+    await renderReturning({
+      listCodeWorkspaces: vi.fn(async () => [
+        workspace("ws-idea", "Parked idea"),
+      ]),
+    });
+    expect(
+      screen.queryByText("Nothing needs you right now."),
+    ).not.toBeInTheDocument();
+
+    deliverSnapshot([]);
+    expect(screen.getByText("Nothing needs you right now.")).toBeVisible();
+  });
+
+  it("invites a first workspace when repositories have none", async () => {
+    await renderHome(app({ listCodeRepos: vi.fn(async () => [REPO]) }));
+    expect(
+      await screen.findByRole("heading", { name: /^Repositories/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("No workspaces yet")).toBeVisible();
+    expect(screen.getByRole("button", { name: "New workspace" })).toBeVisible();
+  });
+
+  it("keeps repository settings in the row menu, not a button per row", async () => {
+    await renderReturning({
+      getCodeRepo: vi.fn(() => new Promise<CodeRepoSnapshot>(() => {})),
+      getCodeRepoTrust: vi.fn(() => new Promise<never>(() => {})),
+    });
+    const repositories = section(/^Repositories/);
+    expect(
+      repositories.queryByRole("button", { name: "Settings" }),
+    ).not.toBeInTheDocument();
+
+    const row = repositories.getByRole("button", {
+      name: "New workspace on app",
+    });
+    fireEvent.contextMenu(row);
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: "Repository settings…" }),
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "Repository settings" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the same row menu from the keyboard", async () => {
+    await renderReturning();
+    const row = section(/^Repositories/).getByRole("button", {
+      name: "New workspace on app",
+    });
+    row.focus();
+    fireEvent.keyDown(row, { key: "F10", shiftKey: true });
+    expect(
+      await screen.findByRole("menuitem", { name: "Repository settings…" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Copy path" })).toBeVisible();
+  });
+
+  it("keeps the whole repository path and its tail intact for middle truncation", async () => {
+    const path =
+      "/Users/sam/src/brightwave/product-foundations/design-system-components";
+    await renderReturning({
+      listCodeRepos: vi.fn(async () => [{ ...REPO, root_path: path }]),
+    });
+    const shown = section(/^Repositories/).getByTitle(path);
+    // Every character is in the row; CSS clips the head and never the tail.
+    expect(shown).toHaveTextContent(path);
+    expect(shown.lastElementChild).toHaveTextContent(
+      /design-system-components$/,
+    );
   });
 });

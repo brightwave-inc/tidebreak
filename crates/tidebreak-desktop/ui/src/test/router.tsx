@@ -88,6 +88,11 @@ export async function renderWithRouter(
       panelSearchFrom(search),
     component: () => <>{ui}</>,
   });
+  const codeDeliveryPullRequestsRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/code/delivery/pull-requests",
+    component: () => <>{ui}</>,
+  });
 
   const router = createRouter({
     routeTree: rootRoute.addChildren([
@@ -99,6 +104,7 @@ export async function renderWithRouter(
       codeInboxRoute,
       codeSessionRoute,
       codeWorkspaceRoute,
+      codeDeliveryPullRequestsRoute,
       settingsRoute.addChildren([webSearchSettingsRoute, voiceSettingsRoute]),
     ]),
     history: createMemoryHistory({ initialEntries: [initialUrl] }),
