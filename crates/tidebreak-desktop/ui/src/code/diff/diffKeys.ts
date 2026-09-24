@@ -5,8 +5,8 @@
  * Next and previous file follow the review sites people already use: J and K
  * on GitHub, with ] and [ as GitLab spells them. W hides whitespace changes,
  * as it does on GitHub. They are single keys rather than chords because they
- * only act while focus is in the diff, never in a text field, so they cannot
- * swallow typing.
+ * only act while focus is in the diff, never in a text field or a dialog, so
+ * they cannot swallow typing.
  */
 
 export type DiffKeyId =
@@ -61,10 +61,21 @@ type DiffKeyEvent = Pick<
   "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "target"
 >;
 
-function isTyping(target: EventTarget | null): boolean {
+/**
+ * Whether a key belongs to something other than the diff: a field being
+ * typed in, editable content, or a dialog or menu open over the diff. React
+ * passes a portal's keys up to the diff that opened it, so a key pressed in
+ * the "Delete this comment?" dialog would otherwise flip whitespace.
+ */
+function isElsewhere(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   if (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return true;
-  return target.isContentEditable;
+  if (target.isContentEditable) return true;
+  return (
+    target.closest(
+      '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [contenteditable]:not([contenteditable="false"])',
+    ) !== null
+  );
 }
 
 /** The file-level action a key asks for, or null when it asks for none. */
@@ -74,7 +85,7 @@ export function diffFileKey(
   if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
     return null;
   }
-  if (isTyping(event.target)) return null;
+  if (isElsewhere(event.target)) return null;
   switch (event.key) {
     case "j":
     case "J":

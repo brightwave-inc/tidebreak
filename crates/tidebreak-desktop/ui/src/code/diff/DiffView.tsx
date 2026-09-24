@@ -100,13 +100,23 @@ export type DiffReview = {
   onRelocate?: (id: string, change: CommentRelocation) => void;
 };
 
+/**
+ * A control for one hunk's header row, such as Revert, or nothing. It is
+ * told how many of the hunk's changed lines the view is hiding because only
+ * their whitespace changed, since acting on the hunk acts on those too.
+ */
+export type HunkAction = (
+  index: number,
+  hunk: { hiddenWhitespace: number },
+) => ReactNode;
+
 export type DiffViewProps = {
   group: DiffFileGroup;
   layout: DiffLayout;
   ignoreWhitespace: boolean;
   id?: string;
   /** A control for hunk `index`'s header row, such as Revert, or nothing. */
-  hunkAction?: (index: number) => ReactNode;
+  hunkAction?: HunkAction;
   /** Line comments. Absent, the gutters are plain numbers. */
   review?: DiffReview;
   /** Offered when hiding whitespace left nothing to show. */
@@ -947,7 +957,7 @@ type ChunkProps = {
   end: number;
   syntax: FileSyntax | null;
   syntaxReady: boolean;
-  hunkAction?: (index: number) => ReactNode;
+  hunkAction?: HunkAction;
   commentable: boolean;
   selected: { start: number; end: number } | null;
   tabStop: { row: number; column: Column } | null;
@@ -1349,18 +1359,29 @@ function CodeCell({
 function HunkOrMeta({
   row,
   hunkAction,
+  hiddenWhitespace,
   gutterWidth,
 }: {
   row: DiffRow;
-  hunkAction?: (index: number) => ReactNode;
+  hunkAction?: HunkAction;
+  hiddenWhitespace: ReadonlyMap<number, number>;
   gutterWidth: string;
 }) {
-  const action = row.kind === "hunk" ? hunkAction?.(row.hunk) : undefined;
+  const action =
+    row.kind === "hunk"
+      ? hunkAction?.(row.hunk, {
+          hiddenWhitespace: hiddenWhitespace.get(row.hunk) ?? 0,
+        })
+      : undefined;
   return (
     <>
+      {/*
+        At least as wide as the gutters, and wider when the action needs it:
+        side by side there is one gutter per side, narrower than "Revert".
+      */}
       <span
         className="diff-gutter sticky left-0 z-[1] flex shrink-0 items-center justify-end self-stretch font-sans text-xs"
-        style={{ width: gutterWidth }}
+        style={{ minWidth: gutterWidth }}
         data-diff-gutter={action ? "action" : undefined}
       >
         {action}
@@ -1391,7 +1412,7 @@ const UnifiedLine = memo(function UnifiedLine({
   syntax: FileSyntax | null;
   /** Read only to redraw once more of the syntax is known. */
   syntaxVersion: number;
-  hunkAction?: (index: number) => ReactNode;
+  hunkAction?: HunkAction;
   commentable: boolean;
   selected: { start: number; end: number } | null;
   tabStop: { row: number; column: Column } | null;
@@ -1412,6 +1433,7 @@ const UnifiedLine = memo(function UnifiedLine({
         <HunkOrMeta
           row={row}
           hunkAction={hunkAction}
+          hiddenWhitespace={model.hiddenWhitespace}
           gutterWidth="calc(var(--diff-number) * 2)"
         />
       </div>
@@ -1461,7 +1483,7 @@ const SplitLine = memo(function SplitLine({
   syntax: FileSyntax | null;
   /** Read only to redraw once more of the syntax is known. */
   syntaxVersion: number;
-  hunkAction?: (index: number) => ReactNode;
+  hunkAction?: HunkAction;
   commentable: boolean;
   selected: { start: number; end: number } | null;
   tabStop: { row: number; column: Column } | null;
@@ -1481,6 +1503,7 @@ const SplitLine = memo(function SplitLine({
         <HunkOrMeta
           row={row}
           hunkAction={hunkAction}
+          hiddenWhitespace={model.hiddenWhitespace}
           gutterWidth="var(--diff-number)"
         />
       </div>

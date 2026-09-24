@@ -60,6 +60,11 @@ export type RevertRequest = {
   /** What the Changes list knows about the file, when it is known. */
   kind?: FileChangeKind;
   previousPath?: string;
+  /**
+   * Lines of a hunk the diff hides because only their whitespace changed.
+   * Reverting the hunk puts them back too, so the question says so.
+   */
+  hiddenWhitespaceLines?: number;
 };
 
 export function fileName(path: string): string {
@@ -249,6 +254,7 @@ export function revertHunkConfirmation(
         ? `Line ${hunk.newStart}`
         : `Lines ${hunk.newStart}–${hunk.newStart + hunk.newCount - 1}`
       : `The lines removed near line ${Math.max(hunk.newStart, 1)}`;
+  const hidden = request.hiddenWhitespaceLines ?? 0;
   return {
     title: "Revert this change?",
     description: (
@@ -256,8 +262,14 @@ export function revertHunkConfirmation(
         {where} of <FilePath path={request.path} />{" "}
         {hunk.newCount === 0 ? "come back" : "go back"} to how{" "}
         {hunk.newCount === 1 ? "it was" : "they were"}{" "}
-        {request.turnId ? "before this turn" : "on the base branch"}. Nothing
-        else in the file changes. This cannot be undone.
+        {request.turnId ? "before this turn" : "on the base branch"}.{" "}
+        {hidden > 0 && (
+          <>
+            That includes {hidden} {hidden === 1 ? "line" : "lines"} whose only
+            change is whitespace, which the diff is hiding.{" "}
+          </>
+        )}
+        Nothing else in the file changes. This cannot be undone.
       </>
     ),
     confirmLabel: "Revert change",

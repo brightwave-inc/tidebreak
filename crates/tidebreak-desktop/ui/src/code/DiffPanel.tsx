@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 import { changedFileOrder } from "./DiffOverview";
 import { diffFileKey, stepDiffFile } from "./diff/diffKeys";
 import { useDiffPreferences } from "./diff/diffPreferences";
-import { DiffView, type DiffReview } from "./diff/DiffView";
+import { DiffView, type DiffReview, type HunkAction } from "./diff/DiffView";
 import { DiffViewOptions } from "./diff/DiffViewOptions";
 import { usePendingReviewStore } from "./diff/pendingReview";
 import { useWorkspaceDiffReview } from "./diff/useWorkspaceDiffReview";
@@ -168,6 +168,9 @@ export function DiffPanel({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    // A dialog this panel opened is portaled elsewhere in the page, but its
+    // keys still bubble here through React.
+    if (!event.currentTarget.contains(event.target as Node)) return;
     const action = diffFileKey(event.nativeEvent);
     if (!action) return;
     event.preventDefault();
@@ -609,8 +612,8 @@ function FileDiff({
   const fileReverted =
     reverts?.turnId !== undefined &&
     reverts.reverted.has(revertKey(group.path));
-  const hunkAction = useCallback(
-    (index: number) => {
+  const hunkAction = useCallback<HunkAction>(
+    (index, { hiddenWhitespace }) => {
       const hunk = hunks?.get(index);
       if (!hunk || !reverts) return null;
       return (
@@ -619,6 +622,7 @@ function FileDiff({
           hunk={hunk}
           reverts={reverts}
           fileReverted={fileReverted}
+          hiddenWhitespace={hiddenWhitespace}
         />
       );
     },
@@ -642,11 +646,14 @@ function HunkRevert({
   hunk,
   reverts,
   fileReverted,
+  hiddenWhitespace,
 }: {
   group: DiffFileGroup;
   hunk: DiffHunk;
   reverts: RevertTracker;
   fileReverted: boolean;
+  /** Lines of the hunk the view hides because only their whitespace changed. */
+  hiddenWhitespace: number;
 }) {
   const path = group.path;
   const key = revertKey(path, hunk.index);
@@ -665,8 +672,17 @@ function HunkRevert({
       unavailableReason={reverts.actions.unavailableReason}
       onClick={() =>
         reverts.run(key, () =>
+          // The revert sends the hunk's exact text, hidden lines and all, so
+          // the question names what hiding whitespace kept out of sight.
           reverts.actions.onRevertHunk(
-            { path, turnId: reverts.turnId, ...fileChangeOf(group) },
+            {
+              path,
+              turnId: reverts.turnId,
+              ...fileChangeOf(group),
+              ...(hiddenWhitespace > 0
+                ? { hiddenWhitespaceLines: hiddenWhitespace }
+                : {}),
+            },
             hunk,
           ),
         )

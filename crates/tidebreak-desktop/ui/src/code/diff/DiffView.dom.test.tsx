@@ -494,6 +494,32 @@ describe("keys", () => {
     );
   });
 
+  it("leaves keys pressed in the delete dialog to the dialog", async () => {
+    const user = userEvent.setup();
+    await renderPanel();
+    await user.click(screen.getByRole("button", { name: "Comment on line 3" }));
+    await user.type(
+      await screen.findByRole("textbox", { name: "Comment on line 3" }),
+      "Drop this.",
+    );
+    await user.click(screen.getByRole("button", { name: "Add comment" }));
+    await user.click(
+      screen.getByRole("button", { name: "Delete the comment on line 3" }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+    cancel.focus();
+    await user.keyboard("wjk][[");
+    // The dialog hides the page behind it from the accessibility tree.
+    expect(
+      screen.getByRole("button", {
+        name: "Hide whitespace changes",
+        hidden: true,
+      }),
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(cancel).toHaveFocus();
+  });
+
   it("hides whitespace changes with W, and leaves typing alone", async () => {
     const user = userEvent.setup();
     await renderPanel();
