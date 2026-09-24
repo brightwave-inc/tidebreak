@@ -61,7 +61,7 @@ const DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES: usize = 20;
 /// is a different tier's protocol and leaves Daytona's toolbox unable to run
 /// commands. A fresh name forces every account to re-register once with the
 /// keepalive entrypoint rather than keep serving a broken snapshot.
-const DOCUMENTS_SNAPSHOT: &str = "tidebreak-documents-main-20260924-3253a4d-r1518-exec";
+const DOCUMENTS_SNAPSHOT: &str = "tidebreak-documents-main-20260924-ffcd65e-r1537-exec";
 /// PID 1 for sandboxes built from the documents image.
 ///
 /// The published image's `ENTRYPOINT` is `tidebreak-sandbox-agent` — the
