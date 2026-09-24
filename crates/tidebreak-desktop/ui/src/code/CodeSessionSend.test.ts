@@ -13,7 +13,7 @@ import {
 } from "./CodeSessionSend";
 import { userItemId } from "./CodeSessionReducer";
 import { usePendingReviewStore } from "./diff/pendingReview";
-import type { ReviewComment } from "./diff/reviewComments";
+import { reviewBlockOf, type ReviewComment } from "./diff/reviewComments";
 
 const uploadImageAttachment = vi.hoisted(() => vi.fn());
 
@@ -456,7 +456,55 @@ describe("sendCodeComposer with diff comments", () => {
   afterEach(() => {
     useComposerDrafts.setState({ drafts: {}, attachments: {} });
     useCodeComposerStatus.setState({ byKey: {} });
-    usePendingReviewStore.setState({ byWorkspace: {}, sending: {} });
+    usePendingReviewStore.setState({
+      byWorkspace: {},
+      sending: {},
+      queued: {},
+    });
+  });
+
+  it("keeps a queued message's comments whole, to give back if it is deleted", async () => {
+    const whole: ReviewComment = {
+      ...comment("c1", "Why double it?"),
+      context: { before: ["const MIN = 1;"], after: ["export {};"] },
+    };
+    usePendingReviewStore.getState().add(WORKSPACE, whole);
+    let sentMessage = "";
+    const sent = await sendCodeComposer({
+      client,
+      key: "sess-1",
+      session: "sess-1",
+      reviewWorkspaceId: WORKSPACE,
+      send: async (_session, message) => {
+        sentMessage = message;
+        return { kind: "queued", queued: { id: "q-1" } };
+      },
+    });
+    expect(sent).toBe(true);
+    expect(
+      usePendingReviewStore.getState().byWorkspace[WORKSPACE],
+    ).toBeUndefined();
+
+    usePendingReviewStore
+      .getState()
+      .restoreQueued(WORKSPACE, reviewBlockOf(sentMessage)!, () => []);
+    expect(usePendingReviewStore.getState().byWorkspace[WORKSPACE]).toEqual([
+      whole,
+    ]);
+  });
+
+  it("keeps nothing for a message that started its turn at once", async () => {
+    usePendingReviewStore
+      .getState()
+      .add(WORKSPACE, comment("c1", "Why double it?"));
+    await sendCodeComposer({
+      client,
+      key: "sess-1",
+      session: "sess-1",
+      reviewWorkspaceId: WORKSPACE,
+      send: async () => ({ kind: "ran", turn: {} }),
+    });
+    expect(usePendingReviewStore.getState().queued[WORKSPACE]).toBeUndefined();
   });
 
   it("batches every pending comment into the message and clears them once accepted", async () => {

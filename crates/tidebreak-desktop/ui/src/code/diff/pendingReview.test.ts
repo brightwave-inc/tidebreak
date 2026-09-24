@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   commentsReadyToSend,
   createPendingReviewStore,
+  MAX_QUEUED_REVIEWS,
   readStoredReview,
   reviewSummary,
 } from "./pendingReview";
@@ -132,6 +133,61 @@ describe("pending review", () => {
     expect(store.getState().byWorkspace["ws-1"]?.[0]).toMatchObject({
       outdated: true,
       lines: [{ newNo: 4, text: "const MAX = 20;" }],
+    });
+  });
+
+  describe("comments a queued message carries", () => {
+    const whole: ReviewComment = {
+      ...comment("c-whole"),
+      turnId: "turn-7",
+      lines: [
+        {
+          kind: "context",
+          oldNo: 4,
+          newNo: 4,
+          text: "  layout();",
+          oldText: "\tlayout();",
+        },
+      ],
+      context: { before: ["open();"], after: ["close();"] },
+    };
+
+    it("puts them back whole for the message's block, after a reload too", () => {
+      const storage = memoryStorage();
+      const before = createPendingReviewStore(storage);
+      before.getState().keepQueued("ws-1", "<block one>", [whole]);
+
+      const after = createPendingReviewStore(storage);
+      const fromBlock = () => [comment("from-text")];
+      after.getState().restoreQueued("ws-1", "<block one>", fromBlock);
+      expect(after.getState().byWorkspace["ws-1"]).toEqual([whole]);
+      // Given back once: the message is gone, so what was kept for it goes.
+      expect(after.getState().queued["ws-1"]).toBeUndefined();
+      expect(
+        createPendingReviewStore(storage).getState().queued["ws-1"],
+      ).toBeUndefined();
+    });
+
+    it("reads a block it kept nothing for back from the block", () => {
+      const store = createPendingReviewStore(memoryStorage());
+      store.getState().keepQueued("ws-1", "<block one>", [whole]);
+      store
+        .getState()
+        .restoreQueued("ws-1", "<another block>", () => [comment("c-text")]);
+      expect(store.getState().byWorkspace["ws-1"]).toEqual([comment("c-text")]);
+      expect(store.getState().queued["ws-1"]).toHaveLength(1);
+    });
+
+    it("keeps the newest messages' comments, and no more", () => {
+      const store = createPendingReviewStore(memoryStorage());
+      for (let index = 0; index <= MAX_QUEUED_REVIEWS; index += 1) {
+        store
+          .getState()
+          .keepQueued("ws-1", `<block ${index}>`, [comment(`c${index}`)]);
+      }
+      expect(store.getState().queued["ws-1"]).toHaveLength(MAX_QUEUED_REVIEWS);
+      store.getState().restoreQueued("ws-1", "<block 0>", () => []);
+      expect(store.getState().byWorkspace["ws-1"]).toBeUndefined();
     });
   });
 

@@ -124,10 +124,11 @@ function queuedCodeMessage(
       },
       restore: () => {
         if (!review) return;
+        // The comments as they were claimed, kept when the message queued;
+        // only a message sent from elsewhere falls back to its block's text.
         usePendingReviewStore
           .getState()
-          .restore(
-            review.workspaceId,
+          .restoreQueued(review.workspaceId, block, () =>
             reviewCommentsFromSent(comments, { turnFor: review.turnFor }),
           );
       },

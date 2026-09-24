@@ -15,7 +15,7 @@ import { chatQueueApi, codeQueueApi, QueueTray } from "./QueueTray";
 
 afterEach(() => {
   cleanup();
-  usePendingReviewStore.setState({ byWorkspace: {}, sending: {} });
+  usePendingReviewStore.setState({ byWorkspace: {}, sending: {}, queued: {} });
 });
 
 const first: QueuedTurn = {
@@ -180,6 +180,60 @@ describe("QueueTray", () => {
           { message: `Run them twice\n\n${reviewBlockOf(message)}` },
         ),
       );
+    });
+
+    it("gives back every comment whole, as it was when the message went", async () => {
+      // A comment on a whitespace pair, with the code around it, written on
+      // a turn of another conversation: the block names that turn only as
+      // "an earlier turn", and keeps neither the pair's old text nor the
+      // code around the lines.
+      const whole: ReviewComment = {
+        id: "c-pair",
+        author: { kind: "person" },
+        path: "src/layout.ts",
+        turnId: "turn-of-another-conversation",
+        lines: [
+          {
+            kind: "context",
+            oldNo: 41,
+            newNo: 41,
+            text: "  layout();",
+            oldText: "\tlayout();",
+          },
+        ],
+        context: { before: ["open();"], after: ["close();"] },
+        body: "Tabs here, please.",
+        createdAt: "2026-09-24T09:00:00.000Z",
+      };
+      const message = messageWithReviewComments("Then run the tests.", [
+        whole,
+        review,
+      ]);
+      expect(message).toContain('diff="an earlier turn"');
+      usePendingReviewStore
+        .getState()
+        .keepQueued("ws-1", reviewBlockOf(message)!, [whole, review]);
+      const client = queued(message);
+      render(
+        <QueueTray
+          queue={codeQueueApi(client, "sess-1", {
+            workspaceId: "ws-1",
+            turnFor: () => null,
+          })}
+          active
+          onStop={vi.fn(async () => undefined)}
+        />,
+      );
+      await userEvent.click(
+        await screen.findByRole("button", { name: "Delete queued message" }),
+      );
+      await waitFor(() =>
+        expect(usePendingReviewStore.getState().byWorkspace["ws-1"]).toEqual([
+          whole,
+          review,
+        ]),
+      );
+      expect(usePendingReviewStore.getState().queued["ws-1"]).toBeUndefined();
     });
 
     it("gives the comments back to the review when the message is deleted", async () => {

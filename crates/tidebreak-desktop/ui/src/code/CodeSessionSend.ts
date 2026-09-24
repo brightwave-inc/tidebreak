@@ -26,6 +26,7 @@ import {
 } from "./diff/pendingReview";
 import {
   messageWithReviewComments,
+  reviewBlockOf,
   type TurnNamer,
 } from "./diff/reviewComments";
 import { messageWithWorkspaceFiles } from "./fork";
@@ -354,8 +355,9 @@ export async function sendCodeComposer(input: {
   state.setDraft(key, "");
   state.setPastedTexts(key, []);
   state.setImages(key, []);
+  let outcome: unknown;
   try {
-    await input.send(
+    outcome = await input.send(
       sessionId,
       message,
       attachments.length > 0 ? attachments : undefined,
@@ -378,9 +380,24 @@ export async function sendCodeComposer(input: {
     }
   }
   settleReview(true);
+  const block = review.length > 0 ? reviewBlockOf(message) : null;
+  if (reviewWorkspace && block && !ranAtOnce(outcome)) {
+    // A queued message can be deleted before it runs, and its comments go
+    // back to the review whole, not as the block's text reads them.
+    usePendingReviewStore.getState().keepQueued(reviewWorkspace, block, review);
+  }
   releaseDetachedBacking(backing);
   setSending(key, false, null);
   return true;
+}
+
+/** Whether a send's answer says its message started a turn, not queued. */
+function ranAtOnce(outcome: unknown): boolean {
+  return (
+    typeof outcome === "object" &&
+    outcome !== null &&
+    (outcome as { kind?: unknown }).kind === "ran"
+  );
 }
 
 /**
@@ -397,7 +414,6 @@ function answerMayBeLost(error: unknown): boolean {
 /** Statuses a gateway answers with when it stops waiting for the server. */
 const GATEWAY_STATUSES = new Set([502, 503, 504]);
 
-/** The turns a session's open transcript already shows. */
 /**
  * How a review block names a turn's diff to the conversation it goes to:
  * "turn 3" for one of its own turns, null for another conversation's.
@@ -422,6 +438,7 @@ export function turnIdNamed(sessionId: string, name: string): string | null {
   return null;
 }
 
+/** The turns a session's open transcript already shows. */
 function knownTurnIds(sessionId: string): ReadonlySet<string> {
   const state = peekCodeSession(sessionId)?.store.getState();
   const known = new Set<string>(state?.turnOrdinals.keys() ?? []);

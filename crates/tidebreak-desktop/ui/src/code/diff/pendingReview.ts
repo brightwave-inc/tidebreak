@@ -7,6 +7,7 @@ import type {
   ReviewComment,
   ReviewCommentLine,
 } from "./reviewComments";
+import { textKey } from "./textKey";
 
 /**
  * The comments waiting to go with a workspace's next message.
@@ -20,6 +21,20 @@ import type {
  */
 
 const STORAGE_KEY = "tidebreak.code-pending-review.v1";
+/**
+ * Comments kept for queued messages, apart from the review: a large one that
+ * fills storage must never stop the review itself from being saved.
+ */
+const QUEUED_STORAGE_KEY = "tidebreak.code-queued-review.v1";
+/** Queued messages whose comments a workspace keeps, newest first. */
+export const MAX_QUEUED_REVIEWS = 10;
+
+/** The comments one queued message carries, kept whole. */
+type QueuedReview = {
+  /** `textKey` of the review block the message carries. */
+  readonly block: string;
+  readonly comments: readonly ReviewComment[];
+};
 
 /** Where a comment's lines are now, as the diff showing them found them. */
 export type CommentRelocation = {
@@ -33,12 +48,39 @@ type PendingReviewState = {
   byWorkspace: Readonly<Record<string, readonly ReviewComment[]>>;
   /** Comment ids riding a send that has not answered yet. Never stored. */
   sending: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Comments that went with a message the server queued, kept whole. The
+   * block the message carries names each comment's lines, but not the code
+   * around them, the old text of a whitespace pair, or another conversation's
+   * turn; deleting the message puts back these instead.
+   */
+  queued: Readonly<Record<string, readonly QueuedReview[]>>;
   add: (workspaceId: string, comment: ReviewComment) => void;
   edit: (workspaceId: string, id: string, body: string) => void;
   remove: (workspaceId: string, id: string) => void;
   clear: (workspaceId: string) => void;
-  /** Put comments back in the review, such as a deleted queued message's. */
+  /** Put comments back in the review. */
   restore: (workspaceId: string, comments: readonly ReviewComment[]) => void;
+  /**
+   * Keep the comments a queued message carries, found again by `block`, the
+   * review block in its text. A queued message edited in the tray keeps its
+   * block as sent, so the block finds them however the text changed.
+   */
+  keepQueued: (
+    workspaceId: string,
+    block: string,
+    comments: readonly ReviewComment[],
+  ) => void;
+  /**
+   * Put a deleted queued message's comments back in the review: the ones
+   * kept for its block, or, when none were, `fromBlock`'s, read back from
+   * the block itself.
+   */
+  restoreQueued: (
+    workspaceId: string,
+    block: string,
+    fromBlock: () => readonly ReviewComment[],
+  ) => void;
   /**
    * Record where a comment's lines are now, or that they changed. Nothing
    * is written when that is what the review already says.
@@ -139,18 +181,49 @@ export function readStoredReview(
   }
 }
 
-function writeStoredReview(
+/** The queued messages' comments storage holds, keeping what reads correctly. */
+export function readStoredQueued(
+  storage: Pick<Storage, "getItem"> | null,
+): Record<string, QueuedReview[]> {
+  if (!storage) return {};
+  try {
+    const raw = storage.getItem(QUEUED_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed) || !isRecord(parsed.workspaces)) return {};
+    const out: Record<string, QueuedReview[]> = {};
+    for (const [workspaceId, kept] of Object.entries(parsed.workspaces)) {
+      if (!Array.isArray(kept)) continue;
+      const valid = kept.flatMap((entry): QueuedReview[] =>
+        isRecord(entry) &&
+        typeof entry.block === "string" &&
+        Array.isArray(entry.comments) &&
+        entry.comments.every(isComment)
+          ? [{ block: entry.block, comments: entry.comments }]
+          : [],
+      );
+      if (valid.length > 0) {
+        out[workspaceId] = valid.slice(0, MAX_QUEUED_REVIEWS);
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writeStored(
   storage: Pick<Storage, "setItem" | "removeItem"> | null,
-  byWorkspace: Readonly<Record<string, readonly ReviewComment[]>>,
+  key: string,
+  byWorkspace: Readonly<Record<string, readonly unknown[]>>,
 ): void {
   if (!storage) return;
   try {
     const workspaces = Object.fromEntries(
-      Object.entries(byWorkspace).filter(([, comments]) => comments.length > 0),
+      Object.entries(byWorkspace).filter(([, items]) => items.length > 0),
     );
-    if (Object.keys(workspaces).length === 0) storage.removeItem(STORAGE_KEY);
-    else
-      storage.setItem(STORAGE_KEY, JSON.stringify({ version: 1, workspaces }));
+    if (Object.keys(workspaces).length === 0) storage.removeItem(key);
+    else storage.setItem(key, JSON.stringify({ version: 1, workspaces }));
   } catch {
     // Storage full or blocked: the review still lives for this session.
   }
@@ -175,6 +248,16 @@ function without(
   if (left.length > 0) next[workspaceId] = left;
   else delete next[workspaceId];
   return next;
+}
+
+/** `comments` with `restored` after them, less any it already holds. */
+function withRestored(
+  comments: readonly ReviewComment[],
+  restored: readonly ReviewComment[],
+): readonly ReviewComment[] {
+  const known = new Set(comments.map((comment) => comment.id));
+  const fresh = restored.filter((comment) => !known.has(comment.id));
+  return fresh.length > 0 ? [...comments, ...fresh] : comments;
 }
 
 function sameLines(
@@ -215,6 +298,7 @@ export function createPendingReviewStore(
     return {
       byWorkspace: readStoredReview(storage),
       sending: {},
+      queued: readStoredQueued(storage),
       add: (workspaceId, comment) =>
         update(workspaceId, (comments) => [...comments, comment]),
       edit: (workspaceId, id, body) =>
@@ -239,10 +323,37 @@ export function createPendingReviewStore(
           return { byWorkspace: next };
         }),
       restore: (workspaceId, restored) =>
-        update(workspaceId, (comments) => {
-          const known = new Set(comments.map((comment) => comment.id));
-          const fresh = restored.filter((comment) => !known.has(comment.id));
-          return fresh.length > 0 ? [...comments, ...fresh] : comments;
+        update(workspaceId, (comments) => withRestored(comments, restored)),
+      keepQueued: (workspaceId, block, comments) => {
+        if (comments.length === 0) return;
+        set((state) => ({
+          queued: {
+            ...state.queued,
+            [workspaceId]: [
+              { block: textKey([block]), comments },
+              ...(state.queued[workspaceId] ?? []),
+            ].slice(0, MAX_QUEUED_REVIEWS),
+          },
+        }));
+      },
+      restoreQueued: (workspaceId, block, fromBlock) =>
+        set((state) => {
+          const key = textKey([block]);
+          const kept = state.queued[workspaceId] ?? [];
+          const at = kept.findIndex((entry) => entry.block === key);
+          const restored = at >= 0 ? kept[at]!.comments : fromBlock();
+          const current = state.byWorkspace[workspaceId] ?? [];
+          const comments = withRestored(current, restored);
+          const byWorkspace =
+            comments === current
+              ? state.byWorkspace
+              : { ...state.byWorkspace, [workspaceId]: comments };
+          if (at < 0) return { byWorkspace };
+          const left = kept.filter((_, index) => index !== at);
+          const queued = { ...state.queued };
+          if (left.length > 0) queued[workspaceId] = left;
+          else delete queued[workspaceId];
+          return { byWorkspace, queued };
         }),
       relocate: (workspaceId, id, change) =>
         update(workspaceId, (comments) => {
@@ -315,10 +426,16 @@ export function createPendingReviewStore(
     };
   });
   let written = store.getState().byWorkspace;
+  let writtenQueued = store.getState().queued;
   store.subscribe((state) => {
-    if (state.byWorkspace === written) return;
-    written = state.byWorkspace;
-    writeStoredReview(storage, state.byWorkspace);
+    if (state.byWorkspace !== written) {
+      written = state.byWorkspace;
+      writeStored(storage, STORAGE_KEY, state.byWorkspace);
+    }
+    if (state.queued !== writtenQueued) {
+      writtenQueued = state.queued;
+      writeStored(storage, QUEUED_STORAGE_KEY, state.queued);
+    }
   });
   return store;
 }

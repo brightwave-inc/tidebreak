@@ -368,9 +368,13 @@ function spanStart(value: string | null): number | null {
 }
 
 /**
- * Pending comments again, from the block a message carried: what a queued
- * message gives back when it is deleted before it runs. The block keeps the
- * quote and the spans, so the lines are numbered from where the spans start.
+ * Pending comments again, read back from the block a message carried. A
+ * deleted queued message gives back the comments kept whole when it queued;
+ * this is for one nothing was kept for, such as a message queued on another
+ * device. The block keeps the quote and the spans, so the lines are numbered
+ * from where the spans start. It keeps neither the code around the lines nor
+ * a whitespace pair's old text, and a turn the conversation does not know
+ * comes back as the working tree, where its lines usually still are.
  */
 export function reviewCommentsFromSent(
   sent: readonly SentReviewComment[],
