@@ -366,6 +366,17 @@ type MessageListProps = {
   turnActions?: TurnActions;
   /** Where this conversation was branched from, when it is a branch. */
   branchOrigin?: BranchOrigin;
+  /**
+   * A message a search is pointing at. When the window of turns on screen
+   * starts after it, the window reaches back to the turn that holds it, so
+   * the message renders and can be scrolled to.
+   */
+  revealMessageId?: string | null;
+  /**
+   * A note that closes the transcript, such as the way back from an earlier
+   * stretch of history a search opened.
+   */
+  trailingNotice?: ReactNode;
 };
 
 /** Where a branch came from, as its transcript shows it. */
@@ -477,6 +488,8 @@ export function MessageList({
   latestSideEffects = null,
   turnActions,
   branchOrigin,
+  revealMessageId = null,
+  trailingNotice,
 }: MessageListProps) {
   // Stable identity between renders so memoized rows only re-render when the
   // approval state itself changes, not on every streamed token.
@@ -597,6 +610,16 @@ export function MessageList({
         messages.findIndex((message) => message.id === start.id),
       )
     : 0;
+  // A search pointing above the window pulls the window back to the turn
+  // that holds its message. Only ever further back, like "Show earlier".
+  if (revealMessageId !== null && startIndex > 0) {
+    const target = messages.findIndex(
+      (message) => message.id === revealMessageId,
+    );
+    if (target >= 0 && target < startIndex) {
+      setWindowStart({ id: turnStartAtOrBefore(messages, target) });
+    }
+  }
   const visibleMessages = useMemo(() => {
     const windowed = startIndex > 0 ? messages.slice(startIndex) : messages;
     const shown = withSelectedVersions(
@@ -842,6 +865,7 @@ export function MessageList({
         )}
         {turns}
         {!pin && trailing}
+        {trailingNotice}
       </div>
     </div>
   );
@@ -871,6 +895,22 @@ export function turnWindowStart(
     if (message?.role !== "user") continue;
     seen += 1;
     if (seen === turns) return index > 0 ? message.id : null;
+  }
+  return null;
+}
+
+/**
+ * The message that opens the turn holding `index`, as a window start: the
+ * nearest user message at or before it, or null when that is the first
+ * message, or there is none.
+ */
+export function turnStartAtOrBefore(
+  messages: readonly ChatMessage[],
+  index: number,
+): string | null {
+  for (let at = index; at >= 0; at -= 1) {
+    const message = messages[at];
+    if (message?.role === "user") return at > 0 ? message.id : null;
   }
   return null;
 }
@@ -1904,7 +1944,11 @@ function MessageBubbleImpl({
         : null;
     return (
       <MessageCitationsProvider value={citations}>
-        <article className="message message-assistant" aria-label="Assistant">
+        <article
+          className="message message-assistant"
+          aria-label="Assistant"
+          data-message-id={message.id}
+        >
           {reasoning && (
             <ThinkingAccordion
               text={reasoning}

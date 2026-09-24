@@ -1049,6 +1049,7 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::set_attention),
         )
         .route("/sessions/{id}/events", get(routes::code::session_events))
+        .route("/sessions/{id}/journal", get(routes::code::session_journal))
         .route(
             "/sessions/{id}/access",
             get(routes::code::list_session_access).post(routes::code::add_session_access),

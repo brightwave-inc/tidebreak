@@ -1,15 +1,21 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ApiClient } from "@/api/client";
 import type {
   CodeApprovalSnapshot,
   CodeApprovalDecision,
   CodeSessionSnapshot,
+  SequencedCodeEventFrame,
 } from "@/api/types";
+import { useTranscriptRevealStore } from "@/search/transcriptReveal";
 import { codeSession } from "@/stories/fixtures";
 import { useCodeCatalogStore } from "../CodeCatalogStore";
-import { resetCodeSessionRegistry } from "../CodeSessionRegistry";
+import {
+  peekCodeSession,
+  resetCodeSessionRegistry,
+} from "../CodeSessionRegistry";
+import { markCodeSessionHydrated } from "../CodeSessionReducer";
 import { CodeSessionPane } from "./CodeSessionPane";
 
 const navigate = vi.hoisted(() => vi.fn());
@@ -40,6 +46,7 @@ const transcript = vi.hoisted(() => ({
     approvalError?: string;
     approvalErrorId?: string | null;
     decidingId?: string | null;
+    trailingNotice?: unknown;
   },
 }));
 vi.mock("../CodeTranscript", () => ({
@@ -63,7 +70,7 @@ vi.mock("@/useTranscriptFollow", () => ({
   }),
 }));
 
-function setup(session: CodeSessionSnapshot) {
+function setup(session: CodeSessionSnapshot, more: Partial<ApiClient> = {}) {
   const submitCodeTurn = vi.fn(async () => ({ kind: "queued" }));
   const decideCodeApproval = vi.fn(async () => ({}) as CodeApprovalSnapshot);
   const client = {
@@ -76,6 +83,7 @@ function setup(session: CodeSessionSnapshot) {
       addEventListener() {},
       removeEventListener() {},
     }),
+    ...more,
   } as unknown as ApiClient;
   const props = {
     session,
@@ -225,4 +233,46 @@ it("opens a child session from the parent tree in one click", async () => {
     params: { workspaceId: "ws-child" },
     search: { task: "child-session" },
   });
+});
+
+it("leaves an earlier stretch a search opened when you send", async () => {
+  const listCodeJournal = vi.fn(
+    async (): Promise<SequencedCodeEventFrame[]> => [
+      {
+        seq: 1,
+        event: { type: "turn_started", turn_id: "t1" },
+        replayed: true,
+      },
+      {
+        seq: 2,
+        event: { type: "assistant_message", text: "The harbour dues stay." },
+        replayed: true,
+      },
+    ],
+  );
+  setup(
+    { ...codeSession, lifecycle: "idle", is_owner: true, access: "contribute" },
+    { listCodeJournal },
+  );
+  // The socket's replay settles the transcript; this stub socket sends none.
+  act(() => {
+    peekCodeSession(codeSession.id)
+      ?.store.getState()
+      .update(markCodeSessionHydrated);
+  });
+  // A match on an event the live transcript does not hold opens the stretch
+  // of the journal around it.
+  act(() => {
+    useTranscriptRevealStore
+      .getState()
+      .reveal({ kind: "code", sessionId: codeSession.id, eventSeq: 2 }, [
+        "harbour",
+      ]);
+  });
+  await waitFor(() => expect(transcript.props?.trailingNotice).toBeTruthy());
+
+  await act(async () => {
+    await composer.props?.onSend("continue");
+  });
+  expect(transcript.props?.trailingNotice).toBeUndefined();
 });

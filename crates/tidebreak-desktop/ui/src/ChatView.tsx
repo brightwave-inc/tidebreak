@@ -91,6 +91,10 @@ import {
   transcriptNavigationEntries,
 } from "./TranscriptNavigation";
 import { messageWithPastedText } from "./PastedText";
+import { EarlierHistoryNotice } from "./search/EarlierHistoryNotice";
+import { TranscriptFindBar } from "./search/TranscriptFindBar";
+import { TranscriptFindOverlay } from "./search/TranscriptFindOverlay";
+import { useChatTranscriptSearch } from "./search/useChatTranscriptSearch";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -485,6 +489,18 @@ export function ChatView({
   // a freshly loaded history reads normally, then the just-sent turn is held tall
   // enough to land near the top of the viewport.
   const [pinLastTurn, setPinLastTurn] = useState(false);
+  // Find in this conversation, and the palette's jumps into it. A message
+  // on a page the transcript does not hold loads with that one page.
+  const transcriptSearch = useChatTranscriptSearch({
+    client,
+    chatId: chat.id,
+    memoryIncognito: chat.memory_incognito,
+    hydrated,
+    scrollElement,
+    disarmFollow,
+    beginProgrammaticScroll,
+    endProgrammaticScroll,
+  });
 
   // A conversation starts live at its tail. Streaming growth itself is handled
   // only by the content ResizeObserver in the follow hook; reacting to every
@@ -620,6 +636,7 @@ export function ChatView({
   );
 
   const jumpToLatest = useCallback(() => {
+    transcriptSearch.leaveHistory();
     if (anchoredMessageId) {
       void navigate({
         to: "/c/$chatId",
@@ -632,10 +649,19 @@ export function ChatView({
       });
     }
     armFollow(followScrollBehavior(false));
-  }, [anchoredMessageId, armFollow, chat.id, navigate]);
+  }, [
+    anchoredMessageId,
+    armFollow,
+    chat.id,
+    navigate,
+    transcriptSearch.leaveHistory,
+  ]);
 
   const handleSend = useCallback(async () => {
     setPinLastTurn(true);
+    // A turn lands at the end of the conversation, so a reader reading an
+    // earlier stretch goes back to it.
+    transcriptSearch.leaveHistory();
     if (anchoredMessageId) {
       await navigate({
         to: "/c/$chatId",
@@ -657,7 +683,58 @@ export function ChatView({
     navigate,
     onSend,
     requestSmoothFollow,
+    transcriptSearch.leaveHistory,
   ]);
+
+  const historyView = transcriptSearch.historyView;
+  const findBar = transcriptSearch.find;
+  const transcriptProps: ChatTranscriptProps = {
+    chatId: chat.id,
+    folderAccessRequests: folderAccess.requests,
+    outputWritebackRequests: outputWritebacks.requests,
+    pendingPromptCount,
+    nativeHost,
+    nativeBusy: folderAccess.resolving.size > 0,
+    resolvingFolderCalls: folderAccess.resolving,
+    folderAccessErrors: folderAccess.errors,
+    resolvingOutputWritebackCalls: outputWritebacks.resolving,
+    outputWritebackErrors: outputWritebacks.errors,
+    decidingApprovalCalls: approvals.deciding,
+    approvalErrors: approvals.errors,
+    grantScope: chat.project_id ? "project" : "chat",
+    backgroundAgentRuns: agentRuns.runs,
+    backgroundAgentRunsLoading: agentRuns.loading,
+    backgroundAgentRunsError: agentRuns.error,
+    onRetryBackgroundAgentRuns: agentRuns.refresh,
+    onCancelBackgroundAgentRun: agentRuns.cancel,
+    onLoadBackgroundAgentActivity: agentRuns.loadActivity,
+    onLoadBackgroundAgentTaskPlan: agentRuns.loadTaskPlan,
+    onLoadBackgroundAgentProgress: agentRuns.loadProgress,
+    onOpenBackgroundAgent: onOpenAgentPanel,
+    onOpenOutput,
+    backgroundAgentClient: client,
+    scrollRef: attachScrollRef,
+    contentRef: attachContentRef,
+    pinLastTurn,
+    onScroll: handleScroll,
+    onApproval: decideApproval,
+    onFolderAccessDecision: decideFolderAccess,
+    onFolderAccessCancel: cancelFolderAccess,
+    onOutputWritebackDecision: decideOutputWriteback,
+    onOutputWritebackCancel: cancelOutputWriteback,
+    onSelectPrompt,
+    onRetryTurn,
+    turnActions,
+    branchOrigin,
+    hasEarlierMessages,
+    onLoadEarlierMessages: loadEarlierMessages,
+    hydrated,
+    imageClient: client,
+    executionConfigClient: client,
+    changeClient: client,
+    memoryClient: client,
+    revealMessageId: transcriptSearch.revealMessageId,
+  };
 
   return (
     <section className="chat-pane">
@@ -672,7 +749,25 @@ export function ChatView({
           onOpenChange={setUsageOpen}
         />
       )}
-      <div className={cn("message-view", fadeClass)}>
+      <div
+        className={cn("message-view", fadeClass)}
+        onFocusCapture={findBar.activate}
+        onPointerDownCapture={findBar.activate}
+      >
+        {findBar.open && (
+          <TranscriptFindOverlay scrollElement={scrollElement}>
+            <TranscriptFindBar
+              ref={findBar.inputRef}
+              className="pointer-events-auto"
+              query={findBar.query}
+              onQueryChange={findBar.setQuery}
+              state={findBar.state}
+              onOlder={findBar.older}
+              onNewer={findBar.newer}
+              onClose={findBar.close}
+            />
+          </TranscriptFindOverlay>
+        )}
         {hydrationError ? (
           <Empty role="alert" className="h-full">
             <EmptyHeader>
@@ -687,53 +782,26 @@ export function ChatView({
               </Button>
             </EmptyContent>
           </Empty>
-        ) : (
-          <ChatTranscript
-            chatId={chat.id}
-            folderAccessRequests={folderAccess.requests}
-            outputWritebackRequests={outputWritebacks.requests}
-            pendingPromptCount={pendingPromptCount}
-            nativeHost={nativeHost}
-            nativeBusy={folderAccess.resolving.size > 0}
-            resolvingFolderCalls={folderAccess.resolving}
-            folderAccessErrors={folderAccess.errors}
-            resolvingOutputWritebackCalls={outputWritebacks.resolving}
-            outputWritebackErrors={outputWritebacks.errors}
-            decidingApprovalCalls={approvals.deciding}
-            approvalErrors={approvals.errors}
-            grantScope={chat.project_id ? "project" : "chat"}
-            backgroundAgentRuns={agentRuns.runs}
-            backgroundAgentRunsLoading={agentRuns.loading}
-            backgroundAgentRunsError={agentRuns.error}
-            onRetryBackgroundAgentRuns={agentRuns.refresh}
-            onCancelBackgroundAgentRun={agentRuns.cancel}
-            onLoadBackgroundAgentActivity={agentRuns.loadActivity}
-            onLoadBackgroundAgentTaskPlan={agentRuns.loadTaskPlan}
-            onLoadBackgroundAgentProgress={agentRuns.loadProgress}
-            onOpenBackgroundAgent={onOpenAgentPanel}
-            onOpenOutput={onOpenOutput}
-            backgroundAgentClient={client}
-            scrollRef={attachScrollRef}
-            contentRef={attachContentRef}
-            pinLastTurn={pinLastTurn}
-            onScroll={handleScroll}
-            onApproval={decideApproval}
-            onFolderAccessDecision={decideFolderAccess}
-            onFolderAccessCancel={cancelFolderAccess}
-            onOutputWritebackDecision={decideOutputWriteback}
-            onOutputWritebackCancel={cancelOutputWriteback}
-            onSelectPrompt={onSelectPrompt}
-            onRetryTurn={onRetryTurn}
-            turnActions={turnActions}
-            branchOrigin={branchOrigin}
-            hasEarlierMessages={hasEarlierMessages}
-            onLoadEarlierMessages={loadEarlierMessages}
-            hydrated={hydrated}
-            imageClient={client}
-            executionConfigClient={client}
-            changeClient={client}
-            memoryClient={client}
+        ) : historyView ? (
+          <MessageList
+            {...transcriptProps}
+            key="history"
+            messages={historyView.messages}
+            answerVersions={historyView.answerVersions}
+            busy={false}
+            animateStreaming={false}
+            folderAccessRequests={[]}
+            outputWritebackRequests={[]}
+            pendingPromptCount={0}
+            pinLastTurn={false}
+            turnActions={undefined}
+            onRetryTurn={undefined}
+            hasEarlierMessages={historyView.earlierCursor !== null}
+            onLoadEarlierMessages={transcriptSearch.showEarlierHistory}
+            trailingNotice={<EarlierHistoryNotice onLeave={jumpToLatest} />}
           />
+        ) : (
+          <ChatTranscript {...transcriptProps} />
         )}
         <TranscriptNavigation
           entries={navigationEntries}
@@ -745,14 +813,16 @@ export function ChatView({
           type="button"
           className={cn(
             "absolute z-[1] left-1/2 bottom-3 -translate-x-1/2 inline-flex items-center justify-center rounded-full border border-border p-2 text-foreground bg-background shadow transition-[opacity,background-color] duration-150 ease-in-out opacity-0 pointer-events-none hover:bg-accent motion-reduce:transition-none",
-            (scrolledAway || anchoredMessageId) &&
+            (scrolledAway || anchoredMessageId || historyView) &&
               "opacity-100 pointer-events-auto",
           )}
           aria-label={
-            anchoredMessageId ? "Return to latest" : "Scroll to latest"
+            anchoredMessageId || historyView
+              ? "Return to latest"
+              : "Scroll to latest"
           }
-          aria-hidden={!scrolledAway && !anchoredMessageId}
-          tabIndex={scrolledAway || anchoredMessageId ? 0 : -1}
+          aria-hidden={!scrolledAway && !anchoredMessageId && !historyView}
+          tabIndex={scrolledAway || anchoredMessageId || historyView ? 0 : -1}
           onClick={jumpToLatest}
         >
           <ArrowDown size={16} />

@@ -146,6 +146,31 @@ async fn a_member_never_finds_another_persons_messages() {
         [bob_chat.id]
     );
     assert!(theirs.indexing.complete);
+
+    // Held to one conversation, a search reads only that one, and naming
+    // someone else's conversation finds nothing in it.
+    let held = |chat: SessionId| format!("/search/messages?q=harbour&session_id={chat}");
+    let response = get(&router, &alice, &held(alice_chat.id)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: tidebreak_core::MessageSearchPage = json_body(response).await;
+    assert_eq!(
+        page.hits
+            .iter()
+            .map(|hit| hit.session_id)
+            .collect::<Vec<_>>(),
+        [alice_chat.id]
+    );
+    let response = get(&router, &bob, &held(alice_chat.id)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: tidebreak_core::MessageSearchPage = json_body(response).await;
+    assert!(page.hits.is_empty());
+    let response = get(
+        &router,
+        &alice,
+        "/search/messages?q=harbour&session_id=nope",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

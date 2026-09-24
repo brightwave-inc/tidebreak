@@ -2,7 +2,7 @@
 //! index keeps up with deletes, incognito, and archiving.
 
 use chrono::{DateTime, Duration, Utc};
-use sea_orm::{ConnectionTrait, EntityTrait, Statement};
+use sea_orm::{ConnectionTrait, EntityTrait, Statement, TransactionTrait};
 
 use super::{sample_chat, temp_store};
 use crate::code::{Event, ToolDetail, ToolOutcome};
@@ -35,6 +35,7 @@ async fn search_page(
                 query: query.into(),
                 limit,
                 cursor,
+                session_id: None,
             },
         )
         .await
@@ -1025,4 +1026,411 @@ async fn a_message_whose_terms_would_outgrow_a_tsvector_is_written_and_found() {
     let text = "\u{FDFA}\u{4E2D}".repeat(crate::message_search::MAX_INDEXED_CHARS / 2);
     say(&store, chat.id, Role::User, &text, Utc::now()).await;
     assert_eq!(search(&store, &owner, "\u{FDFA}").await.hits.len(), 1);
+}
+
+/// A search can be held to one conversation, and then says whether that
+/// conversation, not every one, is still waiting for the backfill.
+#[tokio::test]
+async fn a_search_held_to_one_conversation_reads_only_that_one() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let open = sample_chat();
+    let other = sample_chat();
+    for chat in [&open, &other] {
+        store.create_chat(chat).await.unwrap();
+        say(&store, chat.id, Role::User, "harbour lights", Utc::now()).await;
+    }
+    let held = |session: SessionId| MessageSearchRequest {
+        query: "harbour".into(),
+        limit: 50,
+        cursor: None,
+        session_id: Some(session),
+    };
+
+    let page = store
+        .search_messages_scoped(&owner, &held(open.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        page.hits
+            .iter()
+            .map(|hit| hit.session_id)
+            .collect::<Vec<_>>(),
+        [open.id]
+    );
+    assert!(page.indexing.complete);
+
+    // Someone else's conversation answers nothing, like one with no match.
+    let stranger = OwnerId::new("someone-else").unwrap();
+    let page = store
+        .search_messages_scoped(&stranger, &held(open.id))
+        .await
+        .unwrap();
+    assert!(page.hits.is_empty());
+
+    // Only the conversation still queued counts, and only when it is the one
+    // being searched.
+    store
+        .conn
+        .execute_raw(Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            "INSERT INTO message_search_backfill (session_id) VALUES (?)",
+            [other.id.0.into()],
+        ))
+        .await
+        .unwrap();
+    let page = store
+        .search_messages_scoped(&owner, &held(open.id))
+        .await
+        .unwrap();
+    assert!(page.indexing.complete);
+    let page = store
+        .search_messages_scoped(&owner, &held(other.id))
+        .await
+        .unwrap();
+    assert!(!page.indexing.complete);
+    assert_eq!(page.indexing.pending_conversations, 1);
+}
+
+/// Run the backfill until it gives up on every queued conversation that
+/// fails, and answer when the last step ran.
+async fn give_up(store: &DbStore) -> DateTime<Utc> {
+    let mut now = micros_now();
+    for _ in 1..MAX_BACKFILL_ATTEMPTS {
+        let state = backfill(store, 8, now).await.unwrap();
+        now = state.next_attempt_at.unwrap();
+    }
+    let state = backfill(store, 8, now).await.unwrap();
+    assert_eq!(state.waiting, 0);
+    assert!(state.failed > 0);
+    now
+}
+
+/// A conversation the backfill gave up on gets one more attempt when
+/// something new is written to it a day or more after it was given up on.
+/// Sooner, it waits. If that attempt fails, it is given up on again, so a
+/// conversation that always fails is rebuilt at most once a day however much
+/// is said in it.
+#[tokio::test]
+async fn a_given_up_conversation_is_tried_again_once_a_day_on_new_content() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let old = say(&store, chat.id, Role::User, "written long ago", Utc::now()).await;
+    forget_and_queue(&store).await;
+    // Rebuilding the history fails; indexing what is new does not.
+    store
+        .conn
+        .execute_unprepared(&format!(
+            "CREATE TRIGGER refuse_history BEFORE INSERT ON message_search \
+             WHEN NEW.source_key = 'message:{}' \
+             BEGIN SELECT RAISE(ABORT, 'the index refused the row'); END",
+            old.0
+        ))
+        .await
+        .unwrap();
+    let gave_up_at = give_up(&store).await;
+    assert!(queued(&store, chat.id).await.2);
+
+    // Given up stays given up while nothing happens, and while what is new
+    // comes within a day.
+    backfill(&store, 8, gave_up_at + Duration::days(1))
+        .await
+        .unwrap();
+    say(
+        &store,
+        chat.id,
+        Role::User,
+        "written an hour later",
+        gave_up_at + Duration::hours(1),
+    )
+    .await;
+    assert!(queued(&store, chat.id).await.2);
+
+    // A day later, new content earns one attempt. It fails, and the
+    // conversation is given up on again at once.
+    let day_later = gave_up_at + Duration::days(1);
+    say(
+        &store,
+        chat.id,
+        Role::User,
+        "written a day later",
+        day_later,
+    )
+    .await;
+    let (attempts, error, gave_up) = queued(&store, chat.id).await;
+    assert_eq!((attempts, gave_up), (MAX_BACKFILL_ATTEMPTS - 1, false));
+    assert!(
+        error.is_some(),
+        "the last error is kept for whoever reads it"
+    );
+    let page = search(&store, &owner, "long").await;
+    assert_eq!(page.indexing.pending_conversations, 1);
+    assert_eq!(page.indexing.failed_conversations, 0);
+    let state = backfill(&store, 8, day_later).await.unwrap();
+    assert_eq!((state.waiting, state.failed), (0, 1));
+    let (attempts, _, gave_up) = queued(&store, chat.id).await;
+    assert_eq!((attempts, gave_up), (MAX_BACKFILL_ATTEMPTS, true));
+
+    // The next day's content earns the next attempt, which adds the history
+    // once the failure has passed.
+    store
+        .conn
+        .execute_unprepared("DROP TRIGGER refuse_history")
+        .await
+        .unwrap();
+    say(
+        &store,
+        chat.id,
+        Role::User,
+        "written the next day",
+        day_later + Duration::hours(23),
+    )
+    .await;
+    assert!(queued(&store, chat.id).await.2, "not a day yet");
+    say(
+        &store,
+        chat.id,
+        Role::User,
+        "written two days later",
+        day_later + Duration::days(1),
+    )
+    .await;
+    let state = backfill(&store, 8, day_later + Duration::days(1))
+        .await
+        .unwrap();
+    assert_eq!((state.waiting, state.failed), (0, 0));
+    let page = search(&store, &owner, "long").await;
+    assert_eq!(page.hits.len(), 1);
+    assert!(page.indexing.complete);
+}
+
+/// Every conversation the backfill gave up on gets another try when a newer
+/// app version starts than the one that ran the backfill last. The same
+/// version starting again, or an older one, retries nothing.
+#[tokio::test]
+async fn given_up_conversations_are_tried_again_when_a_newer_version_starts() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    say(&store, chat.id, Role::User, "written long ago", Utc::now()).await;
+    forget_and_queue(&store).await;
+    refuse_index_writes(&store).await;
+    give_up(&store).await;
+
+    // The first version to keep track retries what an older one gave up on.
+    assert_eq!(
+        store
+            .retry_message_search_after_upgrade("1.4.0")
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!queued(&store, chat.id).await.2);
+    give_up(&store).await;
+    for same_or_older in ["1.4.0", "1.3.9", "1.4.0-rc.1"] {
+        assert_eq!(
+            store
+                .retry_message_search_after_upgrade(same_or_older)
+                .await
+                .unwrap(),
+            0,
+            "{same_or_older}"
+        );
+    }
+    assert!(queued(&store, chat.id).await.2);
+
+    allow_index_writes(&store).await;
+    assert_eq!(
+        store
+            .retry_message_search_after_upgrade("1.5.0")
+            .await
+            .unwrap(),
+        1
+    );
+    backfill(&store, 8, micros_now()).await.unwrap();
+    let page = search(&store, &owner, "long").await;
+    assert_eq!(page.hits.len(), 1);
+    assert!(page.indexing.complete);
+}
+
+/// Turning memory incognito on and back off settles a conversation the
+/// backfill gave up on: turning it off rebuilds the whole history, so the
+/// conversation no longer counts as one the index could not add.
+#[tokio::test]
+async fn turning_incognito_off_adds_a_given_up_conversation() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    say(&store, chat.id, Role::User, "written long ago", Utc::now()).await;
+    forget_and_queue(&store).await;
+    refuse_index_writes(&store).await;
+    give_up(&store).await;
+    allow_index_writes(&store).await;
+
+    assert!(store
+        .set_chat_memory_incognito(chat.id, true)
+        .await
+        .unwrap());
+    let page = search(&store, &owner, "long").await;
+    assert!(page.hits.is_empty());
+    assert!(
+        page.indexing.complete,
+        "an incognito conversation waits for nothing"
+    );
+
+    assert!(store
+        .set_chat_memory_incognito(chat.id, false)
+        .await
+        .unwrap());
+    let page = search(&store, &owner, "long").await;
+    assert_eq!(page.hits.len(), 1);
+    assert!(page.indexing.complete);
+}
+
+/// A rebuild can fail in a way that also fails its rollback: a dropped
+/// connection takes the transaction with it. The attempt still counts, so
+/// that conversation waits its turn, and the conversations behind it in the
+/// queue are added in the same step instead of waiting behind it.
+#[tokio::test]
+async fn a_rebuild_whose_rollback_fails_still_counts_and_blocks_nothing() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let steady = sample_chat();
+    store.create_chat(&steady).await.unwrap();
+    say(&store, steady.id, Role::User, "steady harbour", Utc::now()).await;
+    // Newer, so the queue reads it first.
+    let mut dropping = sample_chat();
+    dropping.created_at = Utc::now() + Duration::seconds(5);
+    store.create_chat(&dropping).await.unwrap();
+    let lost = say(
+        &store,
+        dropping.id,
+        Role::User,
+        "dropping harbour",
+        Utc::now() + Duration::seconds(5),
+    )
+    .await;
+    forget_and_queue(&store).await;
+    // `RAISE(ROLLBACK)` ends the transaction inside SQLite, so the rollback
+    // that follows finds none to roll back and fails, the way it does on a
+    // connection that is gone.
+    store
+        .conn
+        .execute_unprepared(&format!(
+            "CREATE TRIGGER drop_rebuild BEFORE INSERT ON message_search \
+             WHEN NEW.source_key = 'message:{}' \
+             BEGIN SELECT RAISE(ROLLBACK, 'the connection dropped'); END",
+            lost.0
+        ))
+        .await
+        .unwrap();
+
+    let start = micros_now();
+    let state = backfill(&store, 8, start).await.unwrap();
+    assert_eq!((state.waiting, state.failed), (1, 0));
+    assert_eq!(state.next_attempt_at, Some(start + Duration::seconds(30)));
+    let (attempts, error, gave_up) = queued(&store, dropping.id).await;
+    assert_eq!((attempts, gave_up), (1, false));
+    assert!(
+        error.as_deref().unwrap().contains("the connection dropped"),
+        "{error:?}"
+    );
+    let page = search(&store, &owner, "harbour").await;
+    assert_eq!(
+        page.hits
+            .iter()
+            .map(|hit| hit.session_id)
+            .collect::<Vec<_>>(),
+        [steady.id]
+    );
+}
+
+/// A rollback that fails leaves the driver counting a transaction SQLite
+/// already ended. The store stops using that connection. Kept in use, the
+/// next rollback on the one writer would leave a transaction open, and every
+/// write after it would join that transaction and never commit.
+#[tokio::test]
+async fn writes_after_a_failed_rollback_are_committed() {
+    let (_dir, store) = super::temp_store_with_max_connections(2).await;
+    let steady = sample_chat();
+    store.create_chat(&steady).await.unwrap();
+    let dropping = sample_chat();
+    store.create_chat(&dropping).await.unwrap();
+    let lost = say(
+        &store,
+        dropping.id,
+        Role::User,
+        "dropping harbour",
+        Utc::now(),
+    )
+    .await;
+    forget_and_queue(&store).await;
+    store
+        .conn
+        .execute_unprepared(&format!(
+            "CREATE TRIGGER drop_rebuild BEFORE INSERT ON message_search \
+             WHEN NEW.source_key = 'message:{}' \
+             BEGIN SELECT RAISE(ROLLBACK, 'the connection dropped'); END",
+            lost.0
+        ))
+        .await
+        .unwrap();
+    backfill(&store, 8, micros_now()).await.unwrap();
+    assert_eq!(queued(&store, dropping.id).await.0, 1);
+
+    // A later transaction rolls back, as a failed write does.
+    let transaction = store.conn.begin().await.unwrap();
+    transaction.rollback().await.unwrap();
+    // Then something is written.
+    say(
+        &store,
+        steady.id,
+        Role::User,
+        "written afterwards",
+        Utc::now(),
+    )
+    .await;
+
+    // The read pool's connections see only what committed.
+    let read = store.conn.read_pool().expect("the store has a read pool");
+    let written = read
+        .query_one_raw(Statement::from_string(
+            sea_orm::DbBackend::Sqlite,
+            "SELECT COUNT(*) AS n FROM message WHERE content = 'written afterwards'",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "n")
+        .unwrap();
+    assert_eq!(written, 1, "the write after the failed rollback committed");
+}
+
+#[test]
+fn a_newer_release_is_one_with_a_higher_version() {
+    use crate::db::ops::message_search::newer_release;
+    assert!(newer_release("1.4.1", "1.4.0"));
+    assert!(newer_release("1.10.0", "1.9.9"));
+    assert!(newer_release("2.0.0", "1.99.99"));
+    assert!(newer_release("1.4.0", "1.4.0-rc.2"));
+    assert!(newer_release("1.4.0+build.7", "1.3.0"));
+    assert!(!newer_release("1.4.0", "1.4.0"));
+    assert!(!newer_release("1.4.0-rc.2", "1.4.0"));
+    assert!(!newer_release("1.3.9", "1.4.0"));
+    // Pre-releases compare by their identifiers, numbers as numbers.
+    assert!(newer_release("0.0.0-staging.2", "0.0.0-staging.1"));
+    assert!(newer_release("0.0.0-staging.10", "0.0.0-staging.9"));
+    assert!(!newer_release("0.0.0-staging.1", "0.0.0-staging.2"));
+    assert!(!newer_release("0.0.0-staging.2", "0.0.0-staging.2"));
+    assert!(newer_release("1.4.0-rc.1", "1.4.0-beta.9"));
+    assert!(newer_release("1.4.0-rc.1.1", "1.4.0-rc.1"));
+    // Build metadata does not make a version newer.
+    assert!(!newer_release("1.4.0+build.8", "1.4.0+build.7"));
+    // A version that is not a release is newer only when it differs.
+    assert!(newer_release("dev", "1.4.0"));
+    assert!(!newer_release("dev", "dev"));
 }

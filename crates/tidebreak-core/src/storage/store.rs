@@ -394,6 +394,7 @@ pub trait Store: Send + Sync {
             .map(|transcript| ChatTranscriptPage {
                 transcript,
                 earlier: None,
+                later: None,
             }))
     }
 

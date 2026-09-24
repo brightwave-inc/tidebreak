@@ -1096,6 +1096,13 @@ has_more: boolean,
  */
 earlier_cursor: number | null,
 /**
+ * Where the conversation goes on after this page: the sequence number of
+ * the first message a newer page holds. Absent when this page reaches the
+ * newest message. A page read with `around` can end before the newest
+ * page a reader already holds; this says whether the two meet.
+ */
+later_cursor?: number,
+/**
  * Earlier answers to messages that were answered again, oldest first.
  *
  * `messages`, `tool_activity`, and `terminal_turns` hold the conversation

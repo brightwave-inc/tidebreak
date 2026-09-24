@@ -87,6 +87,8 @@ export type CodeTranscriptItem =
        * of the person's. The person's reply never streams into it.
        */
       background?: true;
+      /** The journal events that wrote this row; see {@link itemForEvent}. */
+      seqs?: readonly number[];
     }
   | {
       kind: "reasoning";
@@ -112,6 +114,8 @@ export type CodeTranscriptItem =
       durationMs: number | null;
       /** Run by a turn the engine started on its own. */
       background?: true;
+      /** The journal events that wrote this row; see {@link itemForEvent}. */
+      seqs?: readonly number[];
     }
   | {
       kind: "notice";
@@ -140,6 +144,8 @@ export type CodeTranscriptItem =
       id: string;
       turnId: string | null;
       text: string;
+      /** The journal event that wrote this row; see {@link itemForEvent}. */
+      seqs?: readonly number[];
     }
   | {
       kind: "file_activity";
@@ -1043,6 +1049,14 @@ export function reduceCodeSessionEvent(
 
     case "assistant_message": {
       const parentCallId = event.parent_call_id ?? null;
+      const upserted = upsertStreaming(
+        state.items,
+        "assistant",
+        event.text,
+        attributedTurnId,
+        parentCallId,
+        deps.nextId,
+      );
       return {
         state: {
           ...state,
@@ -1052,14 +1066,18 @@ export function reduceCodeSessionEvent(
           assistantBuffer:
             parentCallId === null ? event.text : state.assistantBuffer,
           items: finalizeStreaming(
-            upsertStreaming(
-              state.items,
-              "assistant",
-              event.text,
-              attributedTurnId,
-              parentCallId,
-              deps.nextId,
-            ),
+            transient
+              ? upserted
+              : tagEvent(
+                  upserted,
+                  lastIndexOfKindForTurn(
+                    upserted,
+                    "assistant",
+                    attributedTurnId,
+                    parentCallId,
+                  ),
+                  framed.seq,
+                ),
             "assistant",
             parentCallId,
           ),
@@ -1114,6 +1132,7 @@ export function reduceCodeSessionEvent(
             preview: "",
             startedAt: framed.replayed ? null : deps.now(),
             durationMs: null,
+            seqs: transient ? [] : [framed.seq],
           }),
         },
         effects,
@@ -1137,6 +1156,9 @@ export function reduceCodeSessionEvent(
                   durationMs: framed.replayed
                     ? null
                     : durationMs(item.startedAt, deps.now()),
+                  seqs: transient
+                    ? item.seqs
+                    : [...(item.seqs ?? []), framed.seq],
                 }
               : item,
           ),
@@ -1284,6 +1306,7 @@ export function reduceCodeSessionEvent(
             id: deps.nextId(),
             turnId: attributedTurnId,
             text: event.text,
+            seqs: transient ? [] : [framed.seq],
           }),
         },
         effects,
@@ -1513,6 +1536,7 @@ function reduceBackgroundActivity(
           text: event.text,
           streaming: false,
           background: true,
+          seqs: framed.transient === true ? [] : [framed.seq],
         }),
       };
     case "tool_started":
@@ -1531,6 +1555,7 @@ function reduceBackgroundActivity(
           startedAt: framed.replayed ? null : deps.now(),
           durationMs: null,
           background: true,
+          seqs: framed.transient === true ? [] : [framed.seq],
         }),
       };
     case "tool_completed": {
@@ -1550,6 +1575,10 @@ function reduceBackgroundActivity(
                 durationMs: framed.replayed
                   ? null
                   : durationMs(item.startedAt, deps.now()),
+                seqs:
+                  framed.transient === true
+                    ? item.seqs
+                    : [...(item.seqs ?? []), framed.seq],
               }
             : item,
         ),
@@ -1767,6 +1796,56 @@ function lastIndexOfKindForTurn(
     }
   }
   return -1;
+}
+
+/**
+ * Record on the row at `index` that journal event `seq` wrote it. A search
+ * hit names a code event by its sequence number, and this is how the
+ * transcript finds the row that event drew.
+ */
+function tagEvent(
+  items: CodeTranscriptItem[],
+  index: number,
+  seq: number,
+): CodeTranscriptItem[] {
+  const item = items[index];
+  if (!item || (item.kind !== "assistant" && item.kind !== "steer")) {
+    return items;
+  }
+  if (item.seqs?.includes(seq)) return items;
+  const tagged = { ...item, seqs: [...(item.seqs ?? []), seq] };
+  return items.map((candidate, at) => (at === index ? tagged : candidate));
+}
+
+/**
+ * The row a journal event drew, or a turn's prompt when the event is the
+ * turn's own input. `null` when the transcript does not hold it: the event
+ * is older than the part of the journal this transcript replayed.
+ */
+export function itemForEvent(
+  items: readonly CodeTranscriptItem[],
+  target: { eventSeq?: number; turnId?: string },
+): CodeTranscriptItem | null {
+  if (target.eventSeq !== undefined) {
+    const seq = target.eventSeq;
+    return (
+      items.find(
+        (item) =>
+          (item.kind === "assistant" ||
+            item.kind === "tool" ||
+            item.kind === "steer") &&
+          item.seqs?.includes(seq) === true,
+      ) ?? null
+    );
+  }
+  if (target.turnId) {
+    return (
+      items.find(
+        (item) => item.kind === "user" && item.turnId === target.turnId,
+      ) ?? null
+    );
+  }
+  return null;
 }
 
 function insertBeforeTurnBoundary(

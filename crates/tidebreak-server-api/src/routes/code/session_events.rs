@@ -19,18 +19,91 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
-use tidebreak_core::db::code::{list_events, MAX_REPLAY_EVENTS};
+use tidebreak_core::db::code::{list_events, list_events_before, MAX_REPLAY_EVENTS};
 use tidebreak_core::{CodeGrantId, Event, OwnerId, SessionId};
 
 use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::code::bus::{CodeLiveUpdate, LiveTail};
 use crate::code::ScopedCode;
 use crate::error::ServerError;
-use crate::extract::{Path, Query};
+use crate::extract::{Json, Path, Query};
 use crate::routes::events::{gateway_auth_revalidation_timer, wait_for_gateway_auth_revalidation};
 use crate::state::AppState;
 
 use super::types::{SequencedEventFrame, SessionEventsQuery};
+
+/// Events one journal window reads when the caller names no limit.
+pub const DEFAULT_JOURNAL_WINDOW: u64 = 400;
+
+/// Query of `GET /sessions/{id}/journal`.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionJournalQuery {
+    /// Read the events whose sequence number is below this one.
+    pub before: i64,
+    /// Most events to read, the newest below `before`. From 1 to
+    /// `MAX_REPLAY_EVENTS`; 400 when absent.
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+/// `GET /sessions/{id}/journal?before=&limit=` — one window of a session's
+/// journal, oldest first, for a reader opening a part of a long session the
+/// event socket no longer replays: a search hit on an event older than its
+/// last `MAX_REPLAY_EVENTS`.
+///
+/// The frames are the ones the socket replays, and the same reader may read
+/// them: the owner, or someone the session is shared with. The first frame
+/// carries `truncated` when older events were left out of the window.
+pub async fn session_journal(
+    State(state): State<AppState>,
+    code: ScopedCode,
+    Path(id): Path<SessionId>,
+    Query(query): Query<SessionJournalQuery>,
+) -> Result<Json<Vec<SequencedEventFrame>>, ServerError> {
+    if query.before < 1 {
+        return Err(ServerError::bad_request(
+            "before must be a positive journal sequence number",
+        ));
+    }
+    let limit = query.limit.unwrap_or(DEFAULT_JOURNAL_WINDOW);
+    if !(1..=MAX_REPLAY_EVENTS).contains(&limit) {
+        return Err(ServerError::bad_request(format!(
+            "limit must be between 1 and {MAX_REPLAY_EVENTS}"
+        )));
+    }
+    let principal = code.owner().clone();
+    let (owner, is_owner) = code.event_stream_access(id).await?;
+    let granted = (!is_owner).then_some(principal);
+    let Some(runtime) = state.code.clone() else {
+        return Err(ServerError::not_found(format!("session {id} not found")));
+    };
+    let page = list_events_before(&runtime.db, &owner, id, query.before, limit).await?;
+    let mut truncated = page.truncated;
+    let mut frames = Vec::with_capacity(page.events.len());
+    for event in page.events {
+        frames.push(SequencedEventFrame {
+            seq: event.seq,
+            event: crate::code::session_tree::authorize_event(
+                &runtime.db,
+                &owner,
+                id,
+                None,
+                granted.as_ref(),
+                event.event,
+            )
+            .await,
+            replayed: Some(true),
+            transient: None,
+            replacement: None,
+            truncated: truncated.then(|| {
+                truncated = false;
+                true
+            }),
+        });
+    }
+    Ok(Json(frames))
+}
 
 pub async fn session_events(
     State(state): State<AppState>,

@@ -11,6 +11,15 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { STATUS_DOT } from "./code/statusTone";
+import type { MessageSearchHit } from "./generated/wire";
+import {
+  MessageSearchSection,
+  messageSearchAnnouncement,
+} from "./search/MessageSearchSection";
+import {
+  IDLE_MESSAGE_SEARCH,
+  type MessageSearchState,
+} from "./search/useMessageSearch";
 import {
   PALETTE_PREFIXES,
   type PaletteGroup,
@@ -41,6 +50,9 @@ export function CommandPaletteList({
   loading = false,
   emptyLabel = "Nothing here matches that.",
   command = usesCommandModifier(navigator.userAgent),
+  messages = IDLE_MESSAGE_SEARCH,
+  onSelectMessage = () => undefined,
+  now,
 }: {
   groups: readonly PaletteGroup[];
   query: string;
@@ -54,11 +66,19 @@ export function CommandPaletteList({
   emptyLabel?: string;
   /** Fixed per story so keycaps look the same wherever they are opened. */
   command?: boolean;
+  /** What a search of the person's messages found for the query. */
+  messages?: MessageSearchState;
+  onSelectMessage?: (hit: MessageSearchHit) => void;
+  /** Fixed per story so relative times do not drift. */
+  now?: Date;
 }) {
+  // A message search owns its own empty and loading rows, so the list's
+  // "nothing matches" waits until it has answered too.
+  const searchingMessages = messages.status !== "idle";
   return (
     <Command
       shouldFilter={false}
-      label="Search commands, workspaces, and settings"
+      label="Search commands, conversations, messages, and settings"
       className="rounded-none bg-transparent"
       // Backspace on an empty query drops the scope, which is how the reader
       // gets out of one without reaching for Escape and losing the whole
@@ -102,9 +122,11 @@ export function CommandPaletteList({
       </div>
 
       <CommandList className="max-h-[min(60vh,32rem)] min-h-24 p-1.5">
-        <CommandEmpty className="px-3 py-6 text-sm text-muted-foreground">
-          {emptyLabel}
-        </CommandEmpty>
+        {!searchingMessages && (
+          <CommandEmpty className="px-3 py-6 text-sm text-muted-foreground">
+            {emptyLabel}
+          </CommandEmpty>
+        )}
         {groups.map((group) => (
           <CommandGroup
             key={group.section}
@@ -122,7 +144,16 @@ export function CommandPaletteList({
             ))}
           </CommandGroup>
         ))}
+        <MessageSearchSection
+          state={messages}
+          onSelect={onSelectMessage}
+          now={now}
+        />
       </CommandList>
+      {/* Outside the listbox, which may hold only options and groups. */}
+      <p className="sr-only" role="status">
+        {messageSearchAnnouncement(messages)}
+      </p>
 
       <PaletteFooter scoped={Boolean(scopeLabel)} />
     </Command>

@@ -7303,6 +7303,7 @@ dependencies = [
  "schemars 1.2.2",
  "sea-orm",
  "sea-orm-migration",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",

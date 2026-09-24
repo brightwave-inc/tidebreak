@@ -73,6 +73,37 @@ describe("shell shortcut resolution", () => {
     }
   });
 
+  it("gives Cmd+F to find in the conversation and Cmd+Shift+F to the worktree files", () => {
+    // Cmd+F finds in what is on screen, in both modes, the way it does in
+    // every app on the platform. Searching across files moved to the chord
+    // the editors beside this app use for it, and only code mode has files.
+    const cmdF = keyEvent({ key: "f", code: "KeyF" });
+    const cmdShiftF = keyEvent({ key: "F", code: "KeyF", shiftKey: true });
+    for (const mode of ["chat", "code"] as const) {
+      expect(resolveShellShortcut(cmdF, context({ mode }))?.id).toBe(
+        "find-in-transcript",
+      );
+    }
+    expect(resolveShellShortcut(cmdShiftF, context({ mode: "code" }))?.id).toBe(
+      "code-find",
+    );
+    expect(resolveShellShortcut(cmdShiftF, context({ mode: "chat" }))).toBe(
+      null,
+    );
+
+    // The shortcuts dialog lists both where both work, each with its chord.
+    const listed = groupedShellShortcuts("code").flatMap(({ items }) => items);
+    const find = listed.find((def) => def.id === "find-in-transcript");
+    const files = listed.find((def) => def.id === "code-find");
+    expect(find && shortcutKeycaps(find, true)).toEqual(["⌘", "F"]);
+    expect(files && shortcutKeycaps(files, true)).toEqual(["⌘", "⇧", "F"]);
+    expect(
+      groupedShellShortcuts("chat")
+        .flatMap(({ items }) => items)
+        .map((def) => def.id),
+    ).toContain("find-in-transcript");
+  });
+
   it("gives Cmd+N to whichever mode the reader is in", () => {
     // One chord, two modes: a conversation in chat, a workspace in code. The
     // regression this pins is Cmd+N in code mode creating a chat and taking

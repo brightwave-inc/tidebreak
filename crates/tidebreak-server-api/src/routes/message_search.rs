@@ -7,6 +7,7 @@ use tidebreak_core::message_search::{
     MessageSearchCursor, MessageSearchPage, MessageSearchRequest, DEFAULT_SEARCH_LIMIT,
     MAX_QUERY_CHARS, MAX_SEARCH_LIMIT,
 };
+use tidebreak_core::SessionId;
 
 use crate::error::ServerError;
 use crate::extract::{Json, Query};
@@ -27,10 +28,15 @@ pub struct MessageSearchQuery {
     /// The `next_cursor` of the page before, to read the page after it.
     #[serde(default)]
     pub cursor: Option<String>,
+    /// Search only this conversation: a Work chat's id or a code session's.
+    /// A conversation the caller does not own answers no hits, the same as
+    /// one with nothing that matches.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
 }
 
-/// `GET /search/messages?q=&limit=&cursor=` — search the caller's own Work
-/// chats and code sessions, newest match first.
+/// `GET /search/messages?q=&limit=&cursor=&session_id=` — search the caller's
+/// own Work chats and code sessions, newest match first.
 ///
 /// A hit is a message the person sent, text the assistant wrote, or what a
 /// code session's tool call acted on. It names the conversation and the turn,
@@ -38,7 +44,8 @@ pub struct MessageSearchQuery {
 /// the matched words as ranges. Conversations the caller does not own, ones
 /// with memory incognito on, and answers a regenerate or an edit replaced are
 /// never hits. `indexing` says whether older conversations are still being
-/// added to the index, and how many could not be added.
+/// added to the index, and how many could not be added; with `session_id`, it
+/// speaks for that one conversation.
 pub async fn search_messages(
     store: ScopedStore,
     Query(query): Query<MessageSearchQuery>,
@@ -71,6 +78,7 @@ pub async fn search_messages(
             query: words.to_owned(),
             limit,
             cursor,
+            session_id: query.session_id,
         })
         .await?;
     Ok(Json(page))

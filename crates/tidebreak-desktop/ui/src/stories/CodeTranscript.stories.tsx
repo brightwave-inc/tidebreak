@@ -664,7 +664,12 @@ export const ExpandedToolGroup: Story = {
     await expect(icons.length).toBe(3);
     for (const icon of icons) {
       const row = icon.closest("section")!;
-      const body = row.parentElement!;
+      // Each call sits in a box-less wrapper that names it for search, so
+      // the group's body is the first ancestor that has a box.
+      let body = row.parentElement!;
+      while (getComputedStyle(body).display === "contents") {
+        body = body.parentElement!;
+      }
       const iconRect = icon.getBoundingClientRect();
       const bodyRect = body.getBoundingClientRect();
       await expect(iconRect.left).toBeGreaterThanOrEqual(bodyRect.left + 1);

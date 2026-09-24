@@ -619,6 +619,10 @@ pub(in crate::db) async fn set_chat_memory_incognito(
         } else {
             super::message_search::rebuild_session_on(&transaction, id).await?;
         }
+        // Either way the conversation's history is settled: all of it is in
+        // the index now, or none of it belongs there. A conversation the
+        // backfill still had queued, or had given up on, no longer waits.
+        super::message_search::settle_backfill_on(&transaction, id).await?;
     }
     transaction.commit().await.map_err(store_err)?;
     Ok(true)
@@ -1814,6 +1818,7 @@ pub(in crate::db) async fn get_chat_transcript(
             last_event_seq,
         },
         earlier: window.earlier,
+        later: window.before_seq,
     }))
 }
 
@@ -1852,11 +1857,65 @@ impl TranscriptWindow {
 async fn transcript_window_on<C>(
     conn: &C,
     chat_id: SessionId,
-    page: TranscriptPage,
+    mut page: TranscriptPage,
 ) -> Result<TranscriptWindow>
 where
     C: ConnectionTrait,
 {
+    // A retry sends its turn's message again, and the transcript shows the
+    // retried turn's message in its place. The copy never opens a page, so a
+    // page always starts at a message it shows and keeps a retry with the
+    // turn it continues.
+    let retry_copies: Vec<uuid::Uuid> = if page.turns.is_some() || page.around.is_some() {
+        let copies: Vec<Option<uuid::Uuid>> = entities::turn::Entity::find()
+            .select_only()
+            .column(entities::turn::Column::InputMessageId)
+            .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+            .filter(
+                entities::turn::Column::Replacement
+                    .eq(crate::model::TurnReplacementKind::Retry.as_str()),
+            )
+            .into_tuple()
+            .all(conn)
+            .await
+            .map_err(store_err)?;
+        copies.into_iter().flatten().collect()
+    } else {
+        Vec::new()
+    };
+    // The page that holds a found message ends a few turns after the
+    // message's own, at the user message that opens the next turn after
+    // those. Fewer turns follow on a short page, so the message's own turn
+    // stays on it. A message that is not in this chat reads the newest page.
+    if let Some(around) = page.around {
+        let after = page
+            .turns
+            .map_or(crate::storage::TURNS_AFTER_FOUND_MESSAGE, |turns| {
+                crate::storage::TURNS_AFTER_FOUND_MESSAGE.min(turns.saturating_sub(1))
+            });
+        let found = entities::message::Entity::find_by_id(around.0)
+            .filter(entities::message::Column::ChatId.eq(chat_id.0))
+            .one(conn)
+            .await
+            .map_err(store_err)?;
+        page.before = match found {
+            None => None,
+            Some(found) => entities::message::Entity::find()
+                .filter(entities::message::Column::ChatId.eq(chat_id.0))
+                .filter(entities::message::Column::Role.eq(role_to_db(Role::User)))
+                .apply_if(
+                    (!retry_copies.is_empty()).then(|| retry_copies.clone()),
+                    |query, copies| query.filter(entities::message::Column::Id.is_not_in(copies)),
+                )
+                .filter(entities::message::Column::Seq.gt(found.seq))
+                .order_by_asc(entities::message::Column::Seq)
+                .offset(u64::from(after))
+                .one(conn)
+                .await
+                .map_err(store_err)?
+                .map(|next| next.seq),
+        };
+    }
     let mut window = TranscriptWindow {
         before_seq: page.before,
         ..TranscriptWindow::default()
@@ -1876,23 +1935,6 @@ where
     let Some(turns) = page.turns else {
         return Ok(window);
     };
-    // A retry sends its turn's message again, and the transcript shows the
-    // retried turn's message in its place. The copy never opens a page, so a
-    // page always starts at a message it shows and keeps a retry with the
-    // turn it continues.
-    let retry_copies: Vec<Option<uuid::Uuid>> = entities::turn::Entity::find()
-        .select_only()
-        .column(entities::turn::Column::InputMessageId)
-        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
-        .filter(
-            entities::turn::Column::Replacement
-                .eq(crate::model::TurnReplacementKind::Retry.as_str()),
-        )
-        .into_tuple()
-        .all(conn)
-        .await
-        .map_err(store_err)?;
-    let retry_copies: Vec<uuid::Uuid> = retry_copies.into_iter().flatten().collect();
     // The user message that opens the oldest turn on this page. With fewer
     // turns left than asked for, the page runs to the start.
     let Some(boundary) = entities::message::Entity::find()

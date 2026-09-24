@@ -174,7 +174,36 @@ fn with_sqlite_write_policy(mut options: ConnectOptions, with_read_pool: bool) -
             .synchronous(sea_orm::sqlx::sqlite::SqliteSynchronous::Normal)
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
     });
+    close_connections_left_in_a_transaction(&mut options);
     options
+}
+
+/// Close a SQLite connection the driver still counts as inside a
+/// transaction when the pool is about to hand it out; the pool opens a new
+/// one in its place.
+///
+/// sqlx lowers its count of open transactions only when a `COMMIT` or
+/// `ROLLBACK` succeeds. A rollback fails when SQLite has already ended the
+/// transaction itself: a trigger's `RAISE(ROLLBACK)`, a full disk, or an I/O
+/// error. The count then stays one too high. On that connection the next
+/// `begin` opens a savepoint instead of a transaction, the next rollback
+/// leaves a transaction open, and every write after it joins that
+/// transaction and is never committed. Every transaction has ended by the
+/// time its connection is idle, since a dropped transaction's rollback runs
+/// before the pool takes the connection back, so a count above zero there
+/// means the count is wrong.
+#[cfg(feature = "sqlite")]
+fn close_connections_left_in_a_transaction(options: &mut ConnectOptions) {
+    options.map_sqlx_sqlite_before_acquire(|connection, _| {
+        use sea_orm::sqlx::Connection as _;
+        let in_transaction = connection.is_in_transaction();
+        if in_transaction {
+            tracing::warn!(
+                "a failed rollback left a database connection out of step; opening a new one"
+            );
+        }
+        Box::pin(std::future::ready(Ok(!in_transaction)))
+    });
 }
 
 #[cfg(not(feature = "sqlite"))]
@@ -236,6 +265,21 @@ impl DbStore {
         ops::message_search::backfill(self, sessions, Utc::now()).await
     }
 
+    /// Give every conversation the message index's backfill gave up on
+    /// another try, when `version` is newer than the version that last ran
+    /// the backfill. Answers how many it retried. The server calls this once
+    /// at startup, before it works through the queue.
+    pub async fn retry_message_search_after_upgrade(&self, version: &str) -> Result<u64> {
+        ops::message_search::retry_after_upgrade(self, version).await
+    }
+
+    /// Wait until a conversation the message index's backfill gave up on is
+    /// due again, because something new was written to it. The wake can come
+    /// a moment before that write commits.
+    pub async fn message_search_backfill_woken() {
+        ops::message_search::backfill_woken().await;
+    }
+
     fn from_connection(conn: StoreConnection) -> Self {
         Self {
             conn,
@@ -286,6 +330,7 @@ impl DbStore {
                 .synchronous(sea_orm::sqlx::sqlite::SqliteSynchronous::Off)
                 .busy_timeout(SQLITE_BUSY_TIMEOUT)
         });
+        close_connections_left_in_a_transaction(&mut options);
         let write = Database::connect(options).await.map_err(store_err)?;
         let mut read = ConnectOptions::new(url);
         read.max_connections(max_connections).min_connections(1);

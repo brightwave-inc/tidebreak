@@ -46,6 +46,29 @@ export function withCodeEventsApi<TBase extends Constructor<HttpCore>>(
       return socket;
     }
 
+    /**
+     * One window of a session's journal: the newest `limit` events below
+     * `before`, oldest first, the way the socket replays them. For a part of
+     * a long session the socket no longer replays; the first frame carries
+     * `truncated` when older events were left out.
+     */
+    async listCodeJournal(
+      sessionId: string,
+      window: { before: number; limit?: number },
+      signal?: AbortSignal,
+    ): Promise<SequencedCodeEventFrame[]> {
+      const params = new URLSearchParams({ before: String(window.before) });
+      if (window.limit !== undefined) params.set("limit", String(window.limit));
+      return parseList(
+        await this.json(
+          `/sessions/${encodeURIComponent(sessionId)}/journal?${params}`,
+          { headers: this.headers(), signal },
+        ),
+        parseSequencedCodeEvent,
+        "code session journal",
+      );
+    }
+
     /** Open the install-wide digest channel; auth via Sec-WebSocket-Protocol. */
     openCodeUpdates(onNotice: (notice: CodeUpdateNotice) => void): WebSocket {
       const url = `${this.baseUrl.replace(/^http/, "ws")}/updates`;

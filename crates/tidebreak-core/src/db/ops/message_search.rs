@@ -78,6 +78,9 @@ const BACKFILL_RETRY_MICROS: i64 = 30 * 1_000_000;
 const MAX_BACKFILL_RETRY_MICROS: i64 = 60 * 60 * 1_000_000;
 /// Longest error a queued conversation keeps, in characters.
 const MAX_BACKFILL_ERROR_CHARS: usize = 1_000;
+/// How long after the backfill gives up on a conversation new content in it
+/// earns another attempt.
+const NEW_CONTENT_RETRY_AFTER_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 
 /// One piece of a conversation, ready to index.
 #[derive(Debug, Clone)]
@@ -410,6 +413,7 @@ where
     {
         return Ok(());
     }
+    retry_on_new_content(conn, message.chat_id, message.created_at).await?;
     insert_pieces_on(
         conn,
         &facts.owner,
@@ -489,6 +493,7 @@ where
     if terms.is_empty() {
         return Ok(());
     }
+    retry_on_new_content(conn, session_id.0, started_at).await?;
     insert_pieces_on(
         conn,
         &facts.owner,
@@ -560,6 +565,7 @@ where
     // needs it before one of `events` starts a turn.
     let mut turn: Option<Option<uuid::Uuid>> = None;
     let mut boundary: Option<(uuid::Uuid, i64)> = None;
+    let mut retried = false;
     for (seq, event, at) in &decoded {
         if let Some(started) = turn_boundary(event) {
             turn = Some(Some(started.0));
@@ -581,6 +587,10 @@ where
         let Some(piece) = event_piece(*seq, event, *at, in_turn) else {
             continue;
         };
+        if !retried {
+            retry_on_new_content(conn, session_id.0, *at).await?;
+            retried = true;
+        }
         if piece.source_key.starts_with("call:") {
             delete_piece_on(conn, session_id.0, &piece.source_key).await?;
         }
@@ -826,7 +836,8 @@ where
 /// its error are recorded, and the session is tried again after a wait that
 /// doubles with each failure. After [`MAX_BACKFILL_ATTEMPTS`] failures the
 /// session is marked failed and left out of the index's history, and a search
-/// reports it. Its new messages are still indexed as they land.
+/// reports it. Its new messages are still indexed as they land, and new
+/// content a day or more after it was given up on earns it one more attempt.
 pub(in crate::db) async fn backfill(
     store: &DbStore,
     sessions: u64,
@@ -884,7 +895,21 @@ pub(in crate::db) async fn backfill(
         let failed = match rebuilt {
             Ok(()) => transaction.commit().await.map_err(store_err).err(),
             Err(error) => {
-                transaction.rollback().await.map_err(store_err)?;
+                // A rollback fails when the transaction is already gone: its
+                // connection dropped, or SQLite ended it (a trigger's
+                // `RAISE(ROLLBACK)`, a full disk, an I/O error). The pool
+                // replaces a SQLite connection left that way before it is used
+                // again, so the attempt is recorded on a sound connection.
+                // Returning here instead would leave this session due, so it
+                // would head the queue on every step and hold back every
+                // session behind it.
+                if let Err(rollback) = transaction.rollback().await {
+                    tracing::warn!(
+                        session = %session_id,
+                        error = %rollback,
+                        "could not roll back a failed message index rebuild"
+                    );
+                }
                 Some(error)
             }
         };
@@ -963,6 +988,169 @@ async fn record_failed_attempt(
         );
     }
     Ok(())
+}
+
+/// Wakes the backfill worker when a conversation it gave up on is due again.
+///
+/// A given-up conversation leaves nothing due, so the worker waits for this
+/// instead of polling. The wake can land before the write that caused it
+/// commits; the worker lets such a write settle before it looks again.
+static BACKFILL_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Wait until a conversation the backfill gave up on is due again.
+pub(in crate::db) async fn backfill_woken() {
+    BACKFILL_WAKE.notified().await;
+}
+
+/// The `setting` key holding the newest app version the backfill ran under.
+const BACKFILL_VERSION_SETTING: &str = "message_search.backfill_version";
+
+/// Give every conversation the backfill gave up on a fresh count of attempts.
+/// Their last errors stay, for anyone reading the queue.
+async fn retry_every_given_up_on<C>(conn: &C) -> Result<u64>
+where
+    C: ConnectionTrait,
+{
+    let backend = conn.get_database_backend();
+    let retried = conn
+        .execute_raw(Statement::from_string(
+            backend,
+            "UPDATE \"message_search_backfill\" SET \"attempts\" = 0, \
+             \"retry_at_micros\" = NULL, \"failed_at_micros\" = NULL \
+             WHERE \"failed_at_micros\" IS NOT NULL",
+        ))
+        .await
+        .map_err(store_err)?
+        .rows_affected();
+    if retried > 0 {
+        BACKFILL_WAKE.notify_one();
+    }
+    Ok(retried)
+}
+
+/// A conversation that gets something new, written at `at`, gets one more
+/// attempt at its history if the backfill gave up on it a day or more
+/// before. One attempt, not a fresh count: if it fails again the backfill
+/// gives up on it again, so a conversation that always fails costs at most
+/// one rebuild a day however much is said in it. Its last error stays.
+///
+/// Runs with every live index write, and costs one primary-key lookup when
+/// there is nothing to retry.
+async fn retry_on_new_content<C>(conn: &C, session_id: uuid::Uuid, at: DateTime<Utc>) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let backend = conn.get_database_backend();
+    let retried = conn
+        .execute_raw(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "UPDATE \"message_search_backfill\" SET \"attempts\" = {}, \
+                 \"retry_at_micros\" = NULL, \"failed_at_micros\" = NULL \
+                 WHERE \"session_id\" = {} AND \"failed_at_micros\" IS NOT NULL \
+                 AND \"failed_at_micros\" <= {}",
+                placeholder(backend, 1),
+                placeholder(backend, 2),
+                placeholder(backend, 3)
+            ),
+            [
+                (MAX_BACKFILL_ATTEMPTS - 1).into(),
+                session_id.into(),
+                micros(at)
+                    .saturating_sub(NEW_CONTENT_RETRY_AFTER_MICROS)
+                    .into(),
+            ],
+        ))
+        .await
+        .map_err(store_err)?
+        .rows_affected();
+    if retried > 0 {
+        BACKFILL_WAKE.notify_one();
+    }
+    Ok(())
+}
+
+/// Take a conversation out of the backfill queue, after a write that settled
+/// its history: a rebuild that indexed all of it, or memory incognito, which
+/// keeps it out of the index altogether.
+pub(in crate::db) async fn settle_backfill_on<C>(conn: &C, session_id: SessionId) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let backend = conn.get_database_backend();
+    conn.execute_raw(Statement::from_sql_and_values(
+        backend,
+        format!(
+            "DELETE FROM \"message_search_backfill\" WHERE \"session_id\" = {}",
+            placeholder(backend, 1)
+        ),
+        [session_id.0.into()],
+    ))
+    .await
+    .map_err(store_err)?;
+    Ok(())
+}
+
+/// Whether `current` is a newer version than `previous`, by semantic
+/// versioning precedence: pre-release identifiers count, so
+/// `0.0.0-staging.2` is newer than `0.0.0-staging.1`, and a pre-release comes
+/// before its release. Build metadata does not count. Versions that do not
+/// parse are newer when they differ.
+pub(in crate::db) fn newer_release(current: &str, previous: &str) -> bool {
+    match (
+        semver::Version::parse(current),
+        semver::Version::parse(previous),
+    ) {
+        (Ok(current), Ok(previous)) => current.cmp_precedence(&previous).is_gt(),
+        _ => current != previous,
+    }
+}
+
+/// Give every conversation the backfill gave up on another try when a newer
+/// app version starts than the one that last ran the backfill, since the new
+/// version may no longer fail on them. Answers how many it retried.
+///
+/// The newest version is kept in `setting`, so the same version starting
+/// again, or an older one, retries nothing.
+pub(in crate::db) async fn retry_after_upgrade(store: &DbStore, version: &str) -> Result<u64> {
+    use sea_orm::sea_query::OnConflict;
+    use sea_orm::ActiveValue::Set;
+
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let previous = entities::setting::Entity::find_by_id(BACKFILL_VERSION_SETTING.to_owned())
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .and_then(|row| row.value_json.as_str().map(str::to_owned));
+    if previous
+        .as_deref()
+        .is_some_and(|previous| !newer_release(version, previous))
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(0);
+    }
+    let retried = retry_every_given_up_on(&transaction).await?;
+    entities::setting::Entity::insert(entities::setting::ActiveModel {
+        key: Set(BACKFILL_VERSION_SETTING.to_owned()),
+        value_json: Set(serde_json::Value::String(version.to_owned())),
+    })
+    .on_conflict(
+        OnConflict::column(entities::setting::Column::Key)
+            .update_column(entities::setting::Column::ValueJson)
+            .to_owned(),
+    )
+    .exec(&transaction)
+    .await
+    .map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
+    if retried > 0 {
+        tracing::info!(
+            retried,
+            version,
+            "trying again to add conversations the message index gave up on, under a newer version"
+        );
+    }
+    Ok(retried)
 }
 
 /// Where the backfill queue stands at `now`.
@@ -1050,11 +1238,56 @@ async fn indexing_for_owner(store: &DbStore, owner: &OwnerId) -> Result<MessageS
     })
 }
 
+/// Whether one of `owner`'s conversations is still waiting for the backfill,
+/// or was given up on. A conversation someone else owns, or one that was
+/// never queued, counts as neither.
+async fn indexing_for_session(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+) -> Result<MessageSearchIndexing> {
+    let backend = store.conn.get_database_backend();
+    let row = store
+        .conn
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "SELECT \"message_search_backfill\".\"failed_at_micros\" AS \"failed_at_micros\" \
+                 FROM \"message_search_backfill\" \
+                 JOIN \"session\" ON \"session\".\"id\" = \"message_search_backfill\".\"session_id\" \
+                 WHERE \"message_search_backfill\".\"session_id\" = {} AND \"session\".\"owner\" = {}",
+                placeholder(backend, 1),
+                placeholder(backend, 2)
+            ),
+            [session_id.0.into(), owner.as_str().into()],
+        ))
+        .await
+        .map_err(store_err)?;
+    let (pending, failed) = match row {
+        None => (0, 0),
+        Some(row) => {
+            let failed_at: Option<i64> = row.try_get("", "failed_at_micros").map_err(store_err)?;
+            if failed_at.is_some() {
+                (0, 1)
+            } else {
+                (1, 0)
+            }
+        }
+    };
+    Ok(MessageSearchIndexing {
+        complete: pending == 0 && failed == 0,
+        pending_conversations: pending,
+        failed_conversations: failed,
+    })
+}
+
 /// Which conversations a search reads.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::db) enum SearchScope {
     /// Every conversation the owner owns.
     Owner,
+    /// One of the owner's conversations.
+    Session(SessionId),
     /// The owner's code sessions in one repository's workspaces.
     Repo(RepoId),
 }
@@ -1128,7 +1361,7 @@ where
         ),
     };
     let workspace_join = match scope {
-        SearchScope::Owner => "LEFT JOIN",
+        SearchScope::Owner | SearchScope::Session(_) => "LEFT JOIN",
         SearchScope::Repo(_) => "JOIN",
     };
     let mut filters = vec![
@@ -1146,6 +1379,12 @@ where
             next(&mut values, false.into())
         ),
     ];
+    if let SearchScope::Session(session_id) = scope {
+        filters.push(format!(
+            "\"message_search\".\"session_id\" = {}",
+            next(&mut values, session_id.0.into())
+        ));
+    }
     if let SearchScope::Repo(repo_id) = scope {
         filters.push(format!(
             "\"code_workspace\".\"repo_id\" = {}",
@@ -1327,7 +1566,10 @@ pub(in crate::db) async fn search_messages(
     owner: &OwnerId,
     request: &MessageSearchRequest,
 ) -> Result<MessageSearchPage> {
-    let indexing = indexing_for_owner(store, owner).await?;
+    let indexing = match request.session_id {
+        Some(session_id) => indexing_for_session(store, owner, session_id).await?,
+        None => indexing_for_owner(store, owner).await?,
+    };
     let terms = SearchTerms::parse(&request.query);
     if terms.is_empty() {
         return Ok(MessageSearchPage {
@@ -1341,7 +1583,9 @@ pub(in crate::db) async fn search_messages(
         &store.conn,
         owner,
         &terms,
-        SearchScope::Owner,
+        request
+            .session_id
+            .map_or(SearchScope::Owner, SearchScope::Session),
         request.cursor,
         u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1),
     )

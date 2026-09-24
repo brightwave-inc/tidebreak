@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
   type RefCallback,
+  type ReactNode,
 } from "react";
 
 import type {
@@ -92,6 +93,8 @@ export function CodeTranscript({
   contentRef,
   onScroll,
   recap,
+  revealItemId = null,
+  trailingNotice,
 }: {
   items: CodeTranscriptItem[];
   approvals?: Record<string, CodeApprovalSnapshot>;
@@ -145,6 +148,10 @@ export function CodeTranscript({
    * reader who left and came back, not the one watching.
    */
   recap?: string;
+  /** A row a search points at; a run of calls folded over it opens. */
+  revealItemId?: string | null;
+  /** A note that closes the transcript, such as the way back to the latest. */
+  trailingNotice?: ReactNode;
 }) {
   // The durable turn snapshot lands before the journal replay that fills in
   // assistant text and tool activity. Hide both sources until that initial
@@ -236,6 +243,7 @@ export function CodeTranscript({
                   tools={row.tools}
                   signature={row.signature}
                   onReveal={onReveal}
+                  revealItemId={revealItemId}
                 />,
               )
             : isolatedCard(
@@ -282,6 +290,7 @@ export function CodeTranscript({
         {shouldShowCodeWorking(presentationItems, busy, streamStalled) && (
           <AssistantWorkingIndicator />
         )}
+        {trailingNotice}
         <TurnLifecycleAnnouncer
           text={codeTurnAnnouncement(presentationItems, busy, approvals)}
         />
@@ -704,15 +713,19 @@ const TranscriptItem = memo(function TranscriptItem({
       );
     case "tool":
       return (
-        <CodeToolCard
-          name={item.name}
-          detail={item.detail}
-          status={item.status}
-          preview={item.preview}
-          startedAt={item.startedAt}
-          durationMs={item.durationMs}
-          onReveal={onReveal}
-        />
+        // A box-less wrapper names the row for a search to find, without
+        // changing how the column lays it out.
+        <div className="contents" data-code-item-id={item.id}>
+          <CodeToolCard
+            name={item.name}
+            detail={item.detail}
+            status={item.status}
+            preview={item.preview}
+            startedAt={item.startedAt}
+            durationMs={item.durationMs}
+            onReveal={onReveal}
+          />
+        </div>
       );
     case "notice":
       return (
@@ -789,7 +802,11 @@ function AssistantRewriteMessage({
   ownsCopyAction?: boolean;
 }) {
   return (
-    <article className="message message-assistant" aria-label="Assistant">
+    <article
+      className="message message-assistant"
+      aria-label="Assistant"
+      data-code-item-id={item.id}
+    >
       {item.rewriteState === "rewriting" && (
         <p className="text-muted-foreground mb-2 text-xs" role="status">
           Writing a recap…
@@ -832,13 +849,21 @@ export const CodeActivityGroup = memo(
   function CodeActivityGroup({
     tools,
     onReveal,
+    revealItemId = null,
   }: {
     tools: readonly CodeToolItem[];
     /** What the group draws on. The memo compares this and nothing else. */
     signature: string;
     onReveal?: () => void;
+    /** A call a search points at; the group opens when it holds it. */
+    revealItemId?: string | null;
   }) {
     const [expanded, setExpanded] = useState(false);
+    const holdsRevealed =
+      revealItemId !== null && tools.some((tool) => tool.id === revealItemId);
+    useEffect(() => {
+      if (holdsRevealed) setExpanded(true);
+    }, [holdsRevealed]);
 
     const lead = leadingCall(tools);
     const status = groupStatus(tools);
@@ -887,23 +912,25 @@ export const CodeActivityGroup = memo(
         bodyClassName="border-border ml-[7px] flex flex-col gap-1 border-l pl-4"
       >
         {tools.map((tool) => (
-          <CodeToolCard
-            key={tool.id}
-            name={tool.name}
-            detail={tool.detail}
-            status={tool.status}
-            preview={tool.preview}
-            startedAt={tool.startedAt}
-            durationMs={tool.durationMs}
-            onReveal={onReveal}
-          />
+          <div key={tool.id} className="contents" data-code-item-id={tool.id}>
+            <CodeToolCard
+              name={tool.name}
+              detail={tool.detail}
+              status={tool.status}
+              preview={tool.preview}
+              startedAt={tool.startedAt}
+              durationMs={tool.durationMs}
+              onReveal={onReveal}
+            />
+          </div>
         ))}
       </ToolCardShell>
     );
   },
   (previous, next) =>
     previous.signature === next.signature &&
-    previous.onReveal === next.onReveal,
+    previous.onReveal === next.onReveal &&
+    previous.revealItemId === next.revealItemId,
 );
 
 /**

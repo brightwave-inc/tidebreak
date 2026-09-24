@@ -377,6 +377,44 @@ pub async fn list_events(
     Ok(EventPage { events, truncated })
 }
 
+/// Events for one of the owner's sessions with `seq < before`, in order.
+///
+/// At most `limit` events come back, the newest ones below `before`, and
+/// `truncated` says older ones were left out. This is how a reader opens a
+/// part of a long session that [`list_events`] no longer replays: pass one
+/// past the last event to show, and the window ends there.
+pub async fn list_events_before(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    before: i64,
+    limit: u64,
+) -> Result<EventPage> {
+    let probe = limit.saturating_add(1);
+    let mut rows = entities::event::Entity::find()
+        .filter(entities::event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::event::Column::SessionId.eq(session_id.0))
+        .filter(entities::event::Column::Seq.lt(before))
+        .order_by_desc(entities::event::Column::Seq)
+        .limit(probe)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    let truncated = rows.len() as u64 > limit;
+    rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    rows.reverse();
+    let events = rows
+        .into_iter()
+        .map(|model| {
+            Ok(SequencedEvent {
+                seq: model.seq,
+                event: serde_json::from_value(model.event)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(EventPage { events, truncated })
+}
+
 /// Complete reconstructable turn events through `through_turn`, newest first
 /// for budget decisions and ascending in the returned page.
 ///

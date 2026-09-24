@@ -23,6 +23,7 @@ sqlite = [
     "dep:sea-orm-migration",
     "sea-orm/sqlx-sqlite",
     "sea-orm-migration/sqlx-sqlite",
+    "dep:semver",
     "dep:tokio",
 ]
 # Test-only SQLite setup shared with crates that exercise `DbStore` indirectly.
@@ -33,6 +34,7 @@ postgres = [
     "dep:sea-orm-migration",
     "sea-orm/sqlx-postgres",
     "sea-orm-migration/sqlx-postgres",
+    "dep:semver",
     "dep:tokio",
 ]
 # The OS-keychain-backed SecretProvider.
@@ -68,6 +70,7 @@ ts-rs = { workspace = true }
 unicode-normalization = { workspace = true }
 sea-orm = { workspace = true, optional = true }
 sea-orm-migration = { workspace = true, optional = true }
+semver = { version = "=1.0.28", optional = true }
 tokio = { workspace = true, optional = true }
 
 # Keychain backends are per-OS: Security framework (macOS), Credential Manager

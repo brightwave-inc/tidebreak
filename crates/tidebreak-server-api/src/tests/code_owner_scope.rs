@@ -1284,6 +1284,134 @@ async fn a_deployment_session_shows_to_a_third_principal_and_a_private_one_does_
     );
 }
 
+/// A window of a session's journal opens a part of a long session the event
+/// socket no longer replays: the newest events below the cursor, oldest
+/// first, flagged when older ones were left out. Whoever may read the
+/// session may read the window, and nobody else.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_journal_window_reads_the_events_below_its_cursor() {
+    let (router, _dir, repo, runtime) = two_user_code_app_with_runtime().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let session = owned_session(&client, addr, ALICE_TOKEN, &repo).await;
+    let owner = tidebreak_core::OwnerId::new("user:alice").unwrap();
+    let session_id = session.parse().unwrap();
+    let epoch = tidebreak_core::db::code::get_session(&runtime.db, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .spawn_epoch;
+    let mut seqs = Vec::new();
+    for index in 0..6 {
+        let note = tidebreak_core::Event::HarnessNotice {
+            level: tidebreak_core::HarnessNoticeLevel::Info,
+            message: format!("note {index}"),
+        };
+        seqs.push(
+            tidebreak_core::db::code::append_event(&runtime.db, &owner, session_id, epoch, &note)
+                .await
+                .unwrap(),
+        );
+    }
+    let window = |token: &'static str, query: String| {
+        let client = client.clone();
+        let session = session.clone();
+        async move {
+            client
+                .get(format!("http://{addr}/sessions/{session}/journal{query}"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    let response = window(ALICE_TOKEN, format!("?before={}&limit=2", seqs[4])).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let frames: Vec<serde_json::Value> = response.json().await.unwrap();
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| frame["event"]["message"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["note 2", "note 3"]
+    );
+    assert_eq!(frames[0]["seq"], seqs[2]);
+    assert_eq!(frames[0]["truncated"], true, "older events were left out");
+    assert!(frames[1].get("truncated").is_none());
+    assert!(frames.iter().all(|frame| frame["replayed"] == true));
+
+    // A window that reaches the start of the journal leaves nothing out.
+    let frames: Vec<serde_json::Value> = window(ALICE_TOKEN, format!("?before={}", seqs[1]))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(frames.iter().all(|frame| frame.get("truncated").is_none()));
+    assert_eq!(frames.last().unwrap()["event"]["message"], "note 0");
+
+    // Someone the session is not shared with finds nothing; once it is
+    // shared with them, they read the same window.
+    let query = format!("?before={}&limit=2", seqs[4]);
+    assert_eq!(
+        window(BOB_TOKEN, query.clone()).await.status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        &session,
+        "principal:user:bob",
+        "view",
+    )
+    .await;
+    let response = window(BOB_TOKEN, query).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response
+            .json::<Vec<serde_json::Value>>()
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    for query in ["", "?before=0", "?before=5&limit=0", "?before=5&limit=2001"] {
+        assert_eq!(
+            window(ALICE_TOKEN, query.to_owned()).await.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+}
+
+/// A chat transcript of an external engine's session tells its owner the
+/// engine keeps none, and tells anyone else nothing: they get the same 404
+/// as an id nobody has.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_transcript_of_someone_elses_session_is_not_found() {
+    let (router, _dir, repo) = two_user_code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let session = owned_session(&client, addr, ALICE_TOKEN, &repo).await;
+    let transcript = format!("/chats/{session}/messages");
+
+    assert_eq!(
+        get_status(&client, addr, ALICE_TOKEN, &transcript).await,
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &transcript).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let unknown = format!("/chats/{}/messages", uuid::Uuid::new_v4());
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &unknown).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+}
+
 /// Revoking a row severs the reader's open event socket rather than leaving
 /// it streaming a session they no longer hold.
 #[tokio::test(flavor = "multi_thread")]
