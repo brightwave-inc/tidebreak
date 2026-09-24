@@ -509,8 +509,10 @@ export const RestoredFromAQueuedMessage: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.findByText("1 review comment")).resolves.toBeVisible();
+    // A row shows its other actions on hover or focus.
+    canvas.getByRole("button", { name: "Send queued message 1 now" }).focus();
     await userEvent.click(
-      canvas.getByRole("button", { name: "Delete queued message" }),
+      await canvas.findByRole("button", { name: "Delete queued message" }),
     );
     const card = await canvas.findByRole("article", { name: "Line 22" });
     await expect(card.closest("[data-diff-outdated]")).toBeNull();

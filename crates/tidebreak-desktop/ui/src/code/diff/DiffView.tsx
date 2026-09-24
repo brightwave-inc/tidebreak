@@ -869,7 +869,10 @@ export function DiffView({
         )}
         {(commentPlacement.hidden.length > 0 || editorAway === "hidden") && (
           <div
-            className="border-border-subtle border-b py-1 font-sans"
+            className={cn(
+              "py-1 font-sans",
+              displayCount > 0 && "border-border-subtle border-b",
+            )}
             data-diff-hidden-comments=""
           >
             <p className="text-muted-foreground px-3 pt-1 text-xs">
@@ -898,7 +901,10 @@ export function DiffView({
         {(commentPlacement.outdated.length > 0 ||
           editorAway === "outdated") && (
           <div
-            className="border-border-subtle border-b py-1 font-sans"
+            className={cn(
+              "py-1 font-sans",
+              displayCount > 0 && "border-border-subtle border-b",
+            )}
             data-diff-outdated=""
           >
             <p className="text-muted-foreground px-3 pt-1 text-xs">
@@ -925,39 +931,44 @@ export function DiffView({
             ))}
           </div>
         )}
-        <div className={cn(layout === "unified" && "w-max min-w-full", "py-1")}>
-          {Array.from({ length: mounted }, (_, chunk) => {
-            const start = chunk * DIFF_CHUNK_ROWS;
-            const end = Math.min(displayCount, start + DIFF_CHUNK_ROWS);
-            return (
-              <DiffChunk
-                key={chunk}
-                model={model}
-                layout={layout}
-                start={start}
-                end={end}
-                syntax={syntax}
-                syntaxReady={languageReady}
-                hunkAction={hunkAction}
-                commentable={review !== undefined}
-                selected={intersect(selected, model, layout, start, end)}
-                tabStop={
-                  tabStop && inChunk(displayOf(tabStop.row), start, end)
-                    ? tabStop
-                    : null
-                }
-                comments={commentsIn(commentPlacement.at, start, end)}
-                editor={
-                  editorSlot && inChunk(editorSlot.display, start, end)
-                    ? editorSlot
-                    : null
-                }
-                editingId={editor?.kind === "edit" ? editor.id : null}
-                sending={review?.sending}
-              />
-            );
-          })}
-        </div>
+        {/* A file that left the diff has no rows, only its comments. */}
+        {displayCount > 0 && (
+          <div
+            className={cn(layout === "unified" && "w-max min-w-full", "py-1")}
+          >
+            {Array.from({ length: mounted }, (_, chunk) => {
+              const start = chunk * DIFF_CHUNK_ROWS;
+              const end = Math.min(displayCount, start + DIFF_CHUNK_ROWS);
+              return (
+                <DiffChunk
+                  key={chunk}
+                  model={model}
+                  layout={layout}
+                  start={start}
+                  end={end}
+                  syntax={syntax}
+                  syntaxReady={languageReady}
+                  hunkAction={hunkAction}
+                  commentable={review !== undefined}
+                  selected={intersect(selected, model, layout, start, end)}
+                  tabStop={
+                    tabStop && inChunk(displayOf(tabStop.row), start, end)
+                      ? tabStop
+                      : null
+                  }
+                  comments={commentsIn(commentPlacement.at, start, end)}
+                  editor={
+                    editorSlot && inChunk(editorSlot.display, start, end)
+                      ? editorSlot
+                      : null
+                  }
+                  editingId={editor?.kind === "edit" ? editor.id : null}
+                  sending={review?.sending}
+                />
+              );
+            })}
+          </div>
+        )}
       </div>
     </InteractionContext.Provider>
   );
