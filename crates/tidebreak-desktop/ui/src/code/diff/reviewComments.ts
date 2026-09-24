@@ -309,6 +309,34 @@ function parseComments(inner: readonly string[]): SentReviewComment[] {
   return comments;
 }
 
+/** Where the block the send put last opens and closes, by line. */
+function blockLines(
+  lines: readonly string[],
+): { open: number; close: number } | null {
+  let open = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (lines[index] === OPEN) {
+      open = index;
+      break;
+    }
+  }
+  if (open === -1) return null;
+  for (let index = lines.length - 1; index > open; index -= 1) {
+    if (lines[index] === CLOSE) return { open, close: index };
+  }
+  return null;
+}
+
+/**
+ * The message's review block exactly as it was sent, or null when it has
+ * none. A queued message edited in the tray keeps it this way.
+ */
+export function reviewBlockOf(message: string): string | null {
+  const lines = message.split("\n");
+  const block = blockLines(lines);
+  return block ? lines.slice(block.open, block.close + 1).join("\n") : null;
+}
+
 /**
  * Take the review block back out of a sent message, so the transcript can
  * show the comments compactly instead of as the text the agent read.
@@ -321,22 +349,9 @@ export function splitReviewComments(message: string): {
   comments: SentReviewComment[];
 } {
   const lines = message.split("\n");
-  let open = -1;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (lines[index] === OPEN) {
-      open = index;
-      break;
-    }
-  }
-  if (open === -1) return { prose: message, comments: [] };
-  let close = -1;
-  for (let index = lines.length - 1; index > open; index -= 1) {
-    if (lines[index] === CLOSE) {
-      close = index;
-      break;
-    }
-  }
-  if (close === -1) return { prose: message, comments: [] };
+  const block = blockLines(lines);
+  if (!block) return { prose: message, comments: [] };
+  const { open, close } = block;
   const comments = parseComments(lines.slice(open + 1, close));
   if (comments.length === 0) return { prose: message, comments: [] };
   const prose = [...lines.slice(0, open), ...lines.slice(close + 1)]

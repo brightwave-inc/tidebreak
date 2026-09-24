@@ -11,6 +11,12 @@ import {
 import { toast } from "sonner";
 
 import type { ApiClient } from "./api";
+import { usePendingReviewStore } from "./code/diff/pendingReview";
+import {
+  reviewBlockOf,
+  reviewCommentsFromSent,
+  splitReviewComments,
+} from "./code/diff/reviewComments";
 import { triggerEventSummary } from "./code/TriggerEventCard";
 import { friendlyErrorMessage } from "./lib/utils";
 import { useRefreshSignals } from "./RefreshSignals";
@@ -24,6 +30,7 @@ const QUEUE_POLL_MS = 15_000;
 /** One queued message, in the vocabulary the tray renders. */
 export type QueueTrayRow = {
   id: string;
+  /** What the person wrote: the text the row shows and the edit box edits. */
   content: string;
   /**
    * Short label naming the automation that parked this row ("Checks failed
@@ -31,7 +38,26 @@ export type QueueTrayRow = {
    * origin chip beside the content.
    */
   origin?: string;
+  /**
+   * Diff comments the message carries after its text. The row counts them
+   * rather than showing the block the agent reads, and the edit box leaves
+   * them out.
+   */
+  reviewComments?: QueuedReviewComments;
 };
+
+export type QueuedReviewComments = {
+  count: number;
+  /** The whole message again, with `text` in place of what was written. */
+  withText: (text: string) => string;
+  /** Put the comments back in the workspace's pending review. */
+  restore: () => void;
+};
+
+/** "3 review comments". */
+function reviewCommentsLabel(count: number): string {
+  return `${count} review ${count === 1 ? "comment" : "comments"}`;
+}
 
 /**
  * The queue operations the tray drives. Chat and code sessions expose the
@@ -69,10 +95,51 @@ export function chatQueueApi(client: ApiClient, chatId: string): QueueTrayApi {
   };
 }
 
+/** Where a deleted queued message's diff comments go back to. */
+export type QueueReviewTarget = {
+  workspaceId: string;
+  /** The turn a comment's `diff` names, such as "turn 3", in this conversation. */
+  turnFor?: (diff: string) => string | null;
+};
+
+/**
+ * A queued code message, split into what the person wrote and the diff
+ * comments riding after it, so the tray shows the comments as a count and a
+ * deleted row can give them back to the review.
+ */
+function queuedCodeMessage(
+  message: string,
+  review: QueueReviewTarget | undefined,
+): Pick<QueueTrayRow, "content" | "reviewComments"> {
+  const { prose, comments } = splitReviewComments(message);
+  const block = reviewBlockOf(message);
+  if (comments.length === 0 || !block) return { content: message };
+  return {
+    content: prose,
+    reviewComments: {
+      count: comments.length,
+      withText: (text) => {
+        const typed = text.trim();
+        return typed ? `${typed}\n\n${block}` : block;
+      },
+      restore: () => {
+        if (!review) return;
+        usePendingReviewStore
+          .getState()
+          .restore(
+            review.workspaceId,
+            reviewCommentsFromSent(comments, { turnFor: review.turnFor }),
+          );
+      },
+    },
+  };
+}
+
 /** The code-session queue (`/sessions/{id}/queued`), decision 69. */
 export function codeQueueApi(
   client: ApiClient,
   sessionId: string,
+  review?: QueueReviewTarget,
 ): QueueTrayApi {
   return {
     list: async () => {
@@ -80,7 +147,7 @@ export function codeQueueApi(
       return {
         queued: snapshot.queued.map((row) => ({
           id: row.id,
-          content: row.message,
+          ...queuedCodeMessage(row.message, review),
           origin: row.actor?.trigger
             ? triggerEventSummary(row.actor.trigger)
             : undefined,
@@ -241,6 +308,11 @@ export function QueueTray({
               <Textarea
                 rows={1}
                 autoFocus
+                aria-label={
+                  row.reviewComments
+                    ? `Edit queued message ${index + 1}; its ${reviewCommentsLabel(row.reviewComments.count)} stay`
+                    : `Edit queued message ${index + 1}`
+                }
                 className="min-h-7 flex-1 py-1 text-sm"
                 value={editDraft}
                 onChange={(event) => setEditDraft(event.target.value)}
@@ -249,9 +321,17 @@ export function QueueTray({
                     event.preventDefault();
                     const content = editDraft.trim();
                     setEditing(null);
-                    if (content && content !== row.content) {
+                    // A message with comments may lose its text and keep
+                    // going as the comments alone.
+                    const keeps = content || row.reviewComments;
+                    if (keeps && content !== row.content) {
                       void act(
-                        () => queue.update(row.id, { content }),
+                        () =>
+                          queue.update(row.id, {
+                            content: row.reviewComments
+                              ? row.reviewComments.withText(content)
+                              : content,
+                          }),
                         "Could not edit the queued message",
                       );
                     }
@@ -263,14 +343,35 @@ export function QueueTray({
             ) : (
               <span
                 className="flex min-w-0 flex-1 items-baseline gap-2"
-                title={row.content}
+                title={[
+                  row.content,
+                  row.reviewComments &&
+                    reviewCommentsLabel(row.reviewComments.count),
+                ]
+                  .filter(Boolean)
+                  .join("\n")}
               >
                 {row.origin && (
                   <span className="text-muted-foreground shrink-0 text-xs">
                     {row.origin}
                   </span>
                 )}
-                <span className="min-w-0 truncate text-sm">{row.content}</span>
+                {row.content && (
+                  <span className="min-w-0 truncate text-sm">
+                    {row.content}
+                  </span>
+                )}
+                {row.reviewComments && (
+                  <span
+                    className={
+                      row.content
+                        ? "text-muted-foreground shrink-0 text-xs"
+                        : "min-w-0 truncate text-sm"
+                    }
+                  >
+                    {reviewCommentsLabel(row.reviewComments.count)}
+                  </span>
+                )}
               </span>
             )}
             <Button
@@ -338,12 +439,19 @@ export function QueueTray({
                 size="icon-xs"
                 className="size-6 text-muted-foreground hover:text-destructive"
                 aria-label="Delete queued message"
+                title={
+                  row.reviewComments
+                    ? `Delete; its ${reviewCommentsLabel(row.reviewComments.count)} go back to the diff`
+                    : undefined
+                }
                 disabled={busy}
                 onClick={() =>
-                  void act(
-                    () => queue.remove(row.id),
-                    "Could not delete the queued message",
-                  )
+                  void act(async () => {
+                    await queue.remove(row.id);
+                    // The comments were only in this message: they wait in
+                    // the review again rather than vanish with it.
+                    row.reviewComments?.restore();
+                  }, "Could not delete the queued message")
                 }
               >
                 <Trash2 className="size-3.5" />
@@ -361,7 +469,26 @@ export function useChatQueueApi(client: ApiClient, chatId: string) {
   return useMemo(() => chatQueueApi(client, chatId), [client, chatId]);
 }
 
-/** Memoize a stable adapter so the tray's poll effect does not rearm per render. */
-export function useCodeQueueApi(client: ApiClient, sessionId: string) {
-  return useMemo(() => codeQueueApi(client, sessionId), [client, sessionId]);
+/**
+ * Memoize a stable adapter so the tray's poll effect does not rearm per
+ * render. `reviewWorkspaceId` is where a deleted message's diff comments go
+ * back to, and `turnFor` finds the turns they name.
+ */
+export function useCodeQueueApi(
+  client: ApiClient,
+  sessionId: string,
+  reviewWorkspaceId?: string,
+  turnFor?: (diff: string) => string | null,
+) {
+  return useMemo(
+    () =>
+      codeQueueApi(
+        client,
+        sessionId,
+        reviewWorkspaceId
+          ? { workspaceId: reviewWorkspaceId, turnFor }
+          : undefined,
+      ),
+    [client, sessionId, reviewWorkspaceId, turnFor],
+  );
 }

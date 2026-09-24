@@ -59,7 +59,7 @@ import {
 import { followScrollBehavior } from "@/ChatScroll";
 import { forkTranscriptFile } from "../fork";
 import { splitReviewComments } from "../diff/reviewComments";
-import { sendCodeTurn } from "../CodeSessionSend";
+import { sendCodeTurn, turnIdNamed } from "../CodeSessionSend";
 import { toast } from "sonner";
 import { useCodeUpdatesStore, useSessionDigest } from "../CodeUpdatesStore";
 import { useStreamStalled } from "@/useStreamStalled";
@@ -201,7 +201,16 @@ export function CodeSessionPane({
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | undefined>();
   const [approvalErrorId, setApprovalErrorId] = useState<string | null>(null);
-  const sessionQueue = useCodeQueueApi(client, session.id);
+  const queuedTurnFor = useCallback(
+    (diff: string) => turnIdNamed(session.id, diff),
+    [session.id],
+  );
+  const sessionQueue = useCodeQueueApi(
+    client,
+    session.id,
+    workspaceId,
+    queuedTurnFor,
+  );
   // No `?? []` fallback here: a fresh array is a new snapshot every render,
   // and zustand v5 loops on referentially unstable snapshots.
   const cachedModels = useCodeCatalogStore(

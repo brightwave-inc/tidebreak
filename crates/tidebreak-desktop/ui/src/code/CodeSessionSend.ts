@@ -411,6 +411,17 @@ export function turnNamer(sessionId: string): TurnNamer {
   };
 }
 
+/** The turn a review block's "turn 3" names in this conversation, if any. */
+export function turnIdNamed(sessionId: string, name: string): string | null {
+  const ordinal = /^turn (\d+)$/.exec(name)?.[1];
+  if (!ordinal) return null;
+  const ordinals = peekCodeSession(sessionId)?.store.getState().turnOrdinals;
+  for (const [turnId, value] of ordinals ?? []) {
+    if (value === Number(ordinal)) return turnId;
+  }
+  return null;
+}
+
 function knownTurnIds(sessionId: string): ReadonlySet<string> {
   const state = peekCodeSession(sessionId)?.store.getState();
   const known = new Set<string>(state?.turnOrdinals.keys() ?? []);
