@@ -320,6 +320,7 @@ export function ReviewChangesControl({
       <PopoverContent
         align="end"
         sideOffset={6}
+        aria-label="Review changes"
         className="w-[min(24rem,calc(100vw-24px))] p-3"
       >
         {open && (

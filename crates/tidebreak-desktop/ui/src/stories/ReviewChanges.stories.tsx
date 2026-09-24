@@ -242,6 +242,14 @@ const meta = {
 export default meta;
 
 /**
+ * The form opens in a popover on the document body, not in the story root,
+ * and fades in: wait until what `find` returns has finished opening.
+ */
+async function waitUntilShown(find: () => HTMLElement) {
+  await waitFor(() => expect(find()).toBeVisible());
+}
+
+/**
  * The form the diff's header opens: the engine starts on one that did not
  * write the changes, the model it will run on is in view, and nothing runs
  * until Start review.
@@ -253,13 +261,15 @@ export const ChoosingAnEngine: Story = {
       await canvas.findByRole("button", { name: "Review changes" }),
     );
     const body = within(canvasElement.ownerDocument.body);
-    await expect(
-      body.findByRole("button", { name: "Start review" }),
-    ).resolves.toBeVisible();
+    await waitUntilShown(() =>
+      body.getByRole("button", { name: "Start review" }),
+    );
     await waitFor(() =>
       expect(body.getByRole("combobox")).toHaveTextContent("Codex CLI"),
     );
-    await expect(body.findByText("GPT-5.5")).resolves.toBeVisible();
+    await waitUntilShown(() =>
+      body.getByRole("button", { name: "Model: GPT 5.5" }),
+    );
   },
 };
 
@@ -294,11 +304,11 @@ export const OnlyTheAuthorIsReady: Story = {
         name: "Review changes",
       }),
     );
-    await expect(
-      within(canvasElement.ownerDocument.body).findByText(
+    await waitUntilShown(() =>
+      within(canvasElement.ownerDocument.body).getByText(
         "No other engine is ready, so Claude Code reviews its own changes.",
       ),
-    ).resolves.toBeVisible();
+    );
   },
 };
 
