@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 
 import type { ApiClient } from "../api";
@@ -24,9 +31,11 @@ import {
   scrollToElement,
   termRanges,
 } from "./highlightTerms";
+import { loadedCodeMatches, SHARED_FIND_NOTE } from "./loadedFind";
 import type { RevealTarget } from "./messageSearch";
 import { useTranscriptRevealStore, useRevealRequest } from "./transcriptReveal";
 import { useFindBar } from "./useFindBar";
+import type { LoadedFind } from "./useTranscriptFind";
 
 /** How far past a found event its window of the journal reads. */
 export const EVENTS_AFTER_FOUND = 120;
@@ -185,6 +194,7 @@ type Reveal = { itemId: string; terms: readonly string[]; nonce: number };
 export function useCodeTranscriptSearch({
   client,
   sessionId,
+  shared = false,
   hydrated,
   items,
   scrollElement,
@@ -195,6 +205,11 @@ export function useCodeTranscriptSearch({
     "searchMessages" | "listCodeJournal" | "listCodeSessionTurns"
   >;
   sessionId: string;
+  /**
+   * Someone else owns the session. A search reads only your own, so the
+   * find bar reads what is loaded.
+   */
+  shared?: boolean;
   hydrated: boolean;
   items: readonly CodeTranscriptItem[];
   scrollElement: HTMLElement | null;
@@ -307,6 +322,25 @@ export function useCodeTranscriptSearch({
     };
   }, [pending, scrollElement, pauseFollow]);
 
+  // A search reads only your own conversations, so in a session someone
+  // shared with you the find bar reads the rows on screen.
+  const loaded = useMemo<LoadedFind | null>(
+    () =>
+      shared
+        ? {
+            reason: SHARED_FIND_NOTE,
+            matches: (terms) =>
+              loadedCodeMatches(
+                sessionId,
+                historyRef.current
+                  ? mainAgentTranscriptItems(historyRef.current.items)
+                  : itemsRef.current,
+                terms,
+              ),
+          }
+        : null,
+    [sessionId, shared],
+  );
   const instance = useId();
   const find = useFindBar({
     hostId: `code:${sessionId}:${instance}`,
@@ -315,6 +349,7 @@ export function useCodeTranscriptSearch({
     scrollElement,
     onReveal: (hit, terms) =>
       void reveal({ eventSeq: hit.event_seq, turnId: hit.turn_id }, terms),
+    loaded,
   });
 
   const leaveHistory = useCallback(() => {

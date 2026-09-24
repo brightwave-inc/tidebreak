@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState, type ReactNode } from "react";
 import { expect, fn, userEvent, within } from "storybook/test";
 
+import { INCOGNITO_FIND_NOTE } from "@/search/loadedFind";
 import { TranscriptFindBar } from "@/search/TranscriptFindBar";
 import type { TranscriptFindState } from "@/search/useTranscriptFind";
 import { UserMessage } from "@/UserMessage";
@@ -35,6 +36,7 @@ function state(
     position: 0,
     indexing: messageSearchIndexed,
     error: null,
+    loadedOnly: null,
     ...overrides,
   };
 }
@@ -117,6 +119,20 @@ export const StillIndexing: Story = {
         pending_conversations: 1,
         failed_conversations: 0,
       },
+    }),
+  },
+};
+
+/**
+ * Memory incognito keeps the conversation out of search, so the bar finds
+ * only in the messages the transcript has loaded, and says so.
+ */
+export const LoadedOnly: Story = {
+  args: {
+    state: state({
+      matches: matches.slice(0, 2),
+      indexing: null,
+      loadedOnly: INCOGNITO_FIND_NOTE,
     }),
   },
 };

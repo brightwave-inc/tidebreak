@@ -27,6 +27,12 @@ export type TranscriptFindState = {
   position: number;
   indexing: MessageSearchIndexing | null;
   error: string | null;
+  /**
+   * Why the matches come only from what the transcript has loaded, when the
+   * index cannot search this conversation; null when they come from the
+   * index.
+   */
+  loadedOnly: string | null;
 };
 
 const IDLE: TranscriptFindState = {
@@ -37,6 +43,18 @@ const IDLE: TranscriptFindState = {
   position: -1,
   indexing: null,
   error: null,
+  loadedOnly: null,
+};
+
+/**
+ * How to find in a conversation the index cannot search for you: in what the
+ * transcript has loaded, and why that is all.
+ */
+export type LoadedFind = {
+  /** Why only what is loaded is searched, said in the find bar. */
+  reason: string;
+  /** The loaded rows that hold every term, newest first. */
+  matches: (terms: readonly string[]) => MessageSearchHit[];
 };
 
 type SearchClient = Pick<ApiClient, "searchMessages">;
@@ -87,18 +105,23 @@ export async function findInConversation(
  * the conversation and `newer` back down, each wrapping at the end. Each step
  * hands the match to `onReveal`, which loads its page if it has to and
  * scrolls to it.
+ *
+ * With `loaded`, the index cannot search this conversation for you, so the
+ * find reads what the transcript has loaded instead and says why.
  */
 export function useTranscriptFind({
   client,
   sessionId,
   open,
   onReveal,
+  loaded = null,
   delayMs = FIND_DELAY_MS,
 }: {
   client: SearchClient;
   sessionId: string;
   open: boolean;
   onReveal: (hit: MessageSearchHit, terms: readonly string[]) => void;
+  loaded?: LoadedFind | null;
   delayMs?: number;
 }) {
   const [query, setQuery] = useState("");
@@ -109,6 +132,9 @@ export function useTranscriptFind({
   // not restart the search.
   const clientRef = useRef(client);
   clientRef.current = client;
+  const loadedRef = useRef(loaded);
+  loadedRef.current = loaded;
+  const loadedOnly = loaded?.reason ?? null;
   const words = query.trim();
 
   useEffect(() => {
@@ -119,6 +145,25 @@ export function useTranscriptFind({
     setState((current) => ({ ...current, status: "loading", error: null }));
     const controller = new AbortController();
     const timer = globalThis.setTimeout(() => {
+      const local = loadedRef.current;
+      if (local) {
+        const terms = queryTerms(words);
+        const found = local.matches(terms);
+        const matches = found.slice(0, MAX_FIND_MATCHES);
+        setState({
+          status: "ready",
+          query: words,
+          matches,
+          capped: found.length > matches.length,
+          position: matches.length > 0 ? 0 : -1,
+          indexing: null,
+          error: null,
+          loadedOnly: local.reason,
+        });
+        const first = matches[0];
+        if (first) revealRef.current(first, terms);
+        return;
+      }
       findInConversation(
         clientRef.current,
         sessionId,
@@ -136,6 +181,7 @@ export function useTranscriptFind({
             position,
             indexing: found.indexing,
             error: null,
+            loadedOnly: null,
           });
           const first = found.matches[0];
           if (first) revealRef.current(first, queryTerms(words));
@@ -155,7 +201,7 @@ export function useTranscriptFind({
       globalThis.clearTimeout(timer);
       controller.abort();
     };
-  }, [sessionId, open, words, delayMs]);
+  }, [sessionId, open, words, delayMs, loadedOnly]);
 
   // A different conversation starts the find over.
   useEffect(() => {

@@ -131,7 +131,12 @@ export const TranscriptFindBar = forwardRef<
           </Button>
         </WithTooltip>
       </div>
-      {state.status === "ready" && (pending || failed) && (
+      {state.status === "ready" && state.loadedOnly && (
+        <p className="px-1 pb-0.5 text-xs text-muted-foreground">
+          {state.loadedOnly}
+        </p>
+      )}
+      {state.status === "ready" && !state.loadedOnly && (pending || failed) && (
         <p className="px-1 pb-0.5 text-xs text-muted-foreground">
           {pending
             ? "This conversation is still being indexed, so older matches may be missing."

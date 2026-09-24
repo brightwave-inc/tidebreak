@@ -196,6 +196,7 @@ export function CodeSessionPane({
   const transcriptSearch = useCodeTranscriptSearch({
     client,
     sessionId: session.id,
+    shared: session.is_owner === false,
     hydrated,
     items: transcriptItems,
     scrollElement: follow.scrollElement,

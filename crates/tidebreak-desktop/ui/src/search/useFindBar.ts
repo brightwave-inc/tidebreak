@@ -11,7 +11,7 @@ import {
 } from "./highlightTerms";
 import { queryTerms } from "./messageSearch";
 import { useTranscriptFindStore } from "./transcriptFind";
-import { useTranscriptFind } from "./useTranscriptFind";
+import { type LoadedFind, useTranscriptFind } from "./useTranscriptFind";
 
 /** How often the on-screen marks catch up with a transcript that changes. */
 const REPAINT_MS = 250;
@@ -23,7 +23,8 @@ const REPAINT_MS = 250;
  *
  * `onReveal` puts one match on screen, loading its page first when the
  * transcript does not hold it; the pane owns that, because only it knows how
- * its transcript pages.
+ * its transcript pages. `loaded` is how the pane finds in what it has loaded
+ * when the index cannot search the conversation for you.
  */
 export function useFindBar({
   hostId,
@@ -31,12 +32,14 @@ export function useFindBar({
   sessionId,
   scrollElement,
   onReveal,
+  loaded = null,
 }: {
   hostId: string;
   client: Pick<ApiClient, "searchMessages">;
   sessionId: string;
   scrollElement: HTMLElement | null;
   onReveal: (hit: MessageSearchHit, terms: readonly string[]) => void;
+  loaded?: LoadedFind | null;
 }) {
   const [open, setOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -66,7 +69,13 @@ export function useFindBar({
     return () => window.cancelAnimationFrame(frame);
   }, [request]);
 
-  const find = useTranscriptFind({ client, sessionId, open, onReveal });
+  const find = useTranscriptFind({
+    client,
+    sessionId,
+    open,
+    onReveal,
+    loaded,
+  });
 
   const words = find.state.status === "ready" ? find.state.query : "";
   useEffect(() => {

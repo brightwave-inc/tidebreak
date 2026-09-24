@@ -493,6 +493,7 @@ export function ChatView({
   const transcriptSearch = useChatTranscriptSearch({
     client,
     chatId: chat.id,
+    memoryIncognito: chat.memory_incognito,
     hydrated,
     scrollElement,
     disarmFollow,

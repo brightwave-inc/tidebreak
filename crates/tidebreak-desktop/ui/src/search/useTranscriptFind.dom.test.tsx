@@ -114,6 +114,32 @@ describe("finding in one conversation", () => {
     );
   });
 
+  it("finds in what is loaded when the index cannot search the conversation", async () => {
+    const client = pagingClient(3);
+    const onReveal = vi.fn();
+    const loadedMatches = vi.fn(() => hits(2, 40));
+    const { result } = renderHook(() =>
+      useTranscriptFind({
+        client,
+        sessionId: "chat-1",
+        open: true,
+        onReveal,
+        loaded: { reason: "Only what is loaded.", matches: loadedMatches },
+        delayMs: 0,
+      }),
+    );
+    act(() => result.current.setQuery("Harbour"));
+    await vi.waitFor(() => expect(result.current.state.status).toBe("ready"));
+    expect(client.searchMessages).not.toHaveBeenCalled();
+    expect(loadedMatches).toHaveBeenCalledWith(["harbour"]);
+    expect(findCountLabel(result.current.state)).toBe("1 of 2");
+    expect(result.current.state.loadedOnly).toBe("Only what is loaded.");
+    expect(onReveal).toHaveBeenLastCalledWith(
+      expect.objectContaining({ message_id: "m40" }),
+      ["harbour"],
+    );
+  });
+
   it("says when nothing matched, and steps nowhere", async () => {
     const onReveal = vi.fn();
     const { result } = renderHook(() =>
@@ -142,6 +168,7 @@ describe("the find bar", () => {
     position: 2,
     indexing: messageSearchIndexed,
     error: null,
+    loadedOnly: null,
   };
 
   function mount(state: TranscriptFindState = ready) {
@@ -187,6 +214,20 @@ describe("the find bar", () => {
     expect(screen.getByRole("button", { name: "Newer match" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Close find" })).toBeEnabled();
     expect(screen.getByRole("search")).toBeInTheDocument();
+  });
+
+  it("says why it found only in what is loaded", () => {
+    mount({
+      ...ready,
+      matches: [],
+      position: -1,
+      indexing: null,
+      loadedOnly: "Only the messages loaded here are searched.",
+    });
+    expect(screen.getByText("No matches")).toBeInTheDocument();
+    expect(
+      screen.getByText("Only the messages loaded here are searched."),
+    ).toBeInTheDocument();
   });
 
   it("says when the conversation is still being indexed", () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { ApiClient } from "../api";
@@ -16,8 +16,10 @@ import {
   scrollToElement,
   termRanges,
 } from "./highlightTerms";
+import { INCOGNITO_FIND_NOTE, loadedChatMatches } from "./loadedFind";
 import { useTranscriptRevealStore, useRevealRequest } from "./transcriptReveal";
 import { useFindBar } from "./useFindBar";
+import type { LoadedFind } from "./useTranscriptFind";
 
 /** How long a reveal waits for its row to render before giving up. */
 const REVEAL_DEADLINE_MS = 5_000;
@@ -47,6 +49,7 @@ type Reveal = { messageId: string; terms: readonly string[]; nonce: number };
 export function useChatTranscriptSearch({
   client,
   chatId,
+  memoryIncognito = false,
   hydrated,
   scrollElement,
   disarmFollow,
@@ -55,6 +58,8 @@ export function useChatTranscriptSearch({
 }: {
   client: Pick<ApiClient, "listChatMessages" | "searchMessages">;
   chatId: string;
+  /** The index leaves the chat out, so the find bar reads what is loaded. */
+  memoryIncognito?: boolean;
   hydrated: boolean;
   scrollElement: HTMLElement | null;
   disarmFollow: () => void;
@@ -157,6 +162,24 @@ export function useChatTranscriptSearch({
     endProgrammaticScroll,
   ]);
 
+  // The index leaves an incognito chat out, so its find bar reads the
+  // messages on screen: a stretch a search opened, or the pages held.
+  const loaded = useMemo<LoadedFind | null>(
+    () =>
+      memoryIncognito
+        ? {
+            reason: INCOGNITO_FIND_NOTE,
+            matches: (terms) =>
+              loadedChatMatches(
+                chatId,
+                historyRef.current?.messages ??
+                  useChatSessionStore.getState().messages,
+                terms,
+              ),
+          }
+        : null,
+    [chatId, memoryIncognito],
+  );
   const find = useFindBar({
     hostId: `chat:${chatId}`,
     client,
@@ -165,6 +188,7 @@ export function useChatTranscriptSearch({
     onReveal: (hit, terms) => {
       if (hit.message_id) void reveal(hit.message_id, terms);
     },
+    loaded,
   });
 
   const [earlierLoading, setEarlierLoading] = useState(false);
