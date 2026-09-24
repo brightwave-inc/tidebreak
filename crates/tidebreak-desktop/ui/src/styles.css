@@ -1087,7 +1087,7 @@ body {
   .message-versions-label {
     min-width: 2.75rem;
     color: var(--muted-foreground);
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
     font-variant-numeric: tabular-nums;
     text-align: center;
     white-space: nowrap;
@@ -1108,7 +1108,7 @@ body {
     margin: 0;
     padding-inline: 0.3rem;
     color: var(--muted-foreground);
-    font-size: 0.72rem;
+    font-size: var(--text-2xs);
   }
 
   /* Why answering again starts a new chat, at the top of the Regenerate
@@ -1118,7 +1118,7 @@ body {
     margin: 0;
     padding: 0.375rem 0.5rem 0.5rem;
     color: var(--muted-foreground);
-    font-size: 0.8rem;
+    font-size: var(--text-xs);
     line-height: 1.45;
     text-wrap: pretty;
   }
@@ -1145,7 +1145,7 @@ body {
 
   .message-user-editor-note {
     color: var(--muted-foreground);
-    font-size: 0.8rem;
+    font-size: var(--text-xs);
     line-height: 1.45;
   }
 
@@ -1164,7 +1164,7 @@ body {
     gap: 0.5rem;
     margin-block: 0.75rem;
     color: var(--muted-foreground);
-    font-size: 0.8rem;
+    font-size: var(--text-xs);
   }
 
   .message-branch-notice::before,
