@@ -262,7 +262,7 @@ VALUES
     assert!(!page.indexing.complete);
     assert_eq!(page.indexing.pending_conversations, 1);
 
-    assert_eq!(store.backfill_message_search(10).await.unwrap(), 0);
+    assert_eq!(store.backfill_message_search(10).await.unwrap().waiting, 0);
     let page = crate::Store::search_messages_scoped(&store, &owner, &request)
         .await
         .unwrap();

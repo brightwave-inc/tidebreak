@@ -20,6 +20,16 @@
 //! event it indexes, so a piece of a conversation is searchable exactly when
 //! it is committed. Streamed deltas are never journaled, so they are never
 //! indexed either.
+//!
+//! A write that changes a session's part of the index holds that session's
+//! row lock, and so does a rebuild of the session, for its whole transaction.
+//! The two never interleave: a live write either commits before the rebuild
+//! reads the session's rows, or waits for the rebuild to commit and then
+//! replaces what it wrote. Code journal appends take the lock before they
+//! allocate a sequence number on PostgreSQL, and chat writes take the chat
+//! lock, which is the same row. On SQLite every write, the journal's group
+//! commit included, runs on the one writer connection under `BEGIN
+//! IMMEDIATE`, which serializes them the same way.
 
 use std::collections::{HashMap, HashSet};
 
@@ -35,9 +45,10 @@ use crate::code::{Event, HarnessKind, RepoId};
 use crate::error::{AgentError, Result};
 use crate::id::{MessageId, SessionId, TurnId};
 use crate::message_search::{
-    code_event_text, index_terms, MessageSearchCursor, MessageSearchHit, MessageSearchIndexing,
-    MessageSearchKind, MessageSearchPage, MessageSearchRequest, MessageSearchSource, SearchTerms,
-    INDEXED_EVENT_TYPES, MAX_SEARCH_LIMIT, SNIPPET_CHARS, SNIPPET_LEAD_CHARS,
+    code_event_text, index_terms, MessageSearchBackfill, MessageSearchCursor, MessageSearchHit,
+    MessageSearchIndexing, MessageSearchKind, MessageSearchPage, MessageSearchRequest,
+    MessageSearchSource, SearchTerms, INDEXED_EVENT_TYPES, MAX_SEARCH_LIMIT, SNIPPET_CHARS,
+    SNIPPET_LEAD_CHARS,
 };
 use crate::model::{TurnPlacements, TurnReplacementKind};
 use crate::OwnerId;
@@ -50,6 +61,23 @@ const INSERT_CHUNK: usize = 64;
 const REBUILD_PAGE: u64 = 500;
 /// Most ids one `IN` list carries.
 const ID_CHUNK: usize = 400;
+/// The journal event types that start or resume a turn. The index reads them
+/// to know which turn each later event ran in, and indexes no text from them.
+const TURN_EVENT_TYPES: &[&str] = &["turn_started", "turn_resumed"];
+/// Failed attempts after which the backfill gives up on a conversation. The
+/// waits between them double from [`BACKFILL_RETRY_MICROS`], so the last one
+/// comes about an hour after the first: a lock or statement timeout, a
+/// deadlock, or a dropped connection has passed long before then, and an
+/// error still there is one that will not pass. An attempt counts only once
+/// the database has recorded it, so an outage or a full disk, which fails
+/// that write too, uses up no conversation's attempts.
+pub(in crate::db) const MAX_BACKFILL_ATTEMPTS: i32 = 8;
+/// How long the backfill waits after a conversation's first failed attempt.
+const BACKFILL_RETRY_MICROS: i64 = 30 * 1_000_000;
+/// Longest wait between two attempts at one conversation.
+const MAX_BACKFILL_RETRY_MICROS: i64 = 60 * 60 * 1_000_000;
+/// Longest error a queued conversation keeps, in characters.
+const MAX_BACKFILL_ERROR_CHARS: usize = 1_000;
 
 /// One piece of a conversation, ready to index.
 #[derive(Debug, Clone)]
@@ -236,8 +264,60 @@ where
     Ok(())
 }
 
-/// Remove everything the index holds for one session.
+/// Remove everything the index holds for one session, the turn its journal
+/// is in included.
 pub(in crate::db) async fn clear_session_on<C>(conn: &C, session_id: SessionId) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let backend = conn.get_database_backend();
+    for table in ["message_search", "message_search_turn"] {
+        conn.execute_raw(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "DELETE FROM \"{table}\" WHERE \"session_id\" = {}",
+                placeholder(backend, 1)
+            ),
+            [session_id.0.into()],
+        ))
+        .await
+        .map_err(store_err)?;
+    }
+    Ok(())
+}
+
+/// The turn a code session's journal is in, as the last `turn_started` or
+/// `turn_resumed` it indexed named it. `None` before the first one, and for a
+/// session whose history the backfill has not reached, which the backfill
+/// then reads in full.
+async fn journal_turn_on<C>(conn: &C, session_id: SessionId) -> Result<Option<uuid::Uuid>>
+where
+    C: ConnectionTrait,
+{
+    let backend = conn.get_database_backend();
+    conn.query_one_raw(Statement::from_sql_and_values(
+        backend,
+        format!(
+            "SELECT \"turn_id\" FROM \"message_search_turn\" WHERE \"session_id\" = {}",
+            placeholder(backend, 1)
+        ),
+        [session_id.0.into()],
+    ))
+    .await
+    .map_err(store_err)?
+    .map(|row| row.try_get::<uuid::Uuid>("", "turn_id"))
+    .transpose()
+    .map_err(store_err)
+}
+
+/// Record that the journal event at `seq` started or resumed `turn`. An
+/// older event never replaces a newer one.
+async fn set_journal_turn_on<C>(
+    conn: &C,
+    session_id: SessionId,
+    turn: uuid::Uuid,
+    seq: i64,
+) -> Result<()>
 where
     C: ConnectionTrait,
 {
@@ -245,14 +325,28 @@ where
     conn.execute_raw(Statement::from_sql_and_values(
         backend,
         format!(
-            "DELETE FROM \"message_search\" WHERE \"session_id\" = {}",
-            placeholder(backend, 1)
+            "INSERT INTO \"message_search_turn\" (\"session_id\", \"turn_id\", \"seq\") \
+             VALUES ({}, {}, {}) \
+             ON CONFLICT (\"session_id\") DO UPDATE SET \
+             \"turn_id\" = excluded.\"turn_id\", \"seq\" = excluded.\"seq\" \
+             WHERE excluded.\"seq\" > \"message_search_turn\".\"seq\"",
+            placeholder(backend, 1),
+            placeholder(backend, 2),
+            placeholder(backend, 3)
         ),
-        [session_id.0.into()],
+        [session_id.0.into(), turn.into(), seq.into()],
     ))
     .await
     .map_err(store_err)?;
     Ok(())
+}
+
+/// The turn a journal event starts or resumes, if it does either.
+fn turn_boundary(event: &Event) -> Option<TurnId> {
+    match event {
+        Event::TurnStarted { turn_id } | Event::TurnResumed { turn_id } => Some(*turn_id),
+        _ => None,
+    }
 }
 
 /// The turns of `session_id` that a regenerate or an edit took out of the
@@ -412,13 +506,14 @@ where
     .await
 }
 
-/// Whether a stored journal event is one that can carry searchable text,
-/// read without decoding the rest of it.
+/// Whether a stored journal event is one the index reads, read without
+/// decoding the rest of it: one that can carry searchable text, or one that
+/// starts or resumes a turn.
 pub(in crate::db) fn indexed_event_type(event: &serde_json::Value) -> bool {
     event
         .get("type")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|kind| INDEXED_EVENT_TYPES.contains(&kind))
+        .is_some_and(|kind| INDEXED_EVENT_TYPES.contains(&kind) || TURN_EVENT_TYPES.contains(&kind))
 }
 
 /// One event as it was just journaled: its sequence number, its stored JSON,
@@ -427,6 +522,11 @@ pub(in crate::db) type JournaledEvent<'a> = (i64, &'a serde_json::Value, DateTim
 
 /// Index the searchable events among `events`, just journaled for one
 /// session, in sequence order.
+///
+/// Each piece stores the turn its event ran in: the turn the last
+/// `turn_started` or `turn_resumed` before it named, whether that event is in
+/// `events` or was journaled earlier. A search reads the turn off the row and
+/// never walks the journal back to find it.
 ///
 /// A tool call's piece is replaced by each later event that restates what it
 /// acted on, so the index holds the call's final arguments once.
@@ -456,8 +556,29 @@ where
     if facts.internal || facts.incognito {
         return Ok(());
     }
+    // The turn in effect before `events`, read once and only if an event
+    // needs it before one of `events` starts a turn.
+    let mut turn: Option<Option<uuid::Uuid>> = None;
+    let mut boundary: Option<(uuid::Uuid, i64)> = None;
     for (seq, event, at) in &decoded {
-        let Some(piece) = event_piece(*seq, event, *at) else {
+        if let Some(started) = turn_boundary(event) {
+            turn = Some(Some(started.0));
+            boundary = Some((started.0, *seq));
+            continue;
+        }
+        let in_turn = match code_event_text(event) {
+            None => continue,
+            Some(text) if text.background => None,
+            Some(_) => match turn {
+                Some(known) => known,
+                None => {
+                    let known = journal_turn_on(conn, session_id).await?;
+                    turn = Some(known);
+                    known
+                }
+            },
+        };
+        let Some(piece) = event_piece(*seq, event, *at, in_turn) else {
             continue;
         };
         if piece.source_key.starts_with("call:") {
@@ -465,11 +586,21 @@ where
         }
         insert_pieces_on(conn, &facts.owner, session_id.0, &[piece]).await?;
     }
+    if let Some((started, seq)) = boundary {
+        set_journal_turn_on(conn, session_id, started, seq).await?;
+    }
     Ok(())
 }
 
-/// The piece one journal event puts in the index, if any.
-fn event_piece(seq: i64, event: &Event, at: DateTime<Utc>) -> Option<Piece> {
+/// The piece one journal event puts in the index, if any, stored against
+/// `turn`: the turn the event ran in, or `None` for the engine's own work
+/// outside the person's turn.
+fn event_piece(
+    seq: i64,
+    event: &Event,
+    at: DateTime<Utc>,
+    turn: Option<uuid::Uuid>,
+) -> Option<Piece> {
     let text = code_event_text(event)?;
     let terms = index_terms(text.text);
     if terms.is_empty() {
@@ -478,7 +609,7 @@ fn event_piece(seq: i64, event: &Event, at: DateTime<Utc>) -> Option<Piece> {
     Some(Piece {
         source_key: text.call_id.map_or_else(|| event_key(seq), call_key),
         source: text.source,
-        turn_id: None,
+        turn_id: if text.background { None } else { turn },
         message_id: None,
         event_seq: Some(seq),
         created_at_micros: micros(at),
@@ -490,6 +621,8 @@ fn event_piece(seq: i64, event: &Event, at: DateTime<Utc>) -> Option<Piece> {
 ///
 /// Used for history the index never saw: sessions that predate it, a
 /// conversation leaving memory incognito, and a branch's copied history.
+/// Callers hold the session's row lock, so no live write lands between the
+/// rows this reads and the pieces it writes.
 pub(in crate::db) async fn rebuild_session_on<C>(conn: &C, session_id: SessionId) -> Result<()>
 where
     C: ConnectionTrait,
@@ -501,12 +634,16 @@ where
     if facts.incognito {
         return Ok(());
     }
-    let pieces = if facts.internal {
-        chat_pieces_on(conn, session_id).await?
-    } else {
-        code_pieces_on(conn, session_id).await?
-    };
-    insert_pieces_on(conn, &facts.owner, session_id.0, &pieces).await
+    if facts.internal {
+        let pieces = chat_pieces_on(conn, session_id).await?;
+        return insert_pieces_on(conn, &facts.owner, session_id.0, &pieces).await;
+    }
+    let (pieces, boundary) = code_pieces_on(conn, session_id).await?;
+    insert_pieces_on(conn, &facts.owner, session_id.0, &pieces).await?;
+    if let Some((started, seq)) = boundary {
+        set_journal_turn_on(conn, session_id, started, seq).await?;
+    }
+    Ok(())
 }
 
 /// Every piece of an internal-engine session the transcript shows.
@@ -573,11 +710,12 @@ where
     Ok(pieces)
 }
 
-/// The SQL that keeps only the journal events that can carry searchable
-/// text, so a rebuild never reads a delta or a tool's output.
+/// The SQL that keeps only the journal events the index reads, so a rebuild
+/// never reads a delta or a tool's output.
 fn indexed_event_filter(backend: DbBackend) -> String {
     let types = INDEXED_EVENT_TYPES
         .iter()
+        .chain(TURN_EVENT_TYPES)
         .map(|kind| format!("'{kind}'"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -588,8 +726,13 @@ fn indexed_event_filter(backend: DbBackend) -> String {
 }
 
 /// Every piece of a session on an engine that keeps no `message` rows: each
-/// turn's input and the searchable events in its journal.
-async fn code_pieces_on<C>(conn: &C, session_id: SessionId) -> Result<Vec<Piece>>
+/// turn's input and the searchable events in its journal, each event stored
+/// against the turn it ran in. Also the last event that started or resumed a
+/// turn, as `(turn, seq)`, so live writes carry on from it.
+async fn code_pieces_on<C>(
+    conn: &C,
+    session_id: SessionId,
+) -> Result<(Vec<Piece>, Option<(uuid::Uuid, i64)>)>
 where
     C: ConnectionTrait,
 {
@@ -622,6 +765,8 @@ where
     }
     let filter = indexed_event_filter(conn.get_database_backend());
     let mut calls: HashMap<String, usize> = HashMap::new();
+    let mut turn: Option<uuid::Uuid> = None;
+    let mut boundary: Option<(uuid::Uuid, i64)> = None;
     let mut after = 0_i64;
     loop {
         let page = entities::event::Entity::find()
@@ -647,7 +792,12 @@ where
             let Ok(event) = Event::deserialize(&value) else {
                 continue;
             };
-            let Some(piece) = event_piece(seq, &event, at) else {
+            if let Some(started) = turn_boundary(&event) {
+                turn = Some(started.0);
+                boundary = Some((started.0, seq));
+                continue;
+            }
+            let Some(piece) = event_piece(seq, &event, at, turn) else {
                 continue;
             };
             if piece.source_key.starts_with("call:") {
@@ -664,100 +814,218 @@ where
             break;
         }
     }
-    Ok(pieces)
+    Ok((pieces, boundary))
 }
 
 /// Add the history of up to `sessions` conversations that predate the index,
-/// newest activity first, and answer how many are still waiting.
+/// newest activity first, and answer where the backfill stands.
 ///
 /// Each session is rebuilt in its own transaction under the session's write
-/// lock, so a message committed meanwhile is indexed once either way.
-pub(in crate::db) async fn backfill(store: &DbStore, sessions: u64) -> Result<u64> {
+/// lock, so a message committed meanwhile is indexed once either way. A
+/// session whose rebuild fails keeps its place in the queue: the attempt and
+/// its error are recorded, and the session is tried again after a wait that
+/// doubles with each failure. After [`MAX_BACKFILL_ATTEMPTS`] failures the
+/// session is marked failed and left out of the index's history, and a search
+/// reports it. Its new messages are still indexed as they land.
+pub(in crate::db) async fn backfill(
+    store: &DbStore,
+    sessions: u64,
+    now: DateTime<Utc>,
+) -> Result<MessageSearchBackfill> {
     let backend = store.conn.get_database_backend();
-    let waiting = store
+    let now_micros = micros(now);
+    let due = store
         .conn
         .query_all_raw(Statement::from_sql_and_values(
             backend,
             format!(
-                "SELECT \"message_search_backfill\".\"session_id\" AS \"session_id\" \
+                "SELECT \"message_search_backfill\".\"session_id\" AS \"session_id\", \
+                 \"message_search_backfill\".\"attempts\" AS \"attempts\" \
                  FROM \"message_search_backfill\" \
                  JOIN \"session\" ON \"session\".\"id\" = \"message_search_backfill\".\"session_id\" \
+                 WHERE \"message_search_backfill\".\"failed_at_micros\" IS NULL \
+                 AND (\"message_search_backfill\".\"retry_at_micros\" IS NULL \
+                      OR \"message_search_backfill\".\"retry_at_micros\" <= {}) \
                  ORDER BY COALESCE(\"session\".\"last_activity_at\", \"session\".\"created_at\") DESC, \
                  \"session\".\"id\" \
                  LIMIT {}",
-                placeholder(backend, 1)
+                placeholder(backend, 1),
+                placeholder(backend, 2)
             ),
-            [i64::try_from(sessions).unwrap_or(i64::MAX).into()],
+            [
+                now_micros.into(),
+                i64::try_from(sessions).unwrap_or(i64::MAX).into(),
+            ],
         ))
         .await
         .map_err(store_err)?;
-    let done = |session_id: uuid::Uuid| {
-        Statement::from_sql_and_values(
-            backend,
-            format!(
-                "DELETE FROM \"message_search_backfill\" WHERE \"session_id\" = {}",
-                placeholder(backend, 1)
-            ),
-            [session_id.into()],
-        )
-    };
-    for row in waiting {
+    for row in due {
         let session_id: uuid::Uuid = row.try_get("", "session_id").map_err(store_err)?;
+        let attempts: i32 = row.try_get("", "attempts").map_err(store_err)?;
         let transaction = store.conn.begin().await.map_err(store_err)?;
         let rebuilt = async {
             if super::acquire_session_write_lock(&transaction, session_id).await? {
                 rebuild_session_on(&transaction, SessionId(session_id)).await?;
             }
             transaction
-                .execute_raw(done(session_id))
+                .execute_raw(Statement::from_sql_and_values(
+                    backend,
+                    format!(
+                        "DELETE FROM \"message_search_backfill\" WHERE \"session_id\" = {}",
+                        placeholder(backend, 1)
+                    ),
+                    [session_id.into()],
+                ))
                 .await
                 .map_err(store_err)?;
             Ok::<(), AgentError>(())
         }
         .await;
-        match rebuilt {
-            Ok(()) => transaction.commit().await.map_err(store_err)?,
+        let failed = match rebuilt {
+            Ok(()) => transaction.commit().await.map_err(store_err).err(),
             Err(error) => {
-                // One session that cannot be rebuilt must not hold back every
-                // other. Its new messages are still indexed as they land.
                 transaction.rollback().await.map_err(store_err)?;
-                tracing::warn!(
-                    session = %session_id,
-                    %error,
-                    "could not add a conversation's history to the message index"
-                );
-                store
-                    .conn
-                    .execute_raw(done(session_id))
-                    .await
-                    .map_err(store_err)?;
+                Some(error)
             }
+        };
+        if let Some(error) = failed {
+            // One session that cannot be rebuilt right now must not hold back
+            // every other, and must not be dropped for a failure that passes.
+            record_failed_attempt(store, session_id, attempts.saturating_add(1), &error, now)
+                .await?;
         }
     }
-    let remaining = store
-        .conn
-        .query_one_raw(Statement::from_string(
-            backend,
-            "SELECT COUNT(*) AS \"waiting\" FROM \"message_search_backfill\"",
-        ))
-        .await
-        .map_err(store_err)?
-        .map(|row| row.try_get::<i64>("", "waiting"))
-        .transpose()
-        .map_err(store_err)?
-        .unwrap_or_default();
-    Ok(u64::try_from(remaining).unwrap_or_default())
+    backfill_state(store, now).await
 }
 
-/// How many of `owner`'s conversations the backfill has not reached.
-async fn pending_for_owner(store: &DbStore, owner: &OwnerId) -> Result<u64> {
+/// Record a failed attempt at one queued session: when to try it again, or,
+/// after the last attempt, that the backfill gave up on it.
+async fn record_failed_attempt(
+    store: &DbStore,
+    session_id: uuid::Uuid,
+    attempts: i32,
+    error: &AgentError,
+    now: DateTime<Utc>,
+) -> Result<()> {
     let backend = store.conn.get_database_backend();
-    let waiting = store
+    let gave_up = attempts >= MAX_BACKFILL_ATTEMPTS;
+    let wait = BACKFILL_RETRY_MICROS
+        .saturating_mul(1_i64 << (attempts - 1).clamp(0, 20))
+        .min(MAX_BACKFILL_RETRY_MICROS);
+    let (retry_at, failed_at) = if gave_up {
+        (None, Some(micros(now)))
+    } else {
+        (Some(micros(now).saturating_add(wait)), None)
+    };
+    let message: String = error
+        .to_string()
+        .chars()
+        .take(MAX_BACKFILL_ERROR_CHARS)
+        .collect();
+    store
+        .conn
+        .execute_raw(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "UPDATE \"message_search_backfill\" SET \"attempts\" = {}, \
+                 \"retry_at_micros\" = {}, \"failed_at_micros\" = {}, \"last_error\" = {} \
+                 WHERE \"session_id\" = {}",
+                placeholder(backend, 1),
+                placeholder(backend, 2),
+                placeholder(backend, 3),
+                placeholder(backend, 4),
+                placeholder(backend, 5)
+            ),
+            [
+                attempts.into(),
+                retry_at.into(),
+                failed_at.into(),
+                message.into(),
+                session_id.into(),
+            ],
+        ))
+        .await
+        .map_err(store_err)?;
+    if gave_up {
+        tracing::warn!(
+            session = %session_id,
+            attempts,
+            %error,
+            "gave up adding a conversation's history to the message index"
+        );
+    } else {
+        tracing::warn!(
+            session = %session_id,
+            attempts,
+            retry_in_secs = wait / 1_000_000,
+            %error,
+            "could not add a conversation's history to the message index; will try again"
+        );
+    }
+    Ok(())
+}
+
+/// Where the backfill queue stands at `now`.
+async fn backfill_state(store: &DbStore, now: DateTime<Utc>) -> Result<MessageSearchBackfill> {
+    let backend = store.conn.get_database_backend();
+    let row = store
         .conn
         .query_one_raw(Statement::from_sql_and_values(
             backend,
             format!(
-                "SELECT COUNT(*) AS \"waiting\" FROM \"message_search_backfill\" \
+                "SELECT \
+                 COUNT(CASE WHEN \"failed_at_micros\" IS NULL THEN 1 END) AS \"waiting\", \
+                 COUNT(\"failed_at_micros\") AS \"failed\", \
+                 COUNT(CASE WHEN \"failed_at_micros\" IS NULL AND (\"retry_at_micros\" IS NULL \
+                      OR \"retry_at_micros\" <= {}) THEN 1 END) AS \"due\", \
+                 MIN(CASE WHEN \"failed_at_micros\" IS NULL THEN \"retry_at_micros\" END) \
+                      AS \"next_retry\" \
+                 FROM \"message_search_backfill\"",
+                placeholder(backend, 1)
+            ),
+            [micros(now).into()],
+        ))
+        .await
+        .map_err(store_err)?;
+    let Some(row) = row else {
+        return Ok(MessageSearchBackfill {
+            waiting: 0,
+            failed: 0,
+            next_attempt_at: None,
+        });
+    };
+    let count = |column: &str| -> Result<u64> {
+        let value: i64 = row.try_get("", column).map_err(store_err)?;
+        Ok(u64::try_from(value).unwrap_or_default())
+    };
+    let waiting = count("waiting")?;
+    let due = count("due")?;
+    let next_retry: Option<i64> = row.try_get("", "next_retry").map_err(store_err)?;
+    Ok(MessageSearchBackfill {
+        waiting,
+        failed: count("failed")?,
+        next_attempt_at: if waiting == 0 || due > 0 {
+            None
+        } else {
+            next_retry.and_then(DateTime::from_timestamp_micros)
+        },
+    })
+}
+
+/// How many of `owner`'s conversations the backfill has not added yet, and
+/// how many it gave up on.
+async fn indexing_for_owner(store: &DbStore, owner: &OwnerId) -> Result<MessageSearchIndexing> {
+    let backend = store.conn.get_database_backend();
+    let row = store
+        .conn
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "SELECT \
+                 COUNT(CASE WHEN \"message_search_backfill\".\"failed_at_micros\" IS NULL \
+                      THEN 1 END) AS \"waiting\", \
+                 COUNT(\"message_search_backfill\".\"failed_at_micros\") AS \"failed\" \
+                 FROM \"message_search_backfill\" \
                  JOIN \"session\" ON \"session\".\"id\" = \"message_search_backfill\".\"session_id\" \
                  WHERE \"session\".\"owner\" = {}",
                 placeholder(backend, 1)
@@ -765,12 +1033,21 @@ async fn pending_for_owner(store: &DbStore, owner: &OwnerId) -> Result<u64> {
             [owner.as_str().into()],
         ))
         .await
-        .map_err(store_err)?
-        .map(|row| row.try_get::<i64>("", "waiting"))
-        .transpose()
-        .map_err(store_err)?
-        .unwrap_or_default();
-    Ok(u64::try_from(waiting).unwrap_or_default())
+        .map_err(store_err)?;
+    let count = |column: &str| -> Result<u64> {
+        let Some(row) = &row else {
+            return Ok(0);
+        };
+        let value: i64 = row.try_get("", column).map_err(store_err)?;
+        Ok(u64::try_from(value).unwrap_or_default())
+    };
+    let pending = count("waiting")?;
+    let failed = count("failed")?;
+    Ok(MessageSearchIndexing {
+        complete: pending == 0 && failed == 0,
+        pending_conversations: pending,
+        failed_conversations: failed,
+    })
 }
 
 /// Which conversations a search reads.
@@ -942,12 +1219,10 @@ where
         .collect()
 }
 
-/// The text a matched row was indexed from, and whether a journal event was
-/// the engine's own work outside the person's turn.
+/// The text a matched row was indexed from.
 #[derive(Debug, Clone)]
 pub(in crate::db) struct RowText {
     pub(in crate::db) text: String,
-    pub(in crate::db) background: bool,
 }
 
 /// Read back the text every row in `rows` was indexed from, keyed by row id.
@@ -1022,17 +1297,13 @@ where
     }
     for row in rows {
         let text = if let Some(message_id) = row.message_id {
-            messages.get(&message_id).map(|text| RowText {
-                text: text.clone(),
-                background: false,
-            })
+            messages
+                .get(&message_id)
+                .map(|text| RowText { text: text.clone() })
         } else if row.source_key.starts_with("input:") {
             row.turn_id
                 .and_then(|turn| inputs.get(&turn))
-                .map(|text| RowText {
-                    text: text.clone(),
-                    background: false,
-                })
+                .map(|text| RowText { text: text.clone() })
         } else {
             row.event_seq
                 .and_then(|seq| events.get(&(row.session_id, seq)))
@@ -1040,7 +1311,6 @@ where
                 .and_then(|event| {
                     code_event_text(&event).map(|text| RowText {
                         text: text.text.to_owned(),
-                        background: text.background,
                     })
                 })
         };
@@ -1051,55 +1321,13 @@ where
     Ok(texts)
 }
 
-/// The turn a journal event at `seq` ran in: the last turn that started or
-/// resumed before it.
-async fn event_turn<C>(conn: &C, session_id: uuid::Uuid, seq: i64) -> Result<Option<TurnId>>
-where
-    C: ConnectionTrait,
-{
-    let backend = conn.get_database_backend();
-    let (turn, kind) = match backend {
-        DbBackend::Postgres => (
-            "\"event\"->>'turn_id'".to_owned(),
-            "\"event\"->>'type'".to_owned(),
-        ),
-        _ => (
-            "json_extract(\"event\", '$.turn_id')".to_owned(),
-            "json_extract(\"event\", '$.type')".to_owned(),
-        ),
-    };
-    let row = conn
-        .query_one_raw(Statement::from_sql_and_values(
-            backend,
-            format!(
-                "SELECT {turn} AS \"turn_id\" FROM \"event\" \
-                 WHERE \"session_id\" = {} AND \"seq\" < {} \
-                 AND {kind} IN ('turn_started', 'turn_resumed') \
-                 ORDER BY \"seq\" DESC LIMIT 1",
-                placeholder(backend, 1),
-                placeholder(backend, 2)
-            ),
-            [session_id.into(), seq.into()],
-        ))
-        .await
-        .map_err(store_err)?;
-    Ok(row
-        .and_then(|row| row.try_get::<Option<String>>("", "turn_id").ok().flatten())
-        .and_then(|turn| uuid::Uuid::parse_str(&turn).ok())
-        .map(TurnId))
-}
-
 /// Search `owner`'s conversations, newest match first.
 pub(in crate::db) async fn search_messages(
     store: &DbStore,
     owner: &OwnerId,
     request: &MessageSearchRequest,
 ) -> Result<MessageSearchPage> {
-    let pending = pending_for_owner(store, owner).await?;
-    let indexing = MessageSearchIndexing {
-        complete: pending == 0,
-        pending_conversations: pending,
-    };
+    let indexing = indexing_for_owner(store, owner).await?;
     let terms = SearchTerms::parse(&request.query);
     if terms.is_empty() {
         return Ok(MessageSearchPage {
@@ -1158,12 +1386,10 @@ pub(in crate::db) async fn search_messages(
                     _ => turn,
                 }
             })
-        } else if let Some(turn) = row.turn_id {
-            Some(TurnId(turn))
-        } else if let (Some(seq), false) = (row.event_seq, text.background) {
-            event_turn(&store.conn, row.session_id, seq).await?
         } else {
-            None
+            // A code turn's input, or a journal event stored against the turn
+            // it ran in when it was indexed.
+            row.turn_id.map(TurnId)
         };
         let excerpt = terms.excerpt(&text.text, SNIPPET_CHARS, SNIPPET_LEAD_CHARS);
         let kind = if row.internal && row.workspace_id.is_none() {

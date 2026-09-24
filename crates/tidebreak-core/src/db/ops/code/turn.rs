@@ -489,7 +489,9 @@ pub async fn next_turn_ordinal(
 /// [`set_turn_rewrite`].
 ///
 /// The input is searchable, so a write that changes it re-indexes it in the
-/// same transaction.
+/// same transaction, under the session's row lock. A rebuild of the session's
+/// index holds that lock too, so it never reads the old input and writes it
+/// back over the new one.
 pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &Turn) -> Result<bool> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     let stored = entities::turn::Entity::find_by_id(turn.id.0)
@@ -502,6 +504,12 @@ pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &Turn) -> Result<
         .one(&transaction)
         .await
         .map_err(store_err)?;
+    if let Some((session_id, stored_input, _)) = &stored {
+        // Session before turn, the order every other writer takes them in.
+        if *stored_input != turn.user_input {
+            acquire_session_write_lock(&transaction, *session_id).await?;
+        }
+    }
     let result = entities::turn::Entity::update_many()
         .col_expr(
             entities::turn::Column::Status,

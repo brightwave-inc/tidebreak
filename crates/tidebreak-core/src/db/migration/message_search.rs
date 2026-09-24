@@ -23,11 +23,20 @@
 //! Rows die with their session. Deleting a conversation or a workspace's
 //! sessions therefore empties their part of the index in the same statement.
 //!
+//! `message_search_turn` holds, for each code session, the turn its journal
+//! is in: the turn its last `turn_started` or `turn_resumed` event named, and
+//! that event's sequence number. Each indexed journal event stores the turn
+//! it ran in, and this row is how a write knows that turn without reading the
+//! journal back.
+//!
 //! `message_search_backfill` lists the sessions whose history predates the
 //! index. The server works through it in the background, newest first, and
 //! the search route reports how many of the caller's conversations remain.
 //! Only sessions with at least one turn are listed: a session with no turn
-//! has nothing to index.
+//! has nothing to index. A session whose rebuild fails stays listed with its
+//! attempts, its last error, and when to try again; after repeated failures
+//! it is marked failed, and the route reports it as one that could not be
+//! added.
 use sea_orm::{ConnectionTrait, DbBackend};
 use sea_orm_migration::prelude::*;
 
@@ -40,6 +49,7 @@ impl MigrationName for MessageSearch {
 }
 
 const TABLE: &str = "message_search";
+const TURN: &str = "message_search_turn";
 const BACKFILL: &str = "message_search_backfill";
 
 #[async_trait::async_trait]
@@ -153,6 +163,29 @@ impl MigrationTrait for MessageSearch {
         manager
             .create_table(
                 Table::create()
+                    .table(Alias::new(TURN))
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(column("session_id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(column("turn_id")).uuid().not_null())
+                    .col(ColumnDef::new(column("seq")).big_integer().not_null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_message_search_turn_session")
+                            .from(Alias::new(TURN), column("session_id"))
+                            .to(Alias::new("session"), Alias::new("id"))
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
                     .table(Alias::new(BACKFILL))
                     .if_not_exists()
                     .col(
@@ -161,6 +194,18 @@ impl MigrationTrait for MessageSearch {
                             .not_null()
                             .primary_key(),
                     )
+                    // Failed attempts so far, when the next one is due (`NULL`
+                    // is now), when the backfill gave up (`NULL` while it
+                    // still tries), and the last attempt's error.
+                    .col(
+                        ColumnDef::new(column("attempts"))
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(ColumnDef::new(column("retry_at_micros")).big_integer())
+                    .col(ColumnDef::new(column("failed_at_micros")).big_integer())
+                    .col(ColumnDef::new(column("last_error")).text())
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_message_search_backfill_session")
@@ -196,7 +241,7 @@ ON CONFLICT DO NOTHING
                 .execute_unprepared("DROP TABLE IF EXISTS \"message_search_fts\"")
                 .await?;
         }
-        for name in [BACKFILL, TABLE] {
+        for name in [BACKFILL, TURN, TABLE] {
             manager
                 .drop_table(Table::drop().table(Alias::new(name)).if_exists().to_owned())
                 .await?;

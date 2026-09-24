@@ -184,11 +184,30 @@ pub struct MessageSearchHit {
 /// it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct MessageSearchIndexing {
-    /// `false` while some of the caller's older conversations are still being
-    /// added. Until then a search can miss matches in them.
+    /// `true` once every one of the caller's older conversations is in the
+    /// index. `false` while some are still being added, and when some could
+    /// not be added; until then a search can miss matches in them.
     pub complete: bool,
-    /// How many of the caller's conversations are still waiting to be added.
+    /// How many of the caller's conversations are still waiting to be added,
+    /// including any waiting to try again after a failed attempt.
     pub pending_conversations: u64,
+    /// How many of the caller's older conversations could not be added after
+    /// repeated attempts. What was said in them before the index existed is
+    /// not searchable; what is said in them now is.
+    pub failed_conversations: u64,
+}
+
+/// Where the message index's backfill stands after one step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageSearchBackfill {
+    /// Conversations still waiting to be added, including any waiting to try
+    /// again after a failed attempt.
+    pub waiting: u64,
+    /// Conversations the backfill gave up on after repeated failures.
+    pub failed: u64,
+    /// When the next waiting conversation is due, when none is due now.
+    /// `None` when one is due now or none is waiting.
+    pub next_attempt_at: Option<DateTime<Utc>>,
 }
 
 /// One page of search results, newest match first.

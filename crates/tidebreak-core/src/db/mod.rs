@@ -225,10 +225,15 @@ fn sqlite_read_policy(
 
 impl DbStore {
     /// Add the history of up to `sessions` conversations that predate the
-    /// message index, newest activity first, and answer how many are still
-    /// waiting. The server calls this until it answers zero.
-    pub async fn backfill_message_search(&self, sessions: u64) -> Result<u64> {
-        ops::message_search::backfill(self, sessions).await
+    /// message index, newest activity first, and answer where the backfill
+    /// stands. A conversation that fails is tried again later, and given up
+    /// on after repeated failures. The server calls this until nothing is
+    /// waiting, sleeping until the next attempt is due when none is due now.
+    pub async fn backfill_message_search(
+        &self,
+        sessions: u64,
+    ) -> Result<crate::message_search::MessageSearchBackfill> {
+        ops::message_search::backfill(self, sessions, Utc::now()).await
     }
 
     fn from_connection(conn: StoreConnection) -> Self {

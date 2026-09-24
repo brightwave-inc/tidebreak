@@ -1102,10 +1102,12 @@ pub(in crate::db) const CHAT_REFERENCES: &[(&str, &str)] = &[
     ("exec_file_change", "chat_id"),
     ("message", "chat_id"),
     ("message_identity", "chat_id"),
-    // Search rows exist only beside messages or events, which already keep a
-    // conversation. A queued backfill keeps it only until the backfill runs.
+    // Search rows and the turn a journal is in exist only beside messages or
+    // events, which already keep a conversation. A queued backfill exists
+    // only for a conversation with a turn, which keeps it too.
     ("message_search", "session_id"),
     ("message_search_backfill", "session_id"),
+    ("message_search_turn", "session_id"),
     ("output", "chat_id"),
     ("root_attachment_change", "chat_id"),
     ("sandbox_spawn_checkpoint", "session_id"),

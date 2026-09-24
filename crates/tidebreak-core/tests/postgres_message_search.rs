@@ -373,12 +373,26 @@ async fn postgres_code_search_matches_what_was_said_and_never_journal_keys() {
             text: "Renamed it to Overview.".into(),
             parent_call_id: None,
         },
+        Event::ToolStarted {
+            call_id: "edit-1".into(),
+            name: "Edit".into(),
+            detail: ToolDetail::FileEdit {
+                path: "src/SubmitButton.tsx".into(),
+            },
+            parent_call_id: None,
+        },
     ] {
         seqs.push(
             append_event(&store, &owner, session_id, 0, &event)
                 .await
                 .unwrap(),
         );
+    }
+    // A name is found by its parts and by itself.
+    for query in ["button", "submit", "submitbutton"] {
+        let page = search(&store, &owner, query).await;
+        assert_eq!(page.hits.len(), 1, "{query}");
+        assert_eq!(page.hits[0].event_seq, Some(seqs[3]), "{query}");
     }
 
     for key in ["tool", "call", "type", "message", "detail", "path", "read"] {
@@ -422,6 +436,141 @@ async fn postgres_code_search_matches_what_was_said_and_never_journal_keys() {
     assert_eq!(page.hits[0].event_seq, Some(seqs[1]));
     assert_eq!(search(&store, &owner, "uberblick").await.hits.len(), 1);
     assert_eq!(search(&store, &owner, "overview").await.hits.len(), 1);
+
+    // The turn a hit names is stored on its index row: with the event that
+    // started the turn gone from the journal, the hit still names it.
+    execute(
+        &url,
+        &name,
+        &[format!(
+            "DELETE FROM event WHERE session_id = '{}' AND seq = {}",
+            session_id.0, seqs[0]
+        )],
+    )
+    .await;
+    let page = search(&store, &owner, "overview").await;
+    assert_eq!(page.hits.len(), 1);
+    assert_eq!(page.hits[0].turn_id, Some(turn_id));
+
+    store.close().await.unwrap();
+    drop_database(&url, &name).await;
+}
+
+/// Run `statements` against the test database on a connection of its own.
+async fn execute(url: &str, name: &str, statements: &[String]) {
+    let (prefix, _, query) = split_postgres_url(url);
+    let connection = Database::connect(&format!("{prefix}{name}{query}"))
+        .await
+        .unwrap();
+    for statement in statements {
+        connection.execute_unprepared(statement).await.unwrap();
+    }
+    connection.close().await.unwrap();
+}
+
+/// PostgreSQL refuses a `tsvector` whose words add up to a mebibyte, and a
+/// short text can fold to that much: one ligature folds to fifteen letters.
+/// The index caps a text's terms, so the message is written and found.
+#[tokio::test]
+async fn postgres_a_message_whose_terms_would_outgrow_a_tsvector_is_written_and_found() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let Some((store, url, name)) = fresh_store("long_terms").await else {
+        return;
+    };
+    let owner = OwnerId::local();
+    let long = chat("Ligatures");
+    store.create_chat(&long).await.unwrap();
+    let text = "\u{FDFA}\u{4E2D}".repeat(tidebreak_core::message_search::MAX_INDEXED_CHARS / 2);
+    let message = say(&store, long.id, Role::User, &text).await;
+    let page = search(&store, &owner, "\u{FDFA}").await;
+    assert_eq!(page.hits.len(), 1);
+    assert_eq!(page.hits[0].message_id, Some(message));
+
+    store.close().await.unwrap();
+    drop_database(&url, &name).await;
+}
+
+/// A conversation whose backfill fails stays queued and is tried again; one
+/// that fails its last attempt is reported as one the index could not add,
+/// and the page never calls the index complete while either is true.
+#[tokio::test]
+async fn postgres_a_failed_backfill_is_tried_again_and_reported_once_given_up() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let Some((store, url, name)) = fresh_store("backfill").await else {
+        return;
+    };
+    let owner = OwnerId::local();
+    let kept = chat("Kept");
+    let lost = chat("Lost");
+    for conversation in [&kept, &lost] {
+        store.create_chat(conversation).await.unwrap();
+        say(&store, conversation.id, Role::User, "written long ago").await;
+    }
+    execute(
+        &url,
+        &name,
+        &[
+            "DELETE FROM message_search".to_owned(),
+            "INSERT INTO message_search_backfill (session_id) SELECT id FROM session".to_owned(),
+            "CREATE FUNCTION refuse_index() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'the index refused the row'; END $$"
+                .to_owned(),
+            "CREATE TRIGGER refuse_index BEFORE INSERT ON message_search \
+             FOR EACH ROW EXECUTE FUNCTION refuse_index()"
+                .to_owned(),
+        ],
+    )
+    .await;
+
+    let state = store.backfill_message_search(10).await.unwrap();
+    assert_eq!((state.waiting, state.failed), (2, 0));
+    assert!(state.next_attempt_at.is_some(), "both wait to try again");
+    let page = search(&store, &owner, "long").await;
+    assert!(page.hits.is_empty());
+    assert!(!page.indexing.complete);
+    assert_eq!(page.indexing.pending_conversations, 2);
+    assert_eq!(page.indexing.failed_conversations, 0);
+
+    // One conversation's failure has passed, and the other fails the last of
+    // its attempts. Both are due now.
+    execute(
+        &url,
+        &name,
+        &[
+            "DROP TRIGGER refuse_index ON message_search".to_owned(),
+            format!(
+                "CREATE TRIGGER refuse_index BEFORE INSERT ON message_search \
+                 FOR EACH ROW WHEN (NEW.session_id = '{}') EXECUTE FUNCTION refuse_index()",
+                lost.id.0
+            ),
+            "UPDATE message_search_backfill SET retry_at_micros = 0".to_owned(),
+            format!(
+                "UPDATE message_search_backfill SET attempts = 7 WHERE session_id = '{}'",
+                lost.id.0
+            ),
+        ],
+    )
+    .await;
+    let state = store.backfill_message_search(10).await.unwrap();
+    assert_eq!(
+        state,
+        tidebreak_core::message_search::MessageSearchBackfill {
+            waiting: 0,
+            failed: 1,
+            next_attempt_at: None,
+        }
+    );
+    let page = search(&store, &owner, "long").await;
+    assert_eq!(
+        page.hits
+            .iter()
+            .map(|hit| hit.session_id)
+            .collect::<Vec<_>>(),
+        [kept.id]
+    );
+    assert!(!page.indexing.complete);
+    assert_eq!(page.indexing.pending_conversations, 0);
+    assert_eq!(page.indexing.failed_conversations, 1);
 
     store.close().await.unwrap();
     drop_database(&url, &name).await;

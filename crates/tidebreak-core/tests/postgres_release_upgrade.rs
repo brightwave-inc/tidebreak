@@ -870,10 +870,12 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("exec_file_change".to_owned(), "r".to_owned()),
             ("message".to_owned(), "a".to_owned()),
             ("message_identity".to_owned(), "a".to_owned()),
-            // A search row and a queued backfill die with their session, so
-            // deleting a conversation empties its part of the index.
+            // A search row, a queued backfill, and the turn a journal is in
+            // die with their session, so deleting a conversation empties its
+            // part of the index.
             ("message_search".to_owned(), "c".to_owned()),
             ("message_search_backfill".to_owned(), "c".to_owned()),
+            ("message_search_turn".to_owned(), "c".to_owned()),
             ("output".to_owned(), "c".to_owned()),
             ("root_attachment_change".to_owned(), "r".to_owned()),
             // Decision 0086: an access row dies with its session, so a
@@ -1111,13 +1113,14 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
             .search_messages_scoped(&owner, &request)
             .await
             .map_err(|error| error.to_string())?;
-        let remaining = store
+        let state = store
             .backfill_message_search(10)
             .await
             .map_err(|error| error.to_string())?;
-        if remaining != 0 {
+        if state.waiting != 0 || state.failed != 0 {
             return Err(format!(
-                "{remaining} conversations still wait for the index"
+                "{} conversations still wait for the index and {} failed",
+                state.waiting, state.failed
             ));
         }
         let after = store
