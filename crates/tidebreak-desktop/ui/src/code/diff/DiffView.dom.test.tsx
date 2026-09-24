@@ -14,6 +14,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../../api/client";
 import { DiffPanel } from "../DiffPanel";
 import { groupUnifiedDiff } from "../unifiedDiff";
+import { diffRows } from "./diffModel";
 import { useDiffPreferences } from "./diffPreferences";
 import { DIFF_CHUNK_ROWS, DiffView } from "./DiffView";
 import { usePendingReviewStore } from "./pendingReview";
@@ -171,7 +172,7 @@ describe("line comments", () => {
     });
 
     const editor = await screen.findByRole("textbox", {
-      name: "Comment on lines 2–3",
+      name: "Comment on lines 2–3 and deleted line 2",
     });
     fireEvent.change(editor, { target: { value: "One change, three lines." } });
     fireEvent.keyDown(editor, { key: "Enter", metaKey: true });
@@ -204,7 +205,7 @@ describe("line comments", () => {
     await user.keyboard("{Enter}");
 
     const editor = await screen.findByRole("textbox", {
-      name: "Comment on line 2",
+      name: "Comment on line 2 and deleted line 2",
     });
     expect(editor).toHaveFocus();
     // The range runs from the removed line 2 to the added line 2.
@@ -377,6 +378,29 @@ describe("a long diff", () => {
     expect(rows()).toBe(DIFF_CHUNK_ROWS);
     await waitFor(() => expect(rows()).toBeGreaterThan(DIFF_CHUNK_ROWS));
     expect(rows()).toBeLessThanOrEqual(DIFF_CHUNK_ROWS * 3);
+  });
+
+  it("keeps every row through a refresh while an agent works", async () => {
+    const diff = longFileDiff(600);
+    const { container, rerender } = render(
+      <DiffView
+        group={groupUnifiedDiff(diff)[0]!}
+        layout="unified"
+        ignoreWhitespace={false}
+      />,
+    );
+    const rows = () => container.querySelectorAll("[data-row]").length;
+    const total = diffRows(groupUnifiedDiff(diff)[0]!).length;
+    await waitFor(() => expect(rows()).toBe(total));
+    // A refetch hands over a new group for the same file.
+    rerender(
+      <DiffView
+        group={groupUnifiedDiff(diff)[0]!}
+        layout="unified"
+        ignoreWhitespace={false}
+      />,
+    );
+    expect(rows()).toBe(total);
   });
 });
 

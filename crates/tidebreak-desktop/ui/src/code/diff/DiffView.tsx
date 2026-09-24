@@ -306,11 +306,15 @@ export function DiffView({
   const rowByAnchorRef = useRef(rowByAnchor);
   rowByAnchorRef.current = rowByAnchor;
 
+  /** Put focus, and the tab stop, back on a line once the editor closes. */
   const focusRow = useCallback((row: number) => {
     window.requestAnimationFrame(() => {
-      rootRef.current
-        ?.querySelector<HTMLElement>(`[data-diff-target][data-row="${row}"]`)
-        ?.focus({ preventScroll: true });
+      const target = rootRef.current?.querySelector<HTMLElement>(
+        `[data-diff-target][data-row="${row}"]`,
+      );
+      if (!target) return;
+      setActive({ row, column: target.dataset.column as Column });
+      target.focus({ preventScroll: true });
     });
   }, []);
 
@@ -461,23 +465,29 @@ export function DiffView({
     const targets = targetsIn(column);
     const index = targets.indexOf(element);
     const plain = !event.metaKey && !event.ctrlKey && !event.altKey;
+    // Shift extends from the line that had focus when nothing was picked yet.
+    const anchorHere = () => {
+      if (!event.shiftKey || selectionRef.current) return;
+      const anchor = rowAnchor(model.rows[row]!);
+      if (anchor) setSelection({ anchor, head: anchor });
+    };
     switch (event.key) {
       case "ArrowDown":
       case "ArrowUp": {
         if (!plain) return;
         event.preventDefault();
-        const step = event.key === "ArrowDown" ? 1 : -1;
-        if (event.shiftKey && !selection) {
-          const anchor = rowAnchor(model.rows[row]!);
-          if (anchor) setSelection({ anchor, head: anchor });
-        }
-        moveTo(targets[index + step], event.shiftKey);
+        anchorHere();
+        moveTo(
+          targets[index + (event.key === "ArrowDown" ? 1 : -1)],
+          event.shiftKey,
+        );
         return;
       }
       case "Home":
       case "End": {
         if (!plain) return;
         event.preventDefault();
+        anchorHere();
         moveTo(
           event.key === "Home" ? targets[0] : targets.at(-1),
           event.shiftKey,
@@ -512,7 +522,7 @@ export function DiffView({
         return;
       }
       case "Escape": {
-        if (!selection) return;
+        if (!selectionRef.current) return;
         event.preventDefault();
         setSelection(null);
         return;
@@ -524,7 +534,9 @@ export function DiffView({
   const displayCount =
     layout === "split" ? model.split.length : model.rows.length;
   const chunkCount = Math.ceil(displayCount / DIFF_CHUNK_ROWS);
-  const mounted = useProgressiveCount(chunkCount, model);
+  // Keyed on the file, not its content: a refresh while an agent works keeps
+  // every row it had instead of mounting the diff again from the top.
+  const mounted = useProgressiveCount(chunkCount, group.path);
 
   // The roving tab stop: the line last used, or the first line.
   const firstTarget = useMemo(

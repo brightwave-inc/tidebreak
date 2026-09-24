@@ -104,8 +104,13 @@ describe("splitReviewComments", () => {
 });
 
 describe("commentLinesLabel", () => {
-  it("names new lines, and removed lines only when there are no new ones", () => {
-    expect(commentLinesLabel(comment().lines)).toBe("Lines 22–23");
+  it("names the new lines and the deleted ones a range takes in", () => {
+    expect(commentLinesLabel(comment().lines)).toBe(
+      "Lines 22–23 and deleted line 22",
+    );
+    expect(
+      commentLinesLabel([{ kind: "add", oldNo: null, newNo: 4, text: "" }]),
+    ).toBe("Line 4");
     expect(
       commentLinesLabel([{ kind: "del", oldNo: 7, newNo: null, text: "" }]),
     ).toBe("Deleted line 7");

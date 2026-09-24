@@ -61,19 +61,23 @@ export function commentLineSpans(lines: readonly ReviewCommentLine[]): {
   return { lines: span(newNumbers), oldLines: span(oldNumbers) };
 }
 
-/** "Line 12", "Lines 12–14", "Deleted lines 3–4", for people. */
+/**
+ * "Line 12", "Lines 12–14", "Deleted lines 3–4", or both halves of a range
+ * that takes in a change: "Line 12 and deleted line 12".
+ */
 export function commentLinesLabel(lines: readonly ReviewCommentLine[]): string {
   const spans = commentLineSpans(lines);
   const words = (value: string, prefix: string) => {
     const [first, last] = value.split("-");
     return last ? `${prefix}lines ${first}–${last}` : `${prefix}line ${first}`;
   };
-  if (spans.lines) {
-    const label = words(spans.lines, "");
-    return label.charAt(0).toUpperCase() + label.slice(1);
-  }
-  if (spans.oldLines) return words(spans.oldLines, "Deleted ");
-  return "Lines";
+  const parts = [
+    spans.lines ? words(spans.lines, "") : null,
+    spans.oldLines ? words(spans.oldLines, "deleted ") : null,
+  ].filter((part): part is string => part !== null);
+  if (parts.length === 0) return "Lines";
+  const label = parts.join(" and ");
+  return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
 const MARKER = { add: "+", del: "-", context: " " } as const;

@@ -113,9 +113,12 @@ export function DiffPanel({
     errorMessage: "Could not load the diff",
   });
 
+  // Keyed on the text: a refresh that finds the same diff keeps the same
+  // groups, so nothing below draws again.
+  const diffText = payload?.diff;
   const groups = useMemo(
-    () => (payload ? groupUnifiedDiff(payload.diff) : []),
-    [payload],
+    () => (diffText === undefined ? [] : groupUnifiedDiff(diffText)),
+    [diffText],
   );
   const reverts = useRevertTracker(revert, turnId);
   const layout = useDiffPreferences((state) => state.layout);
