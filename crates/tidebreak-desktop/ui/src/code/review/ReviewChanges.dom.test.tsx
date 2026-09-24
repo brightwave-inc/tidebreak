@@ -168,9 +168,9 @@ describe("the review's status", () => {
       />,
     );
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Codex CLI could not finish the review",
+      "Codex CLI is not signed in",
     );
-    expect(screen.getByText(/is not signed in/)).toBeInTheDocument();
+    expect(screen.getByText(/or its sign-in was refused/)).toBeInTheDocument();
     await userEvent.click(
       screen.getByRole("button", { name: "Coding engines" }),
     );
@@ -234,7 +234,7 @@ describe("the review's status", () => {
       />,
     );
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Codex CLI found 1 issue",
+      "Codex CLI reported 1 finding",
     );
     expect(screen.getByText("One real bug.")).toBeInTheDocument();
     expect(
@@ -279,7 +279,7 @@ describe("a reviewer's finding in the diff", () => {
     expect(screen.getByText("High")).toBeInTheDocument();
     expect(screen.getByText("The flush loop never stops")).toBeInTheDocument();
     expect(
-      screen.getByText("Keep it to send it to the agent"),
+      screen.getByText("Goes with your next message once kept"),
     ).toBeInTheDocument();
     await userEvent.click(
       screen.getByRole("button", { name: "Keep the finding on line 5" }),

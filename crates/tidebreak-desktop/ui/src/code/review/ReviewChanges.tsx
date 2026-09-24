@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { useRouter } from "@tanstack/react-router";
-import { ScanSearch, X } from "lucide-react";
+import { CircleAlert, CircleCheck, ScanSearch, X } from "lucide-react";
 import { toast } from "sonner";
 
 import type { ApiClient } from "../../api/client";
@@ -41,6 +41,7 @@ import {
   type CodeModelOption,
 } from "../labels";
 import { formatElapsedDuration } from "../TurnReviewCard";
+import { STATUS_MARK, type StatusTone } from "../statusTone";
 import { renderWorkflowPrompt } from "../workflowPrompts";
 import {
   defaultReviewEngine,
@@ -521,16 +522,54 @@ export function reviewHeadline(
       const count = reviewFindingCount(review);
       return count === 0
         ? `${label} found nothing to change`
-        : `${label} found ${plural(count, "issue", "issues")}`;
+        : `${label} reported ${plural(count, "finding", "findings")}`;
     }
     case "failed":
-      return `${label} could not finish the review`;
+      switch (review.failure?.kind) {
+        case "rate_limited":
+          return `${label} hit a usage limit`;
+        case "signed_out":
+          return `${label} is not signed in`;
+        case "not_installed":
+          return `${label} is not installed`;
+        default:
+          return `${label} could not finish the review`;
+      }
     case "timed_out":
       return `${label} ran out of time`;
     case "cancelled":
       return "Review stopped";
   }
 }
+
+/**
+ * How a review's status reads: the notice's edge, and the mark beside the
+ * headline. A clean review finished well; a limit or a time-out needs a
+ * look; anything else that stopped it failed.
+ */
+export function reviewTone(review: CodeReviewSnapshot): StatusTone {
+  switch (review.status) {
+    case "running":
+      return "running";
+    case "completed":
+      return reviewFindingCount(review) === 0 &&
+        review.result?.raw_text === undefined
+        ? "ready"
+        : "neutral";
+    case "failed":
+      return review.failure?.kind === "rate_limited" ? "warning" : "critical";
+    case "timed_out":
+      return "warning";
+    case "cancelled":
+      return "neutral";
+  }
+}
+
+const NOTICE_TONE: Partial<Record<StatusTone, string>> = {
+  ready: "notice-success",
+  warning: "notice-warning",
+  critical: "notice-critical",
+};
 
 function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -541,14 +580,6 @@ function useNow(active: boolean): number {
   }, [active]);
   return now;
 }
-
-const NOTICE_TONE: Record<CodeReviewSnapshot["status"], string> = {
-  running: "",
-  completed: "",
-  failed: "notice-critical",
-  timed_out: "notice-warning",
-  cancelled: "",
-};
 
 /**
  * How a review stands, under the diff's header: while it runs, what the
@@ -584,23 +615,32 @@ export function ReviewStatus({
 }) {
   const running = review.status === "running";
   const headline = reviewHeadline(review, turnLabel);
+  const tone = reviewTone(review);
   const elapsed = formatElapsedDuration(
     now - new Date(review.started_at).getTime(),
   );
   const detail =
     review.status === "completed"
       ? (review.result?.summary ?? null)
-      : (review.failure?.message ?? null);
+      : review.status === "cancelled"
+        ? "Nothing was added to the diff."
+        : (review.failure?.message ?? null);
   const rejected = review.result?.rejected ?? 0;
   const credential =
     review.failure?.kind === "signed_out" ||
     review.failure?.kind === "not_installed";
+  const Mark =
+    tone === "ready"
+      ? CircleCheck
+      : tone === "warning" || tone === "critical"
+        ? CircleAlert
+        : ScanSearch;
   return (
     <section
       aria-label="Review"
       className={cn(
         "notice-surface flex shrink-0 flex-col gap-1 border-b px-3 py-2",
-        NOTICE_TONE[review.status],
+        NOTICE_TONE[tone],
       )}
       data-review-status={review.status}
     >
@@ -613,8 +653,8 @@ export function ReviewStatus({
             decorative
           />
         ) : (
-          <ScanSearch
-            className="text-muted-foreground size-3.5 shrink-0"
+          <Mark
+            className={cn("size-3.5 shrink-0", STATUS_MARK[tone])}
             aria-hidden
           />
         )}

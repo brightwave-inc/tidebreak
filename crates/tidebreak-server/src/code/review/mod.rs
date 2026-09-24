@@ -664,9 +664,14 @@ impl CodeRuntime {
                 Some(failure(
                     CodeReviewFailureKind::TimedOut,
                     format!(
-                        "{} ran past {} minutes and was stopped",
+                        "{} ran past {} minutes and was stopped. {}",
                         harness_label(job.harness),
-                        self.reviews.time_limit().as_secs().div_ceil(60)
+                        self.reviews.time_limit().as_secs().div_ceil(60),
+                        if job.turn_id.is_some() {
+                            "Try again, or pick a faster model."
+                        } else {
+                            "Try again, or review one turn's changes instead."
+                        }
                     ),
                 )),
                 None,
@@ -999,7 +1004,7 @@ pub fn classify_failure(harness: HarnessKind, detail: &str) -> CodeReviewFailure
     let said = if detail.is_empty() {
         String::new()
     } else {
-        format!(" {label} said: {detail}")
+        format!(" The engine said: {detail}")
     };
     if RATE_LIMIT_WORDS.iter().any(|word| lower.contains(word))
         || has_status(&lower, "429")

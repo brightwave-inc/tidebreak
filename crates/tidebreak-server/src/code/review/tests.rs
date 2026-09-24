@@ -273,7 +273,9 @@ fn failures_sort_into_what_the_person_can_do() {
     assert!(said
         .message
         .starts_with("Codex CLI hit a rate or usage limit."));
-    assert!(said.message.ends_with("Codex CLI said: rate limit reached"));
+    assert!(said
+        .message
+        .ends_with("The engine said: rate limit reached"));
     let not_found = classify_harness_error(HarnessKind::Grok, &HarnessError::NotFound);
     assert_eq!(not_found.kind, CodeReviewFailureKind::NotInstalled);
 }

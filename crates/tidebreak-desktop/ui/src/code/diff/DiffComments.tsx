@@ -233,7 +233,7 @@ export function CommentCard({
                 Sending with your message…
               </>
             ) : proposed ? (
-              "Keep it to send it to the agent"
+              "Goes with your next message once kept"
             ) : (
               "Goes with your next message"
             )}
