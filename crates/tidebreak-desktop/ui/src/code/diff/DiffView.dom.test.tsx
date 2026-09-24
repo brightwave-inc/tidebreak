@@ -404,6 +404,23 @@ describe("a long diff", () => {
   });
 });
 
+describe("syntax color through a refresh", () => {
+  it("keeps colors on the render a refetch causes", async () => {
+    const group = () => groupUnifiedDiff(QUEUE_DIFF)[0]!;
+    const { container, rerender } = render(
+      <DiffView group={group()} layout="unified" ignoreWhitespace={false} />,
+    );
+    await waitFor(() =>
+      expect(container.querySelector(".text-syntax-keyword")).not.toBeNull(),
+    );
+    rerender(
+      <DiffView group={group()} layout="unified" ignoreWhitespace={false} />,
+    );
+    // No idle wait: unchanged hunks come back from what was just highlighted.
+    expect(container.querySelector(".text-syntax-keyword")).not.toBeNull();
+  });
+});
+
 describe("the queue fixture", () => {
   it("colors TypeScript once its grammar is loaded", async () => {
     await renderPanel(QUEUE_DIFF, { file: QUEUE_PATH });

@@ -330,11 +330,8 @@ export function hunkSpans(group: DiffFileGroup): HunkSpan[] {
  * Highlight one hunk, each side as its own continuous run. Null when the
  * hunk is over a cap or its grammar is missing.
  */
-export function highlightHunk(
-  group: DiffFileGroup,
-  span: HunkSpan,
-  language: string,
-): HunkSyntax | null {
+/** Each side of a hunk: where its lines sit in the file group, and their text. */
+function hunkSides(group: DiffFileGroup, span: HunkSpan) {
   const oldSources: number[] = [];
   const newSources: number[] = [];
   for (let index = span.start + 1; index < span.end; index += 1) {
@@ -343,13 +340,79 @@ export function highlightHunk(
     if (kind === "add" || kind === "context") newSources.push(index);
   }
   const text = (source: number) => group.lines[source]!.text.slice(1);
-  const oldLines = highlightLines(oldSources.map(text), language);
-  const newLines = highlightLines(newSources.map(text), language);
-  if (!oldLines || !newLines) return null;
   return {
-    old: new Map(oldSources.map((source, index) => [source, oldLines[index]!])),
-    new: new Map(newSources.map((source, index) => [source, newLines[index]!])),
+    oldSources,
+    newSources,
+    oldText: oldSources.map(text),
+    newText: newSources.map(text),
   };
+}
+
+type SideRuns = { old: SyntaxLine[]; new: SyntaxLine[] } | null;
+
+/**
+ * Hunks highlighted lately, by language and text. A diff that refreshes
+ * while an agent works, or a file opened again, recalls every hunk that did
+ * not change instead of highlighting it again, so its colors never blink.
+ */
+const recent = new Map<string, SideRuns>();
+const RECENT_HUNKS = 600;
+
+function recentKey(language: string, oldText: string[], newText: string[]) {
+  return `${language}\u0000${oldText.join("\n")}\u0001${newText.join("\n")}`;
+}
+
+function remember(key: string, runs: SideRuns) {
+  recent.delete(key);
+  recent.set(key, runs);
+  if (recent.size > RECENT_HUNKS) {
+    const oldest = recent.keys().next().value;
+    if (oldest !== undefined) recent.delete(oldest);
+  }
+}
+
+function placed(
+  runs: SideRuns,
+  sides: ReturnType<typeof hunkSides>,
+): HunkSyntax | null {
+  if (!runs) return null;
+  return {
+    old: new Map(
+      sides.oldSources.map((source, index) => [source, runs.old[index]!]),
+    ),
+    new: new Map(
+      sides.newSources.map((source, index) => [source, runs.new[index]!]),
+    ),
+  };
+}
+
+export function highlightHunk(
+  group: DiffFileGroup,
+  span: HunkSpan,
+  language: string,
+): HunkSyntax | null {
+  const sides = hunkSides(group, span);
+  const key = recentKey(language, sides.oldText, sides.newText);
+  if (recent.has(key)) return placed(recent.get(key) ?? null, sides);
+  const oldLines = highlightLines(sides.oldText, language);
+  const newLines = highlightLines(sides.newText, language);
+  const runs = oldLines && newLines ? { old: oldLines, new: newLines } : null;
+  remember(key, runs);
+  return placed(runs, sides);
+}
+
+/** The hunk's syntax when an earlier diff already highlighted the same text. */
+function recallHunk(
+  group: DiffFileGroup,
+  span: HunkSpan,
+  language: string,
+): { found: boolean; syntax: HunkSyntax | null } {
+  const sides = hunkSides(group, span);
+  const key = recentKey(language, sides.oldText, sides.newText);
+  if (!recent.has(key)) return { found: false, syntax: null };
+  const runs = recent.get(key) ?? null;
+  remember(key, runs);
+  return { found: true, syntax: placed(runs, sides) };
 }
 
 /**
@@ -383,6 +446,19 @@ export class FileSyntax {
   size(hunk: number): number {
     const span = this.spans[hunk];
     return span ? span.end - span.start : 0;
+  }
+
+  /**
+   * Take the hunk's syntax from what was highlighted lately, without
+   * highlighting anything. Returns whether it is known now.
+   */
+  recall(hunk: number): boolean {
+    if (this.done.has(hunk)) return true;
+    const span = this.spans[hunk];
+    if (!span) return false;
+    const { found, syntax } = recallHunk(this.group, span, this.language);
+    if (found) this.done.set(hunk, syntax);
+    return found;
   }
 
   /** The hunk's syntax, computing it now if it is not known yet. */

@@ -157,25 +157,41 @@ function scheduleIdle(callback: () => void): () => void {
 }
 
 /**
- * Color the hunks a chunk shows. Small hunks are colored during render; a
- * large one waits for an idle moment, and the chunk re-renders when it is
- * done. Either way each hunk is computed once for the whole view.
+ * Color the hunks a chunk shows, each computed once for the whole view.
+ *
+ * A chunk that mounts with its grammar already loaded colors its small hunks
+ * during that first render, so a short diff never flashes plain. Anything
+ * else waits for an idle moment, one chunk at a time: a large hunk, and
+ * every chunk that was already on screen when its grammar arrived, which
+ * would otherwise all highlight in the one render the arrival causes.
+ *
+ * Returns a number that changes only when more of the chunk's syntax is
+ * known, so the memoized lines under it redraw then and only then.
  */
 function useChunkSyntax(
   syntax: FileSyntax | null,
   hunks: readonly number[],
   ready: boolean,
 ): number {
-  // The returned number changes whenever more of the chunk's syntax is
-  // known, so memoized lines under it know to draw again.
   const [version, setVersion] = useState(0);
+  const [colorsOnMount] = useState(ready);
+  const mounted = useRef(false);
   if (syntax && ready) {
     for (const hunk of hunks) {
-      if (!syntax.has(hunk) && syntax.size(hunk) <= SYNC_HIGHLIGHT_LINES) {
+      // A hunk highlighted lately comes back at no cost, on any render.
+      if (syntax.recall(hunk)) continue;
+      if (
+        colorsOnMount &&
+        !mounted.current &&
+        syntax.size(hunk) <= SYNC_HIGHLIGHT_LINES
+      ) {
         syntax.compute(hunk);
       }
     }
   }
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
   const missing =
     syntax && ready ? hunks.filter((hunk) => !syntax.has(hunk)) : [];
   const missingKey = missing.join(",");
@@ -186,7 +202,7 @@ function useChunkSyntax(
       setVersion((current) => current + 1);
     });
   }, [syntax, ready, missingKey]);
-  return ready ? version + 1 : 0;
+  return version;
 }
 
 export function DiffView({

@@ -117,6 +117,21 @@ describe("highlighting a hunk", () => {
     expect(roleOf(alone, "in")).not.toBe("comment");
   });
 
+  it("recalls a hunk a refreshed diff did not change, without highlighting it again", () => {
+    const before = FileSyntax.for(groupUnifiedDiff(DIFF)[0]!)!;
+    const computed = before.compute(0)!;
+    // The same text arrives again as a new group, as a refetch hands it over.
+    const after = FileSyntax.for(groupUnifiedDiff(DIFF)[0]!)!;
+    expect(after.has(0)).toBe(false);
+    expect(after.recall(0)).toBe(true);
+    expect(after.get(0)).toEqual(computed);
+
+    const changed = FileSyntax.for(
+      groupUnifiedDiff(DIFF.replace("in send order", "in arrival order"))[0]!,
+    )!;
+    expect(changed.recall(0)).toBe(false);
+  });
+
   it("finds each hunk's lines, and computes each hunk once", () => {
     const group = groupUnifiedDiff(`${DIFF}\n@@ -40,1 +40,1 @@\n-a\n+b`)[0]!;
     expect(hunkSpans(group)).toEqual([

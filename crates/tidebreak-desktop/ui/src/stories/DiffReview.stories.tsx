@@ -15,6 +15,7 @@ import type {
   ReviewComment,
   ReviewCommentLine,
 } from "@/code/diff/reviewComments";
+import { diffRows } from "@/code/diff/diffModel";
 import { groupUnifiedDiff } from "@/code/unifiedDiff";
 import {
   BINARY_DIFF,
@@ -401,7 +402,8 @@ function LongFileStory(props: DiffStoryProps) {
   const [measured, setMeasured] = useState<Measurement | null>(null);
   const firstRows = useRef<number | null>(null);
   const longest = useRef<number | null>(null);
-  const expected = groupUnifiedDiff(props.diff)[0]?.lines.length ?? 0;
+  const group = groupUnifiedDiff(props.diff)[0];
+  const expected = group ? diffRows(group).length : 0;
 
   useEffect(() => {
     let observer: PerformanceObserver | null = null;
@@ -420,11 +422,14 @@ function LongFileStory(props: DiffStoryProps) {
     }
     let frame = 0;
     const poll = () => {
-      const rows = document.querySelectorAll("[data-diff-view] [data-row]");
+      // Lines only: a line number's button carries its row too.
+      const rows = document.querySelectorAll(
+        "[data-diff-view] .diff-line[data-row]",
+      );
       if (rows.length > 0 && firstRows.current === null) {
         firstRows.current = performance.now() - started.current;
       }
-      if (rows.length >= expected - 1) {
+      if (rows.length >= expected) {
         setMeasured({
           lines: rows.length,
           firstRows: firstRows.current ?? 0,
