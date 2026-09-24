@@ -1885,7 +1885,7 @@ function ReviewCommentsChip({
           <button
             type="button"
             aria-pressed={review.included}
-            className="flex w-fit cursor-pointer items-center gap-1 rounded-sm text-2xs font-medium text-foreground underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="-ml-1 flex w-fit cursor-pointer items-center gap-1 rounded-sm px-1 text-2xs font-medium text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => choice(!review.included)}
           >
             {review.included && <Check className="size-3" aria-hidden />}

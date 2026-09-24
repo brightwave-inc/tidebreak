@@ -354,6 +354,40 @@ export const OutdatedComment: Story = {
   },
 };
 
+/**
+ * With whitespace hidden, a hunk that only changed indentation leaves the
+ * view. The comment on it is not outdated: it waits at the top with its
+ * quote until whitespace is shown again.
+ */
+export const HiddenWithWhitespace: Story = {
+  args: {
+    diff: REINDENT_DIFF,
+    path: LAYOUT_PATH,
+    workspaceId: "ws-diff-hidden",
+  },
+  loaders: [
+    seedReview("ws-diff-hidden", [
+      comment(
+        "c-hidden",
+        LAYOUT_PATH,
+        [line("add", null, 64, "  layoutPanels();")],
+        "Keep tabs in this file; the formatter expects them.",
+      ),
+    ]),
+  ],
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Hide whitespace changes" }),
+    );
+    await expect(
+      canvas.findByText(
+        "Hiding whitespace leaves out the lines these comments are on.",
+      ),
+    ).resolves.toBeVisible();
+  },
+};
+
 /** Pending comments in the side-by-side layout. */
 export const PendingCommentsSplit: Story = {
   args: { workspaceId: "ws-diff-pending-split" },
