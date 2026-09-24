@@ -175,7 +175,12 @@ export function CommentCard({
     comment.author.kind === "reviewer" ? comment.author.engine : null;
   const proposed = comment.proposed === true;
   const noun = reviewer ? "finding" : "comment";
-  const where = comment.general ? "the changes" : label.toLowerCase();
+  // "the changes", "line 12", or a file and its lines as the label names them.
+  const where = comment.general
+    ? comment.path
+      ? label
+      : "the changes"
+    : label.toLowerCase();
   const ReviewerIcon = reviewer ? HARNESS_ICONS[reviewer] : null;
   return (
     <div className={COMMENT_FRAME} data-diff-comment="pending">
@@ -224,6 +229,17 @@ export function CommentCard({
               )}
             >
               Outdated
+            </span>
+          )}
+          {reviewer && comment.edited && (
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-1.5 text-2xs leading-4 font-medium",
+                STATUS_CHIP.neutral,
+              )}
+              title="You rewrote this finding, so it goes as your words"
+            >
+              Edited
             </span>
           )}
           <span className="text-muted-foreground flex min-w-0 items-center gap-1 truncate text-xs">

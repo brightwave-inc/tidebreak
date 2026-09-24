@@ -10,6 +10,7 @@ import type { ReviewComment } from "../diff/reviewComments";
 import { reviewRowLabel } from "../TurnReviewCard";
 import { ReviewChangesForm, ReviewStatus, WORKING_TREE } from "./ReviewChanges";
 import { reviewEngineChoices } from "./reviewEngines";
+import { LOST_REVIEW_MESSAGE, lostReview } from "./reviewStore";
 
 afterEach(cleanup);
 
@@ -78,6 +79,18 @@ describe("the Review changes form", () => {
     expect(screen.getByRole("combobox")).toHaveTextContent("Codex CLI");
     expect(screen.getByRole("radio", { name: "Turn 3" })).toBeChecked();
     expect(screen.getByText("GPT-5.5")).toBeInTheDocument();
+    // It says what it reviews, and that later edits are not part of it.
+    expect(
+      screen.getByText(
+        /reads a copy of the changes as they are when you start/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Edits you make after you start aren't part of the review/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/cannot edit your files/)).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Start review" }));
     expect(onStart).toHaveBeenCalledTimes(1);
   });
@@ -147,6 +160,38 @@ describe("the review's status", () => {
     ).toBeNull();
   });
 
+  it("reads as stopping, and takes no second stop, until the review ends", () => {
+    const onStop = vi.fn();
+    render(
+      <ReviewStatus review={running()} now={NOW} stopping onStop={onStop} />,
+    );
+    const stop = screen.getByRole("button", { name: "Stopping…" });
+    expect(stop).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Stop review" })).toBeNull();
+  });
+
+  it("says a review stopped when Tidebreak restarted, and offers to run it again", async () => {
+    const onRetry = vi.fn();
+    render(
+      <ReviewStatus
+        review={lostReview(running(), () => "2026-09-24T10:02:00.000Z")}
+        now={NOW}
+        onRetry={onRetry}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Codex CLI couldn't finish the review",
+    );
+    expect(screen.getByText(LOST_REVIEW_MESSAGE)).toBeInTheDocument();
+    expect(
+      screen.queryByText("Reading src/queue.ts", { exact: false }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop review" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
   it("says why a review failed, and offers the way back", async () => {
     const onRetry = vi.fn();
     const onOpenEngines = vi.fn();
@@ -167,10 +212,17 @@ describe("the review's status", () => {
         onClose={() => {}}
       />,
     );
+    // The headline says what came of it; the detail alone says why, so the
+    // two never repeat each other.
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Codex CLI is not signed in",
+      "Codex CLI couldn't finish the review",
     );
-    expect(screen.getByText(/or its sign-in was refused/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Codex CLI is not signed in, or its sign-in was refused. Sign in from Settings > Coding engines.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/is not signed in/)).toHaveLength(1);
     await userEvent.click(
       screen.getByRole("button", { name: "Coding engines" }),
     );
@@ -197,7 +249,7 @@ describe("the review's status", () => {
       />,
     );
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Codex CLI ran out of time",
+      "Codex CLI couldn't finish the review",
     );
     expect(
       screen.getByText("Codex CLI ran past 20 minutes and was stopped"),

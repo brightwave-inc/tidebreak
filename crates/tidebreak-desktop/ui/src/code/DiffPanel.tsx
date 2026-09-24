@@ -21,7 +21,11 @@ import { useDiffPreferences } from "./diff/diffPreferences";
 import { DiffView, type HunkAction } from "./diff/DiffView";
 import { DiffViewOptions } from "./diff/DiffViewOptions";
 import { usePendingReviewStore } from "./diff/pendingReview";
-import type { ReviewComment } from "./diff/reviewComments";
+import {
+  commentLinesLabel,
+  spansOf,
+  type ReviewComment,
+} from "./diff/reviewComments";
 import {
   useWorkspaceDiffReview,
   type WorkspaceDiffReview,
@@ -617,7 +621,7 @@ function WholeChangeComments({
         editing === comment.id ? (
           <CommentComposer
             key={comment.id}
-            label={WHOLE_CHANGE}
+            label={wholeChangeLabel(comment)}
             initial={comment.body}
             submitLabel="Save"
             onSubmit={(body) => {
@@ -632,7 +636,7 @@ function WholeChangeComments({
           <CommentCard
             key={comment.id}
             comment={comment}
-            label={WHOLE_CHANGE}
+            label={wholeChangeLabel(comment)}
             sending={sending.has(comment.id)}
             onEdit={() => setEditing(comment.id)}
             onDelete={() =>
@@ -652,6 +656,18 @@ function WholeChangeComments({
 
 /** How a comment on no lines names where it sits. */
 const WHOLE_CHANGE = "The changes as a whole";
+
+/**
+ * Where a comment that quotes no lines sits: the changes as a whole, or a
+ * file's lines the diff does not show, such as "src/queue.ts, lines 90–92".
+ */
+function wholeChangeLabel(comment: ReviewComment): string {
+  if (!comment.path) return WHOLE_CHANGE;
+  const spans = spansOf(comment);
+  return spans.lines || spans.oldLines
+    ? `${comment.path}, ${commentLinesLabel(spans).toLowerCase()}`
+    : comment.path;
+}
 
 function FileDiffSection({
   group,

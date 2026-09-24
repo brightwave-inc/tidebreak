@@ -254,6 +254,14 @@ describe("a reviewer's findings in the pending review", () => {
       model: "gpt-5.5",
       reviewId: "rev-1",
     });
+    // Kept as written, a finding is still the reviewer's; rewritten, its
+    // words are the person's, and it says so.
+    expect(claimed[1]?.edited).toBeUndefined();
+    expect(claimed[2]?.edited).toBe(true);
+    // A person's own comment is never marked as a rewritten finding.
+    store.getState().add("ws-2", comment("own"));
+    store.getState().edit("ws-2", "own", "Mine, reworded");
+    expect(store.getState().byWorkspace["ws-2"]?.[0]?.edited).toBeUndefined();
   });
 
   it("keeps or dismisses one review's waiting findings at once", () => {

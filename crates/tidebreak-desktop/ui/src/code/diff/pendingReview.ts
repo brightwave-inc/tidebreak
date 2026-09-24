@@ -211,6 +211,7 @@ function isComment(value: unknown): value is ReviewComment {
       (REVIEW_SEVERITIES as readonly unknown[]).includes(value.severity)) &&
     (value.title === undefined || typeof value.title === "string") &&
     (value.proposed === undefined || value.proposed === true) &&
+    (value.edited === undefined || value.edited === true) &&
     (value.general === undefined || general)
   );
 }
@@ -442,7 +443,18 @@ export function createPendingReviewStore(
       edit: (workspaceId, id, body) =>
         update(workspaceId, (comments) =>
           comments.map((comment) =>
-            comment.id === id ? { ...kept(comment), body } : comment,
+            comment.id === id
+              ? {
+                  ...kept(comment),
+                  body,
+                  // A reviewer's note the person rewrote is theirs now, and
+                  // the message says so.
+                  ...(comment.author.kind === "reviewer" &&
+                  body.trim() !== comment.body.trim()
+                    ? { edited: true as const }
+                    : {}),
+                }
+              : comment,
           ),
         ),
       remove: (workspaceId, id) =>

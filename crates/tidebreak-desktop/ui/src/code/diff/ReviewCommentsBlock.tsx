@@ -29,7 +29,7 @@ const PREVIEW_COMMENTS = 3;
  * whether its code had changed by the time it was sent.
  */
 function spanLabel(comment: SentReviewComment, path = comment.path): string {
-  if (comment.general) return "The changes as a whole";
+  if (comment.general && !comment.path) return "The changes as a whole";
   const where = comment.lines
     ? `${path}:${comment.lines}`
     : comment.oldLines
@@ -57,9 +57,7 @@ export function ReviewCommentsBlock({
   const [open, setOpen] = useState(false);
   const bodyId = useId();
   const files = new Set(
-    comments
-      .filter((comment) => !comment.general)
-      .map((comment) => comment.path),
+    comments.filter((comment) => comment.path).map((comment) => comment.path),
   ).size;
   const shown = open ? comments : comments.slice(0, PREVIEW_COMMENTS);
   const hidden = comments.length - shown.length;
@@ -142,7 +140,7 @@ export function ReviewCommentsBlock({
                   className="text-foreground shrink-0 font-mono"
                   title={spanLabel(comment)}
                 >
-                  {comment.general
+                  {comment.general && !comment.path
                     ? "Whole change"
                     : spanLabel(comment, fileName(comment.path))}
                 </span>

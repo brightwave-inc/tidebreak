@@ -50,6 +50,7 @@ import {
 } from "./reviewEngines";
 import {
   useCodeReviewStore,
+  useReviewStopping,
   useWorkspaceReview,
   type ReviewClient,
 } from "./reviewStore";
@@ -154,7 +155,9 @@ export function ReviewChangesForm({
           Review changes
         </h2>
         <p className="text-muted-foreground text-xs">
-          Another engine reads a copy of the changes and cannot edit your files.
+          Another engine reads a copy of the changes as they are when you start,
+          not your worktree. It runs read-only, and anything it asks to change
+          is refused. Edits you make after you start aren't part of the review.
           Its findings arrive in the diff for you to keep or dismiss.
         </p>
       </div>
@@ -311,10 +314,11 @@ export function ReviewChangesControl({
           type="button"
           className={cn(HEADER_ACTION, FOCUS_RING_TIGHT, HOVER_TINT)}
           disabled={running}
-          title={running ? "A review of these changes is running" : undefined}
         >
           <ScanSearch className="size-3" aria-hidden />
-          Review changes
+          {/* A disabled button takes no focus and shows no tooltip to a
+              keyboard, so why it is disabled is in its own words. */}
+          {running ? "Review running" : "Review changes"}
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -526,18 +530,10 @@ export function reviewHeadline(
         : `${label} reported ${plural(count, "finding", "findings")}`;
     }
     case "failed":
-      switch (review.failure?.kind) {
-        case "rate_limited":
-          return `${label} hit a usage limit`;
-        case "signed_out":
-          return `${label} is not signed in`;
-        case "not_installed":
-          return `${label} is not installed`;
-        default:
-          return `${label} could not finish the review`;
-      }
     case "timed_out":
-      return `${label} ran out of time`;
+      // The detail says why, in its own words; the headline says what came
+      // of it, so the two never say the same thing twice.
+      return `${label} couldn't finish the review`;
     case "cancelled":
       return "Review stopped";
   }
@@ -677,7 +673,7 @@ export function ReviewStatus({
               onClick={onStop}
             >
               {stopping ? <Spinner aria-hidden /> : null}
-              Stop review
+              {stopping ? "Stopping…" : "Stop review"}
             </Button>
           )}
           {proposed > 0 && onKeepAll && (
@@ -767,7 +763,7 @@ export function DiffReviewStatus({
     | ReturnType<typeof useRouter>
     | undefined;
   const harnessesPath: string = "/settings/coding-harnesses";
-  const [stopping, setStopping] = useState(false);
+  const stopping = useReviewStopping(workspaceId, review?.id);
   const now = useNow(review?.status === "running");
   const client = reviewer.client;
   useEffect(() => {
@@ -791,14 +787,14 @@ export function DiffReviewStatus({
       proposed={proposed}
       stopping={stopping}
       onStop={() => {
-        setStopping(true);
+        // Stopping lasts until the server says the review ended: the engine
+        // gets a few seconds to wind down first.
         void useCodeReviewStore
           .getState()
           .cancel(client, workspaceId)
           .catch((err: unknown) =>
             toast.error(friendlyErrorMessage(err, "Could not stop the review")),
-          )
-          .finally(() => setStopping(false));
+          );
       }}
       onKeepAll={() =>
         usePendingReviewStore.getState().keepAll(workspaceId, review.id)

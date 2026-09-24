@@ -125,7 +125,7 @@ describe("commentsFromReview", () => {
     ).toBe("outdated");
   });
 
-  it("puts findings the diff does not show into one comment on the whole change", () => {
+  it("gives each finding the diff does not show its own comment, with its file, lines, severity, and title", () => {
     const comments = commentsFromReview(
       review(
         {},
@@ -153,25 +153,33 @@ describe("commentsFromReview", () => {
         },
       ),
     );
-    expect(comments).toHaveLength(1);
-    const [summary] = comments;
-    expect(summary).toMatchObject({
-      id: summaryCommentId("rev-1"),
-      author: { kind: "reviewer", engine: "codex", reviewId: "rev-1" },
-      path: "",
-      lines: [],
-      general: true,
-      proposed: true,
-      title: "2 findings on lines outside the diff",
-    });
-    expect(summary!.body).toBe(
-      [
-        "- src/queue.ts, lines 40–41 (medium): Lines the diff does not show",
-        "  The client dropped these from the placed list.",
-        "- src/net.ts, line 3 (low): An unchanged helper",
-        "  Nothing calls it any more.",
-      ].join("\n"),
-    );
+    expect(comments).toEqual([
+      expect.objectContaining({
+        id: findingCommentId("rev-1", 0),
+        author: expect.objectContaining({
+          kind: "reviewer",
+          engine: "codex",
+          reviewId: "rev-1",
+        }),
+        path: "src/queue.ts",
+        lines: [],
+        span: { lines: "40-41", oldLines: null },
+        general: true,
+        proposed: true,
+        severity: "medium",
+        title: "Lines the diff does not show",
+        body: "The client dropped these from the placed list.",
+      }),
+      expect.objectContaining({
+        id: findingCommentId("rev-1", 1),
+        path: "src/net.ts",
+        span: { lines: "3", oldLines: null },
+        general: true,
+        severity: "low",
+        title: "An unchanged helper",
+        body: "Nothing calls it any more.",
+      }),
+    ]);
   });
 
   it("keeps an answer that was not findings as one comment, word for word", () => {

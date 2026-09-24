@@ -2,11 +2,7 @@ import type { CodeReviewFinding, CodeReviewSnapshot } from "../../api/types";
 import { groupUnifiedDiff } from "../unifiedDiff";
 import { anchorRows } from "./commentAnchor";
 import { diffRows, isCodeRow, type DiffRow } from "./diffModel";
-import {
-  commentLinesLabel,
-  type ReviewComment,
-  type ReviewCommentAuthor,
-} from "./reviewComments";
+import type { ReviewComment, ReviewCommentAuthor } from "./reviewComments";
 
 /**
  * A finished review's findings, as pending comments on the diff it read.
@@ -18,10 +14,12 @@ import {
  * moved on, or says it is outdated.
  *
  * Findings arrive proposed: shown in the diff, but not going with the next
- * message until the person keeps or edits them. Findings on lines the diff
- * does not show, and an answer that could not be read as findings, become
- * one comment on the changes as a whole, so nothing the reviewer said is
- * lost and nothing is pinned to a line it was not about.
+ * message until the person keeps or edits them. A finding on lines the diff
+ * does not show becomes a comment of its own above the files, naming its
+ * file and lines, with the same severity and title as one in the diff. An
+ * answer that could not be read as findings becomes one comment on the
+ * changes as a whole, so nothing the reviewer said is lost and nothing is
+ * pinned to a line it was not about.
  */
 
 /** The id a finding's comment keeps: importing a review twice adds it once. */
@@ -67,43 +65,18 @@ function reviewerOf(
   };
 }
 
-function linesOf(finding: CodeReviewFinding): string {
-  return commentLinesLabel({
-    lines:
-      finding.start_line === finding.end_line
-        ? String(finding.start_line)
-        : `${finding.start_line}-${finding.end_line}`,
-    oldLines: null,
-  }).toLowerCase();
-}
-
-/** The whole-change comment: the unread answer, or the findings off the diff. */
-function summaryBody(
-  rawText: string | undefined,
-  offDiff: readonly CodeReviewFinding[],
-): { title: string; body: string } | null {
-  if (rawText !== undefined && rawText.trim()) {
-    return { title: "The review's answer", body: rawText.trim() };
-  }
-  if (offDiff.length === 0) return null;
-  return {
-    title:
-      offDiff.length === 1
-        ? "A finding on lines outside the diff"
-        : `${offDiff.length} findings on lines outside the diff`,
-    body: offDiff
-      .map(
-        (finding) =>
-          `- ${finding.path}, ${linesOf(finding)} (${finding.severity}): ${finding.title}\n  ${finding.explanation.replace(/\n/g, "\n  ")}`,
-      )
-      .join("\n"),
-  };
+/** A finding's lines as a span, "40" or "40-41". */
+function findingSpan(finding: CodeReviewFinding): string {
+  return finding.start_line === finding.end_line
+    ? String(finding.start_line)
+    : `${finding.start_line}-${finding.end_line}`;
 }
 
 /**
- * The pending comments a completed review adds: one per finding on the
- * diff, and at most one about the changes as a whole. Empty for a review
- * that did not complete.
+ * The pending comments a completed review adds: one per finding, on its
+ * lines when the diff shows them and above the files when it does not, and
+ * one for an answer that was not findings. Empty for a review that did not
+ * complete.
  */
 export function commentsFromReview(
   review: CodeReviewSnapshot,
@@ -119,12 +92,30 @@ export function commentsFromReview(
     groupUnifiedDiff(result.diff).map((group) => [group.path, group]),
   );
   const rowsByPath = new Map<string, DiffRow[]>();
-  const comments: ReviewComment[] = [];
-  const offDiff: CodeReviewFinding[] = [];
+  const onDiff: ReviewComment[] = [];
+  const offDiff: ReviewComment[] = [];
+
+  function offTheDiff(finding: CodeReviewFinding, index: number) {
+    offDiff.push({
+      id: findingCommentId(review.id, index),
+      author,
+      path: finding.path,
+      ...turn,
+      lines: [],
+      span: { lines: findingSpan(finding), oldLines: null },
+      body: finding.explanation,
+      createdAt,
+      severity: finding.severity,
+      title: finding.title,
+      proposed: true,
+      general: true,
+    });
+  }
+
   result.findings.forEach((finding, index) => {
     const group = groups.get(finding.path);
     if (!group) {
-      offDiff.push(finding);
+      offTheDiff(finding, index);
       return;
     }
     let rows = rowsByPath.get(finding.path);
@@ -134,11 +125,11 @@ export function commentsFromReview(
     }
     const covered = findingRows(rows, finding);
     if (!covered) {
-      offDiff.push(finding);
+      offTheDiff(finding, index);
       return;
     }
     const { span, ...anchor } = anchorRows(rows, covered.start, covered.end);
-    comments.push({
+    onDiff.push({
       id: findingCommentId(review.id, index),
       author,
       path: finding.path,
@@ -152,21 +143,25 @@ export function commentsFromReview(
       proposed: true,
     });
   });
-  offDiff.push(...result.unplaced);
-  const summary = summaryBody(result.raw_text, offDiff);
-  if (summary) {
-    comments.push({
-      id: summaryCommentId(review.id),
-      author,
-      path: "",
-      ...turn,
-      lines: [],
-      body: summary.body,
-      createdAt,
-      title: summary.title,
-      proposed: true,
-      general: true,
-    });
-  }
-  return comments;
+  result.unplaced.forEach((finding, index) =>
+    offTheDiff(finding, result.findings.length + index),
+  );
+  const answer =
+    result.raw_text !== undefined && result.raw_text.trim()
+      ? [
+          {
+            id: summaryCommentId(review.id),
+            author,
+            path: "",
+            ...turn,
+            lines: [],
+            body: result.raw_text.trim(),
+            createdAt,
+            title: "The review's answer",
+            proposed: true as const,
+            general: true as const,
+          },
+        ]
+      : [];
+  return [...onDiff, ...answer, ...offDiff];
 }

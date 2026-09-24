@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { HttpError } from "../../api/client/http";
 import type { CodeReviewSnapshot } from "../../api/types";
 import { createPendingReviewStore } from "../diff/pendingReview";
-import { createCodeReviewStore, type ReviewClient } from "./reviewStore";
+import {
+  createCodeReviewStore,
+  LOST_REVIEW_MESSAGE,
+  type ReviewClient,
+} from "./reviewStore";
 
 const DIFF = [
   "diff --git a/src/queue.ts b/src/queue.ts",
@@ -178,5 +183,145 @@ describe("following a review", () => {
     ).rejects.toThrow("not signed in");
     expect(reviews.getState().starting["ws-1"]).toBeUndefined();
     expect(reviews.getState().byWorkspace["ws-1"]).toBeUndefined();
+  });
+});
+
+describe("a review the server lost", () => {
+  it("stops polling once the server answers that it does not know the review, and says it stopped", async () => {
+    const { pendingReview, reviews } = stores();
+    const client = {
+      ...server([snapshot("running")]),
+      getCodeReview: vi.fn(async () => {
+        throw new HttpError(404, "code review not found");
+      }),
+    } satisfies ReviewClient;
+    await reviews.getState().start(client, "ws-1", {
+      session_id: "sess-1",
+      harness: "codex",
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    const review = reviews.getState().byWorkspace["ws-1"];
+    expect(review?.status).toBe("failed");
+    expect(review?.failure?.message).toBe(LOST_REVIEW_MESSAGE);
+    expect(review?.progress.activity).toBeUndefined();
+    expect(review?.finished_at).toBeDefined();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(client.getCodeReview).toHaveBeenCalledTimes(1);
+    expect(pendingReview.getState().byWorkspace["ws-1"]).toBeUndefined();
+  });
+
+  it("keeps trying while the server cannot be reached, then marks the review lost", async () => {
+    const { reviews } = stores();
+    let reachable = false;
+    const client = {
+      ...server([snapshot("running")]),
+      getCodeReview: vi.fn(async () => {
+        if (!reachable) throw new TypeError("Failed to fetch");
+        throw new HttpError(404, "code review not found");
+      }),
+    } satisfies ReviewClient;
+    await reviews.getState().start(client, "ws-1", {
+      session_id: "sess-1",
+      harness: "codex",
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(reviews.getState().byWorkspace["ws-1"]?.status).toBe("running");
+    reachable = true;
+    await vi.advanceTimersByTimeAsync(300);
+    expect(reviews.getState().byWorkspace["ws-1"]?.status).toBe("failed");
+  });
+
+  it("marks a running review missing from the list as lost, but not one started while the list was on its way", async () => {
+    const { reviews } = stores();
+    const client = {
+      ...server([snapshot("running")]),
+      listCodeReviews: vi.fn(async (): Promise<CodeReviewSnapshot[]> => []),
+    } satisfies ReviewClient;
+    await reviews.getState().start(client, "ws-1", {
+      session_id: "sess-1",
+      harness: "codex",
+    });
+    await reviews.getState().refresh(client, "ws-1");
+    expect(reviews.getState().byWorkspace["ws-1"]?.status).toBe("failed");
+
+    const { reviews: fresh } = stores();
+    let answer: (reviews: CodeReviewSnapshot[]) => void = () => {};
+    const slow = {
+      ...server([snapshot("running")]),
+      listCodeReviews: vi.fn(
+        () =>
+          new Promise<CodeReviewSnapshot[]>((resolve) => {
+            answer = resolve;
+          }),
+      ),
+    } satisfies ReviewClient;
+    const refreshing = fresh.getState().refresh(slow, "ws-1");
+    await fresh.getState().start(slow, "ws-1", {
+      session_id: "sess-1",
+      harness: "codex",
+    });
+    answer([]);
+    await refreshing;
+    expect(fresh.getState().byWorkspace["ws-1"]?.status).toBe("running");
+  });
+
+  it("treats a stop the server cannot find as the review already gone", async () => {
+    const { reviews } = stores();
+    const client = {
+      ...server([snapshot("running")]),
+      cancelCodeReview: vi.fn(async (): Promise<CodeReviewSnapshot> => {
+        throw new HttpError(404, "code review not found");
+      }),
+    } satisfies ReviewClient;
+    await reviews.getState().start(client, "ws-1", {
+      session_id: "sess-1",
+      harness: "codex",
+    });
+    await reviews.getState().cancel(client, "ws-1");
+    expect(reviews.getState().byWorkspace["ws-1"]?.status).toBe("failed");
+    expect(reviews.getState().stopping["ws-1"]).toBeUndefined();
+  });
+});
+
+describe("stopping a review", () => {
+  it("reads as stopping until the server says the review ended", async () => {
+    const { reviews } = stores();
+    const client = {
+      ...server([snapshot("running"), snapshot("cancelled")]),
+      // The server takes the request, and the engine winds down after.
+      cancelCodeReview: vi.fn(async () => snapshot("running")),
+    } satisfies ReviewClient;
+    await reviews.getState().start(client, "ws-1", {
+      session_id: "sess-1",
+      harness: "codex",
+    });
+    await reviews.getState().cancel(client, "ws-1");
+    expect(reviews.getState().stopping["ws-1"]).toBe("rev-1");
+    expect(reviews.getState().byWorkspace["ws-1"]?.status).toBe("running");
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(reviews.getState().stopping["ws-1"]).toBe("rev-1");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(reviews.getState().byWorkspace["ws-1"]?.status).toBe("cancelled");
+    expect(reviews.getState().stopping["ws-1"]).toBeUndefined();
+  });
+
+  it("stops reading as stopping when the request fails, and passes the error on", async () => {
+    const { reviews } = stores();
+    const client = {
+      ...server([snapshot("running")]),
+      cancelCodeReview: vi.fn(async (): Promise<CodeReviewSnapshot> => {
+        throw new HttpError(500, "the engine did not answer");
+      }),
+    } satisfies ReviewClient;
+    await reviews.getState().start(client, "ws-1", {
+      session_id: "sess-1",
+      harness: "codex",
+    });
+    await expect(reviews.getState().cancel(client, "ws-1")).rejects.toThrow(
+      "the engine did not answer",
+    );
+    expect(reviews.getState().stopping["ws-1"]).toBeUndefined();
+    expect(reviews.getState().byWorkspace["ws-1"]?.status).toBe("running");
   });
 });
