@@ -539,6 +539,7 @@ impl CodeRuntime {
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
         let workspace = self.get_workspace(owner, id).await?;
+        refuse_archived_local_workspace(&workspace)?;
         // Being asked is the attention signal (decision 66): the request
         // path reads local git plus the stored row, and the hot refresher
         // this mark feeds is what keeps the row current while anyone reads.

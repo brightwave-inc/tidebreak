@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import type { ApiClient } from "../api/client";
 import type { CodeWorkspacePrSnapshot, PullRequestDigest } from "../api/types";
+import {
+  isWorkspaceArchivedError,
+  WORKSPACE_ARCHIVED_MESSAGE,
+} from "../api/client/http";
 import { friendlyErrorMessage } from "@/lib/utils";
 import type { LiveResource } from "./useLiveContent";
 
@@ -113,10 +117,12 @@ class WorkspacePrResource {
         (error) => {
           if (generation === this.generation)
             this.update({
-              error: friendlyErrorMessage(
-                error,
-                "Could not load workspace status",
-              ),
+              error: isWorkspaceArchivedError(error)
+                ? WORKSPACE_ARCHIVED_MESSAGE
+                : friendlyErrorMessage(
+                    error,
+                    "Could not load workspace status",
+                  ),
             });
         },
       )

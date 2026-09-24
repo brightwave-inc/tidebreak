@@ -107,6 +107,20 @@ export function archiveForceKind(error: unknown): string | null {
   return ARCHIVE_FORCE_KINDS.has(error.kind) ? error.kind : null;
 }
 
+/** File reads of a local archived workspace answer this instead of a spawn error. */
+export const WORKSPACE_ARCHIVED_KIND = "workspace_archived";
+
+export const WORKSPACE_ARCHIVED_MESSAGE =
+  "This workspace is archived. Its files come back when you restore it.";
+
+export function isWorkspaceArchivedError(error: unknown): boolean {
+  return (
+    error instanceof HttpError &&
+    error.status === 409 &&
+    error.kind === WORKSPACE_ARCHIVED_KIND
+  );
+}
+
 /** The server's own message for a failed response, or its status text. */
 export async function throwIfNotOk(response: Response): Promise<void> {
   if (response.ok) return;

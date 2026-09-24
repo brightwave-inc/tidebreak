@@ -5,6 +5,10 @@ import {
   acquireCodeSessionFromClient,
   releaseCodeSession,
 } from "./CodeSessionRegistry";
+import {
+  isWorkspaceArchivedError,
+  WORKSPACE_ARCHIVED_MESSAGE,
+} from "../api/client/http";
 import { friendlyErrorMessage } from "@/lib/utils";
 
 /**
@@ -139,7 +143,11 @@ export function useLiveResource<T>({
         setError(null);
       } catch (err) {
         if (generation !== generationRef.current) return;
-        setError(friendlyErrorMessage(err, errorMessageRef.current));
+        setError(
+          isWorkspaceArchivedError(err)
+            ? WORKSPACE_ARCHIVED_MESSAGE
+            : friendlyErrorMessage(err, errorMessageRef.current),
+        );
       } finally {
         if (generation === generationRef.current) {
           inFlightRef.current = null;

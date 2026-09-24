@@ -8,6 +8,7 @@ import type {
 } from "@/api/types";
 import { CodeInspector, type InspectorTab } from "@/code/CodeInspector";
 import type { CodeWorkspacePrResource } from "@/code/useCodeWorkspacePr";
+import { archivedWorkspace } from "./fixtures";
 
 type InspectorScenario =
   | "sandbox"
@@ -25,7 +26,8 @@ type InspectorScenario =
   | "truncated"
   | "empty"
   | "loading"
-  | "failure";
+  | "failure"
+  | "archived";
 
 const workspace: CodeWorkspaceSnapshot = {
   id: "ws-inspector-story",
@@ -406,18 +408,20 @@ function InspectorStory({
           }
         : pullRequest;
   const storyWorkspace =
-    scenario === "empty" || scenario.startsWith("placement-")
-      ? workspace
-      : scenario.startsWith("sandbox")
-        ? {
-            ...workspace,
-            worktree_path: `remote:${workspace.id}`,
-            pr:
-              scenario === "sandbox" || scenario === "sandbox-live"
-                ? undefined
-                : storyPr,
-          }
-        : { ...workspace, pr: storyPr };
+    scenario === "archived"
+      ? archivedWorkspace
+      : scenario === "empty" || scenario.startsWith("placement-")
+        ? workspace
+        : scenario.startsWith("sandbox")
+          ? {
+              ...workspace,
+              worktree_path: `remote:${workspace.id}`,
+              pr:
+                scenario === "sandbox" || scenario === "sandbox-live"
+                  ? undefined
+                  : storyPr,
+            }
+          : { ...workspace, pr: storyPr };
   const storySnapshot = {
     ...prSnapshot,
     remote: scenario.startsWith("sandbox"),
@@ -537,6 +541,11 @@ export const Loading: Story = {
 
 export const Failure: Story = {
   args: { tab: "files", scenario: "failure" },
+};
+
+/** An archived local workspace keeps the conversation and says files return on restore. */
+export const Archived: Story = {
+  args: { tab: "files", scenario: "archived" },
 };
 
 export const Compact: Story = {
