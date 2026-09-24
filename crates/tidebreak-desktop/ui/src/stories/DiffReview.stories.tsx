@@ -9,7 +9,7 @@ import {
   useDiffPreferences,
   type DiffLayout,
 } from "@/code/diff/diffPreferences";
-import { DiffView } from "@/code/diff/DiffView";
+import { DIFF_CHUNK_ROWS, DiffView } from "@/code/diff/DiffView";
 import { usePendingReviewStore } from "@/code/diff/pendingReview";
 import type {
   ReviewComment,
@@ -368,8 +368,12 @@ export const WholeWorkspace: Story = {
 
 /**
  * A 5,000-line diff. The first chunk of rows draws on the first frame and
- * the rest follow a few chunks a frame, so opening it never holds the main
+ * the rest follow a chunk a frame, so opening it never holds the main
  * thread. The caption reports what this browser measured.
+ *
+ * The measurement watches only the count of mounted chunks, one element,
+ * and the story has no play function: anything that searched the DOM on
+ * every frame would cost more as the rows arrived and be measured with them.
  */
 export const VeryLongFile: Story = {
   args: {
@@ -379,21 +383,15 @@ export const VeryLongFile: Story = {
   },
   loaders: [seedReview("ws-diff-long", [])],
   render: (args) => <LongFileStory {...args} />,
-  play: async ({ canvasElement }) => {
-    await waitFor(
-      () =>
-        expect(
-          canvasElement.querySelector("[data-long-diff-measured]"),
-        ).not.toBeNull(),
-      { timeout: 20_000 },
-    );
-  },
 };
 
 type Measurement = {
   lines: number;
   firstRows: number;
   allRows: number;
+  /** The task that rendered the story, Storybook's own work included. */
+  mountTask: number | null;
+  /** The longest task after that one, while the rest of the rows arrived. */
   longestTask: number | null;
 };
 
@@ -401,39 +399,52 @@ function LongFileStory(props: DiffStoryProps) {
   const started = useRef(performance.now());
   const [measured, setMeasured] = useState<Measurement | null>(null);
   const firstRows = useRef<number | null>(null);
+  const mountTask = useRef<number | null>(null);
   const longest = useRef<number | null>(null);
   const group = groupUnifiedDiff(props.diff)[0];
   const expected = group ? diffRows(group).length : 0;
+  const expectedChunks = Math.ceil(expected / DIFF_CHUNK_ROWS);
 
   useEffect(() => {
     let observer: PerformanceObserver | null = null;
     try {
       observer = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
-          // Storybook's own start-up is not this diff's work.
-          if (entry.startTime + entry.duration < started.current) continue;
-          longest.current = Math.max(longest.current ?? 0, entry.duration);
+          const end = entry.startTime + entry.duration;
+          // Storybook's start-up before this story is not the diff's work.
+          if (end < started.current) continue;
+          if (entry.startTime <= started.current) {
+            mountTask.current = Math.max(
+              mountTask.current ?? 0,
+              entry.duration,
+            );
+          } else {
+            longest.current = Math.max(longest.current ?? 0, entry.duration);
+          }
         }
       });
       observer.observe({ type: "longtask", buffered: true });
+      mountTask.current = 0;
       longest.current = 0;
     } catch {
       // Not every engine reports long tasks; the caption says so.
     }
     let frame = 0;
+    let view: Element | null = null;
     const poll = () => {
-      // Lines only: a line number's button carries its row too.
-      const rows = document.querySelectorAll(
-        "[data-diff-view] .diff-line[data-row]",
-      );
-      if (rows.length > 0 && firstRows.current === null) {
+      view ??= document.querySelector("[data-diff-view]");
+      // The view's last child holds one element per mounted chunk.
+      const chunks = view?.lastElementChild?.childElementCount ?? 0;
+      if (chunks > 0 && firstRows.current === null) {
         firstRows.current = performance.now() - started.current;
       }
-      if (rows.length >= expected) {
+      if (view && chunks >= expectedChunks) {
+        const allRows = performance.now() - started.current;
         setMeasured({
-          lines: rows.length,
+          lines: view.querySelectorAll(".diff-line[data-row]").length,
           firstRows: firstRows.current ?? 0,
-          allRows: performance.now() - started.current,
+          allRows,
+          mountTask: mountTask.current,
           longestTask: longest.current,
         });
         return;
@@ -445,7 +456,7 @@ function LongFileStory(props: DiffStoryProps) {
       cancelAnimationFrame(frame);
       observer?.disconnect();
     };
-  }, [expected]);
+  }, [expectedChunks]);
 
   return (
     <div className="flex flex-col gap-2">
@@ -454,13 +465,14 @@ function LongFileStory(props: DiffStoryProps) {
           <span data-long-diff-measured="">
             {measured.lines.toLocaleString()} lines: first rows in{" "}
             {Math.round(measured.firstRows)} ms, every row in{" "}
-            {Math.round(measured.allRows)} ms,{" "}
+            {Math.round(measured.allRows)} ms.{" "}
             {measured.longestTask === null
-              ? "long tasks not reported by this browser"
-              : measured.longestTask === 0
-                ? "no main-thread task over 50 ms"
-                : `longest main-thread task ${Math.round(measured.longestTask)} ms`}
-            .
+              ? "This browser does not report long tasks."
+              : `Mounting task ${Math.round(measured.mountTask ?? 0)} ms with Storybook's render; ${
+                  measured.longestTask === 0
+                    ? "no task over 50 ms after it"
+                    : `longest task after it ${Math.round(measured.longestTask)} ms`
+                }.`}
           </span>
         ) : (
           "Measuring…"
