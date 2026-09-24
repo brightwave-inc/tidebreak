@@ -1,6 +1,6 @@
 //! Export, preview, and apply portable workspace configuration (decision 83).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use axum::extract::State;
@@ -15,9 +15,9 @@ use crate::mcp_config::{ManualLockdown, McpServerDefinition, McpServersConfig};
 use crate::principal::AuthContext;
 use crate::state::AppState;
 use crate::workspace_config::{
-    apply_repo_path, export_code_repositories, export_mcp_servers, find_repo,
-    imported_mcp_definition, mcp_lockdown_blocks, parse_document, preview_document, repo_key,
-    starts_local_command, WorkspaceConfigAction, WorkspaceConfigApplyRequest,
+    apply_repo_path, approved_executable_for, export_code_repositories, export_mcp_servers,
+    find_repo, imported_mcp_definition, mcp_lockdown_blocks, parse_document, preview_document,
+    repo_key, starts_local_command, WorkspaceConfigAction, WorkspaceConfigApplyRequest,
     WorkspaceConfigApplyResult, WorkspaceConfigDecision, WorkspaceConfigDocument,
     WorkspaceConfigPreview, WorkspaceConfigSectionId, FORMAT_VERSION,
 };
@@ -81,11 +81,19 @@ pub async fn preview_workspace_config(
 /// lists the commands, may write it. An import that brings such a server in
 /// turned off starts nothing and needs no confirmation. On a multi-user
 /// deployment, only an administrator may import MCP servers at all.
+///
+/// The programs the desktop's dialog approved for the bare commands an
+/// import starts arrive in `approved_executables`, which only the native
+/// host may send: from any other caller they are dropped, so an imported
+/// server records no approved program it did not get from the dialog.
 pub async fn apply_workspace_config(
     State(state): State<AppState>,
     auth: AuthContext,
-    Json(body): Json<WorkspaceConfigApplyRequest>,
+    Json(mut body): Json<WorkspaceConfigApplyRequest>,
 ) -> Result<impl IntoResponse, ServerError> {
+    if !auth.client_executor {
+        body.approved_executables.clear();
+    }
     // Re-parse through the version gate by round-tripping JSON so a client
     // cannot skip parse_document by sending a typed body with a future version.
     let value = serde_json::to_value(&body.document).map_err(|error| {
@@ -116,6 +124,7 @@ pub async fn apply_workspace_config(
     let plan = plan_apply(
         &document,
         &body.decisions,
+        &body.approved_executables,
         configured,
         repos.as_deref(),
         lockdown,
@@ -187,6 +196,7 @@ enum RepoWrite {
 async fn plan_apply(
     document: &WorkspaceConfigDocument,
     decisions: &[WorkspaceConfigDecision],
+    approved_executables: &BTreeMap<String, String>,
     configured: Vec<McpServerDefinition>,
     repos: Option<&[CodeRepo]>,
     lockdown: ManualLockdown,
@@ -246,6 +256,10 @@ async fn plan_apply(
                 }
                 // Keep stored env values: never send env_values on import.
                 definition.env_values.clear();
+                // A bare command records the program the native dialog
+                // showed for it, and nothing when no dialog did.
+                definition.approved_executable =
+                    approved_executable_for(&definition, approved_executables);
                 match existing_idx {
                     Some(idx) => mcp[idx] = definition.clone(),
                     None => mcp.push(definition.clone()),

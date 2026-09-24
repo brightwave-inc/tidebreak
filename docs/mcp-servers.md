@@ -52,6 +52,19 @@ resolves to beside the arguments as typed, for example `"executable":
 default. A name that does not resolve refuses the save with the same
 "Command not found" sentence Settings shows.
 
+When you allow the save, the definition records that path as its
+`approved_executable`. Only the desktop's native save sets it: the server
+drops the field from any other request. Every spawn, whether a save, a launch,
+a supervisor reconnect, or `POST /mcp/servers/{name}/reconnect`, resolves the
+name again and starts it only if it resolves to the approved path. Otherwise
+the server does not start, reads **Needs attention** with a "Needs approval:"
+diagnostic that names both paths, and the supervisor stops retrying it. To run
+the new program, save again and allow it in the dialog. In the desktop app, a
+bare name with no approved program does not start either. The CLI, a
+self-hosted server, and a machine a desktop window attaches to have no dialog:
+there a bare name records no approved program and runs whatever it resolves
+to at each spawn.
+
 `tidebreak mcp-server add <name> --url <url> --oauth` saves a remote server
 that signs in with OAuth. Connect it afterwards from Settings, which opens the
 sign-in page in your browser.

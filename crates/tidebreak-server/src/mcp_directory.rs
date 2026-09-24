@@ -130,6 +130,7 @@ impl McpDirectoryEntry {
             env_values: BTreeMap::new(),
             env_from: Vec::new(),
             cwd: None,
+            approved_executable: None,
             url: Some(self.url.clone()),
             bearer_token_env: match &self.sign_in {
                 McpDirectorySignIn::Token { variable } => Some(variable.clone()),

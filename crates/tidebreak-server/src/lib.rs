@@ -1534,6 +1534,13 @@ async fn bind_inner(
     // Without a restart-stable native executor identity, durable
     // root-attachment mutations stay off — matching `AppState::new`.
     state.root_attachment_routes_enabled = client_executor_id.is_some();
+    // The desktop app shows an OS dialog before any local MCP command runs
+    // (decision 27), so a bare command here starts only the program that
+    // dialog approved. `tidebreak serve` and a self-hosted server have no
+    // dialog, and resolve a bare name at every spawn.
+    if state.config.profile == Profile::Desktop && client_executor_id.is_some() {
+        state.mcp.require_command_approval();
+    }
     state.blobs = blobs;
     // The plugin management routes list what the provider actually loaded, so
     // they read the same instance staging and prompt composition use.

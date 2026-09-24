@@ -17,6 +17,7 @@ use crate::mcp_curated::McpCuration;
 use crate::mcp_oauth_runtime::McpOAuthStatus;
 
 use super::oauth::OAuthAccess;
+use super::stdio::CommandApproval;
 use super::validation::validate_servers;
 
 pub(super) const CONFIG_ENV: &str = "TIDEBREAK_MCP_CONFIG";
@@ -195,6 +196,20 @@ pub struct McpServerDefinition {
     pub env_from: Vec<String>,
     #[serde(default)]
     pub cwd: Option<PathBuf>,
+    /// The absolute path of the program the desktop's native dialog showed
+    /// when the person allowed this server, for a `command` given as a bare
+    /// name such as `npx` (decision 27). Every spawn resolves the name again
+    /// and starts it only when it still resolves here; otherwise the server
+    /// needs approval until a save through the dialog approves the new path.
+    ///
+    /// Only the desktop's native save sets it: the server drops it from every
+    /// other request, so a renderer cannot choose the program it names. It is
+    /// absent for an absolute `command`, which names its program itself, and
+    /// wherever no native dialog guards local commands, such as the CLI or a
+    /// self-hosted server, where a bare name runs whatever it resolves to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub approved_executable: Option<String>,
     /// Streamable HTTP endpoint for a remote server.
     #[serde(default)]
     pub url: Option<String>,
@@ -322,6 +337,7 @@ impl std::fmt::Debug for McpServerDefinition {
             .field("env_names", &self.env.iter().collect::<Vec<_>>())
             .field("env_from", &self.env_from)
             .field("cwd", &self.cwd)
+            .field("approved_executable", &self.approved_executable)
             .field("url", &self.url)
             .field("bearer_token_env", &self.bearer_token_env)
             .field("bearer_token_stored", &self.bearer_token_stored)
@@ -386,14 +402,20 @@ pub struct UiViewDocument {
 impl McpServerDefinition {
     /// Build the child command. `env` is the definition's literal environment
     /// as resolved from the secret store — passed in rather than read off the
-    /// definition, because the definition never holds values.
+    /// definition, because the definition never holds values. `approval` says
+    /// whether the desktop's native dialog guards local commands here, and so
+    /// whether a bare command needs the program it approved.
     ///
     /// A plugin-sourced server takes its environment from its own launch
     /// material instead: package data, never secret-store entries. Its working
     /// directory is re-checked for containment here rather than trusted from
     /// the textual rule the importer applied, because only a check at launch
     /// sees symlinks and edits made since.
-    pub(super) async fn build_command(&self, env: &BTreeMap<String, String>) -> Result<Command> {
+    pub(super) async fn build_command(
+        &self,
+        env: &BTreeMap<String, String>,
+        approval: CommandApproval,
+    ) -> Result<Command> {
         let Some(program) = &self.command else {
             return Err(AgentError::config(
                 "MCP server definition has no command to spawn",
@@ -403,11 +425,19 @@ impl McpServerDefinition {
         // the package root before the child is built. User-configured servers
         // resolve a bare name through the host PATH (process PATH extended
         // with the login-shell PATH the harness probe captures) without
-        // invoking a shell.
+        // invoking a shell, and start it only while it resolves to the
+        // program the native dialog approved.
         let program = match &self.launch {
             Some(launch) => crate::plugin_mcp::resolve_command(program, &launch.root)
                 .map_err(AgentError::config)?,
-            None => super::stdio::resolve_stdio_command(program).await?,
+            None => {
+                super::stdio::resolve_approved_command(
+                    program,
+                    self.approved_executable.as_deref(),
+                    approval,
+                )
+                .await?
+            }
         };
         let mut command = Command::new(program);
         command.args(&self.args);
@@ -453,13 +483,16 @@ impl McpServerDefinition {
     /// Open a session with this server. `http` is what the credential store
     /// holds for an HTTP server: its stored bearer token and header values.
     /// `oauth` is how to present a stored OAuth session, given only for a
-    /// server that [signs in](super::oauth::signs_in).
+    /// server that [signs in](super::oauth::signs_in). `approval` is how a
+    /// local command's program is held to the native dialog's approval; see
+    /// [`build_command`](Self::build_command).
     pub(super) async fn connect(
         &self,
         gateway: &Arc<dyn GatewayEndpoints>,
         env: &BTreeMap<String, String>,
         http: &StoredHttpValues,
         oauth: Option<&OAuthAccess>,
+        approval: CommandApproval,
     ) -> Result<McpClient> {
         let request_timeout = Duration::from_millis(self.request_timeout_ms);
         let initialization_timeout = request_timeout.min(INITIALIZATION_TIMEOUT);
@@ -539,7 +572,7 @@ impl McpServerDefinition {
         }
         McpClient::spawn_with_timeouts(
             self.name.clone(),
-            self.build_command(env).await?,
+            self.build_command(env, approval).await?,
             initialization_timeout,
             request_timeout,
         )
@@ -558,8 +591,9 @@ impl McpServerDefinition {
         env: &BTreeMap<String, String>,
         http: &StoredHttpValues,
         oauth: Option<&OAuthAccess>,
+        approval: CommandApproval,
     ) -> Result<(McpClient, HashMap<String, UiViewDocument>)> {
-        let client = self.connect(gateway, env, http, oauth).await?;
+        let client = self.connect(gateway, env, http, oauth, approval).await?;
         let views = prefetch_views(&client, VIEW_PREFETCH_TIMEOUT).await;
         Ok((client, views))
     }

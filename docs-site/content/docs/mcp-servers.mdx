@@ -24,7 +24,17 @@ Two transports:
 | **Forward environment names** | Variables to pass through from your own environment by name, without copying their values into the config. `HOME` and `PATH` are forwarded by default, so a script such as `npx` finds `node`. Name either one here to replace it. |
 
 In the desktop app, saving a local server asks first in an OS dialog, which
-names the absolute path of the program that will run.
+names the absolute path of the program that will run. For a bare name such as
+`npx`, Tidebreak records that path. Each time the server starts, Tidebreak
+looks the name up again and starts it only if it finds the same program. If
+it finds another one, for example an `npx` that appeared in a directory
+earlier on your `PATH`, the server does not start, and its row names both
+paths. To run the new program, save the server again and allow it in the
+dialog.
+
+The Tidebreak CLI, a self-hosted server, and a desktop window attached to a
+remote machine show no such dialog. There, a bare name runs whatever it
+resolves to each time the server starts.
 
 **Remote endpoint (HTTP)** — Tidebreak connects to a URL.
 

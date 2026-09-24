@@ -13,7 +13,7 @@ use tokio::process::Command;
 use tidebreak_core::{CodeRepo, QuickAction};
 
 use crate::error::ServerError;
-use crate::mcp_config::{ManualLockdown, McpServerDefinition};
+use crate::mcp_config::{is_bare_command, ManualLockdown, McpServerDefinition};
 
 /// Current `tidebreak_config` format version.
 pub const FORMAT_VERSION: u32 = 1;
@@ -173,6 +173,14 @@ pub struct WorkspaceConfigApplyRequest {
     pub document: WorkspaceConfigDocument,
     #[serde(default)]
     pub decisions: Vec<WorkspaceConfigDecision>,
+    /// The program each bare command this import starts resolved to when the
+    /// desktop's native dialog showed it, keyed by the command as the import
+    /// writes it. Only the desktop's native host sets it, after the person
+    /// allowed the commands, and apply ignores it from every other caller.
+    /// Each imported server records its entry as its approved program.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub approved_executables: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
@@ -537,6 +545,7 @@ pub fn exported_mcp_to_definition(exported: &ExportedMcpServer) -> McpServerDefi
         env_values: BTreeMap::new(),
         env_from: exported.env_from.clone(),
         cwd: exported.cwd.as_ref().map(PathBuf::from),
+        approved_executable: None,
         url: exported.url.clone(),
         bearer_token_env: exported.bearer_token_env.clone(),
         bearer_token_stored: exported.bearer_token_stored,
@@ -610,6 +619,21 @@ pub fn needs_stored_credentials(definition: &McpServerDefinition) -> bool {
 /// saved: an enabled `command` server.
 pub fn starts_local_command(definition: &McpServerDefinition) -> bool {
     definition.enabled && definition.command.is_some()
+}
+
+/// The approved program an imported definition records: the path the
+/// desktop's native dialog showed for its command, from `approved`, when the
+/// definition starts a local command given as a bare name. Nothing otherwise,
+/// because only a bare name needs one.
+pub fn approved_executable_for(
+    definition: &McpServerDefinition,
+    approved: &BTreeMap<String, String>,
+) -> Option<String> {
+    let command = definition.command.as_deref()?;
+    if !starts_local_command(definition) || !is_bare_command(command) {
+        return None;
+    }
+    approved.get(command).cloned()
 }
 
 /// Whether a remote server sends a value from this machine's environment to
@@ -752,6 +776,7 @@ mod tests {
             env_values: BTreeMap::from([("TOKEN".into(), "super-secret".into())]),
             env_from: vec![],
             cwd: None,
+            approved_executable: None,
             url: None,
             bearer_token_env: Some("BEARER".into()),
             bearer_token_stored: false,
@@ -927,6 +952,7 @@ mod tests {
         let mut off = sample_mcp();
         off.name = "off".into();
         let request = WorkspaceConfigApplyRequest {
+            approved_executables: Default::default(),
             document: envelope(vec![], vec![sample_mcp(), remote, skipped, off]),
             decisions: vec![
                 WorkspaceConfigDecision {
@@ -947,6 +973,25 @@ mod tests {
         let off = imported_mcp_definition(&request.document, &request.decisions[3])
             .expect("the file names the server");
         assert!(!off.enabled, "the decision turns the server off");
+    }
+
+    /// An import records the program the desktop's dialog approved only on
+    /// a server it starts whose command is a bare name: a server imported
+    /// turned off starts nothing, and an absolute command names its program.
+    #[test]
+    fn an_import_records_the_approved_program_of_a_bare_command_it_starts() {
+        let approved = BTreeMap::from([("npx".to_string(), "/opt/tools/bin/npx".to_string())]);
+        let mut starts = exported_mcp_to_definition(&sample_mcp());
+        starts.command = Some("npx".into());
+        assert_eq!(
+            approved_executable_for(&starts, &approved).as_deref(),
+            Some("/opt/tools/bin/npx")
+        );
+        let mut off = starts.clone();
+        off.enabled = false;
+        assert_eq!(approved_executable_for(&off, &approved), None);
+        let absolute = exported_mcp_to_definition(&sample_mcp());
+        assert_eq!(approved_executable_for(&absolute, &approved), None);
     }
 
     /// A remote server that sends a credential from this machine's

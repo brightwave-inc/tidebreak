@@ -9,6 +9,7 @@ use tidebreak_core::{AgentError, Result, SecretProvider, Store, ToolRegistry};
 
 use super::*;
 
+use super::stdio::CommandApproval;
 use super::validation::{connection_diagnostic, validate_servers};
 
 use tidebreak_core::DbStore;
@@ -151,6 +152,7 @@ fn disabled_definition(name: &str, command: &str) -> McpServerDefinition {
         env_values: BTreeMap::new(),
         env_from: Vec::new(),
         cwd: None,
+        approved_executable: None,
         url: None,
         bearer_token_env: None,
         bearer_token_stored: false,
@@ -175,6 +177,7 @@ fn http_definition(name: &str, url: &str) -> McpServerDefinition {
         env_values: BTreeMap::new(),
         env_from: Vec::new(),
         cwd: None,
+        approved_executable: None,
         url: Some(url.to_string()),
         bearer_token_env: None,
         bearer_token_stored: false,
@@ -199,6 +202,7 @@ fn gateway_definition(name: &str, slug: &str) -> McpServerDefinition {
         env_values: BTreeMap::new(),
         env_from: Vec::new(),
         cwd: None,
+        approved_executable: None,
         url: None,
         bearer_token_env: None,
         bearer_token_stored: false,
@@ -462,7 +466,10 @@ async fn defaults_to_an_isolated_environment_and_sixty_second_timeout() {
     assert!(server.env_from.is_empty());
     assert_eq!(server.request_timeout_ms, 60_000);
     let _path = super::stdio::HostPathGuard::set(Some("/opt/tools/bin:/usr/bin".into())).await;
-    let command = server.build_command(&BTreeMap::new()).await.unwrap();
+    let command = server
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
     // Nothing ambient beyond the two names every child is given.
     let mut names: Vec<_> = command
         .as_std()
@@ -487,7 +494,10 @@ async fn a_stdio_child_is_given_the_host_search_path_and_home() {
     let config = parse(r#"{"servers":[{"name":"docs","command":"/bin/docs"}]}"#).unwrap();
     let search_path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
     let _path = super::stdio::HostPathGuard::set(Some(search_path.into())).await;
-    let command = config.0[0].build_command(&BTreeMap::new()).await.unwrap();
+    let command = config.0[0]
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
     let env: BTreeMap<String, String> = command
         .as_std()
         .get_envs()
@@ -511,7 +521,7 @@ async fn a_stdio_child_is_given_the_host_search_path_and_home() {
     )
     .unwrap();
     let output = script.0[0]
-        .build_command(&BTreeMap::new())
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
         .await
         .unwrap()
         .output()
@@ -609,7 +619,10 @@ async fn forwards_only_explicitly_selected_parent_environment_values() {
     )
     .unwrap();
     let _path = super::stdio::HostPathGuard::set(Some("/opt/seeded/bin".into())).await;
-    let command = config.0[0].build_command(&BTreeMap::new()).await.unwrap();
+    let command = config.0[0]
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
     let forwarded_path = command
         .as_std()
         .get_envs()
@@ -639,7 +652,13 @@ async fn missing_selected_parent_environment_fails_before_spawn_without_a_value(
     .unwrap();
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = config.0[0]
-        .connect(&gateway, &BTreeMap::new(), &Default::default(), None)
+        .connect(
+            &gateway,
+            &BTreeMap::new(),
+            &Default::default(),
+            None,
+            CommandApproval::Optional,
+        )
         .await
         .err()
         .unwrap();
@@ -1200,7 +1219,13 @@ async fn missing_selected_bearer_token_fails_by_name_without_a_value() {
     definition.bearer_token_env = Some(MISSING.to_string());
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = definition
-        .connect(&gateway, &BTreeMap::new(), &Default::default(), None)
+        .connect(
+            &gateway,
+            &BTreeMap::new(),
+            &Default::default(),
+            None,
+            CommandApproval::Optional,
+        )
         .await
         .err()
         .unwrap();
@@ -2078,7 +2103,10 @@ async fn stdio_bare_npx_resolves_on_overridden_host_path() {
         .0
         .remove(0);
     assert_eq!(definition.command.as_deref(), Some("npx"));
-    let command = definition.build_command(&BTreeMap::new()).await.unwrap();
+    let command = definition
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
     assert_eq!(command.as_std().get_program(), npx.as_os_str());
 
     let missing = super::stdio::resolve_stdio_command("definitely-not-npx-9f3a")
@@ -4784,3 +4812,258 @@ async fn a_refused_bearer_without_oauth_metadata_still_fails_the_save() {
         "{error}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Security review of bare commands and stored values (#3573)
+// ---------------------------------------------------------------------------
+
+/// Write an executable `npx` into `directory` that prints `label`, and
+/// return its path.
+#[cfg(unix)]
+fn write_printing_npx(directory: &Path, label: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let npx = directory.join("npx");
+    std::fs::write(&npx, format!("#!/bin/sh\nprintf '%s' {label}\n")).unwrap();
+    std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+    npx
+}
+
+/// Write an executable `npx` into `directory` that notes `label` in `ran`
+/// each time it starts, then answers as an MCP server with no tools.
+#[cfg(unix)]
+fn write_mcp_npx(directory: &Path, label: &str, ran: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let npx = directory.join("npx");
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s\n' '{label}' >> '{ran}'
+read _initialize
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"{version}","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"{label}","version":"1"}}}}}}'
+read _initialized
+read _list
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[]}}}}'
+while read _line; do :; done
+"#,
+        ran = ran.display(),
+        version = tidebreak_mcp::PROTOCOL_VERSION,
+    );
+    std::fs::write(&npx, script).unwrap();
+    std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+    npx
+}
+
+/// What a definition's child prints, started the way a spawn starts it.
+async fn spawned_output(definition: &McpServerDefinition, approval: CommandApproval) -> String {
+    let output = definition
+        .build_command(&BTreeMap::new(), approval)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Finding 1: the desktop's dialog showed the absolute path a bare `npx`
+/// resolved to, but the definition kept only `npx` and every spawn resolved
+/// it again, so a program that later appeared earlier on the search path
+/// ran with no new approval. A bare command now starts only the program the
+/// dialog approved, which its definition records, until a save approves
+/// another.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_bare_command_starts_only_the_program_the_dialog_approved() {
+    let approved = tempfile::tempdir().unwrap();
+    let shadow = tempfile::tempdir().unwrap();
+    let approved_npx = write_printing_npx(approved.path(), "approved");
+    // The shadow directory comes first on the search path, and starts empty.
+    let search_path = std::env::join_paths([shadow.path(), approved.path()]).unwrap();
+    let _path = super::stdio::HostPathGuard::set(Some(search_path)).await;
+
+    // What the dialog shows for a bare `npx`, and the desktop records.
+    let shown = super::resolve_stdio_executable("npx").await.unwrap();
+    assert_eq!(shown, approved_npx);
+    let mut definition = parse(r#"{"servers":[{"name":"files","command":"npx"}]}"#)
+        .unwrap()
+        .0
+        .remove(0);
+    definition.approved_executable = Some(shown.to_string_lossy().into_owned());
+    assert_eq!(
+        spawned_output(&definition, CommandApproval::Required).await,
+        "approved"
+    );
+
+    // Another `npx` appears earlier on the search path. It does not start,
+    // whether or not this process has the dialog, and the refusal names
+    // both programs.
+    let shadow_npx = write_printing_npx(shadow.path(), "shadow");
+    for approval in [CommandApproval::Required, CommandApproval::Optional] {
+        let message = definition
+            .build_command(&BTreeMap::new(), approval)
+            .await
+            .expect_err("nobody approved the new program")
+            .to_string();
+        assert!(message.contains("Needs approval:"), "{message}");
+        assert!(
+            message.contains(&shadow_npx.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&approved_npx.display().to_string()),
+            "{message}"
+        );
+    }
+
+    // A save through the dialog approves the new program, and it runs.
+    let shown = super::resolve_stdio_executable("npx").await.unwrap();
+    assert_eq!(shown, shadow_npx);
+    definition.approved_executable = Some(shown.to_string_lossy().into_owned());
+    assert_eq!(
+        spawned_output(&definition, CommandApproval::Required).await,
+        "shadow"
+    );
+}
+
+/// Where the desktop's dialog guards local commands, a bare command with no
+/// approved program does not start. An absolute command names its program
+/// and needs none. Without the dialog, as in the CLI or on a self-hosted
+/// server, a bare name runs what it resolves to, as before.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_bare_command_without_an_approved_program_runs_only_without_the_dialog() {
+    let directory = tempfile::tempdir().unwrap();
+    let npx = write_printing_npx(directory.path(), "found");
+    let _path =
+        super::stdio::HostPathGuard::set(Some(directory.path().as_os_str().to_owned())).await;
+    let bare = parse(r#"{"servers":[{"name":"files","command":"npx"}]}"#)
+        .unwrap()
+        .0
+        .remove(0);
+    let message = bare
+        .build_command(&BTreeMap::new(), CommandApproval::Required)
+        .await
+        .expect_err("the dialog approved no program")
+        .to_string();
+    assert!(message.contains("Needs approval:"), "{message}");
+    assert!(message.contains(&npx.display().to_string()), "{message}");
+    assert_eq!(
+        spawned_output(&bare, CommandApproval::Optional).await,
+        "found"
+    );
+
+    let mut absolute = bare.clone();
+    absolute.command = Some(npx.to_string_lossy().into_owned());
+    assert_eq!(
+        spawned_output(&absolute, CommandApproval::Required).await,
+        "found"
+    );
+}
+
+/// Finding 1 end to end on a desktop server: saved with the program the
+/// dialog approved, the server runs it. Once another `npx` appears earlier
+/// on the search path, a reconnect refuses to start it, the server reads as
+/// needing approval with both paths named, and the supervisor stops
+/// retrying it. A save that approves the new program runs that one.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_shadowed_command_needs_approval_until_a_save_approves_it() {
+    let (runtime, _store, directory) = test_runtime().await;
+    runtime.require_command_approval();
+    let approved = tempfile::tempdir().unwrap();
+    let shadow = tempfile::tempdir().unwrap();
+    let ran = directory.path().join("ran.log");
+    let approved_npx = write_mcp_npx(approved.path(), "approved", &ran);
+    let search_path = std::env::join_paths([shadow.path(), approved.path()]).unwrap();
+    let _path = super::stdio::HostPathGuard::set(Some(search_path)).await;
+
+    let mut definition = disabled_definition("files", "npx");
+    definition.enabled = true;
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition.clone()],
+        })
+        .await
+        .expect_err("the dialog approved no program");
+    assert!(error.to_string().contains("Needs approval:"), "{error}");
+    assert!(!ran.exists(), "nothing started");
+
+    definition.approved_executable = Some(approved_npx.to_string_lossy().into_owned());
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition.clone()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(info.servers[0].health, McpHealth::Healthy, "{info:?}");
+    assert_eq!(std::fs::read_to_string(&ran).unwrap(), "approved\n");
+
+    let shadow_npx = write_mcp_npx(shadow.path(), "shadow", &ran);
+    let error = runtime
+        .reconnect("files")
+        .await
+        .expect_err("nobody approved the new program");
+    assert!(error.to_string().contains("Needs approval:"), "{error}");
+    let info = runtime.info().await;
+    assert_eq!(info.servers[0].health, McpHealth::Degraded);
+    let diagnostic = info.servers[0].diagnostic.clone().unwrap();
+    assert!(diagnostic.starts_with("Needs approval:"), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&shadow_npx.display().to_string()),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(&approved_npx.display().to_string()),
+        "{diagnostic}"
+    );
+    assert!(
+        runtime
+            .supervised_servers(ManualLockdown::Open)
+            .await
+            .is_empty(),
+        "the supervisor leaves a server that needs approval alone"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&ran).unwrap(),
+        "approved\n",
+        "the new program never started"
+    );
+
+    definition.approved_executable = Some(shadow_npx.to_string_lossy().into_owned());
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .unwrap();
+    assert_eq!(info.servers[0].health, McpHealth::Healthy, "{info:?}");
+    assert_eq!(std::fs::read_to_string(&ran).unwrap(), "approved\nshadow\n");
+}
+
+/// An approved program belongs only to a bare command, as an absolute path.
+#[test]
+fn an_approved_program_belongs_only_to_a_bare_command() {
+    parse(
+        r#"{"servers":[{"name":"files","command":"npx","approved_executable":"/opt/tools/bin/npx"}]}"#,
+    )
+    .unwrap();
+    for (json, expected) in [
+        (
+            r#"{"servers":[{"name":"files","command":"/opt/tools/bin/npx","approved_executable":"/opt/tools/bin/npx"}]}"#,
+            "bare name",
+        ),
+        (
+            r#"{"servers":[{"name":"files","command":"npx","approved_executable":"bin/npx"}]}"#,
+            "absolute path",
+        ),
+        (
+            r#"{"servers":[{"name":"docs","url":"https://mcp.example.com/mcp","approved_executable":"/opt/tools/bin/npx"}]}"#,
+            "only to command servers",
+        ),
+    ] {
+        let error = parse(json).err().unwrap().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+

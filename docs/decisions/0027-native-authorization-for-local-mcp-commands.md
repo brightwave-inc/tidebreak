@@ -34,6 +34,17 @@ answer causes the host to forward the configuration with the client-executor
 credential. The ordinary renderer API refuses enabled command definitions with
 the stable `native_confirmation_required` error.
 
+The approval holds only for the program it names. For a command given as a
+bare name, such as `npx`, the native host resolves the name on the host
+search path, shows the absolute path, and forwards that path with the
+configuration as the definition's approved program. The server keeps an
+approved program only from the native host and drops one sent by any other
+caller. Every spawn resolves the name again and starts it only when it
+resolves to the approved program; otherwise the server needs approval until a
+save through the dialog approves the new one. A host without the dialog, such
+as the CLI, a self-hosted server, or a machine a desktop window attaches to,
+records no approved program and resolves a bare name at every spawn.
+
 Disabled command definitions may be edited without confirmation because they
 cannot start a process. Enabling them later crosses the native confirmation.
 Remote HTTP and gateway transports remain on their existing authorization
@@ -72,3 +83,5 @@ ownership moves to a separately authenticated broker.
 - Disabled command and remote definitions retain their existing behavior.
 - The Tauri command shows a native warning before forwarding an enabled command
   and never serializes the executor credential to the renderer.
+- A bare command whose name comes to resolve to a program other than the one
+  the dialog showed does not start until a native save approves the new one.

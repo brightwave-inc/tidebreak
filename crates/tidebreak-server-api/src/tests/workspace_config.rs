@@ -137,6 +137,7 @@ async fn preview_and_apply_refuse_overwrite_without_replace() {
     assert_eq!(preview_body["entries"][0]["status"], "conflict");
 
     let apply = WorkspaceConfigApplyRequest {
+        approved_executables: Default::default(),
         document: document.clone(),
         decisions: vec![WorkspaceConfigDecision {
             section: WorkspaceConfigSectionId::McpServers,
@@ -162,6 +163,7 @@ async fn preview_and_apply_refuse_overwrite_without_replace() {
     assert_eq!(refused.status(), StatusCode::CONFLICT);
 
     let replace = WorkspaceConfigApplyRequest {
+        approved_executables: Default::default(),
         document,
         decisions: vec![WorkspaceConfigDecision {
             section: WorkspaceConfigSectionId::McpServers,
@@ -305,6 +307,7 @@ async fn apply_refuses_an_enabled_local_command_without_native_confirmation() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let starts = WorkspaceConfigApplyRequest {
+        approved_executables: Default::default(),
         document: local_command_document(true),
         decisions: vec![add_decision("local_command", None)],
     };
@@ -323,6 +326,7 @@ async fn apply_refuses_an_enabled_local_command_without_native_confirmation() {
     assert_ne!(error.kind, "native_confirmation_required");
 
     let turned_off = WorkspaceConfigApplyRequest {
+        approved_executables: Default::default(),
         document: local_command_document(true),
         decisions: vec![add_decision("local_command", Some(false))],
     };
@@ -351,6 +355,7 @@ async fn only_an_administrator_imports_mcp_servers() {
     })
     .await;
     let import = WorkspaceConfigApplyRequest {
+        approved_executables: Default::default(),
         document: local_command_document(false),
         decisions: vec![add_decision("local_command", None)],
     };
@@ -409,6 +414,7 @@ async fn a_remote_server_that_sends_a_credential_imports_turned_off() {
         &bearer,
         false,
         &WorkspaceConfigApplyRequest {
+            approved_executables: Default::default(),
             document: document.clone(),
             decisions: vec![add_decision("search", None)],
         },
@@ -429,6 +435,7 @@ async fn a_remote_server_that_sends_a_credential_imports_turned_off() {
         &bearer,
         false,
         &WorkspaceConfigApplyRequest {
+            approved_executables: Default::default(),
             document,
             decisions: vec![start],
         },
@@ -513,6 +520,7 @@ async fn apply_validates_every_decision_before_writing() {
         &bearer,
         false,
         &WorkspaceConfigApplyRequest {
+            approved_executables: Default::default(),
             document: document.clone(),
             decisions: vec![register.clone(), add_decision("local_command", None)],
         },
@@ -547,6 +555,7 @@ async fn apply_validates_every_decision_before_writing() {
         &bearer,
         false,
         &WorkspaceConfigApplyRequest {
+            approved_executables: Default::default(),
             document,
             decisions: vec![register, replace],
         },
@@ -611,6 +620,7 @@ async fn an_import_whose_mcp_servers_fail_leaves_no_repository_behind() {
         &bearer,
         true,
         &WorkspaceConfigApplyRequest {
+            approved_executables: Default::default(),
             document: document.clone(),
             decisions: vec![register.clone(), add_decision("local_command", None)],
         },
@@ -634,6 +644,7 @@ async fn an_import_whose_mcp_servers_fail_leaves_no_repository_behind() {
         &bearer,
         false,
         &WorkspaceConfigApplyRequest {
+            approved_executables: Default::default(),
             document,
             decisions: vec![register],
         },
@@ -746,6 +757,7 @@ async fn an_import_neither_sees_nor_changes_another_owners_repositories() {
         &bob,
         false,
         &WorkspaceConfigApplyRequest {
+            approved_executables: Default::default(),
             document,
             decisions: vec![WorkspaceConfigDecision {
                 section: WorkspaceConfigSectionId::CodeRepositories,

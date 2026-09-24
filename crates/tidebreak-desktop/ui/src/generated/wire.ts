@@ -3982,6 +3982,20 @@ env_values?: { [key in string]: string },
  */
 env_from: Array<string>, cwd: string | null,
 /**
+ * The absolute path of the program the desktop's native dialog showed
+ * when the person allowed this server, for a `command` given as a bare
+ * name such as `npx` (decision 27). Every spawn resolves the name again
+ * and starts it only when it still resolves here; otherwise the server
+ * needs approval until a save through the dialog approves the new path.
+ *
+ * Only the desktop's native save sets it: the server drops it from every
+ * other request, so a renderer cannot choose the program it names. It is
+ * absent for an absolute `command`, which names its program itself, and
+ * wherever no native dialog guards local commands, such as the CLI or a
+ * self-hosted server, where a bare name runs whatever it resolves to.
+ */
+approved_executable?: string,
+/**
  * Streamable HTTP endpoint for a remote server.
  */
 url: string | null,
@@ -4095,6 +4109,20 @@ env_values?: { [key in string]: string },
  * Parent environment names to forward. Their values never enter this type.
  */
 env_from: Array<string>, cwd: string | null,
+/**
+ * The absolute path of the program the desktop's native dialog showed
+ * when the person allowed this server, for a `command` given as a bare
+ * name such as `npx` (decision 27). Every spawn resolves the name again
+ * and starts it only when it still resolves here; otherwise the server
+ * needs approval until a save through the dialog approves the new path.
+ *
+ * Only the desktop's native save sets it: the server drops it from every
+ * other request, so a renderer cannot choose the program it names. It is
+ * absent for an absolute `command`, which names its program itself, and
+ * wherever no native dialog guards local commands, such as the CLI or a
+ * self-hosted server, where a bare name runs whatever it resolves to.
+ */
+approved_executable?: string,
 /**
  * Streamable HTTP endpoint for a remote server.
  */

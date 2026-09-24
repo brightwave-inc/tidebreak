@@ -1,9 +1,7 @@
 //! Live MCP connection supervision and tool registry publication.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -23,6 +21,7 @@ use crate::mcp_curated::{curation_for, McpCuration};
 use crate::mcp_oauth_runtime::{McpOAuthState, McpOAuthStatus};
 
 use super::oauth::{self, OAuthAccess, OAuthNeed, SignInProgress, SignInRecord, SignInView};
+use super::stdio::CommandApproval;
 use super::types::*;
 use super::validation::{
     failure_diagnostic, failure_park, validate_server, validate_servers, validation_reason,
@@ -308,6 +307,10 @@ pub struct McpRuntime {
     /// reuse this copy, and a write that did read it fresh updates it. That
     /// way no write drops a roster another write just fetched.
     gateway_roster: std::sync::Mutex<Vec<GatewayRosterApp>>,
+    /// Whether the desktop app's native dialog guards local commands here
+    /// (decision 27). When it does, a command given as a bare name starts
+    /// only the program the dialog approved. Set once, at assembly.
+    command_approval: AtomicBool,
     /// Lets a test's fake authorization server live on loopback.
     #[cfg(test)]
     oauth_loopback: AtomicBool,
@@ -347,8 +350,28 @@ impl McpRuntime {
             boot_deadline: std::sync::Mutex::new(None),
             tool_changes,
             gateway_roster: std::sync::Mutex::new(Vec::new()),
+            command_approval: AtomicBool::new(false),
             #[cfg(test)]
             oauth_loopback: AtomicBool::new(false),
+        }
+    }
+
+    /// Declare that the desktop app's native dialog guards local commands on
+    /// this server (decision 27). From then on a command given as a bare name
+    /// starts only the program the dialog approved, recorded on its
+    /// definition, and one with no approved program needs approval. Call it
+    /// once, at assembly, before boot connects anything. The CLI and a
+    /// self-hosted server never call it: no dialog guards their commands.
+    pub fn require_command_approval(&self) {
+        self.command_approval.store(true, Ordering::Relaxed);
+    }
+
+    /// How this server holds a local command's program to an approval.
+    fn command_approval(&self) -> CommandApproval {
+        if self.command_approval.load(Ordering::Relaxed) {
+            CommandApproval::Required
+        } else {
+            CommandApproval::Optional
         }
     }
 
@@ -402,7 +425,13 @@ impl McpRuntime {
             _ => StoredHttpValues::default(),
         };
         let result = definition
-            .connect_with_views(&self.gateway, env, &http, access.as_ref())
+            .connect_with_views(
+                &self.gateway,
+                env,
+                &http,
+                access.as_ref(),
+                self.command_approval(),
+            )
             .await;
         let (Err(error), Some(url)) = (&result, &definition.url) else {
             return (result, None);
@@ -1841,6 +1870,7 @@ impl McpRuntime {
                 env_values: BTreeMap::new(),
                 env_from: Vec::new(),
                 cwd: None,
+                approved_executable: None,
                 url: None,
                 bearer_token_env: None,
                 bearer_token_stored: false,

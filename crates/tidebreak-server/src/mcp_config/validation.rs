@@ -1,11 +1,13 @@
 //! Validation for MCP server definitions.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use tidebreak_core::{AgentError, Result};
 use tidebreak_mcp::MAX_SERVER_NAME_BYTES;
 
 use super::oauth::OAuthNeed;
+use super::stdio::{is_bare_command, NEEDS_APPROVAL};
 use super::types::*;
 
 pub(super) fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
@@ -49,6 +51,21 @@ pub(super) fn validate_server(server: &McpServerDefinition) -> Result<()> {
                 ));
             }
             validate_no_http_fields(server)?;
+            if let Some(approved) = &server.approved_executable {
+                validate_process_string(&server.name, "approved_executable", approved)?;
+                if !is_bare_command(command) {
+                    return Err(server_error(
+                        &server.name,
+                        "approved_executable applies only to a command given as a bare name",
+                    ));
+                }
+                if !Path::new(approved).is_absolute() {
+                    return Err(server_error(
+                        &server.name,
+                        "approved_executable must be an absolute path",
+                    ));
+                }
+            }
         }
         (None, Some(url), None) => {
             validate_process_string(&server.name, "url", url)?;
@@ -184,6 +201,12 @@ pub(super) fn validate_no_process_fields(server: &McpServerDefinition) -> Result
         return Err(server_error(
             &server.name,
             "cwd applies only to command servers",
+        ));
+    }
+    if server.approved_executable.is_some() {
+        return Err(server_error(
+            &server.name,
+            "approved_executable applies only to command servers",
         ));
     }
     Ok(())
@@ -496,7 +519,20 @@ pub(super) fn reconnect_park(
     if definition.gateway_endpoint.is_none() && is_missing_stored_value(error) {
         return Some(ReconnectPark::Configuration);
     }
+    // A program nobody approved stays unapproved until a save through the
+    // native dialog approves it. A manual reconnect only tries again: it
+    // succeeds only once the name resolves to the approved program.
+    if definition.command.is_some() && is_missing_approval(error) {
+        return Some(ReconnectPark::Configuration);
+    }
     None
+}
+
+/// Whether a spawn was refused because the command would run a program the
+/// desktop's native dialog did not approve.
+fn is_missing_approval(error: &AgentError) -> bool {
+    matches!(error, AgentError::Config(message) | AgentError::Message(message)
+        if message.starts_with(NEEDS_APPROVAL))
 }
 
 /// Whether a connection failed because the credential store lacks a stored
@@ -583,6 +619,8 @@ fn classified_transport_detail(error: &AgentError) -> Option<String> {
         "Not executable:",
         "Permission denied:",
         "Relative executable path",
+        // A bare command that now resolves to a program nobody approved.
+        NEEDS_APPROVAL,
         // A stored bearer token or header value this computer does not hold.
         NOT_STORED,
         // A token refresh the sign-in service did not answer: temporary, and
@@ -614,6 +652,7 @@ mod tests {
             env_values: BTreeMap::new(),
             env_from: Vec::new(),
             cwd: None,
+            approved_executable: None,
             url: Some(url.to_string()),
             bearer_token_env: bearer_token_env.map(str::to_string),
             bearer_token_stored: false,

@@ -247,15 +247,20 @@ async fn disconnect_remote_machine(
 /// Save MCP configuration through the native-only server surface. Command
 /// transports receive an OS-native confirmation before the host credential is
 /// attached; renderer JavaScript can request the prompt but cannot approve it.
+///
+/// Each enabled bare command is forwarded with the program the dialog showed
+/// for it as its approved program, so the server starts that program and no
+/// other that the name comes to resolve to later.
 #[tauri::command]
 async fn put_native_mcp_servers(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
     config: Value,
 ) -> Result<Value, String> {
-    if !approve_local_mcp_commands(&app, &config, "Allow and save").await? {
+    let Some(approved) = approve_local_mcp_commands(&app, &config, "Allow and save").await? else {
         return Err("local MCP command configuration was not approved".to_owned());
-    }
+    };
+    let config = with_approved_executables(config, &approved)?;
 
     let info = wait_server_info(state.inner()).await?;
     let response = documents::native_auth(
@@ -271,18 +276,21 @@ async fn put_native_mcp_servers(
 }
 
 /// Ask, in an OS dialog, whether the enabled local MCP commands in `config`
-/// (`{"servers": [...]}`) may run. `Ok(true)` means the person allowed them,
-/// or that `config` starts no local command and there was nothing to ask.
-/// Renderer JavaScript can request the prompt but cannot answer it.
+/// (`{"servers": [...]}`) may run. `Ok(Some(programs))` means the person
+/// allowed them, or that `config` starts no local command and there was
+/// nothing to ask; `Ok(None)` means they declined. Renderer JavaScript can
+/// request the prompt but cannot answer it.
 ///
 /// Each command is resolved the way the embedded server resolves it at
 /// verify and launch, so the dialog names the executable that would run: a
 /// bare `npx` shows the absolute path it resolves to on the host search PATH.
+/// `programs` maps each command, as typed, to that path: the caller forwards
+/// it as the approved program, and the server starts nothing else.
 pub(crate) async fn approve_local_mcp_commands(
     app: &tauri::AppHandle,
     config: &Value,
     allow_label: &str,
-) -> Result<bool, String> {
+) -> Result<Option<std::collections::BTreeMap<String, PathBuf>>, String> {
     let resolved = resolve_native_commands(config).await?;
     let commands = native_command_previews(config, &|command| {
         resolved
@@ -291,7 +299,7 @@ pub(crate) async fn approve_local_mcp_commands(
             .ok_or_else(|| format!("MCP command {command:?} was not resolved"))
     })?;
     if commands.is_empty() {
-        return Ok(true);
+        return Ok(Some(resolved));
     }
     let preview = commands.join("\n");
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -310,7 +318,59 @@ pub(crate) async fn approve_local_mcp_commands(
     dialog.show(move |approved| {
         let _ = sender.send(approved);
     });
-    Ok(receiver.await.unwrap_or(false))
+    Ok(receiver.await.unwrap_or(false).then_some(resolved))
+}
+
+/// The approved program for each bare command in `resolved`, the programs
+/// the native dialog showed, as the server records them. An absolute command
+/// names its program itself and needs none.
+pub(crate) fn approved_bare_commands(
+    resolved: &std::collections::BTreeMap<String, PathBuf>,
+) -> std::collections::BTreeMap<String, String> {
+    resolved
+        .iter()
+        .filter(|(command, _)| tidebreak_server::mcp_stdio::is_bare_command(command))
+        .map(|(command, path)| (command.clone(), path.to_string_lossy().into_owned()))
+        .collect()
+}
+
+/// `config` as the native host forwards it once the person allowed its
+/// commands: each enabled server whose command is a bare name records, as
+/// `approved_executable`, the program the dialog showed for it, and every
+/// other server records none. Whatever the renderer put in that field is
+/// dropped, so the approved program only ever comes from the dialog.
+fn with_approved_executables(
+    mut config: Value,
+    resolved: &std::collections::BTreeMap<String, PathBuf>,
+) -> Result<Value, String> {
+    let approved = approved_bare_commands(resolved);
+    let servers = config
+        .get_mut("servers")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "MCP configuration must contain a servers array".to_owned())?;
+    for server in servers {
+        let program = if native_server_enabled(server) {
+            match server.get("command").and_then(Value::as_str) {
+                Some(command) if tidebreak_server::mcp_stdio::is_bare_command(command) => Some(
+                    approved
+                        .get(command)
+                        .cloned()
+                        .ok_or_else(|| format!("MCP command {command:?} was not resolved"))?,
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let Some(fields) = server.as_object_mut() else {
+            continue;
+        };
+        fields.remove("approved_executable");
+        if let Some(program) = program {
+            fields.insert("approved_executable".to_owned(), Value::String(program));
+        }
+    }
+    Ok(config)
 }
 
 /// Read the embedded server's answer to a native request: its JSON body, or
@@ -1816,6 +1876,42 @@ mod server_info_tests {
             let prompt = native_mcp_command_confirmation(&previews[0]);
             assert!(prompt.contains(executable.to_string_lossy().as_ref()));
         }
+    }
+
+    /// Security review of #3573: the gate resolved a bare `npx` only to show
+    /// it, then forwarded the configuration unchanged, so the server resolved
+    /// the name again at every spawn. The gate now forwards the program it
+    /// showed as each enabled bare command's approved program, and drops
+    /// whatever the renderer put in that field.
+    #[test]
+    fn the_gate_forwards_the_program_it_showed_and_never_the_renderers() {
+        let config = serde_json::json!({
+            "servers": [
+                {"name": "files", "command": "npx", "approved_executable": "/tmp/renderer/npx"},
+                {"name": "shell", "command": "/bin/sh", "approved_executable": "/tmp/renderer/sh"},
+                {
+                    "name": "draft",
+                    "command": "node",
+                    "enabled": false,
+                    "approved_executable": "/tmp/renderer/node"
+                },
+                {"name": "remote", "url": "https://example.test/mcp"}
+            ]
+        });
+        let resolved = std::collections::BTreeMap::from([
+            ("npx".to_owned(), PathBuf::from("/opt/tools/bin/npx")),
+            ("/bin/sh".to_owned(), PathBuf::from("/bin/sh")),
+        ]);
+        let forwarded = with_approved_executables(config, &resolved).unwrap();
+        let servers = forwarded["servers"].as_array().unwrap();
+        assert_eq!(servers[0]["approved_executable"], "/opt/tools/bin/npx");
+        for server in &servers[1..] {
+            assert!(server.get("approved_executable").is_none(), "{server}");
+        }
+        assert_eq!(
+            approved_bare_commands(&resolved),
+            std::collections::BTreeMap::from([("npx".to_owned(), "/opt/tools/bin/npx".to_owned())])
+        );
     }
 
     /// A name the definition sets itself replaces the default, so the dialog

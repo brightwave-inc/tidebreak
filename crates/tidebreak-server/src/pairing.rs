@@ -1101,6 +1101,7 @@ mod tests {
                 env_values: std::collections::BTreeMap::new(),
                 env_from: Vec::new(),
                 cwd: None,
+                approved_executable: None,
                 url: Some(serve_manual_mcp().await),
                 bearer_token_env: None,
                 bearer_token_stored: false,

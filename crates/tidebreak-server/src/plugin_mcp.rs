@@ -274,6 +274,7 @@ fn definition_for(
         env_values: BTreeMap::new(),
         env_from: Vec::new(),
         cwd: None,
+        approved_executable: None,
         url: None,
         bearer_token_env: None,
         bearer_token_stored: false,

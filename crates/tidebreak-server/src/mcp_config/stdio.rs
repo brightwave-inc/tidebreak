@@ -27,6 +27,26 @@ const MAX_SEARCHED_DIRS: usize = 8;
 /// replaces the default.
 pub const FORWARDED_BY_DEFAULT: [&str; 2] = ["HOME", "PATH"];
 
+/// How a spawn failure starts when a bare command would run a program the
+/// desktop's native dialog did not approve. Settings shows the sentence as it
+/// is, and the supervisor stops retrying until a settings change or a manual
+/// reconnect.
+pub(super) const NEEDS_APPROVAL: &str = "Needs approval:";
+
+/// Whether the desktop's native dialog guards this server's local commands
+/// (decision 27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommandApproval {
+    /// No native dialog guards local commands here, as in the CLI, on a
+    /// self-hosted server, or on a machine a desktop window attaches to. A
+    /// bare name runs the program it resolves to at each spawn, unless its
+    /// definition records an approved program.
+    Optional,
+    /// The desktop app's native dialog guards local commands. A bare name runs
+    /// only the program the dialog approved.
+    Required,
+}
+
 static PATH_OVERRIDE: Mutex<Option<OsString>> = Mutex::new(None);
 static LOGIN_PATH: OnceCell<Option<OsString>> = OnceCell::const_new();
 
@@ -119,6 +139,53 @@ pub(super) async fn resolve_stdio_command(command: &str) -> Result<PathBuf> {
     resolve_stdio_executable(command)
         .await
         .map_err(AgentError::config)
+}
+
+/// Whether `command` is a bare program name, such as `npx`, that is looked
+/// up on the host search path, rather than a path to a program.
+pub fn is_bare_command(command: &str) -> bool {
+    !command.is_empty()
+        && !Path::new(command).is_absolute()
+        && !command.contains('/')
+        && !command.contains('\\')
+}
+
+/// Resolve a user-configured command for one spawn, holding a bare name to
+/// the program the desktop's native dialog approved.
+///
+/// `approved` is the absolute path the dialog showed when the person allowed
+/// the server. The name resolves again here, on the host search path as it
+/// stands now, and the spawn goes ahead only when it lands on that same path.
+/// A name that now resolves elsewhere, for example to a program that appeared
+/// in an earlier directory on the path, is refused: nobody approved that
+/// program. A bare name with no approved path runs where it resolves only
+/// where no native dialog guards local commands. An absolute command names
+/// its program itself, so it resolves as it always has.
+pub(super) async fn resolve_approved_command(
+    command: &str,
+    approved: Option<&str>,
+    approval: CommandApproval,
+) -> Result<PathBuf> {
+    let resolved = resolve_stdio_command(command).await?;
+    if !is_bare_command(command) {
+        return Ok(resolved);
+    }
+    match approved {
+        Some(approved) if Path::new(approved) == resolved => Ok(resolved),
+        Some(approved) => Err(AgentError::config(format!(
+            "{NEEDS_APPROVAL} {command:?} now resolves to {}, not to {approved}, the program you \
+             allowed. Tidebreak did not start it. To run the new program, save the server again \
+             and allow it in the dialog.",
+            resolved.display()
+        ))),
+        None if approval == CommandApproval::Required => Err(AgentError::config(format!(
+            "{NEEDS_APPROVAL} {command:?} resolves to {}, a program you have not allowed on this \
+             computer. Tidebreak did not start it. To run it, save the server again and allow it \
+             in the dialog.",
+            resolved.display()
+        ))),
+        None => Ok(resolved),
+    }
 }
 
 /// Resolve a user-typed stdio command exactly as verify and launch do, for a

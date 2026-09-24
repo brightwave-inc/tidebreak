@@ -534,6 +534,7 @@ mod tests {
             env_values: Default::default(),
             env_from: Vec::new(),
             cwd: None,
+            approved_executable: None,
             url: Some(url.to_string()),
             bearer_token_env: None,
             bearer_token_stored: false,

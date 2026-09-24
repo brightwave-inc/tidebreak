@@ -130,6 +130,25 @@ export const StdioLaunchFailure: Story = {
   },
 };
 
+/** A bare `npx` now resolves to another program than the one the system
+ * dialog approved, such as one that appeared earlier on the search path. The
+ * server does not start until a save approves the new program. */
+export const StdioNeedsApproval: Story = {
+  args: {
+    client: stubClient([
+      stdioServer({
+        health: "degraded",
+        tool_count: 0,
+        resolved_command: undefined,
+        approved_executable: "/opt/homebrew/bin/npx",
+        diagnostic:
+          'Needs approval: "npx" now resolves to /Users/avery/.local/bin/npx, not to /opt/homebrew/bin/npx, the program you allowed. Tidebreak did not start it. To run the new program, save the server again and allow it in the dialog.',
+      }),
+    ]),
+  },
+  parameters: { layout: "padded" },
+};
+
 export const StdioProtocolFailure: Story = {
   args: {
     client: stubClient([
