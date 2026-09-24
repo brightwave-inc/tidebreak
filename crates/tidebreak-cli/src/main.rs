@@ -1018,6 +1018,11 @@ async fn serve() -> Result<()> {
     if let Some(executor) = folder_executor {
         tokio::spawn(executor.run(folder_executor::Scope::AllChats));
     }
+    // The stop-signal handlers must exist before the address is announced: a
+    // supervisor may send SIGTERM the moment it reads that line, and a signal
+    // that arrives before its handler kills the process by the default action,
+    // leaving `listen.json` behind.
+    let stop = stop_signal();
     // The address is the client's entry point: the parent process that launched
     // the daemon reads it from stdout to connect, and a container entrypoint
     // waits on the same line.
@@ -1036,27 +1041,38 @@ async fn serve() -> Result<()> {
     // default, the process would die with the file still naming this port.
     tokio::select! {
         result = server.serve() => result,
-        () = stop_signal() => Ok(()),
+        () = stop => Ok(()),
     }
 }
 
-/// Resolve on the first SIGTERM or Ctrl-C (SIGINT).
-async fn stop_signal() {
+/// Install handlers for SIGTERM and Ctrl-C (SIGINT), and return a future that
+/// resolves on the first of them.
+///
+/// The handlers exist as soon as this returns, not on the future's first
+/// poll: creating a tokio `Signal` installs the OS handler at once.
+fn stop_signal() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
-    {
+    let handlers = {
         use tokio::signal::unix::{signal, SignalKind};
-        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+        (
+            signal(SignalKind::terminate()).ok(),
+            signal(SignalKind::interrupt()).ok(),
+        )
+    };
+    async move {
+        #[cfg(unix)]
+        if let (Some(mut terminate), Some(mut interrupt)) = handlers {
             tokio::select! {
                 _ = terminate.recv() => {}
-                _ = tokio::signal::ctrl_c() => {}
+                _ = interrupt.recv() => {}
             }
             return;
         }
-    }
-    // If no handler could be installed, the signals keep their default action
-    // and end the process; until then, keep serving.
-    if tokio::signal::ctrl_c().await.is_err() {
-        std::future::pending::<()>().await;
+        // If no handler could be installed, the signals keep their default
+        // action and end the process; until then, keep serving.
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
