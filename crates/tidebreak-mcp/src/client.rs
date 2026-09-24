@@ -103,6 +103,80 @@ pub struct McpClient {
     tools: Vec<MountedTool>,
     session: Arc<Mutex<Session>>,
     call_bearer: Option<Arc<dyn CallBearerSource>>,
+    /// The stdio server's process, held apart from the session so it can be
+    /// killed while a request holds the session.
+    child: Option<ChildHandle>,
+}
+
+/// How long [`McpClient::kill`] waits for a killed server to exit.
+const KILL_WAIT: Duration = Duration::from_secs(5);
+
+/// A stdio server's process, shared by its session and its client. The last
+/// holder to go drops the child, which `kill_on_drop` kills.
+#[derive(Clone)]
+struct ChildHandle(Arc<std::sync::Mutex<ChildSlot>>);
+
+struct ChildSlot {
+    child: Child,
+    /// The server's process group, which it leads, until the leader is
+    /// reaped. After that its id may name another process, so it is dropped.
+    #[cfg(unix)]
+    group: Option<libc::pid_t>,
+}
+
+impl ChildHandle {
+    fn new(child: Child) -> Self {
+        #[cfg(unix)]
+        let group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
+        Self(Arc::new(std::sync::Mutex::new(ChildSlot {
+            child,
+            #[cfg(unix)]
+            group,
+        })))
+    }
+
+    fn slot(&self) -> std::sync::MutexGuard<'_, ChildSlot> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Kill the server and every process in its group, then wait for the
+    /// server to exit, for at most [`KILL_WAIT`].
+    async fn kill(&self) {
+        {
+            let mut slot = self.slot();
+            if matches!(slot.child.try_wait(), Ok(None)) {
+                // The leader is not reaped yet, so the group id is still its.
+                #[cfg(unix)]
+                if let Some(group) = slot.group {
+                    // SAFETY: killpg only sends a signal; the id is a group
+                    // this process created and has not reaped.
+                    unsafe {
+                        libc::killpg(group, libc::SIGKILL);
+                    }
+                }
+                let _ = slot.child.start_kill();
+            }
+        }
+        let deadline = tokio::time::Instant::now() + KILL_WAIT;
+        loop {
+            {
+                let mut slot = self.slot();
+                if !matches!(slot.child.try_wait(), Ok(None)) {
+                    #[cfg(unix)]
+                    {
+                        slot.group = None;
+                    }
+                    return;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 impl McpClient {
@@ -177,6 +251,10 @@ impl McpClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Its own process group, so a kill also ends what a wrapper such as
+        // npx or a launch script started.
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command.spawn().map_err(classify_spawn_error)?;
         let first_stderr = collect_first_stderr_line(child.stderr.take());
         let stdin = child
@@ -199,14 +277,16 @@ impl McpClient {
         )
         .await
         {
-            Ok(client) => {
+            Ok(mut client) => {
+                let handle = ChildHandle::new(child);
                 {
                     let mut session = client.session.lock().await;
                     if let Wire::Stream(stream) = &mut session.wire {
-                        stream._child = Some(child);
+                        stream._child = Some(handle.clone());
                     }
                     session.request_timeout = request_timeout;
                 }
+                client.child = Some(handle);
                 Ok(client)
             }
             Err(error) => Err(stdio_connect_failure(error, &mut child, first_stderr).await),
@@ -327,7 +407,20 @@ impl McpClient {
             tools,
             session: Arc::new(Mutex::new(session)),
             call_bearer: None,
+            child: None,
         })
+    }
+
+    /// Kill a stdio server's process, and every process it started in its
+    /// group, and wait for it to exit. Nothing it runs writes afterwards.
+    /// Does nothing for a server over HTTP or over streams it did not spawn.
+    ///
+    /// It does not wait for the session, so a request in flight cannot hold
+    /// it up; that request fails as the pipes close.
+    pub async fn kill(&self) {
+        if let Some(child) = &self.child {
+            child.kill().await;
+        }
     }
 
     /// The stable local name used to namespace this server's mounted tools.
@@ -474,7 +567,7 @@ impl Session {
     fn stream(
         reader: BoxReader,
         writer: BoxWriter,
-        child: Option<Child>,
+        child: Option<ChildHandle>,
         request_timeout: Duration,
     ) -> Self {
         Self {
@@ -603,7 +696,7 @@ struct StreamWire {
     partial_line: Vec<u8>,
     // Keeping the child owns its lifecycle; `kill_on_drop(true)` handles both a
     // normal registry teardown and a failed initialization.
-    _child: Option<Child>,
+    _child: Option<ChildHandle>,
 }
 
 impl StreamWire {
@@ -1582,6 +1675,61 @@ mod tests {
             error.to_string().contains("Timed out after 10 ms."),
             "{error}"
         );
+    }
+
+    /// Delete all data kills every stdio server before it removes the folders
+    /// they write into. A server, and anything it started, must not write a
+    /// byte after the kill: here a helper the server leaves running in the
+    /// background appends to a file until then.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_killed_server_and_its_helpers_write_nothing_afterwards() {
+        let dir = std::env::temp_dir().join(format!(
+            "tidebreak-mcp-kill-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("writes.log");
+        // Answers initialize (id 1) and tools/list (id 2) in the order the
+        // client sends them, after starting a helper that keeps writing.
+        let script = format!(
+            r#"( while true; do echo tick >> '{log}'; sleep 0.02; done ) &
+read _initialize
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"{version}","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"writer","version":"1"}}}}}}'
+read _initialized
+read _list
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[]}}}}'
+while read _line; do :; done
+"#,
+            log = log.display(),
+            version = PROTOCOL_VERSION,
+        );
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(script);
+        let client = McpClient::spawn("writer", command)
+            .await
+            .expect("the scripted server initializes");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::metadata(&log).map_or(0, |metadata| metadata.len()) == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the helper never wrote"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        client.kill().await;
+        // Give a stray writer time to show itself.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let settled = std::fs::read(&log).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let later = std::fs::read(&log).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(settled.len(), later.len(), "something wrote after the kill");
     }
 
     #[tokio::test]
