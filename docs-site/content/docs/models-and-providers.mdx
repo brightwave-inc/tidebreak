@@ -22,7 +22,7 @@ Open **Settings → Providers**. Each provider is its own section: turn on
 | Together AI | API key; Tidebreak uses `https://api.together.ai/v1` |
 | OpenRouter | API key; Tidebreak uses `https://openrouter.ai/api/v1`. Add the models you want to use |
 | Ollama | No key for a local daemon. Defaults to `http://127.0.0.1:11434/v1`. Add the models you have pulled |
-| OpenAI-compatible | Base URL and an optional key. Add the models the endpoint serves |
+| OpenAI-compatible | Base URL. A key is optional for a server on your machine. Add the models the endpoint serves |
 
 **Google Gemini** is the direct Gemini Developer API path and accepts a Gemini
 API key.
@@ -31,6 +31,29 @@ The panel never shows a saved key back to you. It shows a status —
 **API key set**, **Signed in with ChatGPT**, **Credential set**, or
 **No credential**. **Clear** removes the stored credential after a
 confirmation.
+
+## Test a provider
+
+Saving a provider tests it: Tidebreak makes one small request with the key and
+address you saved, such as asking for the provider's model list, and gives up
+after 8 seconds. Press **Test** to run it again. The key stays on your
+machine; the result never repeats it.
+
+The badge on each provider says what the last test found, and the card says
+when it ran:
+
+| Badge | What it means |
+| --- | --- |
+| **Connected** | The provider answered with the saved key |
+| **Key rejected** | The provider refused the key. Save a valid one |
+| **Access denied** | The provider refused access. The key may lack a permission, or the account may be out of credits or restricted |
+| **Unreachable** | Nothing answered at the address, or it did not answer in time |
+| **Rate limited** | The provider is limiting requests. Test again in a minute |
+| **Unexpected answer** | Something answered, but not with a model list. Check the base URL |
+| **Not tested** | Set up, but no test has run since the key or address changed |
+
+ChatGPT sign-in has no test. It is checked when you sign in, and Tidebreak asks
+you to sign in again if OpenAI rejects it.
 
 API keys go to your operating system's credential store, not to the database
 and not to a config file. Base URLs and custom models are non-secret settings.
@@ -113,11 +136,18 @@ somewhere else. A key is optional — only remote or locked-down Ollama
 installs need one.
 
 The generic OpenAI-compatible slot points at any other endpoint that speaks
-the same API, including LM Studio or vLLM:
+the same API, including LM Studio, llama.cpp, or vLLM:
 
 ```text
 base URL: http://127.0.0.1:1234/v1
 ```
+
+A server on your machine usually needs no key. Leave the key empty, and
+Tidebreak reaches it over plain HTTP at a loopback address such as
+`127.0.0.1` or `localhost`. If the server does want a key, Tidebreak sends it
+only over HTTPS, unless you tick **Send the key in clear text to this loopback
+address** for a loopback IP address such as `127.0.0.1` or `[::1]`. Ollama
+follows the same rule.
 
 ## Find models
 
@@ -146,8 +176,9 @@ Each provider reports different facts about its models:
 | Ollama | Context window, images, tools, and reasoning for each pulled model |
 | OpenAI-compatible | Context window, when the server reports one (vLLM does) |
 
-Find models needs an API key. An OpenAI-compatible endpoint also needs its
-base URL, and a local Ollama daemon needs no key at all. ChatGPT sign-in
+Find models needs an API key. An OpenAI-compatible endpoint needs its base URL
+instead, and a key only when the server asks for one; a local Ollama daemon
+needs no key at all. ChatGPT sign-in
 cannot list OpenAI models, so save an API key to use it. The request gives up
 after 10 seconds and says what went wrong: a rejected key, an endpoint it
 could not reach, or a listing it could not read.
@@ -156,7 +187,7 @@ could not reach, or a listing it could not read.
 
 **Settings → Models** sets the model for two roles:
 
-- **Chat** — what new conversations start on. Each chat can still override it.
+- **Work** — the model new work starts on until you pick one.
 - **Background work** — the model used for the app's own internal work
   (titling a chat, and similar short tasks). Cheaper, faster models suit this.
 
@@ -164,14 +195,24 @@ Either role can be left automatic, in which case it resolves against whatever
 you have credentialed at the moment you use it, rather than being frozen at
 the time you set it.
 
+New work starts on the first of these that applies:
+
+1. The model you pick in the composer before you send.
+2. The model you picked most recently in any conversation.
+3. The **Work** model in **Settings → Models**.
+
+So once you have picked a model anywhere, changing the default in Settings
+does not change what new work starts on. When your last-used model and the
+default differ, the model picker names both, and marks the default in its
+list. Pick the default there to start from it again.
+
 ## Change the model for one chat
 
 The composer has a model pill next to the send button. It names the model
 the chat will run against. Until a provider is configured, it reads **No
 model**. After that it shows the current model — the one from Settings if
 you have not pinned one, or the pin if you have. The menu lets you switch
-providers and models, and a **Default** switch returns the chat to following
-your global setting.
+providers and models.
 
 The same menu carries **Reasoning** effort for models that expose it:
 **Default**, **Off**, **Low**, **Medium**, **High**, **X-high**, **Max**.
