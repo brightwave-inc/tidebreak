@@ -95,9 +95,9 @@ impl SecretProvider for TestSecrets {
         Ok(())
     }
 }
-/// [`TestSecrets`] with one armed write: the first read of `trigger` writes
-/// `value` under `target` before it answers, the way a live connection that
-/// refreshes its token in the middle of a replacement does.
+/// [`TestSecrets`] with one armed write: deleting `trigger` first writes
+/// `value` under `target`, the way a live connection that refreshes its
+/// token in the middle of a replacement does.
 #[derive(Default)]
 struct HookedSecrets {
     inner: TestSecrets,
@@ -113,6 +113,12 @@ impl HookedSecrets {
 #[async_trait::async_trait]
 impl SecretProvider for HookedSecrets {
     async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+        self.inner.get_secret(key).await
+    }
+    async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+        self.inner.set_secret(key, value).await
+    }
+    async fn delete_secret(&self, key: &str) -> Result<()> {
         let fired = {
             let mut hook = self.hook.lock().unwrap();
             match hook.as_ref() {
@@ -123,12 +129,6 @@ impl SecretProvider for HookedSecrets {
         if let Some((_, target, value)) = fired {
             self.inner.set_secret(&target, &value).await?;
         }
-        self.inner.get_secret(key).await
-    }
-    async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
-        self.inner.set_secret(key, value).await
-    }
-    async fn delete_secret(&self, key: &str) -> Result<()> {
         self.inner.delete_secret(key).await
     }
 }
@@ -2894,9 +2894,10 @@ async fn a_failed_replacement_keeps_the_session_its_connection_refreshed() {
 
 /// Review finding: a live connection refreshed its token while a
 /// replacement was reconciling sign-ins, before the replacement connected
-/// anything. The failed replacement took the rotated token for its own write
-/// and put the spent one back. It now puts back only keys it wrote itself,
-/// so the token the live connection stored stays.
+/// anything. The replacement read what it had written only after that, so it
+/// took the rotated token for its own write, and when it failed it put the
+/// spent token back. It now records each write from its own values as it
+/// makes it, and a key it never wrote stays as the live connection left it.
 #[tokio::test]
 async fn a_token_a_live_connection_rotates_during_reconcile_survives_a_failed_replacement() {
     let fake = FakeOAuthServer::approving().await;
@@ -2909,7 +2910,25 @@ async fn a_token_a_live_connection_rotates_during_reconcile_survives_a_failed_re
     .await;
     runtime.admit_loopback_oauth_for_tests();
     sign_in_to(&runtime, "vercel", &fake).await;
-    let id = saved_records(&store).await[0].id;
+    // A server the replacement below drops, so reconcile clears its sign-in.
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![
+                http_definition("vercel", &fake.mcp_url()),
+                disabled_definition("gone", "/bin/gone"),
+            ],
+        })
+        .await
+        .unwrap();
+    let records = saved_records(&store).await;
+    let id_of = |name: &str| {
+        records
+            .iter()
+            .find(|record| record.name == name)
+            .map(|record| record.id)
+            .unwrap()
+    };
+    let (vercel, gone) = (id_of("vercel"), id_of("gone"));
     let rotated = serde_json::to_string(&crate::connectors::McpOAuthCredentials {
         access_token: fake.access_token.clone(),
         refresh_token: Some("rotated-by-a-live-connection".to_string()),
@@ -2917,10 +2936,12 @@ async fn a_token_a_live_connection_rotates_during_reconcile_survives_a_failed_re
         scope: None,
     })
     .unwrap();
-    // Reconcile reads the registration first; the rotation lands then.
+    // The rotation lands while reconcile clears the dropped server's
+    // sign-in: after the replacement wrote the environment values, before
+    // it connects anything.
     secrets.arm(
-        crate::connectors::oauth_client_secret_key(id),
-        crate::connectors::oauth_token_secret_key(id),
+        crate::connectors::oauth_token_secret_key(gone),
+        crate::connectors::oauth_token_secret_key(vercel),
         rotated,
     );
 
@@ -2936,7 +2957,7 @@ async fn a_token_a_live_connection_rotates_during_reconcile_survives_a_failed_re
         .unwrap();
     assert!(error.to_string().contains("failed to start"), "{error}");
     assert!(secrets.hook.lock().unwrap().is_none(), "the rotation ran");
-    let vault = crate::connectors::McpOAuthCredentialVault::new(runtime.secrets(), id);
+    let vault = crate::connectors::McpOAuthCredentialVault::new(runtime.secrets(), vercel);
     assert_eq!(
         vault
             .load()
@@ -2985,7 +3006,7 @@ async fn a_credential_that_cannot_be_put_back_names_its_server() {
         "{kept}"
     );
 
-    let failing = Arc::new(FailingWrites::default());
+    let failing = Arc::new(FailingWrites);
     let (runtime, _store, _directory) = test_runtime_with_secrets(
         Arc::new(NoGateway),
         Arc::new(crate::managed_policy::NoOsPolicy),
@@ -4032,4 +4053,56 @@ fn every_directory_server_saves_a_valid_definition() {
         .collect();
     assert!(!definitions.is_empty());
     validate_servers(&definitions).unwrap();
+}
+
+/// Review finding: a stdio server outlived the server stop, so Delete all
+/// data could remove a folder that a server, or a helper it started, then
+/// wrote back into. The stop now kills every stdio server with each process
+/// it started.
+#[tokio::test]
+async fn killing_the_stdio_servers_stops_every_process_they_started() {
+    let (runtime, _store, directory) = test_runtime().await;
+    let log = directory.path().join("writes.log");
+    // Answers initialize (id 1) and tools/list (id 2) in the order the
+    // client sends them, after starting a helper that keeps writing.
+    let script = format!(
+        r#"( while true; do echo tick >> '{log}'; /bin/sleep 0.02; done ) &
+read _initialize
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"{version}","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"writer","version":"1"}}}}}}'
+read _initialized
+read _list
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[]}}}}'
+while read _line; do :; done
+"#,
+        log = log.display(),
+        version = tidebreak_mcp::PROTOCOL_VERSION,
+    );
+    let mut definition = disabled_definition("writer", "/bin/sh");
+    definition.args = vec!["-c".to_string(), script];
+    definition.enabled = true;
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while std::fs::metadata(&log).map_or(0, |metadata| metadata.len()) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the helper never wrote"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    runtime.kill_stdio_servers().await;
+    // Give a stray writer time to show itself.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let settled = std::fs::read(&log).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        settled.len(),
+        std::fs::read(&log).unwrap().len(),
+        "something wrote after the kill"
+    );
 }
