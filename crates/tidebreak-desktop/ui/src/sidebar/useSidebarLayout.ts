@@ -15,6 +15,14 @@ export function useSidebarNarrowViewport(): boolean {
   );
 
   useEffect(() => {
+    // Test environments and older webviews have no matchMedia; they keep
+    // the width read at mount.
+    if (
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    ) {
+      return;
+    }
     const media = window.matchMedia(
       `(max-width: ${SIDEBAR_OVERLAY_MAX_WIDTH}px)`,
     );
