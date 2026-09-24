@@ -83,6 +83,18 @@ updates:
       prefix: ci
       include: scope
 
+  # The end-to-end lane's Playwright pin and lockfile. Nothing here ships, so
+  # its bumps read as `test`.
+  - package-ecosystem: npm
+    directory: "/e2e"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    versioning-strategy: increase
+    commit-message:
+      prefix: test
+      include: scope
+
   # Base images of the self-host server image. The Dockerfile pins each one by
   # digest, so a rebuild alone never picks up a patched base; these updates do.
   # They change what the published server image ships, so they read as `deps`.

@@ -757,6 +757,36 @@ test("UI tests and production build each gate the UI lane", () => {
   assert.doesNotMatch(a11y, /continue-on-error|\|\| true/);
 });
 
+test("the end-to-end lane drives the self-host build and keeps failed traces", () => {
+  const ci = workflows["ci.yml"];
+  const changes = workflowJob(ci, "changes");
+  const build = workflowJob(ci, "self-host-build");
+  const e2e = workflowJob(ci, "end-to-end");
+
+  // The flows run for the server, the renderer, and their own files.
+  assert.match(changes, /e2e\/\*\|scripts\/e2e\.sh\) e2e=true ;;/);
+  assert.match(changes, /echo "e2e=true"/);
+  assert.match(
+    changes,
+    /if \[\[ "\$workspace" == true \|\| "\$ui" == true \]\]; then\n\s+e2e=true/,
+  );
+  assert.match(e2e, /^ {4}name: end-to-end$/m);
+  assert.match(e2e, /if: \$\{\{ needs\.changes\.outputs\.e2e == 'true' \}\}/);
+
+  // One debug compile serves both lanes.
+  assert.match(e2e, /needs: \[changes, self-host-build\]/);
+  assert.match(build, /needs\.changes\.outputs\.e2e == 'true'/);
+  assert.match(build, /path: target\/debug\/tidebreak/);
+  assert.match(e2e, /TIDEBREAK_E2E_BINARY: \$\{\{ runner\.temp \}\}\/e2e-server\/tidebreak/);
+  assert.doesNotMatch(e2e, /cargo build/);
+
+  const upload = e2e.match(/- name: Upload Playwright traces[\s\S]*$/)?.[0];
+  assert.ok(upload, "the lane must upload traces from failed flows");
+  assert.match(upload, /if: \$\{\{ failure\(\) \}\}/);
+  assert.match(upload, /path: e2e\/test-results/);
+  assert.doesNotMatch(e2e, /continue-on-error|\|\| true|secrets\./);
+});
+
 test("macOS CI lints and tests the desktop with the Linux desktop selection", () => {
   const ci = workflows["ci.yml"];
   const macos = workflowJob(ci, "macos-desktop");
