@@ -47,6 +47,43 @@ A debug build of the CLI, such as `cargo run -p tidebreak-cli --`, uses the
 dev app's profile (`io.brightwave.tidebreak.dev`) in place of the installed
 app's.
 
+A command trusts the app's `listen.json` only while the app holds its data
+directory, and only after the server the file names answers as Tidebreak.
+That first request carries no credential, so a port the app left behind never
+receives one.
+
+### Upgrading from an earlier version
+
+Before this change, every CLI profile shared the app's keychain entry. A
+profile you name with `TIDEBREAK_DATA_DIR` now has an entry of its own, and
+after the upgrade that entry is empty. To bring back the keys the profile
+stored before, run this once:
+
+```sh
+TIDEBREAK_DATA_DIR=/path/to/profile tidebreak rehome-secrets
+```
+
+It copies the shared entry into the profile's own and leaves the app's entry
+as it is. The copy holds the app's keys too, because the two shared one entry;
+remove any the profile should not use with `provider remove-key`. macOS may
+ask once to let the CLI read the app's entry. Nothing copies the entry unless
+you run this: a new profile starts empty.
+
+A `.tidebreak` folder an earlier CLI created in a project is such a profile.
+To keep using it, set `TIDEBREAK_DATA_DIR` to that folder and run the command
+above.
+
+### A newer CLI upgrades the app's data
+
+`serve` and `--embed` open the app's data with the CLI's own version. A
+release build from source opens the installed app's data, and a debug build
+opens the dev app's. If that CLI is newer than the app, the first such command
+upgrades the app's database, and the older app then refuses to open it.
+Tidebreak saves a copy in the data directory's `backups/` folder before the
+upgrade. To go back, install the newer app, or restore that copy (see
+[Troubleshooting](/troubleshooting#chats-disappeared-after-an-update)).
+Connecting to the running app upgrades nothing.
+
 ## Commands
 
 ```text
@@ -608,7 +645,7 @@ would catch:
 
 ```text
 tidebreak: configuration error: another Tidebreak process is already running on
-the data directory /Users/me/tidebreak-profile. Attach with the CLI's --attach …
+the data directory /Users/me/tidebreak-profile. Quit that process and try again …
 ```
 
 The claim is an OS advisory lock on `tidebreak.lock` inside the directory, so it
@@ -633,6 +670,12 @@ On a release desktop build, the directory is `io.brightwave.tidebreak` (no
 `.dev`). With `TIDEBREAK_DATA_DIR` unset, `--attach` reads the app's own
 `listen.json`, so it fails when the app is not running. `--attach`, `--server`,
 and `--embed` conflict; pick one.
+
+`--attach` believes a `listen.json` only while a live process holds the lock
+on its data directory, and only when it names a server on this computer. The
+file outlives a server that crashed or was killed, so a file whose directory
+nobody holds is refused rather than followed. A reconnect after a dropped
+connection reads the file again under the same checks.
 
 You can still pass an explicit URL when you already have the pair (for example
 from `serve`'s stdout):

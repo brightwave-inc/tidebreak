@@ -40,8 +40,9 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 
-# Default `tidebreak serve` data dir when TIDEBREAK_DATA_DIR is unset (SQLite +
-# vector index); created wherever the server is launched from.
+# A CLI profile kept in the repo with TIDEBREAK_DATA_DIR=.tidebreak (SQLite +
+# vector index). Earlier CLI builds created it wherever a command ran; now it
+# exists only when TIDEBREAK_DATA_DIR names it.
 .tidebreak/
 .vercel/
 .env.local

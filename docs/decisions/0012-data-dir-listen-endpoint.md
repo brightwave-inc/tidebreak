@@ -104,13 +104,35 @@ DB.
 This record rejected attaching without a flag whenever a data directory's lock
 is held, because a person who named another directory meant a fresh embed
 there. The CLI now attaches without a flag in one case only: `TIDEBREAK_DATA_DIR`
-is unset, and the desktop app's `listen.json` names a server on this computer
-that answers. A named directory never attaches on its own, so the rejected case
-cannot arise. With the variable unset, `--attach` reads the app's
-`listen.json`, the same default an embed uses. See the amendment to
+is unset, and the desktop app's `listen.json` can be believed. A named
+directory never attaches on its own, so the rejected case cannot arise. With
+the variable unset, `--attach` reads the app's `listen.json`, the same default
+an embed uses. See the amendment to
 [decision 7](0007-cli-headless-feature-parity.md).
 
-Validation: `a_client_command_connects_to_the_running_app` and
-`without_the_app_a_client_command_says_what_to_do_instead` in
-`crates/tidebreak-cli/tests/serve.rs` run the binary against a fake app and a
-`listen.json` the app left behind.
+This record also said a stale file should not be trusted blindly, because the
+lock names the live owner. The file does outlive its server: a crash, a kill,
+or a signal nothing handled leaves it naming a port anything can take. So
+every read of a `listen.json`, by `--attach`, by the default connection, and by
+a reconnect, now requires three things before it sends anything:
+
+- A live process holds the directory's instance lock. The reader takes a
+  shared lock for as long as it takes to let go of it, and a server starting
+  at that instant retries its own lock briefly rather than refusing.
+- The file names a server on this computer.
+- For the app's own file, the server answers `GET /version` as Tidebreak. That
+  request carries no bearer, and a `404` or another program's answer stops
+  the command.
+
+`tidebreak serve` now shuts down on SIGTERM and Ctrl-C, and the desktop app
+removes its file at exit. Each removes the file only while it still carries
+its own bearer.
+
+Validation: `a_client_command_connects_to_the_running_app`,
+`a_listener_on_a_port_the_app_left_behind_gets_nothing`,
+`a_listener_that_does_not_answer_as_tidebreak_gets_no_credential`,
+`a_listen_file_naming_another_computer_is_not_followed`, and
+`serve_removes_its_listen_file_when_stopped` in
+`crates/tidebreak-cli/tests/serve.rs` run the binary against fake listeners
+and a real `serve`. `only_a_held_lock_means_a_live_owner` in
+`crates/tidebreak-server/src/listen_endpoint.rs` pins the lock check.

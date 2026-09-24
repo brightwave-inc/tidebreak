@@ -156,8 +156,9 @@ On macOS:
    worktrees.
 4. Remove keychain items for the service `tidebreak`, and for any
    `tidebreak.profile.<id>` services a separate CLI profile created. In
-   Keychain Access, search for `tidebreak`, or list them with
-   `security find-generic-password -s tidebreak`.
+   Keychain Access, search for `tidebreak`: that finds both kinds.
+   `security find-generic-password -s tidebreak` matches the exact service
+   name, so it finds only the app's item.
 
 On Windows, remove the app from **Settings → Apps**, then delete
 `%APPDATA%\io.brightwave.tidebreak` and any worktrees you created. Credentials

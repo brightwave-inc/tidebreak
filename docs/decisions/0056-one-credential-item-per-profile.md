@@ -148,11 +148,19 @@ profile keeps its service and its item, so an existing install reads its
 credentials with no migration, whichever binary opens it.
 
 Credentials a separate CLI profile stored before this change stayed in the
-app's item. That profile starts empty; store them again there, and remove from
-the app any it should not use.
+shared item, so that profile's own item starts empty. `tidebreak
+rehome-secrets`, run with `TIDEBREAK_DATA_DIR` naming the profile, copies the
+shared item into the profile's own once, while the profile's own is still
+empty, and leaves the shared item as it is. The copy holds the app's
+credentials too, since the two shared one item. Nothing copies it without
+being asked: an automatic copy would hand every new profile the app's
+credentials, and on macOS reading an item another build created can raise an
+access prompt that a headless run cannot answer.
 
 Validation: `the_app_profile_keeps_the_app_keychain_item`,
-`another_profile_gets_its_own_keychain_service`, and
-`two_spellings_of_one_directory_are_one_profile` in
+`another_profile_gets_its_own_keychain_service`,
+`two_spellings_of_one_directory_are_one_profile`,
+`rehoming_copies_the_shared_item_once_and_leaves_it`, and
+`only_a_profile_other_than_the_apps_has_a_previous_entry` in
 `crates/tidebreak-cli/src/profile.rs`, with `the_channels_match_the_desktop`
 pinning the channel values to the desktop's.
