@@ -439,6 +439,7 @@ mod tests {
         generate::collect_from::<crate::providers::ProviderInfo>(&cfg, &mut out);
         generate::collect_from::<crate::providers::ProviderAuthMode>(&cfg, &mut out);
         generate::collect_from::<crate::model_discovery::DiscoveredModels>(&cfg, &mut out);
+        generate::collect_from::<crate::providers::ProviderTestResult>(&cfg, &mut out);
         generate::collect_from::<crate::chatgpt_runtime::ChatGptSignInStatus>(&cfg, &mut out);
         generate::collect_from::<crate::web_search::WebSearchConfigInfo>(&cfg, &mut out);
         generate::collect_from::<crate::web_search::WebSearchCredentialReadiness>(&cfg, &mut out);
@@ -1584,6 +1585,14 @@ mod tests {
                         .to_vec(),
                     // Added by hand before a release built it in.
                     replaced_by_built_in: vec!["claude-opus-5-5".into()],
+                    allow_loopback_http: false,
+                    last_test: Some(crate::providers::ProviderTestResult {
+                        outcome: crate::providers::ProviderTestOutcome::KeyRejected,
+                        message: "Anthropic rejected the saved API key (HTTP 401). Save a valid key, then test again.".into(),
+                        status: Some(401),
+                        model_count: None,
+                        tested_at: at(1_790_000_000),
+                    }),
                 },
                 ProviderInfo {
                     kind: ProviderKind::OpenaiCompatible,
@@ -1600,6 +1609,14 @@ mod tests {
                         .custom_reasoning_efforts()
                         .to_vec(),
                     replaced_by_built_in: Vec::new(),
+                    allow_loopback_http: true,
+                    last_test: Some(crate::providers::ProviderTestResult {
+                        outcome: crate::providers::ProviderTestOutcome::Connected,
+                        message: "Tidebreak reached the server. It lists 1 model.".into(),
+                        status: None,
+                        model_count: Some(1),
+                        tested_at: at(1_790_000_060),
+                    }),
                 },
             ],
         };

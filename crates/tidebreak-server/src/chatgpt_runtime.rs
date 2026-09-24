@@ -177,6 +177,8 @@ impl ChatGptRuntime {
         config.enabled = true;
         providers::write_config(&*self.store, ProviderKind::Openai, &config).await?;
         providers::clear_chatgpt_reconnect_required(&*self.store).await?;
+        // A test of the API key this sign-in replaced says nothing about it.
+        providers::clear_last_test(&*self.store, ProviderKind::Openai).await?;
         Ok(())
     }
 
@@ -354,6 +356,7 @@ mod tests {
                 enabled: true,
                 base_url: None,
                 models: Vec::new(),
+                allow_loopback_http: false,
             },
         )
         .await
