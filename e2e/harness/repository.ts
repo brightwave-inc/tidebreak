@@ -1,8 +1,8 @@
 import { createReadStream, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer } from "node:http";
 import { join, normalize, sep } from "node:path";
 
-import { command } from "./process";
+import { command, listen } from "./process";
 
 /** Git with no system or global config, so the developer's settings never leak into a fixture. */
 async function git(
@@ -72,14 +72,13 @@ export async function createFixtureRepository(
   return checkout;
 }
 
-/** The latest commit subject on a branch of a checkout. */
+/** The subject of a checkout's latest commit. */
 export async function latestCommitSubject(
   checkout: string,
   root: string,
-  ref = "HEAD",
 ): Promise<string> {
   return (
-    await git(checkout, join(root, "git-home"), "log", "-1", "--format=%s", ref)
+    await git(checkout, join(root, "git-home"), "log", "-1", "--format=%s")
   ).trim();
 }
 
@@ -125,15 +124,4 @@ export async function serveRepository(
     url: `http://127.0.0.1:${port}/${name}`,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
-}
-
-export function listen(server: Server): Promise<number> {
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (address && typeof address === "object") resolve(address.port);
-      else reject(new Error("the server has no port"));
-    });
-  });
 }

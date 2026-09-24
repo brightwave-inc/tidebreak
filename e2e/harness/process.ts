@@ -1,7 +1,20 @@
 import { execFile } from "node:child_process";
+import type { Server } from "node:http";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
+
+/** Listen on a free loopback port and return it. */
+export function listen(server: Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address && typeof address === "object") resolve(address.port);
+      else reject(new Error("the server has no port"));
+    });
+  });
+}
 
 /** Run a command and return its standard output, failing loudly on a non-zero exit. */
 export async function command(

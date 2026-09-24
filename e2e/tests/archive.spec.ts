@@ -25,9 +25,10 @@ test("an archived workspace keeps its conversation and returns to the rail on re
     (await main.getByRole("heading", { level: 1 }).textContent())?.trim() ?? "";
   expect(title).not.toBe("");
   const rail = page.getByRole("region", { name: "fixture" });
-  await expect(
-    rail.getByRole("button", { name: new RegExp(`^${title} ·`) }),
-  ).toBeVisible();
+  const row = rail.getByRole("button", {
+    name: new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} ·`),
+  });
+  await expect(row).toBeVisible();
 
   await main
     .getByRole("button", { name: "Workspace actions", exact: true })
@@ -60,7 +61,5 @@ test("an archived workspace keeps its conversation and returns to the rail on re
     .click();
   await expect(page.getByText("Workspace restored")).toBeVisible();
   await expect(page.getByText("No archived workspaces")).toBeVisible();
-  await expect(
-    rail.getByRole("button", { name: new RegExp(`^${title} ·`) }),
-  ).toBeVisible();
+  await expect(row).toBeVisible();
 });

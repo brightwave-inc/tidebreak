@@ -1,6 +1,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
+import {
+  createWriteStream,
+  mkdirSync,
+  type WriteStream,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -22,8 +27,6 @@ export type Machine = {
   /** Scratch the machine owns: its data directory, home, and logs. */
   root: string;
   dataDir: string;
-  /** Where the server's own stdout and stderr land. */
-  serverLog: string;
   stop(): Promise<void>;
 };
 
@@ -98,60 +101,72 @@ export async function startMachine({
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  child.stderr?.pipe(log);
-  const url = await listeningUrl(child, log, serverLog);
-  return {
-    url,
-    token,
-    root,
-    dataDir,
-    serverLog,
-    stop: () => stopServer(child, log),
-  };
+  // `close` fires once the process is gone and its output is drained, which
+  // is when the log can end.
+  const closed = new Promise<void>((resolve) =>
+    child.once("close", () => resolve()),
+  );
+  child.stderr?.pipe(log, { end: false });
+  const stop = () => stopServer(child, closed, log);
+  let url: string;
+  try {
+    url = await listeningUrl(child, log);
+  } catch (error) {
+    await stop();
+    throw new Error(`${(error as Error).message} See ${serverLog}.`);
+  }
+  return { url, token, root, dataDir, stop };
 }
 
-/** Read stdout until the server announces its address, which it prints only once bound. */
-function listeningUrl(
-  child: ChildProcess,
-  log: NodeJS.WritableStream,
-  serverLog: string,
-): Promise<string> {
+/**
+ * Read stdout until the server announces its address, which it prints only
+ * once bound. Migrating a fresh database takes seconds; the deadline only
+ * catches a server that will never listen.
+ */
+function listeningUrl(child: ChildProcess, log: WriteStream): Promise<string> {
   return new Promise((resolve, reject) => {
+    const deadline = setTimeout(
+      () => reject(new Error("tidebreak serve did not listen within 60 s.")),
+      60_000,
+    );
     const lines = createInterface({ input: child.stdout! });
-    let announced = false;
     lines.on("line", (line) => {
-      log.write(`${line}\n`);
+      if (!log.writableEnded) log.write(`${line}\n`);
       const match = /^tidebreak: listening on (http:\/\/\S+)$/.exec(line);
-      if (match && !announced) {
-        announced = true;
+      if (match) {
+        clearTimeout(deadline);
         resolve(match[1]);
       }
     });
-    child.once("error", reject);
+    child.once("error", (error) => {
+      clearTimeout(deadline);
+      reject(error);
+    });
     child.once("exit", (code, signal) => {
-      if (!announced) {
-        reject(
-          new Error(
-            `tidebreak serve exited (${signal ?? code}) before it listened. See ${serverLog}.`,
-          ),
-        );
-      }
+      clearTimeout(deadline);
+      reject(
+        new Error(
+          `tidebreak serve exited (${signal ?? code}) before it listened.`,
+        ),
+      );
     });
   });
 }
 
 async function stopServer(
   child: ChildProcess,
-  log: NodeJS.WritableStream,
+  closed: Promise<void>,
+  log: WriteStream,
 ): Promise<void> {
-  if (child.exitCode === null && child.signalCode === null) {
-    const exited = new Promise<void>((resolve) =>
-      child.once("exit", () => resolve()),
-    );
+  if (child.pid === undefined) {
+    // It never started, so there is nothing to stop or drain.
+  } else if (child.exitCode === null && child.signalCode === null) {
     child.kill("SIGTERM");
     const escalate = setTimeout(() => child.kill("SIGKILL"), 10_000);
-    await exited;
+    await closed;
     clearTimeout(escalate);
+  } else {
+    await closed;
   }
   await new Promise<void>((resolve) => log.end(resolve));
 }
