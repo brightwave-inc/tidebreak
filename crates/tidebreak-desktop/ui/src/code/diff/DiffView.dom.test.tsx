@@ -373,6 +373,36 @@ describe("comments follow their code through a refresh", () => {
     );
   });
 
+  it("settles when two views of the file briefly disagree about where it is", async () => {
+    usePendingReviewStore.getState().add("ws-1", {
+      id: "c-k",
+      author: { kind: "person" },
+      path: "src/limits.ts",
+      lines: [{ kind: "add", oldNo: null, newNo: 10, text: "const K = 30;" }],
+      context: {
+        before: ["const K = 3;", "const j = 2;", "const i = 1;"],
+        after: ["const L = 4;", "const m = 5;"],
+      },
+      body: "Keep K small.",
+      createdAt: "2026-09-24T10:00:00.000Z",
+    });
+    // One view has the refreshed diff, the other not yet. Each records its
+    // own answer once rather than overwriting the other's in a loop.
+    render(
+      <>
+        <ReviewedDiff diff={WRITTEN} />
+        <ReviewedDiff diff={LINE_ADDED_ABOVE} />
+      </>,
+    );
+    expect(
+      await screen.findByRole("article", { name: "Line 10" }),
+    ).toBeVisible();
+    expect(
+      await screen.findByRole("article", { name: "Line 11" }),
+    ).toBeVisible();
+    await waitFor(() => expect(comments()[0]?.lines[0]?.newNo).toBe(11));
+  });
+
   it("keeps what was typed when the lines change while the editor is open", async () => {
     const user = userEvent.setup();
     const { rerender } = render(<ReviewedDiff diff={WRITTEN} />);

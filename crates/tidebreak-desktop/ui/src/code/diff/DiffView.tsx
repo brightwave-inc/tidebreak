@@ -398,14 +398,23 @@ export function DiffView({
   }, [review?.comments, placements, displayOf]);
 
   // Tell the review where each comment's lines are now, so the message that
-  // carries it names them as they are, or says they changed.
+  // carries it names them as they are, or says they changed. Each view says
+  // so once per answer: two views that briefly disagree, one showing a diff
+  // a refresh has not reached yet, must not overwrite each other in a loop.
   const onRelocate = review?.onRelocate;
   const reviewComments = review?.comments;
+  const reported = useRef(new Map<string, string>());
   useEffect(() => {
     if (!onRelocate || !reviewComments) return;
     for (const comment of reviewComments) {
       const placement = placements.get(comment.id);
       if (!placement) continue;
+      const answer =
+        placement.kind === "outdated"
+          ? "outdated"
+          : `${placement.lines.map((line) => `${line.oldNo}/${line.newNo}`).join(",")}|${placement.span.lines}/${placement.span.oldLines}`;
+      if (reported.current.get(comment.id) === answer) continue;
+      reported.current.set(comment.id, answer);
       if (placement.kind === "outdated") {
         if (!comment.outdated) onRelocate(comment.id, { outdated: true });
         continue;
