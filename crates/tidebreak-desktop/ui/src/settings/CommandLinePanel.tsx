@@ -214,24 +214,29 @@ export function commandLineVerdict(
 }
 
 /** What an install or uninstall did, in one sentence. */
-export function changeSummary(change: CliCommandChange): string | null {
+export function changeSummary(change: CliCommandChange): ReactNode {
   if (change.status.status !== "available") return null;
   const link =
     change.location === "user" ? change.status.user : change.status.system;
-  const path = homeRelative(link.path, change.status);
+  const shown = homeRelative(link.path, change.status);
+  const path = <Path>{shown}</Path>;
   switch (change.outcome) {
     case "created":
-      return change.folderCreated
-        ? `Created ${folderOf(path)} and linked the command there.`
-        : `Linked ${path} to this app.`;
+      return change.folderCreated ? (
+        <>
+          Created {<Path>{folderOf(shown)}</Path>} and linked the command there.
+        </>
+      ) : (
+        <>Linked {path} to this app.</>
+      );
     case "updated":
-      return `Pointed ${path} at this app.`;
+      return <>Pointed {path} at this app.</>;
     case "unchanged":
-      return `${path} already links to this app.`;
+      return <>{path} already links to this app.</>;
     case "removed":
-      return `Removed ${path}.`;
+      return <>Removed {path}.</>;
     case "absent":
-      return `${path} was already gone.`;
+      return <>{path} was already gone.</>;
     case "cancelled":
       return "You cancelled the administrator prompt, so nothing changed.";
   }
@@ -245,7 +250,7 @@ type Work = `${"install" | "uninstall"}:${CliLocation}` | "check";
  */
 type Outcome = {
   location: CliLocation | null;
-  text: string;
+  text: ReactNode;
   failed: boolean;
 };
 
@@ -547,6 +552,8 @@ function SystemRow({
     ) : (
       <>Not installed. Installing links {path} to this app.</>
     );
+  // Laid out like the section above: what is there, then what to do about
+  // it, then what the last action said.
   const install =
     link.state === "missing" || link.state === "stale" ? (
       <Button variant="outline" size="sm" disabled={busy} onClick={onInstall}>
@@ -566,16 +573,14 @@ function SystemRow({
       </Button>
     ) : null;
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <p className="min-w-0 flex-1 basis-56 text-sm text-muted-foreground">
-        {state}
-      </p>
+    <>
+      <p className="text-sm text-muted-foreground">{state}</p>
       {(install || uninstall) && (
         <div className="flex flex-wrap gap-2">
           {install}
           {uninstall}
         </div>
       )}
-    </div>
+    </>
   );
 }

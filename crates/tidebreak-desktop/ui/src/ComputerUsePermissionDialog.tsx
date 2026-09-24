@@ -120,7 +120,8 @@ export function ComputerUsePermissionDialog({
   const ready = permissions !== null && !missing;
   const notNow = useRef<HTMLButtonElement>(null);
   const done = useRef<HTMLButtonElement>(null);
-  const copy = permissionAskCopy(ask, missingPanes(permissions));
+  const missingNow = missingPanes(permissions);
+  const copy = permissionAskCopy(ask, missingNow);
 
   // Not now leaves once both permissions arrive, so focus moves to Done
   // rather than falling back to the page behind the dialog.
@@ -177,7 +178,7 @@ export function ComputerUsePermissionDialog({
             "macOS permissions are ready. Each task still asks before it uses an app."
           ) : (
             <>
-              You can allow them later in{" "}
+              You can allow {missingNow?.length === 1 ? "it" : "them"} later in{" "}
               {onOpenSettings ? (
                 <Button
                   type="button"

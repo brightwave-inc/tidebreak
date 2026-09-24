@@ -108,6 +108,7 @@ describe("ComputerUsePermissionDialog", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/two macOS permissions/)).toBeNull();
+    expect(screen.getByText(/You can allow it later in/)).toBeInTheDocument();
   });
 
   it("words browser control for the browser window", async () => {

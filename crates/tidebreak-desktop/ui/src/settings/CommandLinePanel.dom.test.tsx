@@ -31,6 +31,12 @@ function spyOn(host: CliCommandHost) {
   };
 }
 
+/** Matches the paragraph whose whole text is `text`, paths and all. */
+function line(text: string) {
+  return (_: string, element: Element | null) =>
+    element?.tagName === "P" && element.textContent === text;
+}
+
 /** The verdict's label and tone, for a status on this Mac. */
 function verdictOf(status: CliCommandStatus) {
   const verdict = commandLineVerdict(status, true);
@@ -99,7 +105,7 @@ describe("CommandLinePanel", () => {
     expect(
       within(
         screen.getByRole("region", { name: "The tidebreak command" }),
-      ).getByText("Linked ~/.local/bin/tidebreak to this app."),
+      ).getByText(line("Linked ~/.local/bin/tidebreak to this app.")),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Uninstall the command" }),

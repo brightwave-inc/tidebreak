@@ -276,6 +276,7 @@ fn bundled_command(executable: &Path) -> Result<PathBuf, UnavailableReason> {
 /// Whether `command` sits on one of the disk images mounted at
 /// `mount_points`. An app on an external drive is on none of them: a link to
 /// it works whenever the drive is connected.
+#[cfg(any(target_os = "macos", test))]
 fn on_disk_image(command: &Path, mount_points: &[PathBuf]) -> bool {
     mount_points
         .iter()

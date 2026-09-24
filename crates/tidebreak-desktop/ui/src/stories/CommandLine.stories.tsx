@@ -189,7 +189,9 @@ export const InstalledFromTheMenu: Story = {
   },
   play: async ({ canvasElement }) => {
     await within(canvasElement).findByText(
-      "Linked ~/.local/bin/tidebreak to this app.",
+      (_, element) =>
+        element?.tagName === "P" &&
+        element.textContent === "Linked ~/.local/bin/tidebreak to this app.",
     );
   },
 };
