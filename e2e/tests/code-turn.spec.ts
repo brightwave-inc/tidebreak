@@ -1,7 +1,16 @@
 import { registerRepository } from "../harness/api";
 import { expect, openApp, test } from "../harness/fixtures";
+import { onePixelPng, pasteImage } from "../harness/images";
 import { createFixtureRepository } from "../harness/repository";
 import { codeTurn } from "../harness/scripts";
+
+/**
+ * How long the engine holds the turn before it answers. The first message
+ * must reach the screen well inside it, so the flow sees the conversation
+ * while the turn is still running rather than after it lands.
+ */
+const HOLD_MS = 8_000;
+const FIRST_MESSAGE_WITHIN_MS = 5_000;
 
 test.use({
   scripts: {
@@ -10,11 +19,12 @@ test.use({
       writes: [
         { path: "hello.txt", contents: "hello from the scripted engine\n" },
       ],
+      holdMs: HOLD_MS,
     }),
   },
 });
 
-test("a code turn shows its reply and the diff it made", async ({
+test("a first message with an image shows while its turn runs, then the reply and diff", async ({
   page,
   machine,
 }) => {
@@ -27,17 +37,37 @@ test("a code turn shows its reply and the diff it made", async ({
 
   await page.getByRole("button", { name: "New workspace on fixture" }).click();
   const dialog = page.getByRole("dialog", { name: "New workspace" });
-  await dialog
-    .getByRole("textbox", { name: "First message" })
-    .fill("Add a hello file");
+  const message = dialog.getByRole("textbox", { name: "First message" });
+  await pasteImage(message, onePixelPng());
+  // The dialog holds the image until the workspace exists, so nothing is
+  // uploading yet and the chip must not say so.
+  const attached = dialog.getByRole("list", { name: "Attached images" });
+  await expect(attached.getByRole("listitem")).toContainText("screenshot.png");
+  await expect(
+    attached.getByRole("button", { name: "Remove screenshot.png" }),
+  ).toBeVisible();
+  await expect(dialog.getByText(/^Uploading/)).toHaveCount(0);
+  await expect(dialog.getByRole("progressbar")).toHaveCount(0);
+  await message.fill("Add a hello file");
   await dialog.getByRole("button", { name: "Create" }).click();
 
-  // The first message shows as soon as the session accepts it, and the
-  // engine's reply follows on the live stream.
+  // The conversation shows once the session accepts the first message, not
+  // once the engine answers: the message and its image are on screen while
+  // the turn is still running and before any reply.
   const main = page.getByRole("main");
-  await expect(main.getByRole("article", { name: "You" })).toContainText(
-    "Add a hello file",
-  );
+  const first = main.getByRole("article", { name: "You" });
+  await expect(first).toContainText("Add a hello file", {
+    timeout: FIRST_MESSAGE_WITHIN_MS,
+  });
+  await expect(
+    first.getByRole("button", { name: "Expand attached image 1" }),
+  ).toBeVisible();
+  await expect(
+    main.getByRole("button", { name: "Stop response" }),
+  ).toBeVisible();
+  await expect(main.getByRole("article", { name: "Assistant" })).toHaveCount(0);
+
+  // The engine's reply follows on the live stream.
   await expect(main.getByRole("article", { name: "Assistant" })).toContainText(
     "Added hello.txt.",
   );

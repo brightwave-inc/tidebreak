@@ -18,17 +18,27 @@ export type ProviderStep =
 export type HarnessScript = {
   events: Record<string, unknown>[];
   writes?: { path: string; contents: string }[];
+  /** How long the engine holds each turn before it plays anything. */
+  turn_delay_ms?: number;
 };
 
-/** A code-mode turn: the engine starts, optionally writes files, and replies. */
+/**
+ * A code-mode turn: the engine starts, optionally writes files, and replies.
+ *
+ * `holdMs` keeps every turn running that long before the engine does
+ * anything, so a flow can see the page while a turn is still in flight.
+ */
 export function codeTurn({
   reply,
   writes = [],
+  holdMs,
 }: {
   reply: string;
   writes?: { path: string; contents: string }[];
+  holdMs?: number;
 }): HarnessScript {
   return {
+    ...(holdMs === undefined ? {} : { turn_delay_ms: holdMs }),
     events: [
       {
         type: "session_started",
