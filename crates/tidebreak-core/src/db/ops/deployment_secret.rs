@@ -145,19 +145,19 @@ pub(in crate::db) async fn delete(
     })
 }
 
-/// Every key id the stored rows were written under, sorted, each once.
-pub(in crate::db) async fn key_ids(store: &DbStore) -> Result<Vec<String>> {
+/// Every stored row, sorted by name.
+pub(in crate::db) async fn all(store: &DbStore) -> Result<Vec<DeploymentSecret>> {
     let backend = store.conn.get_database_backend();
     store
         .conn
         .query_all_raw(Statement::from_string(
             backend,
-            "SELECT DISTINCT \"key_id\" FROM \"deployment_secrets\" ORDER BY \"key_id\"",
+            format!("SELECT {COLUMNS} FROM \"deployment_secrets\" ORDER BY \"name\""),
         ))
         .await
         .map_err(store_err)?
         .iter()
-        .map(|row| row.try_get::<String>("", "key_id").map_err(store_err))
+        .map(secret_from_row)
         .collect()
 }
 

@@ -236,28 +236,73 @@ Compose, add the variable and the mount to the `server` service:
       - ./secret.key:/run/tidebreak/secret.key:ro
 ```
 
-The image runs the server as uid 10001, and that uid must be able to read the
-file. On a Linux host, hand it over with `sudo chown 10001 secret.key`.
+Back up the key file separately from the database, and do it now: once the
+container's account owns the file, your own account may not be able to read
+it. A database backup without the key restores no secret, and you would have
+to enter each one again. Keep the two backups in different places, so one
+stolen backup never holds both.
 
-Back up the key file separately from the database. A database backup without
-the key restores no secret, and you would have to enter each one again. Keep
-the two backups in different places, so one stolen backup never holds both.
+The image runs the server as uid 10001, and that uid must be able to read the
+file:
+
+- With Docker Engine on Linux, run `sudo chown 10001 secret.key`.
+- Rootless Docker and rootless Podman map uid 10001 inside the container to a
+  different uid on the host, so a plain `chown 10001` hands the file to the
+  wrong account. Let the runtime apply its own mapping instead. With Podman,
+  run `podman unshare chown 10001 secret.key`. With rootless Docker, run
+  `chown` in a throwaway container of the server image:
+
+  ```sh
+  docker run --rm --user 0 --entrypoint chown \
+    -v "$PWD/secret.key:/secret.key" tidebreak-self-host:local 10001 /secret.key
+  ```
+
+- Docker Desktop on macOS reads the `0400` file as it is, so it needs no
+  `chown`.
 
 The server reads the key once at boot. It refuses to start when the file is
-missing, unreadable, or does not decode to exactly 32 bytes, and when the
-`TIDEBREAK_VAULT_*` variables are set as well. It also refuses to start when
-the database holds secrets written under a different key. In that case,
-restore the original key file and start the server again: it never overwrites
-or deletes secrets written under another key. Each stored secret records the
-id of its key, the first 8 bytes of the key's SHA-256 in hex, and the refusal
-names the ids it found. To find the id of a key file:
+missing, unreadable, or does not decode to exactly 32 bytes, when accounts
+other than its owner can change it, and when the `TIDEBREAK_VAULT_*`
+variables are set as well. It starts, with a warning, when other accounts can
+read the file. The check follows symlinks, so a Kubernetes secret mount is
+judged by the file it names.
+
+The server also refuses to start when the database holds secrets written
+under a different key. In that case, restore the original key file and start
+the server again: it never overwrites or deletes secrets written under another
+key. Each stored secret records the id of its key, the first 8 bytes of the
+key's SHA-256 in hex, and the refusal names the ids it found. To find the id
+of a key file:
 
 ```sh
 openssl base64 -d -in secret.key | openssl dgst -sha256 -r | cut -c1-16
 ```
 
+If the original key is lost, the secrets written under it cannot be recovered.
+Delete those rows with the statement the refusal prints, which names their
+key ids, and enter the credentials again.
+
+At boot the server also decrypts every stored secret once. When one no longer
+decrypts, for example after a damaged restore, it refuses to start and names
+that secret. Restore the database from a backup taken before the damage, or
+delete that row with the statement the refusal prints and enter its
+credentials again.
+
 The key cannot be rotated yet. To start over with a new key, delete the rows
 from `deployment_secrets` and enter the secrets again.
+
+The key protects dumps and backups of the database, not a database someone
+can write to. Anyone who can write rows can put back an older copy of a row,
+which still decrypts, and can already run commands on the server through
+stored MCP server definitions.
+
+On a self-host machine, a member who can use Code mode can read the key file
+and the database URL today: workspace terminals and coding engines run as the
+server's uid and inherit its environment. The Vault token file and provider
+environment variables are exposed the same way. Until members' code sessions
+are kept away from the deployment's secrets
+([#3590](https://github.com/brightwave-inc/tidebreak/issues/3590)), give
+self-host accounts only to people you would trust with those secrets.
 
 Vault remains available. To use it instead, set the `TIDEBREAK_VAULT_*`
 variables from the next section and leave `TIDEBREAK_SECRET_KEY_FILE` unset.

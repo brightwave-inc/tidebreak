@@ -1235,6 +1235,11 @@ mod profile_secret_tests {
         ring::rand::SystemRandom::new().fill(&mut key).unwrap();
         let encoded = base64::engine::general_purpose::STANDARD.encode(key);
         std::fs::write(path, format!("{encoded}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
 
     fn self_host_with_key_file(directory: &Path, key_file: &Path) -> Config {
@@ -1263,7 +1268,7 @@ mod profile_secret_tests {
             .to_string();
         assert!(error.contains("TIDEBREAK_VAULT_ADDR"));
         assert!(error.contains("TIDEBREAK_SECRET_KEY_FILE"));
-        assert!(db.deployment_secret_key_ids().await.unwrap().is_empty());
+        assert!(db.deployment_secrets().await.unwrap().is_empty());
 
         let web_search = web_search::write_credential(
             &*secrets,

@@ -312,9 +312,11 @@ impl DbStore {
         ops::deployment_secret::delete(self, name, key_id).await
     }
 
-    /// Every key id the stored secrets were written under, sorted, each once.
-    pub async fn deployment_secret_key_ids(&self) -> Result<Vec<String>> {
-        ops::deployment_secret::key_ids(self).await
+    /// Every stored encrypted secret, sorted by name. The database custody
+    /// reads them all once at boot, to check that its key wrote and still
+    /// decrypts each one.
+    pub async fn deployment_secrets(&self) -> Result<Vec<DeploymentSecret>> {
+        ops::deployment_secret::all(self).await
     }
 
     fn from_connection(conn: StoreConnection) -> Self {

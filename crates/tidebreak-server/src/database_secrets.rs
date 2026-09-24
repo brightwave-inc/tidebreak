@@ -14,8 +14,18 @@
 //!   the key's SHA-256, in hex. [`DatabaseSecretProvider::open`] refuses a key
 //!   that did not write the stored rows, and no row written under another key
 //!   is ever replaced or removed.
-//! - A row that fails to decrypt is an error that names the secret, never a
-//!   missing secret. Errors name secrets, never values or the key.
+//! - [`DatabaseSecretProvider::open`] also decrypts every row once, so a row
+//!   that no longer decrypts stops the boot instead of reading as a missing
+//!   credential later. After boot, a row that fails to decrypt is an error
+//!   that names the secret, never a missing secret. Errors name secrets, never
+//!   values or the key.
+//! - A key file that accounts other than its owner can change is refused, and
+//!   one they can read draws a warning. The check follows symlinks, as a
+//!   Kubernetes secret mount is one.
+//!
+//! The key protects dumps and backups, not a database someone can write to:
+//! a writer can put back an older row under the same name and key, and it
+//! still decrypts.
 
 use std::io::Read as _;
 use std::path::Path;
@@ -70,13 +80,35 @@ impl SecretKey {
         let file = std::fs::File::open(path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 AgentError::config(format!(
-                    "{KEY_FILE_VARIABLE} names {shown}, and no file is there. Create a key \
-                     with `openssl rand -base64 32` and put it at that path"
+                    "{KEY_FILE_VARIABLE} names {shown}, and no file is there. Check that the \
+                     key file is mounted at that path. Only a deployment that has never stored \
+                     secrets should create a new key there, with `openssl rand -base64 32`"
                 ))
             } else {
                 unreadable(error)
             }
         })?;
+        // The opened file's own mode: when the path is a symlink, as a
+        // Kubernetes secret mount is, this is the target's.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = file.metadata().map_err(unreadable)?.permissions().mode();
+            match key_file_access(mode) {
+                KeyFileAccess::Private => {}
+                KeyFileAccess::ReadableByOthers => tracing::warn!(
+                    "{KEY_FILE_VARIABLE} at {shown} can be read by accounts other than its \
+                     owner. Restrict it with `chmod 400 {shown}`"
+                ),
+                KeyFileAccess::WritableByOthers => {
+                    return Err(AgentError::config(format!(
+                        "{KEY_FILE_VARIABLE} at {shown} can be changed by accounts other than \
+                         its owner, so one of them could replace the key with one they know. \
+                         Restrict it with `chmod 400 {shown}` and start Tidebreak again"
+                    )));
+                }
+            }
+        }
         let mut encoded = Vec::new();
         file.take(KEY_FILE_LIMIT + 1)
             .read_to_end(&mut encoded)
@@ -135,6 +167,36 @@ impl SecretKey {
     }
 }
 
+/// Who besides its owner can reach a key file.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyFileAccess {
+    /// Only the owner.
+    Private,
+    /// Its group or everyone can read it, but not change it.
+    ReadableByOthers,
+    /// Its group or everyone can change it.
+    WritableByOthers,
+}
+
+#[cfg(unix)]
+fn key_file_access(mode: u32) -> KeyFileAccess {
+    if mode & 0o022 != 0 {
+        KeyFileAccess::WritableByOthers
+    } else if mode & 0o044 != 0 {
+        KeyFileAccess::ReadableByOthers
+    } else {
+        KeyFileAccess::Private
+    }
+}
+
+/// `value` as a SQL string literal, for a statement a refusal suggests. A
+/// row's name or key id comes from the database, so a quote in it must not
+/// end the literal early.
+fn sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 impl std::fmt::Debug for SecretKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecretKey")
@@ -154,36 +216,64 @@ pub struct DatabaseSecretProvider {
 impl DatabaseSecretProvider {
     /// Open the custody over `store` with `key`.
     ///
-    /// Refuses when any stored secret was written under another key. Every
-    /// read of it would fail, and nothing this key writes could replace it,
-    /// so the boot stops before anything reads a credential and leaves the
-    /// rows exactly as they are.
+    /// Refuses when any stored secret was written under another key: every
+    /// read of it would fail, and nothing this key writes could replace it.
+    /// Then decrypts every row once and refuses when one no longer decrypts,
+    /// as after a damaged restore: a caller that checks whether a credential
+    /// exists would read the failure as "none", and the deployment would look
+    /// unconfigured. Either way the boot stops before anything reads a
+    /// credential, and the rows stay exactly as they are.
     pub async fn open(store: Arc<DbStore>, key: SecretKey) -> Result<Self> {
-        let others: Vec<String> = store
-            .deployment_secret_key_ids()
-            .await?
-            .into_iter()
+        let stored = store.deployment_secrets().await?;
+        let mut others: Vec<&str> = stored
+            .iter()
+            .map(|secret| secret.key_id.as_str())
             .filter(|id| *id != key.id)
             .collect();
+        others.sort_unstable();
+        others.dedup();
         if !others.is_empty() {
             let noun = if others.len() == 1 { "key" } else { "keys" };
+            let listed = others
+                .iter()
+                .map(|id| sql_literal(id))
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(AgentError::config(format!(
                 "{KEY_FILE_VARIABLE} does not match the stored secrets: the database holds \
                  secrets written under {noun} {}, and this file holds key {}. Restore the \
-                 original key file and start Tidebreak again. No stored secret was changed",
+                 original key file and start Tidebreak again. If the original key is lost, \
+                 those secrets cannot be recovered: remove them with `DELETE FROM \
+                 deployment_secrets WHERE key_id IN ({listed})` and enter the credentials \
+                 again. No stored secret was changed",
                 others.join(", "),
                 key.id
             )));
         }
-        tracing::info!(
-            key_id = %key.id,
-            "stored secrets are kept encrypted in the database"
-        );
-        Ok(Self {
+        let custody = Self {
             store,
             key,
             random: SystemRandom::new(),
-        })
+        };
+        for secret in &stored {
+            // The value is dropped at once; only whether it decrypts matters.
+            if custody.decrypt(&secret.name, secret).is_err() {
+                let name = &secret.name;
+                return Err(AgentError::config(format!(
+                    "{KEY_FILE_VARIABLE} cannot decrypt the stored secret {name}, although \
+                     its key id matches this key: its row was altered or damaged, for example \
+                     by a bad restore. Restore the database from a backup taken before the \
+                     damage, or remove the secret with `DELETE FROM deployment_secrets WHERE \
+                     name = {}` and enter its credentials again. No stored secret was changed",
+                    sql_literal(name)
+                )));
+            }
+        }
+        tracing::info!(
+            key_id = %custody.key.id,
+            "stored secrets are kept encrypted in the database"
+        );
+        Ok(custody)
     }
 
     fn associated_data(name: &str) -> Aad<Vec<u8>> {
@@ -325,10 +415,45 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
+    /// A key file readable only by its owner, whatever the test's umask. A
+    /// file an earlier call left read-only is replaced, not written through.
     fn key_file(dir: &Path, contents: impl AsRef<[u8]>) -> PathBuf {
         let path = dir.join("secret.key");
+        let _ = std::fs::remove_file(&path);
         std::fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        set_mode(&path, 0o600);
         path
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Load `path` while capturing what the load logs.
+    fn load_logging(path: &Path) -> (Result<SecretKey>, String) {
+        #[derive(Clone)]
+        struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Captured(Arc::default());
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let loaded = tracing::subscriber::with_default(subscriber, || SecretKey::from_file(path));
+        let logged = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        (loaded, logged)
     }
 
     /// A value made at run time, so no credential-shaped literal sits in the
@@ -537,6 +662,17 @@ mod tests {
         );
         assert!(message.contains(&wrong_id), "{message}");
         assert!(message.contains(secrets.key.id()), "{message}");
+        // When the original key is gone, the refusal says how to start over
+        // without touching rows the current key wrote.
+        assert!(message.contains("If the original key is lost"), "{message}");
+        assert!(
+            message.contains(&format!(
+                "DELETE FROM deployment_secrets WHERE key_id IN ('{}')",
+                secrets.key.id()
+            )),
+            "{message}"
+        );
+        assert!(!message.contains(&value), "{message}");
         assert_eq!(
             store.deployment_secret("provider.test").await.unwrap(),
             before
@@ -548,6 +684,67 @@ mod tests {
                 .unwrap();
         assert_eq!(
             reopened.get_secret("provider.test").await.unwrap(),
+            Some(value)
+        );
+    }
+
+    /// A row this key wrote that no longer decrypts, as after a damaged
+    /// restore, refuses the boot and names the secret. Without the check the
+    /// custody opened, and a caller asking whether a credential exists read
+    /// the failure as "none".
+    #[tokio::test]
+    async fn a_row_that_no_longer_decrypts_refuses_to_open() {
+        let (_dir, store) = test_store().await;
+        let bytes = random_bytes::<KEY_LEN>();
+        let secrets =
+            DatabaseSecretProvider::open(store.clone(), SecretKey::from_bytes(&bytes).unwrap())
+                .await
+                .unwrap();
+        let value = fake_value("damaged");
+        secrets.set_secret("provider.o'hare", &value).await.unwrap();
+        let original = store
+            .deployment_secret("provider.o'hare")
+            .await
+            .unwrap()
+            .unwrap();
+        let mut damaged = original.clone();
+        let middle = damaged.ciphertext.len() / 2;
+        damaged.ciphertext[middle] ^= 0x10;
+        store.put_deployment_secret(&damaged).await.unwrap();
+
+        let error = match DatabaseSecretProvider::open(
+            store.clone(),
+            SecretKey::from_bytes(&bytes).unwrap(),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("the custody opened over a row its key cannot decrypt"),
+        };
+        assert_eq!(error.kind(), "config");
+        let message = error.to_string();
+        assert!(message.contains("provider.o'hare"), "{message}");
+        assert!(message.contains("cannot decrypt"), "{message}");
+        assert!(message.contains("Restore the database"), "{message}");
+        // The suggested statement quotes the name safely.
+        assert!(
+            message.contains("WHERE name = 'provider.o''hare'"),
+            "{message}"
+        );
+        assert!(!message.contains(&value), "{message}");
+        assert_eq!(
+            store.deployment_secret("provider.o'hare").await.unwrap(),
+            Some(damaged),
+            "the refusal changed no row"
+        );
+
+        store.put_deployment_secret(&original).await.unwrap();
+        let repaired =
+            DatabaseSecretProvider::open(store.clone(), SecretKey::from_bytes(&bytes).unwrap())
+                .await
+                .unwrap();
+        assert_eq!(
+            repaired.get_secret("provider.o'hare").await.unwrap(),
             Some(value)
         );
     }
@@ -647,11 +844,88 @@ mod tests {
         assert!(missing.contains(KEY_FILE_VARIABLE), "{missing}");
         assert!(missing.contains("absent.key"), "{missing}");
         assert!(missing.contains("no file is there"), "{missing}");
+        // A failed mount must not read as advice to replace the key.
+        assert!(
+            missing.contains("Check that the key file is mounted"),
+            "{missing}"
+        );
+        assert!(missing.contains("never stored secrets"), "{missing}");
 
         // A directory where the file should be cannot be read as one.
         let unreadable = SecretKey::from_file(dir.path()).unwrap_err().to_string();
         assert!(unreadable.contains("could not read"), "{unreadable}");
         assert!(unreadable.contains(KEY_FILE_VARIABLE), "{unreadable}");
+    }
+
+    /// A key file others can change could be swapped for a key they know
+    /// before the first secret is stored, so it is refused, symlink or not.
+    #[cfg(unix)]
+    #[test]
+    fn a_key_file_others_can_change_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let contents = format!("{}\n", encoded(&random_bytes::<KEY_LEN>()));
+        for mode in [0o620, 0o602, 0o622, 0o660, 0o666, 0o646] {
+            let path = key_file(dir.path(), &contents);
+            set_mode(&path, mode);
+            let error = SecretKey::from_file(&path).unwrap_err();
+            assert_eq!(error.kind(), "config");
+            let message = error.to_string();
+            assert!(
+                message.contains("can be changed by accounts"),
+                "{mode:o}: {message}"
+            );
+            assert!(message.contains("chmod 400"), "{mode:o}: {message}");
+            assert!(message.contains(KEY_FILE_VARIABLE), "{mode:o}: {message}");
+        }
+
+        let target = key_file(dir.path(), &contents);
+        set_mode(&target, 0o666);
+        let link = dir.path().join("mounted.key");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let message = SecretKey::from_file(&link).unwrap_err().to_string();
+        assert!(message.contains("can be changed by accounts"), "{message}");
+    }
+
+    /// A key file others can read still loads, with a warning that says how
+    /// to restrict it. A private one loads quietly, including through a
+    /// symlink, whose own mode says nothing about the file it names.
+    #[cfg(unix)]
+    #[test]
+    fn a_key_file_others_can_read_loads_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = random_bytes::<KEY_LEN>();
+        let contents = format!("{}\n", encoded(&bytes));
+        let expected = SecretKey::from_bytes(&bytes).unwrap().id().to_owned();
+
+        for mode in [0o640, 0o604, 0o644, 0o444] {
+            let path = key_file(dir.path(), &contents);
+            set_mode(&path, mode);
+            let (loaded, logged) = load_logging(&path);
+            assert_eq!(loaded.unwrap().id(), expected, "{mode:o}");
+            assert!(logged.contains("WARN"), "{mode:o}: {logged}");
+            assert!(
+                logged.contains("can be read by accounts other than its owner"),
+                "{mode:o}: {logged}"
+            );
+            assert!(logged.contains("chmod 400"), "{mode:o}: {logged}");
+            assert!(!logged.contains(contents.trim()), "{mode:o}: {logged}");
+        }
+
+        for mode in [0o600, 0o400] {
+            let path = key_file(dir.path(), &contents);
+            set_mode(&path, mode);
+            let (loaded, logged) = load_logging(&path);
+            assert_eq!(loaded.unwrap().id(), expected, "{mode:o}");
+            assert_eq!(logged, "", "{mode:o}");
+        }
+
+        let target = key_file(dir.path(), &contents);
+        set_mode(&target, 0o400);
+        let link = dir.path().join("mounted.key");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (loaded, logged) = load_logging(&link);
+        assert_eq!(loaded.unwrap().id(), expected);
+        assert_eq!(logged, "");
     }
 
     #[cfg(unix)]

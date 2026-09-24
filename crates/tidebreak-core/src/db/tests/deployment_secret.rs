@@ -15,7 +15,7 @@ fn sealed(name: &str, key_id: &str, fill: u8, second: i64) -> DeploymentSecret {
 async fn a_secret_round_trips_and_is_replaced_under_its_own_key() {
     let (_dir, store) = temp_store().await;
     assert_eq!(store.deployment_secret("bundle").await.unwrap(), None);
-    assert!(store.deployment_secret_key_ids().await.unwrap().is_empty());
+    assert!(store.deployment_secrets().await.unwrap().is_empty());
 
     let first = sealed("bundle", "key-one", 1, 0);
     assert_eq!(
@@ -34,12 +34,9 @@ async fn a_secret_round_trips_and_is_replaced_under_its_own_key() {
     );
     assert_eq!(
         store.deployment_secret("bundle").await.unwrap(),
-        Some(second)
+        Some(second.clone())
     );
-    assert_eq!(
-        store.deployment_secret_key_ids().await.unwrap(),
-        ["key-one"]
-    );
+    assert_eq!(store.deployment_secrets().await.unwrap(), [second]);
 }
 
 /// A row written under one key is never replaced or removed under another,
@@ -66,13 +63,9 @@ async fn a_row_written_under_another_key_is_never_replaced_or_removed() {
         DeploymentSecretWrite::OtherKey
     );
     assert_eq!(
-        store.deployment_secret("bundle").await.unwrap(),
-        Some(original),
+        store.deployment_secrets().await.unwrap(),
+        [original],
         "the other key's writes left the row exactly as it was"
-    );
-    assert_eq!(
-        store.deployment_secret_key_ids().await.unwrap(),
-        ["key-one"]
     );
 
     assert_eq!(
@@ -93,18 +86,18 @@ async fn a_row_written_under_another_key_is_never_replaced_or_removed() {
     );
 }
 
+/// The boot check reads every row, whatever key wrote it, in a stable order.
 #[tokio::test]
-async fn key_ids_name_each_key_once() {
+async fn every_row_is_listed_by_name() {
     let (_dir, store) = temp_store().await;
-    for secret in [
+    let rows = [
         sealed("b", "key-two", 1, 0),
         sealed("a", "key-one", 2, 0),
         sealed("c", "key-one", 3, 0),
-    ] {
-        store.put_deployment_secret(&secret).await.unwrap();
+    ];
+    for secret in &rows {
+        store.put_deployment_secret(secret).await.unwrap();
     }
-    assert_eq!(
-        store.deployment_secret_key_ids().await.unwrap(),
-        ["key-one", "key-two"]
-    );
+    let [b, a, c] = rows;
+    assert_eq!(store.deployment_secrets().await.unwrap(), [a, b, c]);
 }

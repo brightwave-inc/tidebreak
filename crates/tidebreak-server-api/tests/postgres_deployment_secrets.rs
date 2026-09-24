@@ -16,6 +16,10 @@ use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
 use tidebreak_core::{Config, DbStore, DeploymentSecretWrite, Profile, SecretProvider};
 use tidebreak_server_core::database_secrets::{DatabaseSecretProvider, SecretKey};
 
+/// Each test points `TIDEBREAK_DATABASE_URL` at its own database for the
+/// server it boots, and the variable is process-wide, so they take turns.
+static DATABASE_URL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct EnvRestore {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
@@ -108,6 +112,11 @@ fn write_key_file(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
     let encoded = base64::engine::general_purpose::STANDARD.encode(&key);
     std::fs::write(&path, format!("{encoded}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+    }
     path
 }
 
@@ -198,6 +207,7 @@ async fn rows_holding(url: &str, value: &str) -> i64 {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn postgres_keeps_secrets_encrypted_bound_to_their_name_and_to_one_key() {
+    let _turn = DATABASE_URL_LOCK.lock().await;
     let Some(database) = TestDatabase::create().await else {
         return;
     };
@@ -356,7 +366,16 @@ async fn postgres_keeps_secrets_encrypted_bound_to_their_name_and_to_one_key() {
         store.deployment_secret("provider.test").await.unwrap(),
         Some(row)
     );
-    assert_eq!(store.deployment_secret_key_ids().await.unwrap(), [key_id]);
+    assert_eq!(
+        store
+            .deployment_secrets()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|secret| secret.key_id)
+            .collect::<Vec<_>>(),
+        [key_id]
+    );
 
     // The original key file boots again.
     let again_dir = tempfile::tempdir().unwrap();
@@ -370,6 +389,98 @@ async fn postgres_keeps_secrets_encrypted_bound_to_their_name_and_to_one_key() {
     );
 
     drop(secrets);
+    drop(store);
+    database.drop_database().await;
+}
+
+/// A row the configured key wrote that no longer decrypts, as after a
+/// damaged restore, refuses the real boot and names the secret. Without the
+/// check the server started, and every provider whose credential sat in that
+/// row read as unconfigured.
+#[tokio::test(flavor = "multi_thread")]
+async fn postgres_refuses_to_boot_over_a_row_that_no_longer_decrypts() {
+    let _turn = DATABASE_URL_LOCK.lock().await;
+    let Some(database) = TestDatabase::create().await else {
+        return;
+    };
+    let _database_url = EnvRestore::set("TIDEBREAK_DATABASE_URL", &database.url);
+    let keys = tempfile::tempdir().unwrap();
+    let key_file = write_key_file(keys.path(), "secret.key");
+
+    // Boot once so the server migrates the empty database, then store a
+    // credential the way the server does: in the one bundle row.
+    let first_dir = tempfile::tempdir().unwrap();
+    drop(
+        tidebreak_server::bind(self_host_config(first_dir.path(), &key_file))
+            .await
+            .expect("a self-host server boots with a key file and no stored secrets"),
+    );
+    let store = Arc::new(DbStore::connect(&database.url).await.unwrap());
+    let value = fake_value("bundled");
+    DatabaseSecretProvider::open(store.clone(), SecretKey::from_file(&key_file).unwrap())
+        .await
+        .unwrap()
+        .set_secret(tidebreak_core::BUNDLE_KEY, &value)
+        .await
+        .unwrap();
+    let original = store
+        .deployment_secret(tidebreak_core::BUNDLE_KEY)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Damage the row in place, as a bad restore might, keeping its key id.
+    let connection = Database::connect(&database.url).await.unwrap();
+    let damaged = connection
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE deployment_secrets \
+             SET ciphertext = set_byte(ciphertext, 0, get_byte(ciphertext, 0) # 1) \
+             WHERE name = $1",
+            [tidebreak_core::BUNDLE_KEY.into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(damaged.rows_affected(), 1);
+    connection.close().await.unwrap();
+    let before = store
+        .deployment_secret(tidebreak_core::BUNDLE_KEY)
+        .await
+        .unwrap();
+
+    let damaged_dir = tempfile::tempdir().unwrap();
+    let refusal =
+        match tidebreak_server::bind(self_host_config(damaged_dir.path(), &key_file)).await {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a self-host server booted over a stored secret it cannot decrypt"),
+        };
+    assert!(
+        refusal.contains(tidebreak_core::BUNDLE_KEY) && refusal.contains("cannot decrypt"),
+        "the refusal must name the secret that no longer decrypts: {refusal}"
+    );
+    assert!(
+        refusal.contains("Restore the database"),
+        "the refusal must name the remedy: {refusal}"
+    );
+    assert!(!refusal.contains(&value), "{refusal}");
+    assert_eq!(
+        store
+            .deployment_secret(tidebreak_core::BUNDLE_KEY)
+            .await
+            .unwrap(),
+        before,
+        "the refusal changed no row"
+    );
+
+    // Putting the undamaged row back lets the same key file boot again.
+    store.put_deployment_secret(&original).await.unwrap();
+    let repaired_dir = tempfile::tempdir().unwrap();
+    drop(
+        tidebreak_server::bind(self_host_config(repaired_dir.path(), &key_file))
+            .await
+            .expect("the key file boots once the row decrypts again"),
+    );
+
     drop(store);
     database.drop_database().await;
 }

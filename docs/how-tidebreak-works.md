@@ -853,7 +853,7 @@ explicitly not claimed.
 bundle in the OS keychain. Self-host never opens that keychain. When
 `TIDEBREAK_SECRET_KEY_FILE` names a key file, the server keeps the same bundle
 in its own database, encrypted with AES-256-GCM, and refuses to boot when the
-stored rows were written under another key
+stored rows were written under another key or no longer decrypt
 ([decision 102](decisions/0102-self-host-secrets-in-the-database.md)). When
 `TIDEBREAK_VAULT_ADDR` and `TIDEBREAK_VAULT_TOKEN_FILE` are configured instead,
 the server stores the bundle in HashiCorp Vault KV v2 under the configured
