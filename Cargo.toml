@@ -135,7 +135,7 @@ tracing = "=0.1.44"
 url = { version = "=2.5.8", features = ["serde"] }
 # Image header/decode allowlist codecs shared by server, mcp, code-execution.
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
-dom_smoothie = "=0.18.1"
+dom_smoothie = "=0.18.2"
 # Exact version dom_smoothie builds against; pins move together.
 dom_query = "=0.28.0"
 
