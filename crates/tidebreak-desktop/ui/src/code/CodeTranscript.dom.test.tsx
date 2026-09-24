@@ -577,6 +577,43 @@ describe("CodeTranscript", () => {
     expect(screen.getByText("-const MAX = 10;")).toBeInTheDocument();
   });
 
+  it("folds the diff comments a steer carried the same way", () => {
+    const text = messageWithReviewComments("Stop and fix this.", [
+      {
+        id: "c1",
+        author: { kind: "person" },
+        path: "src/queue.ts",
+        lines: [
+          { kind: "add", oldNo: null, newNo: 23, text: "const MAX = 20;" },
+        ],
+        body: "Why double it?",
+        createdAt: "2026-08-15T00:00:00.000Z",
+      },
+    ]);
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "user",
+            id: "u1",
+            turnId: "t1",
+            text: "Start.",
+            createdAt: "2026-08-15T00:00:00.000Z",
+          },
+          { kind: "steer", id: "s1", turnId: "t1", text },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Stop and fix this.")).toBeInTheDocument();
+    expect(screen.getByText("1 comment on 1 file")).toBeInTheDocument();
+    expect(screen.getByText("queue.ts:23")).toBeInTheDocument();
+    expect(screen.getByText("Why double it?")).toBeInTheDocument();
+    expect(screen.getByText("Steered mid-turn")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/review_comments|The person reviewing/),
+    ).toBeNull();
+  });
+
   it("renders the prompt as markdown with a timestamped footer", () => {
     render(<CodeTranscript items={items} />);
     const prompt = screen.getByRole("article", { name: "You" });

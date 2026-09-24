@@ -681,17 +681,7 @@ const TranscriptItem = memo(function TranscriptItem({
       }
       return <CodeUserMessage item={item} sessionId={sessionId} />;
     case "steer":
-      return (
-        <UserMessage
-          text={item.text}
-          anchorId={item.id}
-          trailing={
-            <p className="text-muted-foreground mt-1 text-xs">
-              Steered mid-turn
-            </p>
-          }
-        />
-      );
+      return <CodeSteerMessage item={item} />;
     case "file_activity":
       return <FileActivityRow files={item.files} onReveal={onReveal} />;
     case "assistant":
@@ -1401,6 +1391,33 @@ function CodeTurnImages({
         width: 0,
         height: 0,
       }))}
+    />
+  );
+}
+
+/**
+ * A message sent into a running turn. Diff comments it carried fold into one
+ * compact block under the prose, as they do under a turn's first message.
+ */
+function CodeSteerMessage({
+  item,
+}: {
+  item: Extract<CodeTranscriptItem, { kind: "steer" }>;
+}) {
+  const { prose, comments } = useMemo(
+    () => splitReviewComments(item.text),
+    [item.text],
+  );
+  return (
+    <UserMessage
+      text={prose}
+      anchorId={item.id}
+      trailing={
+        <>
+          {comments.length > 0 && <ReviewCommentsBlock comments={comments} />}
+          <p className="text-muted-foreground mt-1 text-xs">Steered mid-turn</p>
+        </>
+      }
     />
   );
 }

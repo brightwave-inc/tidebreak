@@ -473,6 +473,77 @@ export const ReviewCommentsOpen: Story = {
   },
 };
 
+const steerWithReviewTurn: CodeTranscriptItem[] = [
+  {
+    kind: "user",
+    id: "user-steer-review",
+    turnId: "turn-steer-review",
+    text: "Move the queue limit into one constant both sides read.",
+    createdAt: "2026-09-24T10:05:00.000Z",
+  },
+  {
+    kind: "assistant",
+    id: "assistant-steer-review",
+    turnId: "turn-steer-review",
+    parentCallId: null,
+    text: "I'll start with the server's constant and point the UI at it.",
+    streaming: false,
+  },
+  {
+    kind: "steer",
+    id: "steer-review",
+    turnId: "turn-steer-review",
+    text: messageWithReviewComments("Before you go on, look at these two.", [
+      {
+        id: "s1",
+        author: { kind: "person" },
+        path: "crates/tidebreak-server/src/code/queue.rs",
+        lines: [
+          {
+            kind: "add",
+            oldNo: null,
+            newNo: 12,
+            text: "pub const MAX_QUEUED_TURNS: usize = 20;",
+          },
+        ],
+        body: "Ten, not twenty. The tray was designed around ten rows.",
+        createdAt: "2026-09-24T10:06:00.000Z",
+      },
+      {
+        id: "s2",
+        author: { kind: "person" },
+        path: "crates/tidebreak-desktop/ui/src/code/sessionQueue.ts",
+        lines: [
+          {
+            kind: "del",
+            oldNo: 22,
+            newNo: null,
+            text: "const MAX_QUEUED = 10;",
+          },
+        ],
+        body: "Keep this one until the server sends its limit.",
+        createdAt: "2026-09-24T10:06:30.000Z",
+      },
+    ]),
+  },
+];
+
+/**
+ * Comments added to a steer fold into the same block as a message's,
+ * above the note that the turn was steered.
+ */
+export const ReviewCommentsInASteer: Story = {
+  args: { items: steerWithReviewTurn },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.findByText("2 comments on 2 files"),
+    ).resolves.toBeVisible();
+    await expect(canvas.findByText("Steered mid-turn")).resolves.toBeVisible();
+    await expect(canvas.queryByText(/review_comments/)).toBeNull();
+  },
+};
+
 export const Notices: Story = {
   args: {
     onFileIssue: fn(),
