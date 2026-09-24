@@ -4495,6 +4495,131 @@ auto: boolean, };
 export type MessageId = string;
 
 /**
+ * One message, event, or tool call that matched a search.
+ */
+export type MessageSearchHit = {
+/**
+ * Whether the hit is in a Work chat or a code session.
+ */
+kind: MessageSearchKind,
+/**
+ * The chat or code session that holds the hit.
+ */
+session_id: SessionId,
+/**
+ * The workspace a code session belongs to, when it has one.
+ */
+workspace_id?: WorkspaceId,
+/**
+ * The conversation's title, or its workspace's title when the session
+ * has none of its own. Absent for a conversation nobody has named yet.
+ */
+title?: string,
+/**
+ * The turn that holds the hit, as the transcript shows it.
+ */
+turn_id?: TurnId,
+/**
+ * The chat message to scroll to. Chat hits only.
+ */
+message_id?: MessageId,
+/**
+ * The code journal event to scroll to: its sequence number in the
+ * session's journal. Code hits from the journal only; a hit on a code
+ * turn's input carries `turn_id` alone.
+ */
+event_seq?: number,
+/**
+ * Who wrote the matched text.
+ */
+source: MessageSearchSource,
+/**
+ * Plain text around the first match, never markup. It starts or ends
+ * with `…` where it was cut.
+ */
+snippet: string,
+/**
+ * The matched words in `snippet`, in order.
+ */
+ranges: Array<MessageSearchRange>,
+/**
+ * When the matched message or event was written.
+ */
+created_at: string,
+/**
+ * Whether the conversation, or the workspace a code session belongs to,
+ * is archived.
+ */
+archived: boolean, };
+
+/**
+ * How far the index has caught up with conversations that existed before
+ * it did.
+ */
+export type MessageSearchIndexing = {
+/**
+ * `true` once every one of the caller's older conversations is in the
+ * index. `false` while some are still being added, and when some could
+ * not be added; until then a search can miss matches in them.
+ */
+complete: boolean,
+/**
+ * How many of the caller's conversations are still waiting to be added,
+ * including any waiting to try again after a failed attempt.
+ */
+pending_conversations: number,
+/**
+ * How many of the caller's older conversations could not be added after
+ * repeated attempts. What was said in them before the index existed is
+ * not searchable; what is said in them now is.
+ */
+failed_conversations: number, };
+
+/**
+ * Which kind of conversation a hit belongs to.
+ */
+export type MessageSearchKind = "chat" | "code";
+
+/**
+ * One page of search results, newest match first.
+ */
+export type MessageSearchPage = {
+/**
+ * The matches on this page.
+ */
+hits: Array<MessageSearchHit>,
+/**
+ * Pass this back as `cursor` to read the next page. Absent on the last
+ * page.
+ */
+next_cursor?: string,
+/**
+ * Whether the index covers every conversation yet.
+ */
+indexing: MessageSearchIndexing, };
+
+/**
+ * One matched word in a snippet.
+ *
+ * `start` and `end` count UTF-16 code units into the snippet, so
+ * `snippet.slice(start, end)` in JavaScript is the matched text.
+ */
+export type MessageSearchRange = {
+/**
+ * First code unit of the match.
+ */
+start: number,
+/**
+ * One past the last code unit of the match.
+ */
+end: number, };
+
+/**
+ * Who wrote the matched text.
+ */
+export type MessageSearchSource = "user" | "assistant" | "tool";
+
+/**
  * A selectable model in the catalog.
  */
 export type ModelInfo = {

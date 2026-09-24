@@ -473,6 +473,16 @@ impl Store for MemStore {
     async fn get_chat(&self, id: SessionId) -> Result<Option<Chat>> {
         Ok(self.chats.lock().unwrap().get(&id).cloned())
     }
+    async fn search_messages_scoped(
+        &self,
+        _owner: &crate::model::OwnerId,
+        _request: &crate::message_search::MessageSearchRequest,
+    ) -> Result<crate::message_search::MessageSearchPage> {
+        Err(AgentError::Store(
+            "message search is not implemented by this Store".into(),
+        ))
+    }
+
     async fn list_chats(&self) -> Result<Vec<Chat>> {
         Ok(self.chats.lock().unwrap().values().cloned().collect())
     }

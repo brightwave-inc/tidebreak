@@ -95,6 +95,7 @@ mod lifecycle;
 #[cfg(feature = "keychain")]
 mod listener;
 mod memory;
+mod message_search;
 mod outputs;
 mod renderer_errors;
 mod root_attachment;
@@ -899,6 +900,13 @@ impl PauseTerminalStore {
 impl Store for PauseTerminalStore {
     async fn create_project(&self, project: &Project) -> Result<()> {
         self.inner.create_project(project).await
+    }
+    async fn search_messages_scoped(
+        &self,
+        owner: &tidebreak_core::OwnerId,
+        request: &tidebreak_core::MessageSearchRequest,
+    ) -> Result<tidebreak_core::MessageSearchPage> {
+        self.inner.search_messages_scoped(owner, request).await
     }
     async fn get_project(&self, id: ProjectId) -> Result<Option<Project>> {
         let project = self.inner.get_project(id).await?;

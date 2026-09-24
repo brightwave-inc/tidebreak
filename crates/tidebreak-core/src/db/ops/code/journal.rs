@@ -241,26 +241,39 @@ pub(in crate::db) async fn insert_event_row_on<C>(
 where
     C: ConnectionTrait,
 {
-    entities::event::Entity::insert(event_row(owner, session_id, seq, event))
+    let created_at = Utc::now();
+    // Only an event that can carry searchable text is kept for the index.
+    let searchable =
+        super::super::message_search::indexed_event_type(&event).then(|| event.clone());
+    entities::event::Entity::insert(event_row_at(owner, session_id, seq, event, created_at))
         .exec_without_returning(conn)
         .await
         .map_err(store_err)?;
+    if let Some(event) = searchable {
+        super::super::message_search::index_code_events_on(
+            conn,
+            session_id,
+            &[(seq, &event, created_at)],
+        )
+        .await?;
+    }
     Ok(())
 }
 
-/// One code-journal row, ready to insert.
-pub(in crate::db) fn event_row(
+/// One code-journal row, ready to insert, stamped `created_at`.
+pub(in crate::db) fn event_row_at(
     owner: &OwnerId,
     session_id: SessionId,
     seq: i64,
     event: serde_json::Value,
+    created_at: chrono::DateTime<Utc>,
 ) -> entities::event::ActiveModel {
     entities::event::ActiveModel {
         owner: Set(owner.as_str().to_owned()),
         session_id: Set(session_id.0),
         seq: Set(seq),
         event: Set(event),
-        created_at: Set(Utc::now()),
+        created_at: Set(created_at),
         // The chat lane's recovery receipts; an engine fenced by its spawn
         // epoch writes none.
         turn_id: Set(None),

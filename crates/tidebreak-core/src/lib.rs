@@ -89,6 +89,7 @@ pub mod keychain;
 pub mod local_app;
 pub mod memory;
 pub mod memory_tool;
+pub mod message_search;
 pub mod model;
 pub mod permission;
 pub use permission::PermissionMode;
@@ -336,6 +337,10 @@ pub use memory::{
 pub use memory_tool::{
     memory_tool_spec, parse_memory_tool_arguments, MemoryToolArgs, MemoryToolVerb, MEMORY_TOOL,
     MEMORY_TOOL_SEARCH_LIMIT,
+};
+pub use message_search::{
+    MessageSearchCursor, MessageSearchHit, MessageSearchIndexing, MessageSearchKind,
+    MessageSearchPage, MessageSearchRange, MessageSearchRequest, MessageSearchSource,
 };
 pub use model::{
     exec_attachment_file_name, turns_outside_conversation, AgentRun, AgentRunCancellationReason,

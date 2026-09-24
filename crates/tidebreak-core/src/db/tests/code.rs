@@ -288,7 +288,7 @@ async fn repository_transcript_search_survives_workspace_release() {
 /// Seed one owner's whole code-mode graph into an existing store: repo,
 /// workspace, session, turn. Two calls with different owners give the
 /// cross-owner fixture the isolation tests need.
-async fn seed_owner(
+pub(super) async fn seed_owner(
     store: &crate::db::DbStore,
     owner: &OwnerId,
     label: &str,

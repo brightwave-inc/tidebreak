@@ -68,6 +68,7 @@ futures-timer = "=3.0.4"
 thiserror = "=2.0.20"
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }
 unicode-general-category = "=1.1.0"
+unicode-normalization = "=0.1.25"
 chrono = { version = "=0.4.45", features = ["serde"] }
 # Generates the renderer's TypeScript wire types from these serde definitions.
 # `serde-compat` is what makes the output trustworthy: ts-rs reads the same

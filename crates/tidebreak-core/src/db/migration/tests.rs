@@ -117,6 +117,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260923_000004_pull_request_observed_times",
             "m20260923_000005_conversation_list_state",
             "m20260924_000003_turn_versions_and_branches",
+            "m20260924_000004_message_search",
         ]
     );
     assert!(db
@@ -198,6 +199,88 @@ VALUES
             (None, None, None, None, None),
         ]
     );
+}
+
+/// An upgraded profile's history joins the message index. The migration
+/// queues each session that had a turn, a search says the index is still
+/// catching up, and the backfill makes the old messages searchable.
+#[tokio::test]
+async fn the_message_search_migration_queues_existing_history_for_the_backfill() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("upgrade.db").display()
+    );
+    let db = Database::connect(&url).await.unwrap();
+    Migrator::up(&db, Some(steps_before("m20260924_000004_message_search")))
+        .await
+        .unwrap();
+    db.execute_unprepared(
+        r#"
+INSERT INTO session (
+id, owner, workspace_id, kind, harness_kind, permission_mode, lifecycle,
+spawn_epoch, attention_state, attention_source, created_at, title
+) VALUES
+(X'0000000000000000000000000000f101', 'local', NULL, 'interactive', 'internal',
+ 'ask', 'idle', 0, '{"type":"idle"}', 'lifecycle', '2026-08-01T00:00:00Z', 'harbour'),
+(X'0000000000000000000000000000f102', 'local', NULL, 'interactive', 'internal',
+ 'ask', 'idle', 0, '{"type":"idle"}', 'lifecycle', '2026-08-02T00:00:00Z', NULL);
+INSERT INTO turn (id, owner, session_id, ordinal, status, user_input, started_at, ended_at)
+VALUES
+(X'0000000000000000000000000000f111', 'local', X'0000000000000000000000000000f101',
+ 1, 'completed', 'where is the harbour', '2026-09-01T00:00:00Z', '2026-09-01T00:05:00Z');
+INSERT INTO message (id, chat_id, turn_id, seq, role, content, created_at)
+VALUES
+(X'0000000000000000000000000000f121', X'0000000000000000000000000000f101',
+ X'0000000000000000000000000000f111', 1, 'user', 'where is the harbour',
+ '2026-09-01T00:00:00Z'),
+(X'0000000000000000000000000000f122', X'0000000000000000000000000000f101',
+ X'0000000000000000000000000000f111', 2, 'assistant', 'The harbour is north.',
+ '2026-09-01T00:00:01Z');
+"#,
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(&db, None).await.unwrap();
+    // The session with no turn has nothing to index, so nothing queues it.
+    assert_eq!(count(&db, "message_search_backfill").await, 1);
+    assert_eq!(count(&db, "message_search").await, 0);
+    db.close().await.unwrap();
+
+    let store = crate::db::DbStore::connect(&url).await.unwrap();
+    let owner = crate::OwnerId::local();
+    let request = crate::MessageSearchRequest {
+        query: "harbour".into(),
+        limit: 10,
+        cursor: None,
+    };
+    let page = crate::Store::search_messages_scoped(&store, &owner, &request)
+        .await
+        .unwrap();
+    assert!(page.hits.is_empty());
+    assert!(!page.indexing.complete);
+    assert_eq!(page.indexing.pending_conversations, 1);
+
+    assert_eq!(store.backfill_message_search(10).await.unwrap().waiting, 0);
+    let page = crate::Store::search_messages_scoped(&store, &owner, &request)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.hits
+            .iter()
+            .map(|hit| (hit.source, hit.snippet.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                crate::MessageSearchSource::Assistant,
+                "The harbour is north."
+            ),
+            (crate::MessageSearchSource::User, "where is the harbour"),
+        ]
+    );
+    assert!(page.indexing.complete);
+    store.close().await.unwrap();
 }
 
 #[tokio::test]

@@ -224,6 +224,18 @@ fn sqlite_read_policy(
 }
 
 impl DbStore {
+    /// Add the history of up to `sessions` conversations that predate the
+    /// message index, newest activity first, and answer where the backfill
+    /// stands. A conversation that fails is tried again later, and given up
+    /// on after repeated failures. The server calls this until nothing is
+    /// waiting, sleeping until the next attempt is due when none is due now.
+    pub async fn backfill_message_search(
+        &self,
+        sessions: u64,
+    ) -> Result<crate::message_search::MessageSearchBackfill> {
+        ops::message_search::backfill(self, sessions, Utc::now()).await
+    }
+
     fn from_connection(conn: StoreConnection) -> Self {
         Self {
             conn,
@@ -1288,6 +1300,14 @@ impl Store for DbStore {
         memory_incognito: bool,
     ) -> Result<bool> {
         ops::conversation::set_chat_memory_incognito(self, id, memory_incognito, Some(owner)).await
+    }
+
+    async fn search_messages_scoped(
+        &self,
+        owner: &OwnerId,
+        request: &crate::message_search::MessageSearchRequest,
+    ) -> Result<crate::message_search::MessageSearchPage> {
+        ops::message_search::search_messages(self, owner, request).await
     }
 
     async fn update_chat_metadata_scoped(

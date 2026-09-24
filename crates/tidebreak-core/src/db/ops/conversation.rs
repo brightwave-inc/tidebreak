@@ -579,12 +579,24 @@ pub(in crate::db) async fn update_chat_metadata(
 /// A targeted column write rather than another `update_chat_metadata`
 /// parameter: the switch has no tri-state and no sticky default, and keeping
 /// it out of that signature spares every caller a positional `None`.
+/// Memory incognito keeps a conversation out of every derived store, the
+/// message index included: turning it on removes the conversation from
+/// search, and turning it off adds its history back, in the same transaction
+/// as the flag.
 pub(in crate::db) async fn set_chat_memory_incognito(
     store: &DbStore,
     id: SessionId,
     memory_incognito: bool,
     owner: Option<&OwnerId>,
 ) -> Result<bool> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let was_incognito = entities::session::Entity::find_by_id(id.0)
+        .select_only()
+        .column(entities::session::Column::MemoryIncognito)
+        .into_tuple::<bool>()
+        .one(&transaction)
+        .await
+        .map_err(store_err)?;
     let mut update = entities::session::Entity::update_many()
         .col_expr(
             entities::session::Column::MemoryIncognito,
@@ -596,8 +608,20 @@ pub(in crate::db) async fn set_chat_memory_incognito(
             .filter(entities::session::Column::Owner.eq(owner.as_str()))
             .filter(internal_sessions());
     }
-    let result = update.exec(&store.conn).await.map_err(store_err)?;
-    Ok(result.rows_affected == 1)
+    let result = update.exec(&transaction).await.map_err(store_err)?;
+    if result.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    if was_incognito != Some(memory_incognito) {
+        if memory_incognito {
+            super::message_search::clear_session_on(&transaction, id).await?;
+        } else {
+            super::message_search::rebuild_session_on(&transaction, id).await?;
+        }
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(true)
 }
 
 pub(in crate::db) async fn get_chat(
@@ -1078,6 +1102,12 @@ pub(in crate::db) const CHAT_REFERENCES: &[(&str, &str)] = &[
     ("exec_file_change", "chat_id"),
     ("message", "chat_id"),
     ("message_identity", "chat_id"),
+    // Search rows and the turn a journal is in exist only beside messages or
+    // events, which already keep a conversation. A queued backfill exists
+    // only for a conversation with a turn, which keeps it too.
+    ("message_search", "session_id"),
+    ("message_search_backfill", "session_id"),
+    ("message_search_turn", "session_id"),
     ("output", "chat_id"),
     ("root_attachment_change", "chat_id"),
     ("sandbox_spawn_checkpoint", "session_id"),
@@ -2290,6 +2320,7 @@ pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) ->
         transaction.rollback().await.map_err(store_err)?;
         return Err(store_err(error));
     }
+    super::message_search::index_chat_message_on(&transaction, message.id).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(())
 }

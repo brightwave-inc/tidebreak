@@ -195,6 +195,8 @@ pub(in crate::db) async fn branch_chat(
         &point,
     )
     .await?;
+    // The copied history is searchable from the moment the branch exists.
+    super::message_search::rebuild_session_on(&transaction, branch).await?;
 
     transaction.commit().await.map_err(store_err)?;
     Ok(BranchChatOutcome::Branched {

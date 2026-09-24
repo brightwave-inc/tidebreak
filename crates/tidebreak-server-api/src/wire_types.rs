@@ -431,6 +431,9 @@ mod tests {
         generate::collect_from::<crate::routes::MemoryStatusBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::MemoryIngestBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::MemoryDeleteAllResult>(&cfg, &mut out);
+        // Message search: one page of hits across the caller's chats and
+        // code sessions, with how far the index has caught up.
+        generate::collect_from::<tidebreak_core::MessageSearchPage>(&cfg, &mut out);
         // Data and privacy: where the profile lives and its disk use, and the
         // conversation export request the settings page sends.
         generate::collect_from::<crate::profile_data::DataOverview>(&cfg, &mut out);

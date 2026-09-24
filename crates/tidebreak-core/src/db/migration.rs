@@ -36,6 +36,7 @@ mod idens;
 mod incarnation_wip_time;
 mod managed_decision;
 mod memory_evidence_kind;
+mod message_search;
 mod native_tool_receipt;
 mod native_turn_identity;
 mod notification_body;
@@ -139,6 +140,7 @@ impl MigratorTrait for Migrator {
             Box::new(pull_request_observed_times::PullRequestObservedTimes),
             Box::new(conversation_list_state::ConversationListState),
             Box::new(turn_versions_and_branches::TurnVersionsAndBranches),
+            Box::new(message_search::MessageSearch),
         ]
     }
 }

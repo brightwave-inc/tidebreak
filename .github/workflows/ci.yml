@@ -843,6 +843,7 @@ jobs:
           --test postgres_document_blob
           --test postgres_code_owner
           --test postgres_release_upgrade
+          --test postgres_message_search
           --locked
       - name: Exercise self-host store ownership on PostgreSQL
         run: >-

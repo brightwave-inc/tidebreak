@@ -101,6 +101,15 @@ where
     .await
     .map_err(store_err)?;
     insert_attachments_on(conn, owner, turn.id, &turn.attachments).await?;
+    super::super::message_search::index_code_turn_input_on(
+        conn,
+        turn.session_id,
+        turn.id,
+        &turn.user_input,
+        turn.started_at,
+        false,
+    )
+    .await?;
     // Every turn the runtime starts, a Slack message or a queued one
     // included, moves the conversation in its owner's list the way a turn
     // from the chat routes does.
@@ -478,7 +487,29 @@ pub async fn next_turn_ordinal(
 /// from a stale snapshot would blank a recap or rewrite that had already been
 /// stored, so each column has exactly one writer: [`set_turn_narrative`] and
 /// [`set_turn_rewrite`].
+///
+/// The input is searchable, so a write that changes it re-indexes it in the
+/// same transaction, under the session's row lock. A rebuild of the session's
+/// index holds that lock too, so it never reads the old input and writes it
+/// back over the new one.
 pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &Turn) -> Result<bool> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let stored = entities::turn::Entity::find_by_id(turn.id.0)
+        .select_only()
+        .column(entities::turn::Column::SessionId)
+        .column(entities::turn::Column::UserInput)
+        .column(entities::turn::Column::StartedAt)
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .into_tuple::<(uuid::Uuid, String, chrono::DateTime<chrono::Utc>)>()
+        .one(&transaction)
+        .await
+        .map_err(store_err)?;
+    if let Some((session_id, stored_input, _)) = &stored {
+        // Session before turn, the order every other writer takes them in.
+        if *stored_input != turn.user_input {
+            acquire_session_write_lock(&transaction, *session_id).await?;
+        }
+    }
     let result = entities::turn::Entity::update_many()
         .col_expr(
             entities::turn::Column::Status,
@@ -527,9 +558,23 @@ pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &Turn) -> Result<
         )
         .filter(entities::turn::Column::Id.eq(turn.id.0))
         .filter(entities::turn::Column::Owner.eq(owner.as_str()))
-        .exec(&store.conn)
+        .exec(&transaction)
         .await
         .map_err(store_err)?;
+    if let Some((session_id, stored_input, started_at)) = stored {
+        if result.rows_affected == 1 && stored_input != turn.user_input {
+            super::super::message_search::index_code_turn_input_on(
+                &transaction,
+                SessionId(session_id),
+                turn.id,
+                &turn.user_input,
+                started_at,
+                true,
+            )
+            .await?;
+        }
+    }
+    transaction.commit().await.map_err(store_err)?;
     Ok(result.rows_affected == 1)
 }
 

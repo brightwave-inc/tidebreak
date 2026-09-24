@@ -264,6 +264,24 @@ async fn cross_principal_rest_surface_is_disjoint() {
     .await;
     assert!(!transcript["messages"].as_array().unwrap().is_empty());
 
+    // Search reads only the caller's own conversations: Alice finds her
+    // message, and Bob's search for the same word answers the page an empty
+    // account gets.
+    let found: serde_json::Value =
+        json_body(request(&router, "GET", "/search/messages?q=hello", &alice, None).await).await;
+    assert_eq!(found["hits"][0]["session_id"], chat.id.to_string());
+    let hidden: serde_json::Value =
+        json_body(request(&router, "GET", "/search/messages?q=hello", &bob, None).await).await;
+    assert_eq!(hidden["hits"], serde_json::json!([]));
+    assert_eq!(
+        hidden["indexing"],
+        serde_json::json!({
+            "complete": true,
+            "pending_conversations": 0,
+            "failed_conversations": 0,
+        })
+    );
+
     // Bob's lists are empty — not filtered views that leak counts, but the
     // same responses an empty account gets.
     for uri in ["/chats", "/projects"] {
@@ -755,6 +773,7 @@ fn member_plane_routes() -> Vec<(&'static str, &'static str)> {
         ("GET", "/voice-transcription"),
         ("GET", "/chats"),
         ("GET", "/chats?archived=true"),
+        ("GET", "/search/messages?q=hello"),
         ("GET", "/projects"),
         ("GET", "/documents"),
         ("GET", "/inbox"),

@@ -28,6 +28,7 @@ pub(in crate::db) mod memory;
 pub(in crate::db) mod memory_sweep;
 pub(in crate::db) mod message_attachment;
 pub(in crate::db) mod message_document_attachment;
+pub(in crate::db) mod message_search;
 pub(in crate::db) mod notification;
 pub(in crate::db) mod operation_log;
 pub(in crate::db) mod output;
