@@ -136,9 +136,11 @@ usage: tidebreak serve
        tidebreak mcp <workspace>
        tidebreak rehome-secrets
 
-serve runs the Tidebreak HTTP server. mcp serves read-only filesystem tools
-over MCP stdio, confined to the given workspace. rehome-secrets rewrites
-desktop-profile credentials so they belong to this binary's code signature.";
+serve runs the Tidebreak HTTP server over TIDEBREAK_DATA_DIR, or over the
+Tidebreak app's data when that is unset, so it cannot run while the app does.
+mcp serves read-only filesystem tools over MCP stdio, confined to the given
+workspace. rehome-secrets rewrites desktop-profile credentials so they belong
+to this binary's code signature.";
 
 const PRINT_USAGE: &str = "\
 usage: tidebreak -p <prompt> [--chat <id>] [--output-format text|json]
@@ -150,7 +152,7 @@ usage: tidebreak -p <prompt> [--chat <id>] [--output-format text|json]
 --permission-mode sets the chat's permission mode for the run. --model pins
 the chat's model selection before the turn.
 
--p also takes --server <url> [--server-token-env <var>] or --attach.";
+-p also takes --server <url> [--server-token-env <var>], --attach, or --embed.";
 
 const OUTPUT_USAGE: &str = "\
 usage: tidebreak output list <chat> [--output-format text|json]
@@ -160,7 +162,8 @@ usage: tidebreak output list <chat> [--output-format text|json]
        tidebreak attach <chat> <file>
 
 output reads a conversation's outputs. attach puts a local file into a
-conversation. Both take --server <url> [--server-token-env <var>] or --attach.";
+conversation. Both take --server <url> [--server-token-env <var>], --attach,
+or --embed.";
 
 const SETUP_USAGE: &str = "\
 usage: tidebreak provider list
@@ -193,8 +196,8 @@ usage: tidebreak provider list
 
 These commands configure the profile the same way the desktop settings pages
 do. They take --output-format text|json, and --server <url>
-[--server-token-env <var>] or --attach. A key is read from stdin, or from
-the environment variable named by --from-env — never from an argument.";
+[--server-token-env <var>], --attach, or --embed. A key is read from stdin, or
+from the environment variable named by --from-env — never from an argument.";
 
 const DIAGNOSTICS_USAGE: &str = "\
 usage: tidebreak diagnostics snapshot
@@ -204,7 +207,8 @@ usage: tidebreak diagnostics snapshot
 diagnostics reads process measurements and local log tails from the server.
 export writes a ZIP for performance investigations; it does not read
 conversations, databases, blobs, attachments, or credential stores.
-These commands take --server <url> [--server-token-env <var>] or --attach.";
+These commands take --server <url> [--server-token-env <var>], --attach, or
+--embed.";
 
 const PLUGINS_USAGE: &str = "\
 usage: tidebreak plugins install --git <url> --ref <tag-or-sha> [--json]
@@ -213,7 +217,7 @@ plugins install fetches one public HTTPS Git repository at a pinned tag or
 full commit SHA and imports it as an instruction-only plugin. A moving
 branch is refused. The plugin's files run with the agent's permissions.
 --json prints one object stamped with schema_version. These commands take
---server <url> [--server-token-env <var>] or --attach.";
+--server <url> [--server-token-env <var>], --attach, or --embed.";
 
 const FOLDER_USAGE: &str = "\
 usage: tidebreak folder connect <path> --chat <id> [--output-format text|json]
@@ -221,9 +225,9 @@ usage: tidebreak folder connect <path> --chat <id> [--output-format text|json]
        tidebreak folder disconnect <path-or-root-id> --chat <id> [--output-format text|json]
 
 folder records standing consent for a host folder. These commands do not
-take --server/--attach: they provision local host consent in this machine's
-own broker and product store, and they can run while serve or the desktop
-already owns the data directory.";
+take --server, --attach, or --embed: they provision local host consent in the
+profile's own broker and product store, and they can run while serve or the
+desktop already owns the data directory.";
 
 /// Short usage for the `code` family. Parse errors print this instead of the
 /// whole CLI surface.
@@ -264,7 +268,8 @@ Every verb takes --json (or --output-format json). run and watch stream NDJSON
 under --json. --timeout is seconds. watch --once prints the connect snapshot
 and exits. session start without --mode uses the first mode the engine supports:
 allow, auto, ask, then plan. Pass --mode ask to require approval prompts.
-The code family also takes --server <url> [--server-token-env <var>] or --attach.";
+The code family also takes --server <url> [--server-token-env <var>], --attach,
+or --embed.";
 
 /// Usage text shown for `tidebreak browser` (and `browser-mcp`).
 const BROWSER_USAGE: &str = "\
@@ -318,9 +323,10 @@ const AGENT_MCP_USAGE: &str = "\
 usage: tidebreak agent-mcp
 
 agent-mcp serves chat-mode tools over MCP stdio so an external agent can
-drive a running Tidebreak over the attach contract. Unlike mcp and
-browser-mcp it accepts --server / --attach: it is a client, the same way
--p is.";
+drive a running Tidebreak over the attach contract. With no flags it connects
+to the Tidebreak app. Unlike mcp and browser-mcp it accepts --server and
+--attach: it is a client, the same way -p is. It runs a server of its own
+only with --embed, even when TIDEBREAK_DATA_DIR is set.";
 
 const SHARED_NOTES: &str = "\
 The setup commands, the output family, the folder commands, and the code
@@ -329,16 +335,25 @@ A key is read from stdin, or from the environment variable named by
 --from-env — never from an argument, which every process on the machine
 can read.
 
--p, output, attach, diagnostics, agent-mcp, the setup commands, and the code
-family also take --server <url> [--server-token-env <var>] or --attach, which
-talks to a server that is already running instead of embedding one. --attach
-reads {TIDEBREAK_DATA_DIR}/listen.json (written by serve and the desktop).
-With --server the token comes from TIDEBREAK_SERVER_TOKEN, or from the named
+Which data the CLI uses: with TIDEBREAK_DATA_DIR unset, every command works on
+the Tidebreak app's own data. -p, output, attach, diagnostics, agent-mcp,
+plugins, the setup commands, and the code family connect to the app while it
+runs, and stop with what to do next when it does not. --embed runs a server in
+this process over the app's data instead. Set TIDEBREAK_DATA_DIR to work on a
+separate profile in that folder: commands then run their own server over it,
+except agent-mcp, which needs --attach, --server, or --embed. A separate
+profile keeps its credentials apart from the app's. Nothing uses the current
+directory.
+
+--server <url> [--server-token-env <var>] talks to a server that is already
+running instead. --attach reads {TIDEBREAK_DATA_DIR}/listen.json (written by
+serve and the desktop), or the app's when TIDEBREAK_DATA_DIR is unset. With
+--server the token comes from TIDEBREAK_SERVER_TOKEN, or from the named
 variable; it is never an argument either. Remote server URLs must use https;
 http is accepted only for a loopback host. The folder commands do not take
---server/--attach: they provision local host consent in this machine's own
-broker and product store, and they can run while serve or the desktop already
-owns the data directory.
+--server, --attach, or --embed: they provision local host consent in the
+profile's own broker and product store, and they can run while serve or the
+desktop already owns the data directory.
 
 Browser, computer, browser-mcp, and computer-mcp run inside a Tidebreak
 session. They read a session-private capfile and do not take --server/--attach.";

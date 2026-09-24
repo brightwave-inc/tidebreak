@@ -214,3 +214,28 @@ agent wanders.
 WebSocket API internal until a versioned API exists. The CLI, its flags, exit
 codes, and JSON output, and the `-p` stdin decision protocol are the stable
 surface for 1.x.
+
+## Amended 2026-09-23: which profile the CLI uses
+
+Section 6 kept an embed-by-default CLI over "its own data dir". With no
+`TIDEBREAK_DATA_DIR`, that directory was `./.tidebreak` under wherever a
+command ran, and the embedded profile read and wrote the desktop app's keychain
+item. A command run from a project folder started an empty profile there, and
+a key set from it rewrote the app's credentials. The isolation section 6 relied
+on held for chats but not for credentials.
+
+The CLI now decides the profile this way:
+
+- With `TIDEBREAK_DATA_DIR` unset, the profile is the desktop app's own. A
+  client command connects to the app through its `listen.json`, and stops with
+  what to do next when the app is not running. `--embed` runs the server
+  in-process over the app's data instead.
+- With `TIDEBREAK_DATA_DIR` set, commands embed over that directory, as
+  section 6 describes. That profile keeps its credentials under a keychain
+  service of its own ([decision 56](0056-one-credential-item-per-profile.md)).
+- `agent-mcp` embeds only with `--embed`.
+- Nothing defaults to the current directory, and a bare `tidebreak` prints
+  help rather than running `serve`.
+
+An embedded profile of its own stays the shape for agents trying things out.
+Naming the directory is what makes it theirs.

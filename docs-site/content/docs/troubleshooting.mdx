@@ -57,8 +57,9 @@ cargo run -p tidebreak-cli -- rehome-secrets
 ## The app will not start, or reports the data directory is in use
 
 One process owns the application data directory at a time, enforced with a
-lock file. Close the other instance — including a headless `tidebreak serve`
-pointed at the same directory.
+lock file. Close the other instance — including a headless `tidebreak serve`,
+or a CLI command run with `--embed`, started without `TIDEBREAK_DATA_DIR`:
+both use the app's data directory.
 
 ## Chats disappeared after an update
 
@@ -93,6 +94,26 @@ To restore a backup:
 You opened an older version of Tidebreak than the one that last used this
 profile. Tidebreak changes nothing and stops. Install the newer version again,
 or restore a backup from `backups/` with the steps above.
+
+A CLI you built from source counts as a version too. If it is newer than the
+app and you ran `tidebreak serve` or a command with `--embed` without
+`TIDEBREAK_DATA_DIR`, it upgraded the app's database. See
+[Running headless](/headless#a-newer-cli-upgrades-the-apps-data).
+
+## Keys are missing from a CLI profile after an update
+
+A profile you name with `TIDEBREAK_DATA_DIR` used to share the app's keychain
+entry. It now has an entry of its own, and after the update that entry is
+empty. To copy the keys the profile stored before into it, run this once:
+
+```sh
+TIDEBREAK_DATA_DIR=/path/to/profile tidebreak rehome-secrets
+```
+
+The app's entry stays as it is. The copy holds the app's keys too, because the
+two shared one entry; remove any the profile should not use with
+`tidebreak provider remove-key`. See
+[Running headless](/headless#upgrading-from-an-earlier-version).
 
 ## Closing the window did not quit Tidebreak
 

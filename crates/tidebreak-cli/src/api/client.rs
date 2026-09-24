@@ -2,7 +2,6 @@
 //! consumes.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
@@ -20,6 +19,7 @@ use super::wire::{
     DeliverablePreview, DeliverablesCatalog, ModelCatalog, OutputRevisionsCatalog,
     PendingPlanApproval, PendingUserQuestions, ProviderInfo, ProvidersList, ServerVersion,
 };
+use crate::connect::ListenSource;
 
 /// The chat event stream once the upgrade completes.
 pub type EventSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -29,10 +29,13 @@ pub type EventSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
+    /// The same transport without the bearer, for the one request that goes
+    /// out before a server has shown it is the one the bearer belongs to.
+    anonymous: reqwest::Client,
     base: String,
     token: String,
     local_import_token: Option<String>,
-    listen_data_dir: Option<PathBuf>,
+    listen_source: Option<ListenSource>,
 }
 
 /// The error body every route answers with on failure.
@@ -132,13 +135,13 @@ impl Client {
         Self::attach_with_reconnect_source(base, token, local_import_token, None)
     }
 
-    /// Attach to a server and remember the profile whose `listen.json` owns
-    /// its rotating endpoint credentials.
+    /// Attach to a server and remember the `listen.json` that owns its
+    /// rotating endpoint credentials.
     pub fn attach_with_reconnect_source(
         base: String,
         token: &str,
         local_import_token: Option<&str>,
-        listen_data_dir: Option<PathBuf>,
+        listen_source: Option<ListenSource>,
     ) -> Result<Self> {
         let base = validated_server_base_url(&base)?;
         let mut headers = reqwest::header::HeaderMap::new();
@@ -146,41 +149,42 @@ impl Client {
             .map_err(|error| AgentError::msg(format!("invalid server token: {error}")))?;
         value.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, value);
-        let mut http = reqwest::Client::builder()
-            .default_headers(headers)
+        let loopback = server_url_is_loopback(&base);
+        let build = |builder: reqwest::ClientBuilder| {
             // A same-host HTTPS-to-HTTP redirect would otherwise resend the
             // bearer over cleartext. Tidebreak routes never redirect.
-            .redirect(reqwest::redirect::Policy::none());
-        if server_url_is_loopback(&base) {
+            let builder = builder.redirect(reqwest::redirect::Policy::none());
             // Ambient HTTP_PROXY must not intercept loopback: a proxy that
             // claims 127.0.0.1 black-holes `serve` and `--attach`.
-            http = http.no_proxy();
-        }
-        let http = http.build().map_err(|error| {
-            AgentError::msg(format!("could not build the HTTP client: {error}"))
-        })?;
+            let builder = if loopback {
+                builder.no_proxy()
+            } else {
+                builder
+            };
+            builder.build().map_err(|error| {
+                AgentError::msg(format!("could not build the HTTP client: {error}"))
+            })
+        };
+        let http = build(reqwest::Client::builder().default_headers(headers))?;
+        let anonymous = build(reqwest::Client::builder())?;
         Ok(Self {
             http,
+            anonymous,
             base,
             token: token.to_owned(),
             local_import_token: local_import_token.map(str::to_owned),
-            listen_data_dir,
+            listen_source,
         })
     }
 
-    /// Re-read a desktop-owned attach endpoint after the desktop restarts.
-    /// Explicit `--server` clients have no rotating source and remain unchanged.
-    pub fn refresh_attach_endpoint(&mut self) -> Result<()> {
-        let Some(data_dir) = self.listen_data_dir.clone() else {
+    /// Re-read the `listen.json` this client came from after its server
+    /// restarts, under the same checks as the first read. Explicit `--server`
+    /// clients have no rotating source and remain unchanged.
+    pub async fn refresh_attach_endpoint(&mut self) -> Result<()> {
+        let Some(source) = self.listen_source.clone() else {
             return Ok(());
         };
-        let endpoint = tidebreak_server::listen_endpoint::ListenEndpoint::read(&data_dir)?;
-        *self = Self::attach_with_reconnect_source(
-            endpoint.base_url.trim_end_matches('/').to_owned(),
-            &endpoint.token,
-            Some(&endpoint.local_import_token),
-            Some(data_dir),
-        )?;
+        *self = crate::connect::client_from_listen_file(source).await?;
         Ok(())
     }
 
@@ -1071,11 +1075,17 @@ impl Client {
 
     /// What the server says about its own version.
     ///
+    /// The request carries no bearer. It is the first one a command sends, and
+    /// a server has not yet shown it is the one the bearer belongs to: a port
+    /// its server left behind may belong to anything now.
+    ///
     /// `Ok(None)` covers a server that predates `GET /version` (a `404`), a
     /// page in front of it, an answer this client could not print, and a
-    /// request refused outright. The caller treats all of them as compatible:
-    /// the check exists to explain a version gap, and a server that refused
-    /// this request refuses the command's own next one with its own error.
+    /// request refused outright. For a server named by `--server` or a named
+    /// data directory, the caller treats all of them as compatible: the check
+    /// exists to explain a version gap, and a server that refused this request
+    /// refuses the command's own next one with its own error. The app's own
+    /// `listen.json` is held to more (see [`crate::connect`]).
     ///
     /// A server that does not answer within `timeout` is an error instead.
     /// The command's own requests would wait on it without a limit, so the
@@ -1092,7 +1102,7 @@ impl Client {
             ))
         };
         let response = match self
-            .http
+            .anonymous
             .get(format!("{}/version", self.base))
             .timeout(timeout)
             .send()
@@ -1381,7 +1391,7 @@ pub(crate) fn validated_server_base_url(value: &str) -> Result<String> {
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
-fn server_url_is_loopback(base: &str) -> bool {
+pub(crate) fn server_url_is_loopback(base: &str) -> bool {
     reqwest::Url::parse(base).is_ok_and(|url| url_host_is_loopback(&url))
 }
 
@@ -1501,9 +1511,19 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn refreshing_an_attach_client_reloads_the_rotated_endpoint() {
+    /// Hold `dir`'s instance lock the way a running server does.
+    fn hold_lock(dir: &std::path::Path) -> std::fs::File {
+        let lock =
+            std::fs::File::create(tidebreak_server::listen_endpoint::instance_lock_path(dir))
+                .unwrap();
+        lock.lock().unwrap();
+        lock
+    }
+
+    #[tokio::test]
+    async fn refreshing_an_attach_client_reloads_the_rotated_endpoint() {
         let dir = tempfile::tempdir().unwrap();
+        let _lock = hold_lock(dir.path());
         tidebreak_server::listen_endpoint::write(
             dir.path(),
             "http://127.0.0.1:1001",
@@ -1511,11 +1531,15 @@ mod tests {
             "first-import",
         )
         .unwrap();
+        let source = ListenSource {
+            data_dir: dir.path().to_path_buf(),
+            app: false,
+        };
         let mut client = Client::attach_with_reconnect_source(
             "http://127.0.0.1:1001".into(),
             "first-token",
             Some("first-import"),
-            Some(dir.path().to_path_buf()),
+            Some(source.clone()),
         )
         .unwrap();
 
@@ -1526,12 +1550,57 @@ mod tests {
             "second-import",
         )
         .unwrap();
-        client.refresh_attach_endpoint().unwrap();
+        client.refresh_attach_endpoint().await.unwrap();
 
         assert_eq!(client.base, "http://127.0.0.1:2002");
         assert_eq!(client.token, "second-token");
         assert_eq!(client.local_import_token.as_deref(), Some("second-import"));
-        assert_eq!(client.listen_data_dir.as_deref(), Some(dir.path()));
+        assert_eq!(client.listen_source.as_ref(), Some(&source));
+    }
+
+    /// A reconnect believes the file no more than the first read did: once
+    /// the server that wrote it is gone, or when it names another computer,
+    /// the client keeps what it had.
+    #[tokio::test]
+    async fn a_refresh_refuses_a_file_nothing_owns_or_a_remote_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = ListenSource {
+            data_dir: dir.path().to_path_buf(),
+            app: false,
+        };
+        let mut client = Client::attach_with_reconnect_source(
+            "http://127.0.0.1:1001".into(),
+            "first-token",
+            Some("first-import"),
+            Some(source),
+        )
+        .unwrap();
+
+        tidebreak_server::listen_endpoint::write(
+            dir.path(),
+            "http://127.0.0.1:2002",
+            "second-token",
+            "second-import",
+        )
+        .unwrap();
+        let error = client.refresh_attach_endpoint().await.unwrap_err();
+        assert!(error.to_string().contains("No Tidebreak server"), "{error}");
+
+        let _lock = hold_lock(dir.path());
+        tidebreak_server::listen_endpoint::write(
+            dir.path(),
+            "https://tidebreak.example.invalid",
+            "second-token",
+            "second-import",
+        )
+        .unwrap();
+        let error = client.refresh_attach_endpoint().await.unwrap_err();
+        assert!(
+            error.to_string().contains("not on this computer"),
+            "{error}"
+        );
+        assert_eq!(client.base, "http://127.0.0.1:1001");
+        assert_eq!(client.token, "first-token");
     }
 
     #[test]

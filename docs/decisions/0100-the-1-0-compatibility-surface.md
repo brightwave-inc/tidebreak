@@ -212,3 +212,26 @@ Validation: `tests/json_documents.rs` and `src/compatibility.rs` in
 `crates/tidebreak-cli` pin the documents' version, the documented commands and
 flags, and the exit codes. `crates/tidebreak-server/src/server_version.rs`
 pins the compatibility rule.
+
+## Amendment (2026-09-23): which data a command uses
+
+The stable surface includes which profile a command works on. A script that
+runs `tidebreak chat list` depends on that as much as on the command's name:
+
+- With `TIDEBREAK_DATA_DIR` unset, a command works on the desktop app's own
+  profile. A client command connects to the app, and exits `1` with what to do
+  next when the app is not running. `--embed` runs the server in-process over
+  the app's data.
+- With `TIDEBREAK_DATA_DIR` set, commands work on that directory's profile,
+  and its credentials stay apart from the app's.
+- `agent-mcp` starts a server of its own only with `--embed`.
+- Nothing defaults to the current directory, and a bare `tidebreak` prints
+  help.
+
+These changed before 1.0, while a default can still change. From 1.0, a change
+to any of them waits for a major release. See the amendments to
+[decision 7](0007-cli-headless-feature-parity.md) and
+[decision 56](0056-one-credential-item-per-profile.md).
+
+Validation: the process tests in `crates/tidebreak-cli/tests/serve.rs` pin each
+rule against the real binary with a scratch home.

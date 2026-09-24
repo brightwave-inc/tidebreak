@@ -246,9 +246,12 @@ platform notes. See
 [`crates/tidebreak-desktop/README.md`](crates/tidebreak-desktop/README.md) for
 the native and browser-based UI workflows.
 
-The headless server uses the same core runtime:
+The headless server uses the same core runtime. Give it a data directory of
+its own; without `TIDEBREAK_DATA_DIR`, it serves the dev app's data and cannot
+start while the dev app runs:
 
 ```sh
+export TIDEBREAK_DATA_DIR="$PWD/.tidebreak"
 ANTHROPIC_API_KEY=sk-... cargo run -p tidebreak-cli -- serve
 ```
 

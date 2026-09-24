@@ -1078,11 +1078,33 @@ pub fn run() {
             if let Some(markers) = app.try_state::<Arc<unclean_exit::RunMarkerState>>() {
                 markers.clear();
             }
+            // The process ends here without dropping the embedded server, so
+            // its guard never removes `listen.json`. Remove it now, or a
+            // command run after the app quits finds an address nothing of
+            // ours answers on.
+            if let Some(listen_file) = app.try_state::<PublishedListenFile>() {
+                listen_file.remove();
+            }
             // Last: write out log lines still queued for the log files.
             tidebreak_server::logging::shutdown();
         }
         _ => {}
     });
+}
+
+/// The `listen.json` this app's embedded server published, recorded once the
+/// server binds. An app that never bound, because another process owns the
+/// data directory, records nothing and so removes nothing at exit: the file
+/// there belongs to that process.
+struct PublishedListenFile {
+    data_dir: PathBuf,
+    token: String,
+}
+
+impl PublishedListenFile {
+    fn remove(&self) {
+        tidebreak_server::listen_endpoint::remove_if_current(&self.data_dir, &self.token);
+    }
 }
 
 /// Append a server failure — a boot that never bound, or a later death of
@@ -1201,6 +1223,11 @@ async fn boot_server(
     let base_url = format!("http://{}", server.local_addr());
     let token = server.token().to_string();
     let executor_token = server.client_executor_token().to_string();
+    // Bound, so `listen.json` is this app's until it exits.
+    app.manage(PublishedListenFile {
+        data_dir: data_dir.clone(),
+        token: token.clone(),
+    });
     app.state::<host_access::HostAccess>()
         .initialize_control_plane(base_url.clone(), token.clone(), executor_token.clone())?;
     let info = NativeServerInfo {

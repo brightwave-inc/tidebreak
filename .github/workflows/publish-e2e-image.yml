@@ -67,6 +67,7 @@ jobs:
           set +e
           output="$(docker run --rm --entrypoint /usr/local/bin/tidebreak \
             -e TIDEBREAK_PROFILE=self_host \
+            -e TIDEBREAK_DATA_DIR=/var/lib/tidebreak \
             -e TIDEBREAK_BLOB_STORE_URL=s3://fixture/test \
             -e TIDEBREAK_DATABASE_URL=postgres://fixture@127.0.0.1:1/fixture \
             -e TIDEBREAK_SCRIPTED_HARNESS='{not json' \

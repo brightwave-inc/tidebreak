@@ -123,9 +123,60 @@ pub fn remove(data_dir: &Path) {
     let _ = std::fs::remove_file(ListenEndpoint::path(data_dir));
 }
 
+/// Remove the file on shutdown when it is still this server's: when it
+/// carries the bearer this server minted. A file another process wrote since,
+/// with its own bearer, stays.
+pub fn remove_if_current(data_dir: &Path, token: &str) {
+    if ListenEndpoint::read(data_dir).is_ok_and(|endpoint| endpoint.token == token) {
+        remove(data_dir);
+    }
+}
+
+/// The instance lock file in `data_dir`, whose lock names the process that
+/// serves it.
+pub fn instance_lock_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(crate::INSTANCE_LOCK_FILE)
+}
+
+/// Whether a live process holds `data_dir`'s instance lock, and so whether a
+/// `listen.json` there can describe a server that is running.
+///
+/// The file outlives its server whenever a process ends without its clean
+/// shutdown: a crash, a kill, a signal nothing handled. The lock does not,
+/// because the kernel releases it with the process. So a reader checks the
+/// lock, not the file. This takes a shared lock for as long as it takes to
+/// let go of it, and never creates the lock file.
+pub fn owner_is_live(data_dir: &Path) -> Result<bool> {
+    let path = instance_lock_path(data_dir);
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(AgentError::config(format!(
+                "could not read {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    match file.try_lock_shared() {
+        Ok(()) => {
+            // Nothing holds it, so whatever wrote `listen.json` has exited.
+            // Let go at once: a server starting now needs it.
+            let _ = file.unlock();
+            Ok(false)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(error)) => Err(AgentError::config(format!(
+            "could not check {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
 /// Holds the published path and removes it when dropped with the server.
 pub struct ListenEndpointGuard {
     data_dir: PathBuf,
+    token: String,
 }
 
 impl ListenEndpointGuard {
@@ -136,13 +187,16 @@ impl ListenEndpointGuard {
         local_import_token: &str,
     ) -> Result<Self> {
         write(&data_dir, base_url, token, local_import_token)?;
-        Ok(Self { data_dir })
+        Ok(Self {
+            data_dir,
+            token: token.to_owned(),
+        })
     }
 }
 
 impl Drop for ListenEndpointGuard {
     fn drop(&mut self) {
-        remove(&self.data_dir);
+        remove_if_current(&self.data_dir, &self.token);
     }
 }
 
@@ -188,5 +242,48 @@ mod tests {
         assert!(!error.contains("is an Tidebreak"));
         assert!(error.contains("TIDEBREAK_DATA_DIR"));
         assert!(error.contains("io.brightwave.tidebreak"));
+    }
+
+    /// The lock, not the file, says whether a server is running: a file left
+    /// by a server that exited is not believed, and checking never creates a
+    /// lock file or keeps a server from taking the lock.
+    #[test]
+    fn only_a_held_lock_means_a_live_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!owner_is_live(dir.path()).unwrap(), "no lock file");
+        assert!(
+            !dir.path().join(crate::INSTANCE_LOCK_FILE).exists(),
+            "checking must not create the lock file"
+        );
+
+        let config = tidebreak_core::Config::desktop(dir.path());
+        let lock = crate::InstanceLock::acquire(&config).unwrap();
+        assert!(owner_is_live(dir.path()).unwrap(), "a held lock");
+        drop(lock);
+        assert!(
+            !owner_is_live(dir.path()).unwrap(),
+            "the file stays after the owner lets go, and means nothing"
+        );
+        // The check let go of its own shared lock, so a server can start.
+        let _lock = crate::InstanceLock::acquire(&config).unwrap();
+    }
+
+    /// A server removes the file it published and leaves one another server
+    /// wrote since.
+    #[test]
+    fn shutdown_removes_only_this_servers_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = ListenEndpointGuard::publish(
+            dir.path().to_path_buf(),
+            "http://127.0.0.1:9",
+            "one",
+            "i",
+        )
+        .unwrap();
+        write(dir.path(), "http://127.0.0.1:10", "two", "i").unwrap();
+        drop(guard);
+        assert_eq!(ListenEndpoint::read(dir.path()).unwrap().token, "two");
+        remove_if_current(dir.path(), "two");
+        assert!(!ListenEndpoint::path(dir.path()).exists());
     }
 }

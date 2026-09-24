@@ -142,8 +142,11 @@ pub struct Config {
     /// The host app's OS bundle identifier, when it runs as one (the desktop
     /// app; its debug and staging builds use a distinct id). On macOS this names
     /// the managed-preferences domain consulted for OS-managed (MDM) policy.
-    /// `None` — the CLI, tests, self-host — only disables that macOS reader;
-    /// the Windows and Linux readers are machine-scoped and ignore it.
+    /// The CLI sets the app's identifier when it opens the app's own profile,
+    /// so that profile obeys the same policy whichever binary opens it.
+    /// `None` — tests, self-host, and a CLI profile other than the app's — only
+    /// disables that macOS reader; the Windows and Linux readers are
+    /// machine-scoped and ignore it.
     #[serde(default)]
     pub bundle_id: Option<String>,
     /// Trusted source directory for helper scripts copied into isolated exec
@@ -434,9 +437,9 @@ impl Config {
     }
 
     /// Load from the environment, falling back to sensible defaults:
-    /// `TIDEBREAK_PROFILE` (default `desktop`), `TIDEBREAK_DATA_DIR` (default
-    /// `./.tidebreak` under the current directory — desktop/CLI clients should set
-    /// this to the platform's app-data location),
+    /// `TIDEBREAK_PROFILE` (default `desktop`), `TIDEBREAK_DATA_DIR`
+    /// (required here; [`Config::from_env_with_default_data_dir`] lets an
+    /// embedding supply one, and nothing defaults to the current directory),
     /// `TIDEBREAK_BLOB_STORE_URL` (required for self-host; an S3 bucket and
     /// optional prefix), with the Model Gateway add-on plane's
     /// `GATEWAY_BASE_URL`, `DATABASE_URL`, and `ADD_ON_PUBLIC_URL` standing in
@@ -459,6 +462,20 @@ impl Config {
     /// `TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD`. Optional
     /// `TIDEBREAK_UI_DIST` names a built renderer bundle to serve to browsers.
     pub fn from_env() -> Result<Self> {
+        Self::from_env_with_default_data_dir(|_| None)
+    }
+
+    /// [`Config::from_env`], with `default_data_dir` naming the data directory
+    /// for the resolved profile when `TIDEBREAK_DATA_DIR` is unset or empty.
+    ///
+    /// The embedding decides the default because only it knows where its own
+    /// data lives: the CLI answers with the desktop app's data directory. A
+    /// profile it answers `None` for requires the variable. Nothing falls back
+    /// to the current directory, which would quietly start a new, empty
+    /// profile wherever a command happened to run.
+    pub fn from_env_with_default_data_dir(
+        default_data_dir: impl FnOnce(Profile) -> Option<PathBuf>,
+    ) -> Result<Self> {
         let vault_secrets = VaultSecretConfig::from_vars(
             std::env::var("TIDEBREAK_VAULT_ADDR").ok(),
             std::env::var_os("TIDEBREAK_VAULT_TOKEN_FILE"),
@@ -466,9 +483,15 @@ impl Config {
             std::env::var("TIDEBREAK_VAULT_PATH").ok(),
             std::env::var("TIDEBREAK_VAULT_NAMESPACE").ok(),
         )?;
-        Self::from_vars(
-            std::env::var("TIDEBREAK_PROFILE").ok(),
+        let profile = std::env::var("TIDEBREAK_PROFILE").ok();
+        let data_dir = data_dir_or_default(
             std::env::var_os("TIDEBREAK_DATA_DIR"),
+            profile.as_deref(),
+            default_data_dir,
+        );
+        Self::from_vars(
+            profile,
+            data_dir,
             std::env::var("TIDEBREAK_BLOB_STORE_URL").ok(),
             std::env::var("TIDEBREAK_CONTAINER_EXECUTION_ENABLED").ok(),
             std::env::var("TIDEBREAK_CONTAINER_IMAGE").ok(),
@@ -664,7 +687,9 @@ impl Config {
     ///
     /// An **empty** value is treated as unset: a caller that exports
     /// `TIDEBREAK_DATA_DIR=` (or an empty profile) gets the documented defaults,
-    /// not an empty path rooted at the current directory.
+    /// not an empty path rooted at the current directory. A data directory is
+    /// required: [`Config::from_env_with_default_data_dir`] is where a default
+    /// comes from, before this runs.
     #[allow(clippy::too_many_arguments)] // mirrors the environment variables one-to-one
     fn from_vars(
         profile: Option<String>,
@@ -681,21 +706,8 @@ impl Config {
         runtime_profile: Option<String>,
         vault_secrets: Option<VaultSecretConfig>,
     ) -> Result<Self> {
-        let profile = match profile.filter(|value| !value.is_empty()).as_deref() {
-            None | Some("desktop") => Profile::Desktop,
-            Some("self_host" | "selfhost") => Profile::SelfHost,
-            Some(other) => {
-                return Err(AgentError::config(format!(
-                    "unknown profile: {other} (valid values: desktop, self_host)"
-                )));
-            }
-        };
-        let data_dir = match data_dir.filter(|dir| !dir.is_empty()) {
-            Some(dir) => PathBuf::from(dir),
-            None => std::env::current_dir()
-                .map_err(|e| AgentError::config(format!("no working directory: {e}")))?
-                .join(".tidebreak"),
-        };
+        let profile = parse_profile(profile.as_deref())?;
+        let data_dir = data_dir.filter(|dir| !dir.is_empty()).map(PathBuf::from);
         let blob_store_url = blob_store_url.filter(|value| !value.trim().is_empty());
         match (profile, blob_store_url.as_deref()) {
             (Profile::SelfHost, None) => {
@@ -748,6 +760,13 @@ impl Config {
                 "TIDEBREAK_RUNTIME_ENDPOINT and TIDEBREAK_RUNTIME_PROFILE are required together",
             ));
         }
+        // Last, so a variable that is wrong is reported before one that is
+        // missing.
+        let data_dir = data_dir.ok_or_else(|| {
+            AgentError::config(
+                "TIDEBREAK_DATA_DIR is not set. Set it to the folder Tidebreak keeps its data in.",
+            )
+        })?;
         Ok(Self {
             profile,
             data_dir,
@@ -924,6 +943,35 @@ fn plane_fallback(own: Option<String>, plane: Option<String>) -> Option<String> 
         .or_else(|| plane.filter(|value| !value.trim().is_empty()))
 }
 
+/// `TIDEBREAK_PROFILE`, with an unset or empty value meaning desktop.
+fn parse_profile(profile: Option<&str>) -> Result<Profile> {
+    match profile.filter(|value| !value.is_empty()) {
+        None | Some("desktop") => Ok(Profile::Desktop),
+        Some("self_host" | "selfhost") => Ok(Profile::SelfHost),
+        Some(other) => Err(AgentError::config(format!(
+            "unknown profile: {other} (valid values: desktop, self_host)"
+        ))),
+    }
+}
+
+/// `TIDEBREAK_DATA_DIR` when it names a directory, otherwise the embedding's
+/// default for the profile.
+///
+/// An unreadable profile gets no default: [`Config::from_vars`] reports the
+/// profile, which is the mistake a person can fix.
+fn data_dir_or_default(
+    data_dir: Option<OsString>,
+    profile: Option<&str>,
+    default_data_dir: impl FnOnce(Profile) -> Option<PathBuf>,
+) -> Option<OsString> {
+    data_dir.filter(|dir| !dir.is_empty()).or_else(|| {
+        parse_profile(profile)
+            .ok()
+            .and_then(default_data_dir)
+            .map(PathBuf::into_os_string)
+    })
+}
+
 /// OAuth resource bound to one exact, already-canonical Tidebreak public URL.
 ///
 /// Callers canonicalize first because URL parsing belongs at their trust
@@ -1059,28 +1107,41 @@ mod tests {
     }
 
     #[test]
-    fn empty_data_dir_var_falls_back_to_the_default() {
-        // `TIDEBREAK_DATA_DIR=` (set but empty) must behave like unset, not point
-        // the store at `tidebreak.db` in the current directory.
-        let config = Config::from_vars(
-            None,
-            Some(OsString::new()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        let expected = std::env::current_dir().unwrap().join(".tidebreak");
-        assert_eq!(config.data_dir, expected);
-        assert_eq!(config.profile, Profile::Desktop);
+    fn an_unset_or_empty_data_dir_is_an_error_not_the_current_directory() {
+        // `TIDEBREAK_DATA_DIR=` (set but empty) behaves like unset, and unset
+        // names the variable rather than quietly starting a profile in
+        // whatever directory the process runs in.
+        for data_dir in [None, Some(OsString::new())] {
+            let error = Config::from_vars(
+                None, data_dir, None, None, None, None, None, None, None, None, None, None, None,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("TIDEBREAK_DATA_DIR is not set"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_embedding_supplies_the_data_dir_the_variable_does_not() {
+        let named = data_dir_or_default(Some(OsString::from("/named")), None, |_| {
+            Some(PathBuf::from("/default"))
+        });
+        assert_eq!(named, Some(OsString::from("/named")));
+
+        let mut asked = None;
+        let defaulted = data_dir_or_default(Some(OsString::new()), Some("self_host"), |profile| {
+            asked = Some(profile);
+            Some(PathBuf::from("/default"))
+        });
+        assert_eq!(defaulted, Some(OsString::from("/default")));
+        assert_eq!(asked, Some(Profile::SelfHost));
+
+        assert_eq!(data_dir_or_default(None, None, |_| None), None);
+        // A profile nobody can read gets no default; `from_vars` names it.
+        assert_eq!(
+            data_dir_or_default(None, Some("bogus"), |_| Some(PathBuf::from("/default"))),
+            None
+        );
     }
 
     #[test]

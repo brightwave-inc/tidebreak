@@ -123,7 +123,8 @@ key's partition list to avoid it up front.
 See [`crates/tidebreak-desktop/README.md`](crates/tidebreak-desktop/README.md).
 Short version: `cd crates/tidebreak-desktop && pnpm --dir ui install && cargo tauri
 dev`, or run the React UI in a browser against `tidebreak serve` via
-`ui/.env.local`.
+`ui/.env.local`. Start that `serve` with `TIDEBREAK_DATA_DIR` set: without it,
+`serve` uses the dev app's data and cannot run beside the dev app.
 
 ## Commit and PR conventions
 

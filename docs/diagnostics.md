@@ -10,17 +10,18 @@ profiles.
 
 ## Export diagnostics
 
-If the desktop or `tidebreak serve` owns the profile, attach to that process:
+With `TIDEBREAK_DATA_DIR` unset, the command reads the running Tidebreak app:
 
 ```sh
-tidebreak diagnostics snapshot --attach
-tidebreak diagnostics metrics --attach
-tidebreak diagnostics export ./tidebreak-diagnostics.zip --attach
+tidebreak diagnostics snapshot
+tidebreak diagnostics metrics
+tidebreak diagnostics export ./tidebreak-diagnostics.zip
 ```
 
-Without `--attach` or `--server`, the command starts an embedded server for the
-selected profile. A running desktop already holds that profile's lock, so use
-`--attach` for the desktop process.
+When the app is not running, the command stops and says so. Add `--embed` to
+start an embedded server over the app's data instead. For another profile, set
+`TIDEBREAK_DATA_DIR`: the command then starts an embedded server over it, or
+add `--attach` when `tidebreak serve` already owns that folder.
 
 To inspect a self-host server, pass its URL and an administrator bearer token:
 
