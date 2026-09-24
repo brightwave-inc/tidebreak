@@ -142,10 +142,15 @@ pub(crate) enum CliCommandError {
     Unsupported,
     #[error("Tidebreak could not change {path}: {reason}")]
     Io { path: String, reason: String },
+    // The administrator prompt exists only on macOS; elsewhere these three
+    // are never built.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     #[error("The administrator prompt was cancelled, so nothing changed.")]
     AdministratorCancelled,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     #[error("Something else appeared at {0} while Tidebreak was changing it, so nothing changed.")]
     Changed(String),
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     #[error("Tidebreak could not change {0} as an administrator.")]
     AdministratorFailed(String),
 }
@@ -392,6 +397,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 /// Quote a string for AppleScript.
+#[cfg(any(target_os = "macos", test))]
 fn applescript_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', r"\\").replace('"', "\\\""))
 }
