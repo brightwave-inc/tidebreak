@@ -43,7 +43,8 @@ type SearchClient = Pick<ApiClient, "searchMessages">;
  * a newer query aborts the request still out for an older one, so a slow
  * answer can never land over a newer one. While a search runs, the hits of
  * the last one stay up with the status saying a newer one is coming, which
- * keeps the list from blinking empty between words.
+ * keeps the list from blinking empty between words. A search that fails
+ * clears them.
  */
 export function useMessageSearch(
   client: SearchClient | null,
@@ -94,12 +95,15 @@ export function useMessageSearch(
           },
           (error: unknown) => {
             if (controller.signal.aborted) return;
-            setState((current) => ({
-              ...current,
+            // The last search's hits answer another query, so they go: a
+            // hit left under the error would open a match for words the
+            // field no longer holds.
+            setState({
+              ...IDLE_MESSAGE_SEARCH,
               status: "error",
               query: words,
               error: friendlyErrorMessage(error, "Could not search messages."),
-            }));
+            });
           },
         );
     }, delayMs);

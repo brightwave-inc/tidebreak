@@ -90,6 +90,28 @@ describe("searching messages as the person types", () => {
     expect(searchMessages).not.toHaveBeenCalled();
   });
 
+  it("drops the last query's hits when the next search fails", async () => {
+    const { client, calls } = deferredClient();
+    const { result, rerender } = renderHook(
+      ({ query }) => useMessageSearch(client, query),
+      { initialProps: { query: "harbour" } },
+    );
+    act(() => void vi.advanceTimersByTime(MESSAGE_SEARCH_DELAY_MS));
+    await act(async () => calls[0]!.resolve(page("harbour")));
+    expect(result.current.hits).toHaveLength(1);
+
+    client.searchMessages.mockImplementationOnce(() =>
+      Promise.reject(new Error("503: index busy")),
+    );
+    rerender({ query: "lighthouse" });
+    await act(async () => {
+      vi.advanceTimersByTime(MESSAGE_SEARCH_DELAY_MS);
+    });
+    expect(result.current.status).toBe("error");
+    expect(result.current.query).toBe("lighthouse");
+    expect(result.current.hits).toEqual([]);
+  });
+
   it("says a search failed, in words", async () => {
     const searchMessages = vi.fn(() =>
       Promise.reject(new Error("503: index busy")),
