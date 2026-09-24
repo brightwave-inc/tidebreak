@@ -15,6 +15,7 @@ import {
   RefreshCw,
   ScrollText,
   ShieldCheck,
+  SquareChevronRight,
   SquareTerminal,
   Mic,
   Terminal,
@@ -50,6 +51,7 @@ import { MemoryPanel } from "./MemoryPanel";
 import { InstructionsPanel } from "./InstructionsPanel";
 import { DataPrivacyPanel, nativeDataPrivacyHost } from "./DataPrivacyPanel";
 import { NotificationsPanel } from "./NotificationsPanel";
+import { CommandLinePanel } from "./CommandLinePanel";
 
 /**
  * Each section reads what it needs from the shell context rather than being
@@ -256,6 +258,27 @@ function ChannelsSection() {
 function GitSourceControlSection() {
   const { client } = useApp();
   return <GitSourceControlPanel client={client} />;
+}
+
+/**
+ * The menu's Install the tidebreak Command arrives with `?install=user`. The
+ * panel runs that install once, and the parameter is dropped so a reload or a
+ * trip back through history does not install again.
+ */
+function CommandLineSection() {
+  const navigate = useNavigate();
+  const search = useRouterState({
+    select: (state) => state.location.search,
+  }) as Record<string, unknown>;
+  const path: string = "/settings/command-line";
+  return (
+    <CommandLinePanel
+      autoInstall={search.install === "user"}
+      onAutoInstallHandled={() =>
+        void navigate({ to: path, search: {}, replace: true })
+      }
+    />
+  );
 }
 
 function MemorySection() {
@@ -501,6 +524,18 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: RefreshCw,
     iconClass: "text-icon-green",
     Component: UpdatesSection,
+  },
+  {
+    path: "command-line",
+    label: "Command line",
+    keywords: "CLI terminal shell PATH tidebreak command install headless",
+    group: "application",
+    icon: SquareChevronRight,
+    iconClass: "text-icon-blue",
+    Component: CommandLineSection,
+    validateSearch: (search: Record<string, unknown>) => ({
+      install: search.install === "user" ? "user" : undefined,
+    }),
   },
   {
     path: "memory",
