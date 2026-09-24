@@ -57,6 +57,13 @@ export type SelectedCodeClone = {
 
 export type CodeUpdatesState = {
   /**
+   * Whether the socket has restated its snapshot since the last reset.
+   *
+   * Until it has, empty digest maps mean "not heard yet", not "nothing is
+   * live", so a surface that would say nothing needs you waits for this.
+   */
+  snapshotLoaded: boolean;
+  /**
    * Conversation digests, keyed workspace → session. Never a watch.
    *
    * A workspace runs several agents (record 55), so it names a set rather
@@ -137,6 +144,7 @@ export type CodeUpdatesAction =
   | { type: "reset" };
 
 const EMPTY: CodeUpdatesState = {
+  snapshotLoaded: false,
   conversationsByWorkspace: {},
   conversationsWithoutWorkspace: {},
   childrenByWorkspace: {},
@@ -181,6 +189,7 @@ export function reduceCodeUpdates(
       }
       return {
         ...state,
+        snapshotLoaded: true,
         conversationsByWorkspace,
         conversationsWithoutWorkspace,
         childrenByWorkspace,

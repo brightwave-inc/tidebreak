@@ -418,6 +418,33 @@ export function sessionStatusRank(
   return "idle";
 }
 
+/**
+ * Where a conversation without a workspace came from, in words: a Slack
+ * channel or direct message, another channel's own name, or nothing for one
+ * the desktop started. Slack keys read `workspace/channel/thread`, and a
+ * direct-message channel id starts with `D`.
+ */
+export function conversationSourceLabel(
+  digest: Pick<CodeSessionDigest, "external_origin">,
+): string | undefined {
+  const origin = digest.external_origin;
+  if (!origin) return undefined;
+  if (origin.channel_kind !== "slack") return origin.channel_kind;
+  const channel = origin.external_key.split("/")[1];
+  return channel?.startsWith("D") ? "Slack direct message" : "Slack channel";
+}
+
+/** A conversation's name, or where it came from when it has none yet. */
+export function conversationTitle(
+  digest: Pick<CodeSessionDigest, "external_origin" | "title">,
+): string {
+  const source = conversationSourceLabel(digest);
+  return (
+    digest.title?.trim() ||
+    (source ? `${source} conversation` : "Untitled conversation")
+  );
+}
+
 /** Flatten sources in display order while preserving their group metadata. */
 export function arrangeWorkspaces(
   mode: WorkspaceSortMode,

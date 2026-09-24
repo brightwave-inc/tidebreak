@@ -6,7 +6,12 @@ import { HARNESS_ICONS } from "./HarnessPicker";
 import { FOCUS_RING_INSET, HOVER_TINT } from "./interactive";
 import { HARNESS_LABELS } from "./labels";
 import { SessionStateGlyph } from "./WorkspaceCard";
-import { formatCompactAge, sessionActivityLineLabel } from "./workspaceCards";
+import {
+  conversationSourceLabel,
+  conversationTitle,
+  formatCompactAge,
+  sessionActivityLineLabel,
+} from "./workspaceCards";
 import { pointerSelectIntent } from "./workspaceSelection";
 import { sessionTreeWaitLabel } from "./sessionTree";
 
@@ -37,17 +42,8 @@ export function WorkspaceLessSessionRow({
   childrenByParent?: ReadonlyMap<string, CodeSessionDigest[]>;
 }) {
   digest = recoveryDigest(digest);
-  const origin = digest.external_origin;
-  const channel = origin?.external_key.split("/")[1];
-  const source =
-    origin?.channel_kind === "slack"
-      ? channel?.startsWith("D")
-        ? "Slack direct message"
-        : "Slack channel"
-      : origin?.channel_kind;
-  const title =
-    digest.title?.trim() ||
-    (source ? `${source} conversation` : "Untitled conversation");
+  const source = conversationSourceLabel(digest);
+  const title = conversationTitle(digest);
   const recovering = digest.attention.state.type === "fenced";
   const showRecovery = useRecoveryDelay(recovering);
   // The same copy as a workspace card's activity line: the live tool subject

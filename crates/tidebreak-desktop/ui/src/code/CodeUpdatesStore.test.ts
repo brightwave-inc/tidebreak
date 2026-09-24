@@ -56,6 +56,7 @@ function digest(overrides: Partial<CodeSessionDigest> = {}): CodeSessionDigest {
 }
 
 const EMPTY_STATE: CodeUpdatesState = {
+  snapshotLoaded: false,
   conversationsByWorkspace: {},
   conversationsWithoutWorkspace: {},
   childrenByWorkspace: {},
@@ -157,6 +158,12 @@ describe("reduceCodeUpdates", () => {
   );
 
   it("replaces the map on snapshot and upserts a digest", () => {
+    const beforeSnapshot = reduceCodeUpdates(EMPTY_STATE, {
+      type: "digest",
+      digest: digest(),
+    });
+    // One digest is not the whole picture: only a snapshot says what is live.
+    expect(beforeSnapshot.snapshotLoaded).toBe(false);
     const afterSnapshot = reduceCodeUpdates(EMPTY_STATE, {
       type: "snapshot",
       sessions: [
@@ -164,6 +171,7 @@ describe("reduceCodeUpdates", () => {
         digest({ workspace: "ws-2", session: "sess-2", title: "other" }),
       ],
     });
+    expect(afterSnapshot.snapshotLoaded).toBe(true);
     expect(Object.keys(afterSnapshot.conversationsByWorkspace)).toEqual([
       "ws-1",
       "ws-2",
