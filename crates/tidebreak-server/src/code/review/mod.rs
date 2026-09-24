@@ -12,13 +12,15 @@
 //! - The engine loses what it has for writing files or running commands
 //!   (`SessionSpec::read_only`), whatever the person's own rules allow:
 //!   Claude Code launches in plan mode with Bash, Edit, Write, and
-//!   NotebookEdit disallowed; Codex runs in its read-only OS sandbox;
-//!   opencode's plan agent gets deny rules for `edit` and `bash`; Grok CLI,
-//!   which has no plan mode, runs in Ask under its `read-only` sandbox
-//!   profile. An engine with neither a plan mode nor approvals Tidebreak can
-//!   refuse is not offered. This layer is what stops a write aimed outside
-//!   the copy below; the OS enforces it for Codex, and for Grok where Grok
-//!   can apply its profile.
+//!   NotebookEdit disallowed and no MCP servers; Codex runs in its read-only
+//!   OS sandbox; opencode's plan agent gets rules that deny every tool but
+//!   reading, the person's own MCP servers' tools included; Grok CLI, which
+//!   has no plan mode, runs in Ask under its `read-only` sandbox profile,
+//!   and a machine where Grok cannot apply that profile does not offer Grok
+//!   for review at all ([`CodeRuntime::review_blocker`]). An engine with
+//!   neither a plan mode nor approvals Tidebreak can refuse is not offered.
+//!   This layer is what stops a write aimed outside the copy below; the OS
+//!   enforces it for Codex and Grok.
 //! - Every approval the engine asks for is refused, with feedback telling it
 //!   to report the change as a finding instead. Claude Code gets no
 //!   permission-prompt tool at all, so print mode refuses what plan mode
@@ -139,7 +141,14 @@ pub struct ReviewRegistry {
     entries: Mutex<HashMap<CodeReviewId, ReviewEntry>>,
     time_limit: Mutex<Option<Duration>>,
     copy_limits: Mutex<Option<CopySize>>,
+    /// Why each engine install cannot review read-only here, when it cannot,
+    /// as its adapter last answered. Keyed by the binary and version, and
+    /// cleared with the probes.
+    blockers: Mutex<HashMap<BlockerKey, Option<String>>>,
 }
+
+/// One engine install, as the read-only check keys it.
+type BlockerKey = (HarnessKind, Option<PathBuf>, Option<String>);
 
 struct ReviewEntry {
     owner: OwnerId,
@@ -300,6 +309,48 @@ impl ReviewRegistry {
     pub fn set_copy_limits(&self, limits: CopySize) {
         *self.copy_limits.lock().expect("review copy limits") = Some(limits);
     }
+
+    /// Forget every read-only check, so the next one asks again.
+    pub fn clear_blockers(&self) {
+        self.blockers.lock().expect("review blockers").clear();
+    }
+}
+
+impl CodeRuntime {
+    /// Why `adapter`'s engine cannot review read-only on this machine, when
+    /// it cannot, such as Grok CLI with no sandbox it can apply here. Asked
+    /// once per install and remembered until the probes are refreshed.
+    pub async fn review_blocker(
+        &self,
+        adapter: &dyn HarnessAdapter,
+        probe: &HarnessProbe,
+    ) -> Option<String> {
+        if !probe.found {
+            return None;
+        }
+        let key = (
+            adapter.kind(),
+            probe.binary_path.clone(),
+            probe.version.clone(),
+        );
+        let cached = self
+            .reviews
+            .blockers
+            .lock()
+            .expect("review blockers")
+            .get(&key)
+            .cloned();
+        if let Some(blocker) = cached {
+            return blocker;
+        }
+        let blocker = adapter.read_only_blocker(probe).await;
+        self.reviews
+            .blockers
+            .lock()
+            .expect("review blockers")
+            .insert(key, blocker.clone());
+        blocker
+    }
 }
 
 /// Delete the copies of reviews that are not running, such as ones a crash
@@ -345,7 +396,8 @@ impl CodeRuntime {
     ///
     /// Refuses before anything runs when the engine is not installed or not
     /// signed in (`422 harness_not_found`, `422 harness_not_authenticated`),
-    /// cannot review read-only (`422 review_engine_unsupported`), or is above
+    /// cannot review read-only here, such as Grok CLI with no sandbox it can
+    /// apply on this machine (`422 review_engine_unsupported`), or is above
     /// the managed ceiling (`409 permission_mode_locked`); when there is
     /// nothing to review (`409 review_empty`); and while another review of the
     /// workspace runs (`409 review_running`). Returns as soon as the review is
@@ -407,6 +459,14 @@ impl CodeRuntime {
                     ),
                 ));
             }
+        }
+        // Fail closed: an engine whose read-only posture rests on something
+        // this machine cannot give it does not review here.
+        if let Some(reason) = self.review_blocker(adapter.as_ref(), &probe).await {
+            return Err(ServerError::unprocessable_kind(
+                "review_engine_unsupported",
+                reason,
+            ));
         }
         let (worktree, from, to, turn_id) = resolve_diff_range(&self.db, &workspace, body.turn_id)
             .await

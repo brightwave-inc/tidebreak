@@ -175,6 +175,10 @@ pub struct ScriptedAdapter {
     turn_delay: Duration,
     /// What the probe reports as this engine's local sign-in state.
     authenticated: Arc<std::sync::Mutex<Option<bool>>>,
+    /// What the adapter answers when asked why a read-only session cannot
+    /// start here, and how many times it was asked.
+    read_only_blocker: Option<String>,
+    read_only_checks: Arc<AtomicU64>,
 }
 
 impl ScriptedAdapter {
@@ -221,6 +225,8 @@ impl ScriptedAdapter {
             launched_sessions: Arc::new(std::sync::Mutex::new(Vec::new())),
             launched_postures: Arc::new(std::sync::Mutex::new(Vec::new())),
             authenticated: Arc::new(std::sync::Mutex::new(Some(true))),
+            read_only_blocker: None,
+            read_only_checks: Arc::new(AtomicU64::new(0)),
             writes: Vec::new(),
             turn_delay: Duration::ZERO,
         }
@@ -300,6 +306,20 @@ impl ScriptedAdapter {
     pub fn with_turn_delay(mut self, delay: Duration) -> Self {
         self.turn_delay = delay;
         self
+    }
+
+    /// Answer the read-only check with `reason`, the way Grok's adapter does
+    /// on a machine where its sandbox cannot apply.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_read_only_blocker(mut self, reason: &str) -> Self {
+        self.read_only_blocker = Some(reason.to_owned());
+        self
+    }
+
+    /// How many times the read-only check was asked.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn read_only_checks(&self) -> u64 {
+        self.read_only_checks.load(Ordering::SeqCst)
     }
 
     /// Fails every turn the way an engine does once it has lost the session
@@ -531,6 +551,11 @@ impl ScriptedAdapter {
 impl HarnessAdapter for ScriptedAdapter {
     fn kind(&self) -> HarnessKind {
         self.kind
+    }
+
+    async fn read_only_blocker(&self, _probe: &HarnessProbe) -> Option<String> {
+        self.read_only_checks.fetch_add(1, Ordering::SeqCst);
+        self.read_only_blocker.clone()
     }
 
     async fn probe(&self, _host: &HostEnv) -> HarnessProbe {

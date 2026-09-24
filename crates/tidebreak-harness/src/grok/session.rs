@@ -256,9 +256,20 @@ pub(crate) fn project_config_env(
 /// temp directories, enforced by Seatbelt on macOS and Landlock on Linux.
 /// The `agent` subcommand takes no `--sandbox` or `--deny` flag, so the
 /// profile travels in `GROK_SANDBOX`, which every entry point reads.
+///
+/// `GROK_SANDBOX_AUTO_ALLOW_BASH=false` keeps a person's
+/// `sandbox.auto_allow_bash` from running commands unasked while the
+/// profile is on: each one still asks, and a review refuses it.
+///
+/// Before a read-only session starts, the adapter checks that the profile
+/// applies on this machine ([`crate::HarnessAdapter::read_only_blocker`]),
+/// and the session is refused when it does not.
 pub(crate) fn read_only_env(read_only: bool) -> &'static [(&'static str, &'static str)] {
     if read_only {
-        &[("GROK_SANDBOX", "read-only")]
+        &[
+            ("GROK_SANDBOX", "read-only"),
+            ("GROK_SANDBOX_AUTO_ALLOW_BASH", "false"),
+        ]
     } else {
         &[]
     }
@@ -1009,6 +1020,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(sandbox(&acp), ["read-only"]);
+        // Commands still ask under the profile, whatever the person's
+        // `sandbox.auto_allow_bash` says, so a review can refuse them.
+        assert!(acp
+            .env
+            .iter()
+            .any(|(key, value)| key == "GROK_SANDBOX_AUTO_ALLOW_BASH" && value == "false"));
 
         let session = GrokSession::new(spec(false), "1.0.40".into());
         let plan = session

@@ -1853,6 +1853,16 @@ impl ScopedCode {
         self.runtime.probe(adapter).await
     }
 
+    /// Why this engine cannot review read-only on this machine, when it
+    /// cannot. See [`CodeRuntime::review_blocker`].
+    pub async fn review_blocker(
+        &self,
+        adapter: &dyn tidebreak_harness::HarnessAdapter,
+        probe: &tidebreak_harness::HarnessProbe,
+    ) -> Option<String> {
+        self.runtime.review_blocker(adapter, probe).await
+    }
+
     pub fn pin_install_error(&self, kind: HarnessKind) -> Option<String> {
         self.runtime.pin_install_error(kind)
     }

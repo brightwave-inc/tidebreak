@@ -525,6 +525,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                         latest_version: Some("2.1.259".to_owned()),
                         update_available: false,
                         sign_in_command: Some("claude auth login".to_owned()),
+                        review_blocked: None,
                     },
                     HarnessDoctorEntry {
                         kind: HarnessKind::Grok,
@@ -546,6 +547,9 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                         latest_version: None,
                         update_available: false,
                         sign_in_command: None,
+                        review_blocked: Some(
+                            "Grok CLI can't apply its read-only sandbox on this machine. Grok said: Landlock is not supported by this kernel".to_owned(),
+                        ),
                     },
                 ],
                 update_channel: tidebreak_core::HarnessUpdateChannel::Latest,

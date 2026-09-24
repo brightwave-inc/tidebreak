@@ -388,10 +388,10 @@ pub(crate) fn compose_serve_plan(launch: ServeLaunch<'_>) -> Result<LaunchPlan, 
 /// (disallows edit tools). Ask parks bash/edit. Auto allows workspace
 /// edits and still asks for bash.
 ///
-/// A read-only session ([`crate::SessionSpec::read_only`]) adds deny rules
-/// for `edit` and `bash`. The session's rules are evaluated after the
-/// agent's and the user's config, so a user's `"bash": "allow"` does not
-/// hand either back.
+/// A read-only session ([`crate::SessionSpec::read_only`]) adds
+/// [`read_only_rules`]: everything denied but reading. The session's rules
+/// are evaluated after the agent's and the user's config, so a user's
+/// `"bash": "allow"` or MCP server does not hand anything back.
 #[must_use]
 pub(crate) fn session_create_body(
     mode: PermissionMode,
@@ -436,16 +436,41 @@ pub(crate) fn session_create_body(
         body["model"] = model;
     }
     if read_only {
-        let deny = [
-            json!({"permission": "edit", "pattern": "*", "action": "deny"}),
-            json!({"permission": "bash", "pattern": "*", "action": "deny"}),
-        ];
+        let rules = read_only_rules();
         match body.get_mut("permission").and_then(Value::as_array_mut) {
-            Some(rules) => rules.extend(deny),
-            None => body["permission"] = Value::Array(deny.to_vec()),
+            Some(existing) => existing.extend(rules),
+            None => body["permission"] = Value::Array(rules),
         }
     }
     body
+}
+
+/// The permission names a read-only session keeps: reading files and
+/// searching them.
+const READ_ONLY_PERMISSIONS: [&str; 4] = ["read", "grep", "glob", "list"];
+
+/// A read-only session's rules, after every other: deny everything, then
+/// allow the read tools back, then deny `edit` and `bash` by name.
+///
+/// opencode's default rules allow every tool (`"*": "allow"`), the tools of
+/// the person's own MCP servers among them, and nothing keeps a configured
+/// MCP server from loading. So the rules deny by default rather than list
+/// what to deny: an MCP tool, `task`, `webfetch`, or a tool a later
+/// version adds matches only the leading `*` and is denied. The last rule
+/// that matches decides, which is what puts these after the agent's rules
+/// and the person's config.
+fn read_only_rules() -> Vec<Value> {
+    let mut rules = vec![json!({"permission": "*", "pattern": "*", "action": "deny"})];
+    rules.extend(
+        READ_ONLY_PERMISSIONS
+            .iter()
+            .map(|permission| json!({"permission": permission, "pattern": "*", "action": "allow"})),
+    );
+    rules.extend(
+        ["edit", "bash"]
+            .map(|permission| json!({"permission": permission, "pattern": "*", "action": "deny"})),
+    );
+    rules
 }
 
 /// `POST /session` model object. The captured 1.18.18 schema wants
@@ -1566,29 +1591,62 @@ mod tests {
         assert!(matches!(err, HarnessError::LaunchRejected(_)));
     }
 
-    /// A read-only session keeps the plan agent and denies `edit` and `bash`
-    /// last, so neither the agent's defaults nor a user's own `allow` rule
-    /// hands them back.
+    /// How opencode decides a tool call under a ruleset: the last rule whose
+    /// permission and pattern match wins, and `*` matches anything.
+    fn decide(rules: &[Value], permission: &str) -> Option<String> {
+        rules
+            .iter()
+            .rev()
+            .find(|rule| rule["permission"] == "*" || rule["permission"] == permission)
+            .map(|rule| rule["action"].as_str().unwrap().to_owned())
+    }
+
+    /// A read-only session keeps the plan agent and ends its rules with
+    /// "deny everything but reading", so neither the agent's defaults, a
+    /// user's own `allow` rule, nor a user's MCP server hands a tool back.
+    /// Confirmed live against opencode 1.18.23 with a stub model: the
+    /// session offered only `glob`, `grep`, and `read`, and calls to `bash`,
+    /// `write`, and a user MCP server's tool failed as unavailable, where the
+    /// plan agent alone ran the MCP tool.
     #[test]
-    fn a_read_only_session_denies_edit_and_bash_last() {
+    fn a_read_only_session_denies_everything_but_reading_last() {
         let body = session_create_body(PermissionMode::Plan, Some("model-gateway/glm-5.3"), true);
         assert_eq!(body["agent"], "plan");
         let rules = body["permission"].as_array().unwrap();
-        let denied: Vec<_> = rules
-            .iter()
-            .filter(|rule| rule["action"] == "deny" && rule["pattern"] == "*")
-            .map(|rule| rule["permission"].as_str().unwrap())
-            .collect();
-        assert_eq!(denied, ["edit", "bash"]);
+        assert_eq!(
+            rules.first(),
+            Some(&json!({"permission": "*", "pattern": "*", "action": "deny"}))
+        );
+        for tool in ["read", "grep", "glob", "list"] {
+            assert_eq!(decide(rules, tool).as_deref(), Some("allow"), "{tool}");
+        }
+        // The person's MCP servers' tools are named `<server>_<tool>`.
+        for tool in [
+            "bash",
+            "edit",
+            "write",
+            "task",
+            "webfetch",
+            "filesystem_write_file",
+            "github_create_pull_request",
+        ] {
+            assert_eq!(decide(rules, tool).as_deref(), Some("deny"), "{tool}");
+        }
 
-        // After any rule the mode itself carries.
+        // After any rule the mode itself carries, and after a user's own
+        // allow rules, which opencode reads before the session's.
         let ask = session_create_body(PermissionMode::Ask, None, true);
-        let rules = ask["permission"].as_array().unwrap();
-        let last_bash = rules
-            .iter()
-            .rposition(|rule| rule["permission"] == "bash")
-            .unwrap();
-        assert_eq!(rules[last_bash]["action"], "deny");
+        let mut with_user = vec![
+            json!({"permission": "*", "pattern": "*", "action": "allow"}),
+            json!({"permission": "bash", "pattern": "*", "action": "allow"}),
+        ];
+        with_user.extend(ask["permission"].as_array().unwrap().iter().cloned());
+        assert_eq!(decide(&with_user, "bash").as_deref(), Some("deny"));
+        assert_eq!(
+            decide(&with_user, "writer_write_marker").as_deref(),
+            Some("deny")
+        );
+        assert_eq!(decide(&with_user, "read").as_deref(), Some("allow"));
 
         let plain = session_create_body(PermissionMode::Plan, None, false);
         assert!(plain.get("permission").is_none());

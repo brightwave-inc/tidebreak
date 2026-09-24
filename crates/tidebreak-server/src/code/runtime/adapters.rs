@@ -164,6 +164,8 @@ impl CodeRuntime {
 
     pub(crate) fn invalidate_probes(&self) {
         self.probes.lock().expect("harness probes").clear();
+        // A read-only check rests on the same install and machine.
+        self.reviews.clear_blockers();
         // The doctor's Re-check is also how a changed shell profile reaches
         // the next terminal, the same way it reaches the next probe.
         *self.login_env.lock().expect("login env") = None;

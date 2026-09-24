@@ -1032,10 +1032,13 @@ pub struct SessionSpec {
     /// - Claude Code launches with `--disallowedTools` for Bash, Edit, Write,
     ///   and NotebookEdit. Deny rules win over allow rules, so Read, Grep,
     ///   and Glob are what is left.
-    /// - opencode's session carries deny rules for `edit` and `bash`, which
-    ///   come after the agent's and the user's rules and so win.
+    /// - opencode's session carries rules that deny every tool but reading,
+    ///   the person's own MCP servers' tools included. They come after the
+    ///   agent's and the user's rules and so win.
     /// - Grok CLI runs under its `read-only` sandbox profile (`GROK_SANDBOX`),
-    ///   which the OS enforces where Grok can apply it.
+    ///   which the OS enforces. A caller checks first that it applies here
+    ///   ([`HarnessAdapter::read_only_blocker`]) and refuses the session when
+    ///   it does not.
     /// - Codex needs nothing more: its Plan posture is already the read-only
     ///   OS sandbox.
     pub read_only: bool,
@@ -1139,6 +1142,19 @@ pub trait HarnessAdapter: Send + Sync {
     /// the record and the engine disagree.
     fn relaunch_composes_permission_mode(&self) -> bool {
         true
+    }
+
+    /// Why a read-only session ([`SessionSpec::read_only`]) cannot start on
+    /// this machine, when something the adapter relies on for it is missing.
+    /// `None` means nothing stands in the way.
+    ///
+    /// Most engines need nothing beyond their launch flags. One that keeps a
+    /// read-only session read-only with an OS sandbox checks here that the
+    /// sandbox applies, and a caller refuses the session rather than run it
+    /// without one.
+    async fn read_only_blocker(&self, probe: &HarnessProbe) -> Option<String> {
+        let _ = probe;
+        None
     }
 
     /// Spawn or connect for one session.

@@ -369,6 +369,53 @@ async fn an_engine_with_no_plan_mode_reviews_in_ask_and_one_with_neither_is_refu
     assert!(neither.launched_sessions().is_empty());
 }
 
+/// Grok reviews under its OS sandbox. On a machine where the sandbox cannot
+/// apply, the review fails closed: it is refused with Grok's own reason
+/// before anything runs, and the engine list says why Grok is unavailable.
+#[tokio::test]
+async fn an_engine_whose_sandbox_cannot_apply_here_is_refused_and_listed_as_unavailable() {
+    let reason = "Grok CLI can't apply its read-only sandbox on this machine. Grok said: Landlock is not supported by this kernel";
+    let grok = ScriptedAdapter::new(review_script(r#"{"findings": []}"#))
+        .with_kind(HarnessKind::Grok)
+        .with_plan_mode(CapLevel::Unsupported)
+        .with_approvals(CapLevel::Supported)
+        .with_read_only_blocker(reason);
+    let setup = setup(&grok).await;
+    let refused = setup.start(serde_json::json!({ "harness": "grok" })).await;
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "review_engine_unsupported", "{body}");
+    assert_eq!(body["message"], reason);
+    assert!(grok.launched_sessions().is_empty(), "nothing ran");
+
+    let doctor: serde_json::Value = setup
+        .client
+        .get(format!("http://{}/code/harnesses", setup.addr))
+        .bearer_auth(&*setup.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entries = doctor["harnesses"].as_array().expect("doctor entries");
+    let grok_entry = entries
+        .iter()
+        .find(|entry| entry["kind"] == "grok")
+        .expect("grok is listed");
+    assert_eq!(grok_entry["review_blocked"], reason);
+    let claude = entries
+        .iter()
+        .find(|entry| entry["kind"] == "claude_code")
+        .expect("the working engine is listed");
+    assert!(claude.get("review_blocked").is_none(), "{claude}");
+
+    // Asked once per install, not on every request.
+    let again = setup.start(serde_json::json!({ "harness": "grok" })).await;
+    assert_eq!(again.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(grok.read_only_checks(), 1);
+}
+
 #[tokio::test]
 async fn a_running_review_never_holds_up_the_conversation_it_came_from() {
     let reviewer = reviewer(r#"{"findings": []}"#).with_turn_delay(Duration::from_secs(30));
