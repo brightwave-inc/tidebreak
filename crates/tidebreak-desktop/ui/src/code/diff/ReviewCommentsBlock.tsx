@@ -8,11 +8,17 @@ import type { SentReviewComment } from "./reviewComments";
 /** Comments listed before the block folds the rest behind its disclosure. */
 const PREVIEW_COMMENTS = 3;
 
-/** Where a comment points: `path:12-14`, or the old lines of a deletion. */
+/**
+ * Where a comment points: `path:12-14`, or the old lines of a deletion, and
+ * whether its code had changed by the time it was sent.
+ */
 function spanLabel(comment: SentReviewComment, path = comment.path): string {
-  if (comment.lines) return `${path}:${comment.lines}`;
-  if (comment.oldLines) return `${path}:${comment.oldLines} (deleted)`;
-  return path;
+  const where = comment.lines
+    ? `${path}:${comment.lines}`
+    : comment.oldLines
+      ? `${path}:${comment.oldLines} (deleted)`
+      : path;
+  return comment.outdated ? `${where} (outdated)` : where;
 }
 
 function fileName(path: string): string {
@@ -52,21 +58,24 @@ export function ReviewCommentsBlock({
         aria-controls={bodyId}
         onClick={() => setOpen((current) => !current)}
       >
-        <span className="bg-background inline-flex size-9 shrink-0 items-center justify-center rounded-md">
-          <MessageSquareDiff className="size-4" aria-hidden="true" />
-        </span>
-        <span className="grid min-w-0 flex-1 gap-px">
-          <strong className="text-foreground text-xs font-semibold">
+        {/* A plain mark on the title's line, as the transcript's rows draw
+            their icons: no tile behind it. */}
+        <MessageSquareDiff
+          className="text-muted-foreground size-3.5 shrink-0"
+          aria-hidden="true"
+        />
+        <span className="flex min-w-0 flex-1 items-baseline gap-2">
+          <strong className="text-foreground shrink-0 text-xs font-semibold">
             Review comments
           </strong>
-          <small className="text-2xs truncate">
+          <span className="truncate text-xs">
             {comments.length} {comments.length === 1 ? "comment" : "comments"}{" "}
             on {files} {files === 1 ? "file" : "files"}
-          </small>
+          </span>
         </span>
-        <Chevron className="size-4 shrink-0" aria-hidden="true" />
+        <Chevron className="size-3.5 shrink-0" aria-hidden="true" />
       </button>
-      <ul id={bodyId} className="m-0 flex list-none flex-col gap-1 p-0 pl-11">
+      <ul id={bodyId} className="m-0 flex list-none flex-col gap-1 p-0 pl-5.5">
         {shown.map((comment, index) => (
           <li
             key={`${index}:${comment.path}:${comment.lines ?? comment.oldLines}`}

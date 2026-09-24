@@ -24,11 +24,23 @@ export type DiffKey = {
   description: string;
   /** The keycaps in the order they are pressed, for a Cmd or a Ctrl keyboard. */
   keycaps: (command: boolean) => readonly string[];
+  /** Another key that does the same, listed after "or". */
+  alternate?: readonly string[];
 };
 
 export const DIFF_KEYS: readonly DiffKey[] = [
-  { id: "next-file", description: "Next file", keycaps: () => ["J"] },
-  { id: "previous-file", description: "Previous file", keycaps: () => ["K"] },
+  {
+    id: "next-file",
+    description: "Next file",
+    keycaps: () => ["J"],
+    alternate: ["]"],
+  },
+  {
+    id: "previous-file",
+    description: "Previous file",
+    keycaps: () => ["K"],
+    alternate: ["["],
+  },
   {
     id: "toggle-whitespace",
     description: "Hide or show whitespace changes",

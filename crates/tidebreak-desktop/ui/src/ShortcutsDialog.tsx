@@ -30,9 +30,12 @@ function Keycap({ children }: { children: string }) {
 function ShortcutRow({
   description,
   caps,
+  alternate,
 }: {
   description: string;
   caps: readonly string[];
+  /** Another key that does the same. */
+  alternate?: readonly string[];
 }) {
   return (
     <>
@@ -41,6 +44,14 @@ function ShortcutRow({
         {caps.map((cap) => (
           <Keycap key={cap}>{cap}</Keycap>
         ))}
+        {alternate && alternate.length > 0 && (
+          <>
+            <span className="px-0.5 text-xs text-muted-foreground">or</span>
+            {alternate.map((cap) => (
+              <Keycap key={`or-${cap}`}>{cap}</Keycap>
+            ))}
+          </>
+        )}
       </span>
     </>
   );
@@ -120,6 +131,7 @@ export function ShortcutsList({
               key={key.id}
               description={key.description}
               caps={key.keycaps(command)}
+              alternate={key.alternate}
             />
           ))}
         </>

@@ -9,10 +9,15 @@ afterEach(cleanup);
 describe("ShortcutsList", () => {
   it("lists the diff's file keys in code mode", () => {
     render(<ShortcutsList mode="code" command />);
-    const next = screen.getByText("Next file");
-    expect(next.nextElementSibling).toHaveTextContent("J");
-    const previous = screen.getByText("Previous file");
-    expect(previous.nextElementSibling).toHaveTextContent("K");
+    // J and K as on GitHub, or ] and [ as on GitLab.
+    const keycaps = (description: string) =>
+      [
+        ...(screen
+          .getByText(description)
+          .nextElementSibling?.querySelectorAll("kbd") ?? []),
+      ].map((cap) => cap.textContent);
+    expect(keycaps("Next file")).toEqual(["J", "]"]);
+    expect(keycaps("Previous file")).toEqual(["K", "["]);
     expect(
       screen.getByText("Comment on the selected lines"),
     ).toBeInTheDocument();
