@@ -36,5 +36,11 @@
     "serve": "14.2.6",
     "tailwindcss": "4.3.3",
     "typescript": "6.0.3"
+  },
+  "pnpm": {
+    "overrides": {
+      "fast-uri@3.1.5": "3.1.6",
+      "js-yaml@4.3.1": "4.3.2"
+    }
   }
 }
