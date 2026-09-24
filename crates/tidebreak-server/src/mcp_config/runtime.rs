@@ -1727,7 +1727,7 @@ impl McpRuntime {
         // Read before anything below writes: a replacement that fails puts
         // every stored credential it touched back the way it was.
         let snapshot = self.credential_snapshot(&ids).await?;
-        match self.apply_strict(definitions, ids, persist).await {
+        match self.apply_strict(definitions, ids, persist, skipped).await {
             Ok(()) => Ok(()),
             Err(error) => Err(self.restore_credentials(snapshot, error).await),
         }
@@ -1791,6 +1791,7 @@ impl McpRuntime {
         mut definitions: Vec<McpServerDefinition>,
         ids: BTreeMap<String, ConnectedAppId>,
         persist: bool,
+        skipped: Vec<SkippedRecord>,
     ) -> Result<()> {
         // Before anything connects, so the children below see the environment
         // this replacement declares rather than the previous one's. A boot
