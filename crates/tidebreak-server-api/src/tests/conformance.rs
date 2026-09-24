@@ -273,7 +273,14 @@ async fn cross_principal_rest_surface_is_disjoint() {
     let hidden: serde_json::Value =
         json_body(request(&router, "GET", "/search/messages?q=hello", &bob, None).await).await;
     assert_eq!(hidden["hits"], serde_json::json!([]));
-    assert_eq!(hidden["indexing"]["pending_conversations"], 0);
+    assert_eq!(
+        hidden["indexing"],
+        serde_json::json!({
+            "complete": true,
+            "pending_conversations": 0,
+            "failed_conversations": 0,
+        })
+    );
 
     // Bob's lists are empty — not filtered views that leak counts, but the
     // same responses an empty account gets.

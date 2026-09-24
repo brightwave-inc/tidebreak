@@ -4558,14 +4558,22 @@ archived: boolean, };
  */
 export type MessageSearchIndexing = {
 /**
- * `false` while some of the caller's older conversations are still being
- * added. Until then a search can miss matches in them.
+ * `true` once every one of the caller's older conversations is in the
+ * index. `false` while some are still being added, and when some could
+ * not be added; until then a search can miss matches in them.
  */
 complete: boolean,
 /**
- * How many of the caller's conversations are still waiting to be added.
+ * How many of the caller's conversations are still waiting to be added,
+ * including any waiting to try again after a failed attempt.
  */
-pending_conversations: number, };
+pending_conversations: number,
+/**
+ * How many of the caller's older conversations could not be added after
+ * repeated attempts. What was said in them before the index existed is
+ * not searchable; what is said in them now is.
+ */
+failed_conversations: number, };
 
 /**
  * Which kind of conversation a hit belongs to.
