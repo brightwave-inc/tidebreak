@@ -41,8 +41,9 @@ export const useDiffPreferences = create<DiffPreferences>()((set) => ({
 }));
 
 /**
- * The narrowest pane that still shows two columns of code worth reading.
- * Below it a split preference draws unified, the way an editor's side-by-side
- * diff folds to one column in a narrow window.
+ * The narrowest pane that still shows two columns of code worth reading:
+ * about forty characters a side at the diff's type size. Below it a split
+ * preference draws unified, the way an editor's side-by-side diff folds to
+ * one column in a narrow window.
  */
-export const SPLIT_MIN_WIDTH = 560;
+export const SPLIT_MIN_WIDTH = 800;

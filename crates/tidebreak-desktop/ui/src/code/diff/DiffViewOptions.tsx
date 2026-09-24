@@ -1,5 +1,5 @@
 import type { ComponentType } from "react";
-import { Columns2, Space } from "lucide-react";
+import { Columns2, Pilcrow } from "lucide-react";
 
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -36,7 +36,7 @@ export function DiffViewOptions({
       <ViewToggle
         label="Hide whitespace changes"
         hint="W"
-        icon={Space}
+        icon={Pilcrow}
         pressed={ignoreWhitespace}
         onPressedChange={onIgnoreWhitespaceChange}
       />

@@ -54,18 +54,24 @@ export function isNoisyDiffMeta(text: string): boolean {
   );
 }
 
-/** Whether git reported the file as binary rather than giving its lines. */
-export function isBinaryDiff(group: DiffFileGroup): boolean {
-  return group.lines.some(
-    (line) =>
-      line.kind === "meta" &&
-      ((line.text.startsWith("Binary files ") &&
-        line.text.endsWith(" differ")) ||
-        line.text === "GIT binary patch"),
+function isBinaryMarker(text: string): boolean {
+  return (
+    (text.startsWith("Binary files ") && text.endsWith(" differ")) ||
+    text === "GIT binary patch"
   );
 }
 
-/** One file's lines as rows: markers stripped, git's header noise dropped. */
+/** Whether git reported the file as binary rather than giving its lines. */
+export function isBinaryDiff(group: DiffFileGroup): boolean {
+  return group.lines.some(
+    (line) => line.kind === "meta" && isBinaryMarker(line.text),
+  );
+}
+
+/**
+ * One file's lines as rows: markers stripped, git's header noise dropped,
+ * and git's binary marker left to the notice that says the same thing.
+ */
 export function diffRows(group: DiffFileGroup): DiffRow[] {
   const rows: DiffRow[] = [];
   let hunk = -1;
@@ -76,7 +82,7 @@ export function diffRows(group: DiffFileGroup): DiffRow[] {
         rows.push({ ...line, text: line.text, source, hunk });
         return;
       case "meta":
-        if (isNoisyDiffMeta(line.text)) return;
+        if (isNoisyDiffMeta(line.text) || isBinaryMarker(line.text)) return;
         rows.push({ ...line, source, hunk });
         return;
       default:

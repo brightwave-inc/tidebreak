@@ -12,6 +12,8 @@ import {
   useCodeComposerStatus,
 } from "./CodeSessionSend";
 import { userItemId } from "./CodeSessionReducer";
+import { usePendingReviewStore } from "./diff/pendingReview";
+import type { ReviewComment } from "./diff/reviewComments";
 
 const uploadImageAttachment = vi.hoisted(() => vi.fn());
 
@@ -429,6 +431,159 @@ describe("sendCodeComposer", () => {
     expect(useCodeComposerStatus.getState().byKey["sess-1"]?.notice).toBe(
       "Remove or retry the images that failed to attach.",
     );
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("sendCodeComposer with diff comments", () => {
+  const client = {} as ApiClient;
+  const WORKSPACE = "ws-review";
+
+  function comment(id: string, body: string): ReviewComment {
+    return {
+      id,
+      author: { kind: "person" },
+      path: "src/queue.ts",
+      lines: [
+        { kind: "del", oldNo: 22, newNo: null, text: "const MAX = 10;" },
+        { kind: "add", oldNo: null, newNo: 23, text: "const MAX = 20;" },
+      ],
+      body,
+      createdAt: "2026-09-24T10:00:00.000Z",
+    };
+  }
+
+  afterEach(() => {
+    useComposerDrafts.setState({ drafts: {}, attachments: {} });
+    useCodeComposerStatus.setState({ byKey: {} });
+    usePendingReviewStore.setState({ byWorkspace: {}, sending: {} });
+  });
+
+  it("batches every pending comment into the message and clears them once accepted", async () => {
+    useComposerDrafts
+      .getState()
+      .setDraft("sess-1", "Fix these, then run the tests.");
+    usePendingReviewStore
+      .getState()
+      .add(WORKSPACE, comment("c1", "Why double it?"));
+    usePendingReviewStore
+      .getState()
+      .add(WORKSPACE, comment("c2", "Keep the old name."));
+    let seen: { message: string; riding: readonly string[] } | null = null;
+    const send = vi.fn(async (_session: string, message: string) => {
+      seen = {
+        message,
+        riding: usePendingReviewStore.getState().sending[WORKSPACE] ?? [],
+      };
+    });
+
+    const sent = await sendCodeComposer({
+      client,
+      key: "sess-1",
+      session: "sess-1",
+      reviewWorkspaceId: WORKSPACE,
+      send,
+    });
+
+    expect(sent).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    const { message, riding } = seen!;
+    // One message: what was typed, then one block the model reads.
+    expect(
+      message.startsWith(
+        "Fix these, then run the tests.\n\n<review_comments>\n",
+      ),
+    ).toBe(true);
+    expect(message).toContain(
+      '<comment path="src/queue.ts" lines="23" old_lines="22">\n```diff\n-const MAX = 10;\n+const MAX = 20;\n```\nWhy double it?\n</comment>',
+    );
+    expect(message).toContain("Keep the old name.");
+    expect(message.endsWith("</review_comments>")).toBe(true);
+    // Marked while the request was out, so nothing sends them twice.
+    expect(riding).toEqual(["c1", "c2"]);
+    expect(
+      usePendingReviewStore.getState().byWorkspace[WORKSPACE],
+    ).toBeUndefined();
+    expect(usePendingReviewStore.getState().sending[WORKSPACE]).toBeUndefined();
+  });
+
+  it("sends the comments alone when nothing was typed", async () => {
+    usePendingReviewStore
+      .getState()
+      .add(WORKSPACE, comment("c1", "Why double it?"));
+    const send = vi.fn(async (_session: string, _message: string) => {});
+
+    const sent = await sendCodeComposer({
+      client,
+      key: "sess-1",
+      session: "sess-1",
+      reviewWorkspaceId: WORKSPACE,
+      send,
+    });
+
+    expect(sent).toBe(true);
+    expect(send.mock.calls[0]?.[1]).toMatch(/^<review_comments>\n/);
+  });
+
+  it("keeps the comments pending when the server refuses the message", async () => {
+    useComposerDrafts.getState().setDraft("sess-1", "Fix these.");
+    usePendingReviewStore
+      .getState()
+      .add(WORKSPACE, comment("c1", "Why double it?"));
+
+    const sent = await sendCodeComposer({
+      client,
+      key: "sess-1",
+      session: "sess-1",
+      reviewWorkspaceId: WORKSPACE,
+      send: async () => {
+        throw new HttpError(409, "the session is fenced", "session_fenced");
+      },
+    });
+
+    expect(sent).toBe(false);
+    expect(
+      usePendingReviewStore
+        .getState()
+        .byWorkspace[WORKSPACE]?.map((item) => item.id),
+    ).toEqual(["c1"]);
+    expect(usePendingReviewStore.getState().sending[WORKSPACE]).toBeUndefined();
+    expect(useComposerDrafts.getState().drafts["sess-1"]).toBe("Fix these.");
+  });
+
+  it("leaves a comment written during the send for the next message", async () => {
+    useComposerDrafts.getState().setDraft("sess-1", "Fix these.");
+    usePendingReviewStore.getState().add(WORKSPACE, comment("c1", "First."));
+    const send = vi.fn(async () => {
+      usePendingReviewStore.getState().add(WORKSPACE, comment("c2", "Later."));
+    });
+
+    await sendCodeComposer({
+      client,
+      key: "sess-1",
+      session: "sess-1",
+      reviewWorkspaceId: WORKSPACE,
+      send,
+    });
+
+    expect(
+      usePendingReviewStore
+        .getState()
+        .byWorkspace[WORKSPACE]?.map((item) => item.id),
+    ).toEqual(["c2"]);
+  });
+
+  it("sends nothing when there is neither text nor a comment", async () => {
+    const send = vi.fn();
+    expect(
+      await sendCodeComposer({
+        client,
+        key: "sess-1",
+        session: "sess-1",
+        reviewWorkspaceId: WORKSPACE,
+        send,
+      }),
+    ).toBe(false);
     expect(send).not.toHaveBeenCalled();
   });
 });
