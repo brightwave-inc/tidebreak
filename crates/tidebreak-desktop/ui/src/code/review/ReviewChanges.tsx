@@ -155,10 +155,11 @@ export function ReviewChangesForm({
           Review changes
         </h2>
         <p className="text-muted-foreground text-xs">
-          Another engine reviews a copy of the changes as they are now,
-          read-only: anything it asks to change is refused. Edits you make after
-          you start aren't part of the review. Its findings arrive in the diff
-          for you to keep or dismiss.
+          Another engine reviews a copy of the changes as they are now. It can
+          read what your account can read, as coding engines can, but it
+          can&apos;t change your files, and anything it asks to run or change is
+          refused. Edits you make after you start aren&apos;t part of the
+          review. Its findings arrive in the diff for you to keep or dismiss.
         </p>
       </div>
       <div className="flex flex-col gap-1.5">

@@ -82,7 +82,7 @@ describe("the Review changes form", () => {
     // It says what it reviews, and that later edits are not part of it.
     expect(
       screen.getByText(
-        /reviews a copy of the changes as they are now,\s+read-only/,
+        /It can\s+read what your account can read, as coding engines can/,
       ),
     ).toBeInTheDocument();
     expect(

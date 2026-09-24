@@ -826,19 +826,25 @@ was running, and the desktop says it stopped.
 
 Read-only holds in layers:
 
-- The engine loses its tools for writing files and running commands, whatever
-  the person's own rules or MCP servers allow. Claude Code runs in plan mode
-  with Bash, Edit, Write, and NotebookEdit disallowed and no MCP servers,
-  leaving Read, Grep, and Glob. Codex runs in its read-only OS sandbox.
-  opencode runs its plan agent with session rules that deny every tool but
-  reading, the tools of the person's own MCP servers included, since
-  opencode has no switch that keeps a configured MCP server from loading.
-  Grok CLI has no plan mode, so it runs in Ask under its `read-only` sandbox
-  profile, with `sandbox.auto_allow_bash` off. Before a Grok review starts,
-  Tidebreak checks that Grok can apply the profile on this machine; where it
-  cannot, the review is refused with Grok's reason and Review changes lists
-  Grok as unavailable. An engine with neither a plan mode nor approvals
-  Tidebreak can refuse is not offered.
+- The engine loses its tools for writing files, running commands, and
+  reaching the network, whatever the person's own rules, hooks, or MCP
+  servers allow. Claude Code runs in plan mode with only Read, Grep, and
+  Glob (`--tools`), with Bash, Edit, Write, NotebookEdit, WebFetch, and
+  WebSearch also denied by name, no MCP servers, and the person's hooks off
+  (`disableAllHooks`); the rest of the person's settings, such as the env a
+  gateway endpoint needs, still apply. Codex runs in its read-only OS
+  sandbox, which also keeps commands off the network, with web search off
+  and each MCP server in the person's Codex config turned off by name; a
+  Codex that cannot list its servers is refused. opencode runs its plan
+  agent with session rules that deny every tool but reading, the person's
+  own MCP servers' tools and `webfetch` included, since opencode has no
+  switch that keeps a configured MCP server from loading. Grok CLI has no
+  plan mode, so it runs in Ask under its `read-only` sandbox profile, with
+  `sandbox.auto_allow_bash` and `web_fetch` off. Before a Grok review
+  starts, Tidebreak checks that Grok can apply the profile on this machine;
+  where it cannot, the review is refused with Grok's reason and Review
+  changes lists Grok as unavailable. An engine with neither a plan mode nor
+  approvals Tidebreak can refuse is not offered.
 - Every approval the engine asks for is refused, with feedback to report the
   change as a finding instead. The reviewer gets no connected apps, browser,
   computer use, SSH agent, or forge credentials, and the repository's own
@@ -852,6 +858,18 @@ Read-only holds in layers:
   copies every file in the tree, including files a sparse checkout leaves
   out, and a workspace over 200,000 files or 1 GB is refused before anything
   runs.
+
+What a reviewer can read: whatever the person's account can read, as the
+coding engines can, with one exception. opencode's reviewer reads only its
+copy, since its rules deny reading outside the working directory. Claude
+Code confines reads to the working directory only in `--restricted` mode,
+which also drops the person's settings, so reviews do not use it. Codex's
+and Grok's read-only sandboxes allow reads everywhere. What leaves the
+machine: only what the engine sends its own model provider. Grok's
+`web_search` runs through xAI, the provider Grok already uses, and cannot be
+turned off for `grok agent`; and a command the person's own Grok rules allow
+runs without asking, still unable to write, but on macOS Grok's sandbox does
+not keep it off the network.
 
 The reviewer answers with findings in JSON, read strictly. A finding on lines
 the diff shows becomes a proposed comment by the reviewer, anchored like a
