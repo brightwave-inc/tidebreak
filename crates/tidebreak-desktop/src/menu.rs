@@ -43,7 +43,7 @@ const MENU_COMMAND_EVENT: &str = "desktop-menu-command";
 /// name the renderer receives, so the two sides share one vocabulary;
 /// `ui/src/nativeMenu.ts` lists the same names and a test there reads this
 /// list to keep them in step.
-const RENDERER_COMMANDS: [&str; 9] = [
+const RENDERER_COMMANDS: [&str; 10] = [
     MENU_NEW_ID,
     MENU_COMMAND_PALETTE_ID,
     MENU_SETTINGS_ID,
@@ -53,10 +53,15 @@ const RENDERER_COMMANDS: [&str; 9] = [
     MENU_ZOOM_RESET_ID,
     MENU_KEYBOARD_SHORTCUTS_ID,
     MENU_DOCUMENTATION_ID,
+    MENU_INSTALL_CLI_ID,
 ];
 
 const MENU_CHECK_FOR_UPDATES_ID: &str = "check-for-updates";
 const MENU_SETTINGS_ID: &str = "settings";
+/// Installs the `tidebreak` command and opens Settings on what it did. The
+/// renderer carries it out so the result lands on the page that also offers
+/// the install for all users and the uninstall.
+const MENU_INSTALL_CLI_ID: &str = "install-cli-command";
 const MENU_NEW_ID: &str = "new";
 const MENU_COMMAND_PALETTE_ID: &str = "command-palette";
 const MENU_CLOSE_TAB_ID: &str = "close-tab";
@@ -106,6 +111,7 @@ pub(crate) fn install_app_menu(app: &tauri::App) -> tauri::Result<()> {
             &item(MENU_CHECK_FOR_UPDATES_ID, "Check for Updates…", None)?,
             &PredefinedMenuItem::separator(handle)?,
             &item(MENU_SETTINGS_ID, "Settings…", Some("CmdOrCtrl+,"))?,
+            &item(MENU_INSTALL_CLI_ID, "Install the tidebreak Command", None)?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::services(handle, None)?,
             &PredefinedMenuItem::separator(handle)?,

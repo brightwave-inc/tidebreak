@@ -1083,6 +1083,24 @@ fn relaunch_after_update(app: &AppHandle) -> ! {
     app.restart();
 }
 
+/// Open this app again once the process has exited, for a restart the person
+/// asked for. Called as the process exits; the relaunch waits for the exit,
+/// because the single-instance plugin refuses a second Tidebreak while this
+/// one lives. Only a packaged macOS app reopens: a development binary and the
+/// other platforms, which never offer the restart, simply quit.
+pub(crate) fn relaunch_once_exited() {
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = std::env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(app_bundle_from_binary)
+    {
+        if let Err(error) = schedule_bundle_relaunch(&bundle) {
+            eprintln!("tidebreak-desktop: could not reopen Tidebreak after quitting: {error}");
+        }
+    }
+}
+
 /// Walk `…/Name.app/Contents/MacOS/<exe>` up to `Name.app`.
 #[cfg(any(test, target_os = "macos"))]
 fn app_bundle_from_binary(binary: &Path) -> Option<PathBuf> {

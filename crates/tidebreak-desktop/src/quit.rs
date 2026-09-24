@@ -128,6 +128,8 @@ pub(crate) struct QuitPromptUpdate {
     prompt: QuitPrompt,
     /// Why waiting for a safe point failed, when it did.
     error: Option<String>,
+    /// The person asked to restart, so the app opens again once it quits.
+    restart: bool,
 }
 
 /// The person's answer to the prompt.
@@ -172,6 +174,9 @@ struct QuitState {
     error: Option<String>,
     /// Ends the wait for a safe point, when one is running.
     wait: Option<watch::Sender<Option<WaitEnd>>>,
+    /// The quit under way is a restart the person asked for: the app opens
+    /// again once it has exited. Cancelling the quit cancels the restart.
+    restart: bool,
 }
 
 /// What a quit request does next.
@@ -239,6 +244,7 @@ impl Default for QuitController {
                 native_dialog_open: false,
                 error: None,
                 wait: None,
+                restart: false,
             }),
             gate: tokio::sync::Mutex::new(()),
         }
@@ -262,6 +268,7 @@ impl QuitState {
             request: self.request,
             prompt: self.prompt(),
             error: self.error.clone(),
+            restart: self.restart,
         }
     }
 
@@ -346,11 +353,13 @@ impl QuitController {
         match (state.phase, choice) {
             (Phase::Asking(_), QuitChoice::Cancel) => {
                 state.phase = Phase::Idle;
+                state.restart = false;
                 ChoiceAction::Show(state.next_update())
             }
             (Phase::Waiting(_), QuitChoice::Cancel) => {
                 state.end_wait(WaitEnd::Cancelled);
                 state.phase = Phase::Idle;
+                state.restart = false;
                 ChoiceAction::Show(state.next_update())
             }
             (Phase::Asking(count), QuitChoice::SafePoint) => {
@@ -434,7 +443,20 @@ impl QuitController {
             request: state.request,
             prompt: state.prompt(),
             error: state.error.clone(),
+            restart: state.restart,
         }
+    }
+
+    /// Ask to restart: a quit request that opens the app again once it has
+    /// exited. It asks first when agents are working, exactly as a quit does.
+    fn begin_restart(&self) -> RequestAction {
+        self.lock().restart = true;
+        self.begin_request()
+    }
+
+    /// Whether the exit under way should open the app again.
+    pub(crate) fn restarting(&self) -> bool {
+        self.lock().restart
     }
 }
 
@@ -519,7 +541,19 @@ async fn guarded<T>(
 /// Ask to quit: from the Quit menu item, the Dock, or a window close that
 /// quits. Returns at once; the exit, the prompt, or nothing follows.
 pub(crate) fn request_quit(app: &AppHandle) -> QuitDecision {
-    match app.state::<QuitController>().begin_request() {
+    act_on_request(app, app.state::<QuitController>().begin_request())
+}
+
+/// Ask to restart, which is a quit that opens the app again once it has
+/// exited. macOS applies a Screen Recording grant only to a process started
+/// after it, so the permission setup offers this. Working agents get the same
+/// prompt a quit gives them.
+pub(crate) fn request_restart(app: &AppHandle) -> QuitDecision {
+    act_on_request(app, app.state::<QuitController>().begin_restart())
+}
+
+fn act_on_request(app: &AppHandle, action: RequestAction) -> QuitDecision {
+    match action {
         RequestAction::Proceed => QuitDecision::Proceed,
         RequestAction::Count => {
             spawn_count(app);
@@ -851,6 +885,17 @@ pub(crate) fn quit_prompt_opened(controller: State<'_, QuitController>, request:
 #[tauri::command]
 pub(crate) fn answer_quit_prompt(app: AppHandle, choice: QuitChoice) {
     choose(&app, choice);
+}
+
+/// Restart Tidebreak so macOS applies a permission it granted since launch.
+/// Working agents get the quit prompt, worded for a restart.
+#[tauri::command]
+pub(crate) fn restart_app(app: AppHandle, webview: tauri::Webview) -> Result<(), String> {
+    if webview.label() != "main" {
+        return Err("Tidebreak can be restarted only from its own window.".to_owned());
+    }
+    request_restart(&app);
+    Ok(())
 }
 
 /// Closing the main window. On macOS the window hides and the app keeps
@@ -1556,6 +1601,44 @@ mod tests {
         );
     }
 
+    /// A restart asks about working agents the way a quit does, says it is a
+    /// restart, and a cancel takes the restart back with it.
+    #[test]
+    fn a_restart_is_a_quit_that_remembers_to_open_again() {
+        let controller = QuitController::default();
+        assert!(!controller.restarting());
+
+        assert_eq!(controller.begin_restart(), RequestAction::Count);
+        let CountAction::Ask(update) = controller.counted(Ok(agents(2))) else {
+            panic!("working agents are asked about");
+        };
+        assert!(update.restart, "the prompt is worded for a restart");
+        assert!(controller.restarting());
+
+        let ChoiceAction::Show(update) = controller.choose(QuitChoice::Cancel) else {
+            panic!("a cancel goes back to idle");
+        };
+        assert!(!update.restart);
+        assert!(
+            !controller.restarting(),
+            "a later quit must not reopen the app"
+        );
+
+        // With nothing working, the restart exits at once and reopens.
+        assert_eq!(controller.begin_restart(), RequestAction::Count);
+        assert_eq!(controller.counted(Ok(agents(0))), CountAction::Exit);
+        assert!(controller.restarting());
+    }
+
+    /// A plain quit never reopens the app.
+    #[test]
+    fn a_quit_does_not_restart() {
+        let controller = QuitController::default();
+        assert_eq!(controller.begin_request(), RequestAction::Count);
+        assert_eq!(controller.counted(Ok(agents(0))), CountAction::Exit);
+        assert!(!controller.restarting());
+    }
+
     /// The renderer reads the prompt as tagged JSON.
     #[test]
     fn the_prompt_serializes_for_the_renderer() {
@@ -1566,6 +1649,7 @@ mod tests {
                 waiting_for_you: 1,
             }),
             error: None,
+            restart: false,
         };
         assert_eq!(
             serde_json::to_value(update).unwrap(),
@@ -1573,6 +1657,7 @@ mod tests {
                 "request": 4,
                 "prompt": {"phase": "waiting", "agents": 2, "waitingForYou": 1},
                 "error": null,
+                "restart": false,
             })
         );
         assert_eq!(
