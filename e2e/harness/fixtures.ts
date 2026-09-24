@@ -60,15 +60,20 @@ export const test = base.extend<{
       });
     });
     const serverErrors: string[] = [];
+    const origin = new URL(machine.url).origin;
     context.on("response", (response) => {
-      if (response.status() < 500 || !response.url().startsWith(machine.url))
-        return;
+      if (response.status() < 500) return;
+      const url = new URL(response.url());
+      if (url.origin !== origin) return;
       const method = response.request().method();
-      const path = new URL(response.url()).pathname;
       const known = Object.values(knownServerErrors)
         .flat()
-        .some((entry) => entry.method === method && entry.path.test(path));
-      if (!known) serverErrors.push(`${response.status()} ${method} ${path}`);
+        .some(
+          (entry) => entry.method === method && entry.path.test(url.pathname),
+        );
+      if (!known) {
+        serverErrors.push(`${response.status()} ${method} ${url.pathname}`);
+      }
     });
     await use(context);
     expect(

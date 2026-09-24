@@ -7,14 +7,6 @@ import { codeTurn } from "../harness/scripts";
 // A turn that changes nothing, so archiving has no leftover work to confirm.
 test.use({
   scripts: { harness: codeTurn({ reply: "The repository has one README." }) },
-  // Opening an archived workspace reads its file tree and pull request, and
-  // both answer 500 today. Delete this entry when #3580 is fixed.
-  knownServerErrors: {
-    "#3580": [
-      { method: "GET", path: /^\/code\/workspaces\/[^/]+\/tree$/ },
-      { method: "GET", path: /^\/code\/workspaces\/[^/]+\/pr$/ },
-    ],
-  },
 });
 
 test("an archived workspace keeps its conversation and returns to the rail on restore", async ({
