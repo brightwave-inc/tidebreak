@@ -79,7 +79,7 @@ export const LoadFailure: Story = {
       listMcpServers: async () => {
         throw new Error("MCP servers could not be loaded.");
       },
-    } as ApiClient,
+    } as unknown as ApiClient,
   },
 };
 

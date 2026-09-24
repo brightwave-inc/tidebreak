@@ -1088,7 +1088,9 @@ export function McpPanel({
         )}
         {loading && !serversKnown ? (
           <p className="text-sm text-muted-foreground">Loading endpoints…</p>
-        ) : listError !== null && !serversKnown && endpointSlugs.length === 0 ? (
+        ) : listError !== null &&
+          !serversKnown &&
+          endpointSlugs.length === 0 ? (
           <McpLoadFailure
             error={listError}
             onRetry={() => {

@@ -567,7 +567,7 @@ function createSettingsStoryClient(
                 ],
                 skipped_mcp_servers: [],
               }
-          : connectedApps;
+            : connectedApps;
 
   const methods: SettingsClientMethods = {
     getSettings: () => read(settings),
