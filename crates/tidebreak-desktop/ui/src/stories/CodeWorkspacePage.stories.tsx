@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, userEvent, within } from "storybook/test";
+import { expect, userEvent, waitFor, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -9,7 +9,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
-import type { ApiClient } from "@/api/client";
+import { HttpError, type ApiClient } from "@/api/client";
 import type {
   CodeRepoSnapshot,
   CodeForkTranscript,
@@ -23,6 +23,7 @@ import type {
   SequencedCodeEventFrame,
 } from "@/api/types";
 import { useCodeCatalogStore } from "@/code/CodeCatalogStore";
+import { useCodeComposerStatus } from "@/code/CodeSessionSend";
 import { resetCodeSessionRegistry } from "@/code/CodeSessionRegistry";
 import { useCodeUiStore } from "@/code/CodeUiStore";
 import { UNEFF_STARTUP_HEADING, uneffPreparationSteps } from "@/code/uneffMe";
@@ -41,8 +42,10 @@ import {
   searchFromLayout,
   type PanelSearch,
 } from "@/panel/panelUrl";
+import { useComposerDrafts } from "@/ComposerDrafts";
 import { SidebarExpandStrip } from "@/sidebar/SidebarExpandStrip";
 import { useUiStore } from "@/UiStore";
+import { holdComposerImages } from "@/useImageAttachments";
 import {
   attentionNeedsYou,
   codeSession,
@@ -75,8 +78,8 @@ type WorkspaceScenario =
   | "archived-remote"
   | "nested"
   | "start"
+  | "start-attachments"
   | "workspace-starting"
-  | "workspace-sending-message"
   | "uneff-preparing"
   | "session-create-failure"
   | "first-turn-failure"
@@ -168,10 +171,7 @@ function isSetupFailedScenario(
 }
 
 function isWorkspaceStartupScenario(scenario: WorkspaceScenario): boolean {
-  return (
-    scenario === "workspace-starting" ||
-    scenario === "workspace-sending-message"
-  );
+  return scenario === "workspace-starting";
 }
 
 const repo: CodeRepoSnapshot = {
@@ -695,8 +695,8 @@ function storyClient(
       : prSnapshot;
   const sessions =
     scenario === "start" ||
+    scenario === "start-attachments" ||
     scenario === "workspace-starting" ||
-    scenario === "workspace-sending-message" ||
     scenario === "uneff-preparing" ||
     scenario === "session-create-failure" ||
     scenario === "first-turn-failure" ||
@@ -926,7 +926,11 @@ function storyClient(
     forkCodeSession: async () => forkSource,
     submitCodeTurn: async (_sessionId: string, message: string) => {
       if (firstTurnFails) {
-        throw new Error("The harness stopped before it accepted the message.");
+        throw new HttpError(
+          409,
+          "The harness stopped before it accepted the message.",
+          "harness_failed",
+        );
       }
       return {
         kind: "ran",
@@ -1090,6 +1094,56 @@ function storyRouter(client: ApiClient, initialUrl: string) {
   });
 }
 
+/** What a reader typed on the start surface before sending. */
+const FIRST_MESSAGE_DRAFT = "Fix the flaky retry test in the auth crate.";
+
+/** A pasted log long enough to become a chip rather than inline text. */
+const FIRST_MESSAGE_PASTE = Array.from(
+  { length: 30 },
+  (_, index) =>
+    `retry ${String(index + 1).padStart(2, "0")}: auth token refresh timed out after 250ms, backing off 2s`,
+).join("\n");
+
+/** A 160 by 100 PNG that reads as a small app screenshot. */
+const SCREENSHOT_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAKAAAABkCAIAAACO1KzYAAABFUlEQVR42u3doQ3CQBiG4ZsGUYsEU8EKqO7AXoQ5SE1NQxCojoCC4BBNLkhEKc1/T/Kqk/eYfmmTplW1VuCSKwAswAKspQBfd3VuPBlO29x4sj82OZcIWIAFWB6yBBiwAAuwFgL8eL4UOMCABViABViABViAAasU4K6/6csAAwYMGDBgwIABA5YdLMACLMACLDOpzAEGGLAAC7AAa35g2cECLMACLMAyk2J8iAMYMGDAgAEDBgzYTBJgARZgwAKsSMCf/2+4t2dNHmDAgAEDBgwYMI94wLKDBViABViABRiwAAuwAAuwfg28OVz+HiTAAgwYMGDAgAEDBgwYMGABFmDAgL1sEGABFmABFmDAAizAAqwZegPrNzSQE8raogAAAABJRU5ErkJggg==";
+
+function screenshotFile(): File {
+  const bytes = Uint8Array.from(atob(SCREENSHOT_PNG), (char) =>
+    char.charCodeAt(0),
+  );
+  return new File([bytes], "auth-retry-failure.png", { type: "image/png" });
+}
+
+/**
+ * Put a first message on the start surface's composer: typed words and a
+ * pasted log, plus a screenshot when `withImage` is set. The image is held,
+ * the way the start surface holds one until its session exists.
+ *
+ * The app shell loads the engine report, and the engine picker stays empty
+ * without it, so this loads it too: a story that sends needs an engine.
+ */
+function seedStartDraft(withImage: boolean) {
+  useCodeCatalogStore.setState({ doctor: harnessDoctor });
+  const drafts = useComposerDrafts.getState();
+  drafts.setDraft(workspace.id, FIRST_MESSAGE_DRAFT);
+  drafts.setPastedTexts(workspace.id, [
+    { id: "paste-retry-log", text: FIRST_MESSAGE_PASTE },
+  ]);
+  if (withImage) holdComposerImages(workspace.id, [screenshotFile()]);
+}
+
+/** Forget every composer draft and send notice an earlier story left. */
+function resetComposerDrafts() {
+  const drafts = useComposerDrafts.getState();
+  const keys = new Set([
+    ...Object.keys(drafts.drafts),
+    ...Object.keys(drafts.attachments),
+  ]);
+  for (const key of keys) drafts.clearDraft(key);
+  useCodeComposerStatus.setState({ byKey: {} });
+}
+
 function resetStoryState(
   reviewOpen: boolean,
   sidebarCollapsed: boolean,
@@ -1099,6 +1153,7 @@ function resetStoryState(
   disconnectCodeUpdates();
   useCodeCatalogStore.getState().reset();
   useCodeUpdatesStore.getState().reset();
+  resetComposerDrafts();
   useCodeUiStore.setState({
     reviewSidebarOpen: reviewOpen,
     inspectorScope: null,
@@ -1138,18 +1193,19 @@ function WorkspacePageStory({
 }) {
   const [state] = useState(() => {
     resetStoryState(reviewOpen, sidebarCollapsed, storedInspectorLayout);
-    if (
-      scenario === "workspace-starting" ||
-      scenario === "workspace-sending-message"
-    ) {
+    if (scenario === "workspace-starting") {
       useCodeUiStore.getState().setWorkspaceStartup(workspace.id, {
         harness: "claude_code",
         hasFirstMessage: true,
-        phase:
-          scenario === "workspace-starting"
-            ? "starting_session"
-            : "sending_message",
+        phase: "starting_session",
       });
+    }
+    if (scenario === "start-attachments") seedStartDraft(true);
+    if (
+      scenario === "session-create-failure" ||
+      scenario === "first-turn-failure"
+    ) {
+      seedStartDraft(false);
     }
     if (scenario === "uneff-preparing") {
       useCodeUiStore.getState().setWorkspaceStartup(workspace.id, {
@@ -1452,6 +1508,42 @@ export const StartSession: Story = {
   args: { scenario: "start", reviewOpen: false },
 };
 
+/**
+ * The start surface is the session composer before its session exists: the
+ * same draft, pasted text, and image chips. The image waits there until the
+ * send creates the session and publishes it.
+ */
+export const StartWithAttachments: Story = {
+  args: { scenario: "start-attachments", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByRole("button", {
+        name: "Remove auth-retry-failure.png",
+      }),
+    ).toBeVisible();
+    await expect(canvas.getByRole("textbox", { name: "Message" })).toHaveValue(
+      FIRST_MESSAGE_DRAFT,
+    );
+  },
+};
+
+/** Choose Claude Code and send the seeded first message from the start surface. */
+async function sendFirstMessage(canvasElement: HTMLElement) {
+  const canvas = within(canvasElement);
+  const engine = await canvas.findByRole("combobox", { name: "Engine" });
+  await waitFor(() => expect(engine).toBeEnabled());
+  await userEvent.click(engine);
+  await userEvent.click(
+    await within(document.body).findByRole("option", { name: /Claude Code/ }),
+  );
+  // The open engine menu hides the page from the accessibility tree until it
+  // closes, so wait for the send button to come back.
+  const send = await canvas.findByRole("button", { name: "Send message" });
+  await waitFor(() => expect(send).toBeEnabled());
+  await userEvent.click(send);
+}
+
 /** The workspace page carries the handoff while the first agent starts. */
 export const StartingSession: Story = {
   args: { scenario: "workspace-starting", reviewOpen: false },
@@ -1466,19 +1558,37 @@ export const UneffMePreparing: Story = {
   args: { scenario: "uneff-preparing", reviewOpen: false },
 };
 
-/** Once the agent exists, the same surface carries the first message into chat. */
-export const SendingFirstMessage: Story = {
-  args: { scenario: "workspace-sending-message", reviewOpen: false },
-};
-
 /** A creation failure leaves the start surface mounted and restores its draft. */
 export const FailedSessionCreation: Story = {
   args: { scenario: "session-create-failure", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    await sendFirstMessage(canvasElement);
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByText(/Claude Code sign-in expired/),
+    ).toBeVisible();
+    await expect(canvas.getByRole("textbox", { name: "Message" })).toHaveValue(
+      FIRST_MESSAGE_DRAFT,
+    );
+  },
 };
 
-/** A failed first turn keeps the created session and restores the exact draft. */
+/**
+ * A failed first turn keeps the created session. The draft, its pasted text,
+ * and its images wait in that session's composer with the reason.
+ */
 export const FailedFirstMessage: Story = {
   args: { scenario: "first-turn-failure", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    await sendFirstMessage(canvasElement);
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByText(/The harness stopped before it accepted/),
+    ).toBeVisible();
+    await expect(canvas.getByRole("textbox", { name: "Message" })).toHaveValue(
+      FIRST_MESSAGE_DRAFT,
+    );
+  },
 };
 
 /** A failed fork keeps both its editable framing and transcript source. */

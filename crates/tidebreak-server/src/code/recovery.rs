@@ -142,36 +142,43 @@ pub(crate) async fn recover_running_sessions_with_caps(
 /// A [`FenceReason::ResumeLost`] also drops the stored resume ref: the engine
 /// has already refused it, so the reap this fence asks for must re-attach
 /// with a fresh engine session rather than resume the same dead ref.
-pub(crate) async fn fence_session(
-    store: &DbStore,
-    bus: &CodeEventBus,
-    session: &mut Session,
+pub(crate) fn fence_session<'fut>(
+    store: &'fut DbStore,
+    bus: &'fut CodeEventBus,
+    session: &'fut mut Session,
     reason: FenceReason,
-) -> Result<(), tidebreak_core::AgentError> {
-    if matches!(reason, FenceReason::ResumeLost { .. }) {
-        session.harness_resume_ref = None;
-        if !clear_session_harness_resume_ref(store, &session.owner, session.id, session.spawn_epoch)
+) -> futures::future::BoxFuture<'fut, Result<(), tidebreak_core::AgentError>> {
+    Box::pin(async move {
+        if matches!(reason, FenceReason::ResumeLost { .. }) {
+            session.harness_resume_ref = None;
+            if !clear_session_harness_resume_ref(
+                store,
+                &session.owner,
+                session.id,
+                session.spawn_epoch,
+            )
             .await?
-        {
-            return Err(tidebreak_core::AgentError::Store(format!(
-                "code session {} disappeared while clearing its rejected resume ref",
-                session.id
-            )));
+            {
+                return Err(tidebreak_core::AgentError::Store(format!(
+                    "code session {} disappeared while clearing its rejected resume ref",
+                    session.id
+                )));
+            }
         }
-    }
-    session.lifecycle = SessionLifecycle::Fenced;
-    settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
-    session.fence_reason = Some(reason.clone());
-    replace_attention(
-        session,
-        Attention::new(
-            AttentionState::Fenced { reason },
-            AttentionSource::Lifecycle,
-        ),
-        false,
-    );
-    persist_recovery_session(store, bus, session).await?;
-    Ok(())
+        session.lifecycle = SessionLifecycle::Fenced;
+        settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
+        session.fence_reason = Some(reason.clone());
+        replace_attention(
+            session,
+            Attention::new(
+                AttentionState::Fenced { reason },
+                AttentionSource::Lifecycle,
+            ),
+            false,
+        );
+        persist_recovery_session(store, bus, session).await?;
+        Ok(())
+    })
 }
 
 /// Recovery owns both the lifecycle transition and the matching subagent

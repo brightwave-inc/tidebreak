@@ -618,10 +618,11 @@ applies the decision and follows to the next settle point. `code_approvals`
 lists what is parked.
 
 `status` is the chat set plus **`queued`**. `POST /sessions/{id}/turns`
-waits for the worker to finish or to park the message on the durable session
-queue. A queued receipt returns immediately with the queue position and the
-turn id the promoted turn will run under — it is not a failure. Re-check with
-`code_wait`; one wait drains the running turn and then the queued follow-up.
+answers as soon as the message is accepted: with the started turn, or with a
+receipt for a message parked on the durable session queue. A queued receipt
+carries the queue position and the turn id the promoted turn will run under —
+it is not a failure. Re-check with `code_wait`; one wait drains the running
+turn and then the queued follow-up.
 
 `run_action` and `reap_session` are not mounted.
 

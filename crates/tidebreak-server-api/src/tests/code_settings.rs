@@ -128,14 +128,14 @@ async fn a_mode_change_a_relaunch_cannot_carry_is_refused_rather_than_recorded()
         .remove(0);
 
     // A turn is what gives the engine a session to resume into.
-    let accepted = client
-        .post(format!("http://{addr}/sessions/{session}/turns"))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "one" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+    run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        &session,
+        serde_json::json!({ "message": "one" }),
+    )
+    .await;
 
     let response = client
         .post(format!("http://{addr}/sessions/{session}/mode"))
@@ -453,6 +453,8 @@ async fn a_model_switch_deactivates_incompatible_execution_settings() {
     let turn: serde_json::Value = turn.json().await.unwrap();
     assert_eq!(turn["model"], "steady", "{turn}");
     assert_eq!(turn["fast_mode"], false, "{turn}");
+    // The send answers on acceptance; the engine sees the turn after that.
+    wait_for_turn_end(&client, addr, &token, session_id, json_id(&turn)).await;
     assert_eq!(engine.turn_efforts(), vec![None]);
     let inputs = engine.turn_inputs();
     assert_eq!(inputs[0].model.as_deref(), Some("steady"));
@@ -612,14 +614,14 @@ async fn a_live_setting_update_becomes_active_only_after_its_exact_write_commits
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["kind"], "session_settings_changed", "{body}");
 
-    let turn = client
-        .post(format!("http://{addr}/sessions/{session_id}/turns"))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "still default" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        session_id,
+        serde_json::json!({ "message": "still default" }),
+    )
+    .await;
     assert_eq!(engine.turn_efforts(), vec![None]);
 }
 
@@ -685,15 +687,15 @@ async fn a_mode_switch_uses_the_engine_channel_before_it_relaunches() {
 
     // And the turn after it still runs on the same session, without writing
     // the old mode back: the worker holds its own copy of the row, and every
-    // turn persists the whole thing.
-    let response = client
-        .post(format!("http://{addr}/sessions/{session}/turns"))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "after the switch" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    // turn persists the whole thing. The read waits for that last write.
+    run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        &session,
+        serde_json::json!({ "message": "after the switch" }),
+    )
+    .await;
 
     let reread: serde_json::Value = client
         .get(format!("http://{addr}/sessions/{session}/debug"))

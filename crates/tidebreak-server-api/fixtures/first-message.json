@@ -1,0 +1,49 @@
+{
+  "about": [
+    "The first message the desktop sends from a new workspace's start surface:",
+    "a draft restored after a remount, a long paste held as pasted text, and a",
+    "pasted image. The desktop test (crates/tidebreak-desktop/ui/src/code/",
+    "firstMessage.e2e.dom.test.tsx) drives the real composer and API client",
+    "and checks that they send exactly these requests. The server test",
+    "(tests::code_first_message) replays them and reads the first turn back.",
+    "Change one side and the other fails until both agree. To record the",
+    "desktop's requests again, run the desktop test with",
+    "TIDEBREAK_RECORD_FIRST_MESSAGE=1."
+  ],
+  "draft": "Fix the flaky retry test in the auth crate.",
+  "pasted_text": "retry 01: auth token refresh timed out after 250ms, backing off 2s\nretry 02: auth token refresh timed out after 250ms, backing off 2s\nretry 03: auth token refresh timed out after 250ms, backing off 2s\nretry 04: auth token refresh timed out after 250ms, backing off 2s\nretry 05: auth token refresh timed out after 250ms, backing off 2s\nretry 06: auth token refresh timed out after 250ms, backing off 2s\nretry 07: auth token refresh timed out after 250ms, backing off 2s\nretry 08: auth token refresh timed out after 250ms, backing off 2s\nretry 09: auth token refresh timed out after 250ms, backing off 2s\nretry 10: auth token refresh timed out after 250ms, backing off 2s\nretry 11: auth token refresh timed out after 250ms, backing off 2s\nretry 12: auth token refresh timed out after 250ms, backing off 2s\nretry 13: auth token refresh timed out after 250ms, backing off 2s\nretry 14: auth token refresh timed out after 250ms, backing off 2s\nretry 15: auth token refresh timed out after 250ms, backing off 2s\nretry 16: auth token refresh timed out after 250ms, backing off 2s\nretry 17: auth token refresh timed out after 250ms, backing off 2s\nretry 18: auth token refresh timed out after 250ms, backing off 2s\nretry 19: auth token refresh timed out after 250ms, backing off 2s\nretry 20: auth token refresh timed out after 250ms, backing off 2s\nretry 21: auth token refresh timed out after 250ms, backing off 2s\nretry 22: auth token refresh timed out after 250ms, backing off 2s\nretry 23: auth token refresh timed out after 250ms, backing off 2s\nretry 24: auth token refresh timed out after 250ms, backing off 2s\nretry 25: auth token refresh timed out after 250ms, backing off 2s\nretry 26: auth token refresh timed out after 250ms, backing off 2s\nretry 27: auth token refresh timed out after 250ms, backing off 2s\nretry 28: auth token refresh timed out after 250ms, backing off 2s\nretry 29: auth token refresh timed out after 250ms, backing off 2s\nretry 30: auth token refresh timed out after 250ms, backing off 2s",
+  "image": {
+    "file_name": "shot.png",
+    "media_type": "image/png",
+    "base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="
+  },
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/code/workspaces/{workspace}/sessions",
+      "json": {
+        "harness": "claude_code",
+        "permission_mode": "allow"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sessions/{session}/attachments/images",
+      "content_type": "image/png",
+      "body": "image"
+    },
+    {
+      "method": "POST",
+      "path": "/sessions/{session}/turns",
+      "json": {
+        "message": "Fix the flaky retry test in the auth crate.\n\n<pasted_text>\nretry 01: auth token refresh timed out after 250ms, backing off 2s\nretry 02: auth token refresh timed out after 250ms, backing off 2s\nretry 03: auth token refresh timed out after 250ms, backing off 2s\nretry 04: auth token refresh timed out after 250ms, backing off 2s\nretry 05: auth token refresh timed out after 250ms, backing off 2s\nretry 06: auth token refresh timed out after 250ms, backing off 2s\nretry 07: auth token refresh timed out after 250ms, backing off 2s\nretry 08: auth token refresh timed out after 250ms, backing off 2s\nretry 09: auth token refresh timed out after 250ms, backing off 2s\nretry 10: auth token refresh timed out after 250ms, backing off 2s\nretry 11: auth token refresh timed out after 250ms, backing off 2s\nretry 12: auth token refresh timed out after 250ms, backing off 2s\nretry 13: auth token refresh timed out after 250ms, backing off 2s\nretry 14: auth token refresh timed out after 250ms, backing off 2s\nretry 15: auth token refresh timed out after 250ms, backing off 2s\nretry 16: auth token refresh timed out after 250ms, backing off 2s\nretry 17: auth token refresh timed out after 250ms, backing off 2s\nretry 18: auth token refresh timed out after 250ms, backing off 2s\nretry 19: auth token refresh timed out after 250ms, backing off 2s\nretry 20: auth token refresh timed out after 250ms, backing off 2s\nretry 21: auth token refresh timed out after 250ms, backing off 2s\nretry 22: auth token refresh timed out after 250ms, backing off 2s\nretry 23: auth token refresh timed out after 250ms, backing off 2s\nretry 24: auth token refresh timed out after 250ms, backing off 2s\nretry 25: auth token refresh timed out after 250ms, backing off 2s\nretry 26: auth token refresh timed out after 250ms, backing off 2s\nretry 27: auth token refresh timed out after 250ms, backing off 2s\nretry 28: auth token refresh timed out after 250ms, backing off 2s\nretry 29: auth token refresh timed out after 250ms, backing off 2s\nretry 30: auth token refresh timed out after 250ms, backing off 2s\n</pasted_text>",
+        "attachments": [
+          {
+            "blob_id": "{image}",
+            "media_type": "image/png"
+          }
+        ]
+      }
+    }
+  ]
+}

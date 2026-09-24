@@ -24,8 +24,9 @@ export type SessionActionState = {
 };
 
 export function sessionActionAvailability(state: SessionActionState) {
-  // POST /turns stays open until an idle turn settles. That pending request
-  // must block a second follow-up without blocking steer or interrupt.
+  // POST /turns answers once the turn is accepted, not when it ends. While
+  // that request is in flight it blocks a second follow-up, but not steer or
+  // interrupt.
   const controlsBlocked =
     state.steering ||
     state.interrupting ||

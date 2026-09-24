@@ -103,18 +103,18 @@ async fn ran_one_ask_turn(
         .await
         .unwrap();
     let session_id: SessionId = json_id(&session).parse().unwrap();
-    let turn = tokio::time::timeout(
+    tokio::time::timeout(
         Duration::from_secs(10),
-        client
-            .post(format!("http://{addr}/sessions/{session_id}/turns"))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "message": "run it" }))
-            .send(),
+        run_turn_to_end(
+            &client,
+            addr,
+            &token,
+            &session_id.to_string(),
+            serde_json::json!({ "message": "run it" }),
+        ),
     )
     .await
-    .expect("the turn must not park on an approval nobody answers")
-    .unwrap();
-    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    .expect("the turn must not park on an approval nobody answers");
     (client, addr, token, session_id, runtime, dir)
 }
 
@@ -224,7 +224,26 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
     .unwrap()
     .unwrap();
     assert_eq!(row.lifecycle, SessionLifecycle::Running);
-    assert!(!turn.is_finished(), "run_turn must still be executing");
+    // The send answered once the turn was accepted. What must still be
+    // executing is the engine's run_turn, which the open turn row shows.
+    let accepted = tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("the send answers on acceptance")
+        .unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+    let accepted: serde_json::Value = accepted.json().await.unwrap();
+    assert_eq!(accepted["status"], "running");
+    assert!(
+        tidebreak_core::db::code::get_open_turn(
+            &runtime.db,
+            &tidebreak_core::OwnerId::local(),
+            parsed,
+        )
+        .await
+        .unwrap()
+        .is_some(),
+        "run_turn must still be executing"
+    );
 
     let decided = tokio::time::timeout(Duration::from_secs(2), async {
         client
@@ -247,12 +266,7 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
         "the harness must observe the decision before the turn ends"
     );
 
-    let finished = tokio::time::timeout(Duration::from_secs(5), turn)
-        .await
-        .expect("turn must finish after the mid-turn decision")
-        .unwrap();
-    assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
-    let body: serde_json::Value = finished.json().await.unwrap();
+    let body = wait_for_turn_end(&client, addr, &token, &session_id, json_id(&accepted)).await;
     assert_eq!(body["status"], "completed");
     let events = journaled_events(&runtime.db, parsed).await;
     let kinds: Vec<&str> = events
@@ -1094,6 +1108,17 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
         .await
         .unwrap();
     let turn_id = json_id(&turn).parse::<TurnId>().unwrap();
+    // The send answers once the turn is accepted. Let it end first: a turn's
+    // end abandons the approvals it left pending, and the rows below are about
+    // a stale worker's completion, not the turn's own end.
+    wait_for_turn_end(
+        &client,
+        addr,
+        &token,
+        &session_id.to_string(),
+        json_id(&turn),
+    )
+    .await;
     let row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
@@ -1432,8 +1457,10 @@ async fn attention_follows_approval_completion_and_view() {
         after_decision.attention
     );
 
-    let finished = turn.await.unwrap();
-    assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
+    let accepted = turn.await.unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+    let accepted: serde_json::Value = accepted.json().await.unwrap();
+    wait_for_turn_end(&client, addr, &token, &session_id, json_id(&accepted)).await;
     let row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),

@@ -3044,62 +3044,66 @@ impl LegDriver {
         }
     }
 
-    async fn append_event(
-        &self,
-        turn: &TurnRun,
+    fn append_event<'fut>(
+        &'fut self,
+        turn: &'fut TurnRun,
         lease_token: uuid::Uuid,
         ordinal: i32,
-        event: &AgentEvent,
-    ) -> Result<EventAppend> {
-        let entry = TurnEventAppend {
-            attempt_event_ordinal: ordinal,
-            event: event.clone(),
-        };
-        self.append_events(turn, lease_token, std::slice::from_ref(&entry))
-            .await
+        event: &'fut AgentEvent,
+    ) -> futures::future::BoxFuture<'fut, Result<EventAppend>> {
+        Box::pin(async move {
+            let entry = TurnEventAppend {
+                attempt_event_ordinal: ordinal,
+                event: event.clone(),
+            };
+            self.append_events(turn, lease_token, std::slice::from_ref(&entry))
+                .await
+        })
     }
 
     /// Journal a run of pending events in one store transaction and publish
     /// each one in order once the run commits.
-    async fn append_events(
-        &self,
-        turn: &TurnRun,
+    fn append_events<'fut>(
+        &'fut self,
+        turn: &'fut TurnRun,
         lease_token: uuid::Uuid,
-        events: &[TurnEventAppend],
-    ) -> Result<EventAppend> {
-        loop {
-            match self
-                .store
-                .append_turn_events(turn.chat_id, turn.id, lease_token, Utc::now(), events)
-                .await
-            {
-                Ok(Some(seqs)) => {
-                    for (entry, seq) in events.iter().zip(seqs) {
-                        self.publish(
-                            turn.chat_id,
-                            SequencedAgentEvent {
-                                seq,
-                                event: entry.event.clone(),
-                            },
-                        );
+        events: &'fut [TurnEventAppend],
+    ) -> futures::future::BoxFuture<'fut, Result<EventAppend>> {
+        Box::pin(async move {
+            loop {
+                match self
+                    .store
+                    .append_turn_events(turn.chat_id, turn.id, lease_token, Utc::now(), events)
+                    .await
+                {
+                    Ok(Some(seqs)) => {
+                        for (entry, seq) in events.iter().zip(seqs) {
+                            self.publish(
+                                turn.chat_id,
+                                SequencedAgentEvent {
+                                    seq,
+                                    event: entry.event.clone(),
+                                },
+                            );
+                        }
+                        return Ok(EventAppend::Committed);
                     }
-                    return Ok(EventAppend::Committed);
-                }
-                Ok(None) => match self.lease_state_retry(turn, lease_token).await {
-                    LeaseState::Running => continue,
-                    LeaseState::Cancelling => return Ok(EventAppend::Cancelling),
-                    LeaseState::Lost => return Ok(EventAppend::LeaseLost),
-                },
-                Err(error) => {
-                    self.retry_after("event append", turn.id, &error).await;
-                    match self.lease_state_retry(turn, lease_token).await {
-                        LeaseState::Running => {}
+                    Ok(None) => match self.lease_state_retry(turn, lease_token).await {
+                        LeaseState::Running => continue,
                         LeaseState::Cancelling => return Ok(EventAppend::Cancelling),
                         LeaseState::Lost => return Ok(EventAppend::LeaseLost),
+                    },
+                    Err(error) => {
+                        self.retry_after("event append", turn.id, &error).await;
+                        match self.lease_state_retry(turn, lease_token).await {
+                            LeaseState::Running => {}
+                            LeaseState::Cancelling => return Ok(EventAppend::Cancelling),
+                            LeaseState::Lost => return Ok(EventAppend::LeaseLost),
+                        }
                     }
                 }
             }
-        }
+        })
     }
 
     async fn heartbeat_lease(
@@ -3127,32 +3131,44 @@ impl LegDriver {
         }
     }
 
-    async fn renew_lease(&self, turn: &TurnRun, lease_token: uuid::Uuid) -> LeaseState {
-        loop {
-            let now = Utc::now();
-            let Ok(lease) = chrono_duration(self.config.lease) else {
-                return LeaseState::Lost;
-            };
-            match self
-                .store
-                .heartbeat_turn(turn.id, lease_token, now, now + lease)
-                .await
-            {
-                Ok(true) => return LeaseState::Running,
-                Ok(false) => return self.lease_state_retry(turn, lease_token).await,
-                Err(error) => {
-                    self.retry_after("heartbeat", turn.id, &error).await;
-                    match self.lease_state_retry(turn, lease_token).await {
-                        LeaseState::Running => {}
-                        state => return state,
+    fn renew_lease<'fut>(
+        &'fut self,
+        turn: &'fut TurnRun,
+        lease_token: uuid::Uuid,
+    ) -> futures::future::BoxFuture<'fut, LeaseState> {
+        Box::pin(async move {
+            loop {
+                let now = Utc::now();
+                let Ok(lease) = chrono_duration(self.config.lease) else {
+                    return LeaseState::Lost;
+                };
+                match self
+                    .store
+                    .heartbeat_turn(turn.id, lease_token, now, now + lease)
+                    .await
+                {
+                    Ok(true) => return LeaseState::Running,
+                    Ok(false) => return self.lease_state_retry(turn, lease_token).await,
+                    Err(error) => {
+                        self.retry_after("heartbeat", turn.id, &error).await;
+                        match self.lease_state_retry(turn, lease_token).await {
+                            LeaseState::Running => {}
+                            state => return state,
+                        }
                     }
                 }
             }
-        }
+        })
     }
 
-    async fn is_cancelling_retry(&self, turn: &TurnRun, lease_token: uuid::Uuid) -> bool {
-        self.lease_state_retry(turn, lease_token).await == LeaseState::Cancelling
+    fn is_cancelling_retry<'fut>(
+        &'fut self,
+        turn: &'fut TurnRun,
+        lease_token: uuid::Uuid,
+    ) -> futures::future::BoxFuture<'fut, bool> {
+        Box::pin(async move {
+            self.lease_state_retry(turn, lease_token).await == LeaseState::Cancelling
+        })
     }
 
     async fn lease_state_retry(&self, turn: &TurnRun, lease_token: uuid::Uuid) -> LeaseState {
@@ -3180,121 +3196,127 @@ impl LegDriver {
         }
     }
 
-    async fn live_turn_state_retry(
-        &self,
-        turn: &TurnRun,
+    fn live_turn_state_retry<'fut>(
+        &'fut self,
+        turn: &'fut TurnRun,
         lease_token: uuid::Uuid,
-    ) -> LiveTurnState {
-        loop {
-            match self.store.get_turn(turn.id).await {
-                Ok(Some(current))
-                    if current.lease_token == Some(lease_token)
-                        && current.attempt_count == turn.attempt_count
-                        && current
-                            .lease_expires_at
-                            .is_some_and(|expires_at| expires_at > Utc::now()) =>
-                {
-                    return match current.status {
-                        TurnRunStatus::Running => LiveTurnState::Running,
-                        TurnRunStatus::Cancelling => LiveTurnState::Cancelling,
-                        _ => LiveTurnState::Lost,
-                    };
-                }
-                Ok(_) => return LiveTurnState::Lost,
-                Err(error) => {
-                    self.retry_after("turn generation fence read", turn.id, &error)
-                        .await;
-                }
-            }
-        }
-    }
-
-    async fn resolution_state_retry(
-        &self,
-        turn: &TurnRun,
-        lease_token: uuid::Uuid,
-        terminal: TerminalIdentity<'_>,
-    ) -> ResolutionState {
-        loop {
-            match self.store.get_turn(turn.id).await {
-                Ok(Some(current)) if current.attempt_count == turn.attempt_count => {
-                    if current.status == terminal.status() {
-                        if !terminal.matches_turn(&current) {
-                            return ResolutionState::Lost;
-                        }
-                        let recovered = match &terminal {
-                            TerminalIdentity::Completed {
-                                output,
-                                citations,
-                                event,
-                            } => {
-                                self.store
-                                    .recover_exact_completed_turn_event(
-                                        turn.id,
-                                        lease_token,
-                                        output,
-                                        citations,
-                                        event,
-                                    )
-                                    .await
-                            }
-                            TerminalIdentity::Failed { .. }
-                            | TerminalIdentity::Cancelled { .. } => {
-                                self.store
-                                    .recover_exact_turn_terminal_event(
-                                        turn.id,
-                                        lease_token,
-                                        terminal.event(),
-                                    )
-                                    .await
-                            }
-                        };
-                        return match recovered {
-                            Ok(Some(event)) => ResolutionState::Resolved(Box::new(event)),
-                            Ok(None) => ResolutionState::Lost,
-                            Err(error) => {
-                                self.retry_after("terminal recovery", turn.id, &error).await;
-                                continue;
-                            }
+    ) -> futures::future::BoxFuture<'fut, LiveTurnState> {
+        Box::pin(async move {
+            loop {
+                match self.store.get_turn(turn.id).await {
+                    Ok(Some(current))
+                        if current.lease_token == Some(lease_token)
+                            && current.attempt_count == turn.attempt_count
+                            && current
+                                .lease_expires_at
+                                .is_some_and(|expires_at| expires_at > Utc::now()) =>
+                    {
+                        return match current.status {
+                            TurnRunStatus::Running => LiveTurnState::Running,
+                            TurnRunStatus::Cancelling => LiveTurnState::Cancelling,
+                            _ => LiveTurnState::Lost,
                         };
                     }
-                    let exact_live_lease = current.lease_token == Some(lease_token)
-                        && current
-                            .lease_expires_at
-                            .is_some_and(|expires_at| expires_at > Utc::now());
-                    return match current.status {
-                        TurnRunStatus::Running if exact_live_lease => ResolutionState::Retry,
-                        TurnRunStatus::Cancelling if exact_live_lease => {
-                            ResolutionState::Cancelling
-                        }
-                        _ => ResolutionState::Lost,
-                    };
-                }
-                Ok(_) => return ResolutionState::Lost,
-                Err(error) => {
-                    self.retry_after("resolution state check", turn.id, &error)
-                        .await;
+                    Ok(_) => return LiveTurnState::Lost,
+                    Err(error) => {
+                        self.retry_after("turn generation fence read", turn.id, &error)
+                            .await;
+                    }
                 }
             }
-        }
+        })
     }
 
-    async fn acknowledge_cancellation(
-        &self,
-        turn: &TurnRun,
+    fn resolution_state_retry<'fut>(
+        &'fut self,
+        turn: &'fut TurnRun,
+        lease_token: uuid::Uuid,
+        terminal: TerminalIdentity<'fut>,
+    ) -> futures::future::BoxFuture<'fut, ResolutionState> {
+        Box::pin(async move {
+            loop {
+                match self.store.get_turn(turn.id).await {
+                    Ok(Some(current)) if current.attempt_count == turn.attempt_count => {
+                        if current.status == terminal.status() {
+                            if !terminal.matches_turn(&current) {
+                                return ResolutionState::Lost;
+                            }
+                            let recovered = match &terminal {
+                                TerminalIdentity::Completed {
+                                    output,
+                                    citations,
+                                    event,
+                                } => {
+                                    self.store
+                                        .recover_exact_completed_turn_event(
+                                            turn.id,
+                                            lease_token,
+                                            output,
+                                            citations,
+                                            event,
+                                        )
+                                        .await
+                                }
+                                TerminalIdentity::Failed { .. }
+                                | TerminalIdentity::Cancelled { .. } => {
+                                    self.store
+                                        .recover_exact_turn_terminal_event(
+                                            turn.id,
+                                            lease_token,
+                                            terminal.event(),
+                                        )
+                                        .await
+                                }
+                            };
+                            return match recovered {
+                                Ok(Some(event)) => ResolutionState::Resolved(Box::new(event)),
+                                Ok(None) => ResolutionState::Lost,
+                                Err(error) => {
+                                    self.retry_after("terminal recovery", turn.id, &error).await;
+                                    continue;
+                                }
+                            };
+                        }
+                        let exact_live_lease = current.lease_token == Some(lease_token)
+                            && current
+                                .lease_expires_at
+                                .is_some_and(|expires_at| expires_at > Utc::now());
+                        return match current.status {
+                            TurnRunStatus::Running if exact_live_lease => ResolutionState::Retry,
+                            TurnRunStatus::Cancelling if exact_live_lease => {
+                                ResolutionState::Cancelling
+                            }
+                            _ => ResolutionState::Lost,
+                        };
+                    }
+                    Ok(_) => return ResolutionState::Lost,
+                    Err(error) => {
+                        self.retry_after("resolution state check", turn.id, &error)
+                            .await;
+                    }
+                }
+            }
+        })
+    }
+
+    fn acknowledge_cancellation<'fut>(
+        &'fut self,
+        turn: &'fut TurnRun,
         lease_token: uuid::Uuid,
         model_steps: i32,
         usage: tidebreak_core::Usage,
-    ) -> Result<LegDriverOutcome> {
-        self.acknowledge_cancellation_with_output(turn, lease_token, model_steps, usage, None)
-            .await
+    ) -> futures::future::BoxFuture<'fut, Result<LegDriverOutcome>> {
+        Box::pin(async move {
+            self.acknowledge_cancellation_with_output(turn, lease_token, model_steps, usage, None)
+                .await
+        })
     }
 
     /// Acknowledge a cancellation, committing any partial prose the cancelled
     /// agent loop carried out as the turn's durable output (#1182).
-    async fn acknowledge_cancellation_with_output(
-        &self,
-        turn: &TurnRun,
+    fn acknowledge_cancellation_with_output<'fut>(
+        &'fut self,
+        turn: &'fut TurnRun,
         lease_token: uuid::Uuid,
         model_steps: i32,
         usage: tidebreak_core::Usage,
@@ -3302,208 +3324,224 @@ impl LegDriver {
             tidebreak_core::Message,
             Vec<tidebreak_core::AssistantCitationInput>,
         )>,
-    ) -> Result<LegDriverOutcome> {
-        let terminal_event = AgentEvent::TurnCancelled { usage };
-        loop {
-            match self
-                .store
-                .finish_turn_cancellation_and_append_event(
-                    turn.id,
-                    lease_token,
-                    Utc::now(),
-                    model_steps,
-                    usage,
-                    output.as_ref().map(|(message, _)| message),
-                    output
-                        .as_ref()
-                        .map(|(_, citations)| citations.as_slice())
-                        .unwrap_or(&[]),
-                )
-                .await
-            {
-                Ok(Some(resolution)) => {
-                    if let Some(event) = resolution.terminal_event {
-                        self.publish(turn.chat_id, event);
-                    }
-                    return Ok(LegDriverOutcome::Cancelled(turn.id));
-                }
-                Ok(None) => return Ok(LegDriverOutcome::LeaseLost(turn.id)),
-                Err(error) => {
-                    self.retry_after("cancellation acknowledgement", turn.id, &error)
-                        .await;
-                    match self
-                        .resolution_state_retry(
-                            turn,
-                            lease_token,
-                            TerminalIdentity::Cancelled {
-                                event: &terminal_event,
-                            },
-                        )
-                        .await
-                    {
-                        ResolutionState::Retry | ResolutionState::Cancelling => {}
-                        ResolutionState::Resolved(event) => {
-                            self.publish(turn.chat_id, *event);
-                            return Ok(LegDriverOutcome::Cancelled(turn.id));
+    ) -> futures::future::BoxFuture<'fut, Result<LegDriverOutcome>> {
+        Box::pin(async move {
+            let terminal_event = AgentEvent::TurnCancelled { usage };
+            loop {
+                match self
+                    .store
+                    .finish_turn_cancellation_and_append_event(
+                        turn.id,
+                        lease_token,
+                        Utc::now(),
+                        model_steps,
+                        usage,
+                        output.as_ref().map(|(message, _)| message),
+                        output
+                            .as_ref()
+                            .map(|(_, citations)| citations.as_slice())
+                            .unwrap_or(&[]),
+                    )
+                    .await
+                {
+                    Ok(Some(resolution)) => {
+                        if let Some(event) = resolution.terminal_event {
+                            self.publish(turn.chat_id, event);
                         }
-                        ResolutionState::Lost => {
-                            return Ok(LegDriverOutcome::LeaseLost(turn.id));
+                        return Ok(LegDriverOutcome::Cancelled(turn.id));
+                    }
+                    Ok(None) => return Ok(LegDriverOutcome::LeaseLost(turn.id)),
+                    Err(error) => {
+                        self.retry_after("cancellation acknowledgement", turn.id, &error)
+                            .await;
+                        match self
+                            .resolution_state_retry(
+                                turn,
+                                lease_token,
+                                TerminalIdentity::Cancelled {
+                                    event: &terminal_event,
+                                },
+                            )
+                            .await
+                        {
+                            ResolutionState::Retry | ResolutionState::Cancelling => {}
+                            ResolutionState::Resolved(event) => {
+                                self.publish(turn.chat_id, *event);
+                                return Ok(LegDriverOutcome::Cancelled(turn.id));
+                            }
+                            ResolutionState::Lost => {
+                                return Ok(LegDriverOutcome::LeaseLost(turn.id));
+                            }
                         }
                     }
                 }
             }
-        }
+        })
     }
 
-    async fn record_failure(
-        &self,
-        turn: &TurnRun,
+    fn record_failure<'fut>(
+        &'fut self,
+        turn: &'fut TurnRun,
         lease_token: uuid::Uuid,
         model_steps: i32,
         usage: tidebreak_core::Usage,
-        code: &str,
-        detail: &str,
-    ) -> Result<LegDriverOutcome> {
-        self.record_failure_with_retry(
-            turn,
-            lease_token,
-            model_steps,
-            usage,
-            code,
-            detail,
-            TurnFailureRetry::Permanent,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn record_classified_failure(
-        &self,
-        turn: &TurnRun,
-        lease_token: uuid::Uuid,
-        model_steps: i32,
-        usage: tidebreak_core::Usage,
-        code: &str,
-        detail: &str,
-        retry_after: Option<Duration>,
-    ) -> Result<LegDriverOutcome> {
-        let retry = crate::event_projection::TurnFailureCategory::from_kind(code)
-            .retries_may_succeed()
-            .then(|| {
-                self.config
-                    .retry
-                    .next_attempt_at(retry_attempt(turn), retry_after, Utc::now())
-            })
-            .flatten()
-            .map_or(TurnFailureRetry::Permanent, TurnFailureRetry::RetryAt);
-        self.record_failure_with_retry(turn, lease_token, model_steps, usage, code, detail, retry)
+        code: &'fut str,
+        detail: &'fut str,
+    ) -> futures::future::BoxFuture<'fut, Result<LegDriverOutcome>> {
+        Box::pin(async move {
+            self.record_failure_with_retry(
+                turn,
+                lease_token,
+                model_steps,
+                usage,
+                code,
+                detail,
+                TurnFailureRetry::Permanent,
+            )
             .await
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn record_failure_with_retry(
-        &self,
-        turn: &TurnRun,
+    fn record_classified_failure<'fut>(
+        &'fut self,
+        turn: &'fut TurnRun,
         lease_token: uuid::Uuid,
         model_steps: i32,
         usage: tidebreak_core::Usage,
-        code: &str,
-        detail: &str,
+        code: &'fut str,
+        detail: &'fut str,
+        retry_after: Option<Duration>,
+    ) -> futures::future::BoxFuture<'fut, Result<LegDriverOutcome>> {
+        Box::pin(async move {
+            let retry = crate::event_projection::TurnFailureCategory::from_kind(code)
+                .retries_may_succeed()
+                .then(|| {
+                    self.config
+                        .retry
+                        .next_attempt_at(retry_attempt(turn), retry_after, Utc::now())
+                })
+                .flatten()
+                .map_or(TurnFailureRetry::Permanent, TurnFailureRetry::RetryAt);
+            self.record_failure_with_retry(
+                turn,
+                lease_token,
+                model_steps,
+                usage,
+                code,
+                detail,
+                retry,
+            )
+            .await
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_failure_with_retry<'fut>(
+        &'fut self,
+        turn: &'fut TurnRun,
+        lease_token: uuid::Uuid,
+        model_steps: i32,
+        usage: tidebreak_core::Usage,
+        code: &'fut str,
+        detail: &'fut str,
         retry: TurnFailureRetry,
-    ) -> Result<LegDriverOutcome> {
-        let mut detail: String = detail
-            .chars()
-            .map(|character| {
-                if character == '\0' {
-                    '\u{fffd}'
-                } else {
-                    character
-                }
-            })
-            .take(TurnRun::MAX_ERROR_DETAIL_LEN)
-            .collect();
-        if detail.is_empty() {
-            detail.push_str("agent execution failed");
-        }
-        let terminal_event = AgentEvent::TurnFailed {
-            error: tidebreak_core::AgentErrorInfo {
-                kind: code.to_owned(),
-                message: detail.clone(),
-            },
-        };
-        loop {
-            match self
-                .store
-                .record_turn_failure_and_append_event(
-                    turn.id,
-                    lease_token,
-                    Utc::now(),
-                    retry,
-                    model_steps,
-                    usage,
-                    code,
-                    Some(&detail),
-                )
-                .await
-            {
-                Ok(Some(resolution)) => {
-                    if let Some(event) = resolution.terminal_event {
-                        self.publish(turn.chat_id, event);
+    ) -> futures::future::BoxFuture<'fut, Result<LegDriverOutcome>> {
+        Box::pin(async move {
+            let mut detail: String = detail
+                .chars()
+                .map(|character| {
+                    if character == '\0' {
+                        '\u{fffd}'
+                    } else {
+                        character
                     }
-                    return Ok(match resolution.outcome {
-                        RecordTurnFailureOutcome::Recorded(_)
-                        | RecordTurnFailureOutcome::Existing(_) => {
-                            LegDriverOutcome::Failed(turn.id)
-                        }
-                    });
-                }
-                Ok(None) => match self.live_turn_state_retry(turn, lease_token).await {
-                    LiveTurnState::Running => tokio::task::yield_now().await,
-                    LiveTurnState::Cancelling => {
-                        return self
-                            .acknowledge_cancellation(turn, lease_token, model_steps, usage)
-                            .await;
-                    }
-                    LiveTurnState::Lost => return Ok(LegDriverOutcome::LeaseLost(turn.id)),
+                })
+                .take(TurnRun::MAX_ERROR_DETAIL_LEN)
+                .collect();
+            if detail.is_empty() {
+                detail.push_str("agent execution failed");
+            }
+            let terminal_event = AgentEvent::TurnFailed {
+                error: tidebreak_core::AgentErrorInfo {
+                    kind: code.to_owned(),
+                    message: detail.clone(),
                 },
-                Err(error) => {
-                    self.retry_after("failure resolution", turn.id, &error)
-                        .await;
-                    if !matches!(retry, TurnFailureRetry::Permanent) {
-                        // Retry the exact failure identity and timestamp. The
-                        // immutable failure receipt is recoverable even after
-                        // the first commit released this lease into retry_wait.
-                        continue;
-                    }
-                    match self
-                        .resolution_state_retry(
-                            turn,
-                            lease_token,
-                            TerminalIdentity::Failed {
-                                code,
-                                detail: &detail,
-                                event: &terminal_event,
-                            },
-                        )
-                        .await
-                    {
-                        ResolutionState::Retry => {}
-                        ResolutionState::Resolved(event) => {
-                            self.publish(turn.chat_id, *event);
-                            return Ok(LegDriverOutcome::Failed(turn.id));
+            };
+            loop {
+                match self
+                    .store
+                    .record_turn_failure_and_append_event(
+                        turn.id,
+                        lease_token,
+                        Utc::now(),
+                        retry,
+                        model_steps,
+                        usage,
+                        code,
+                        Some(&detail),
+                    )
+                    .await
+                {
+                    Ok(Some(resolution)) => {
+                        if let Some(event) = resolution.terminal_event {
+                            self.publish(turn.chat_id, event);
                         }
-                        ResolutionState::Cancelling => {
+                        return Ok(match resolution.outcome {
+                            RecordTurnFailureOutcome::Recorded(_)
+                            | RecordTurnFailureOutcome::Existing(_) => {
+                                LegDriverOutcome::Failed(turn.id)
+                            }
+                        });
+                    }
+                    Ok(None) => match self.live_turn_state_retry(turn, lease_token).await {
+                        LiveTurnState::Running => tokio::task::yield_now().await,
+                        LiveTurnState::Cancelling => {
                             return self
                                 .acknowledge_cancellation(turn, lease_token, model_steps, usage)
                                 .await;
                         }
-                        ResolutionState::Lost => {
-                            return Ok(LegDriverOutcome::LeaseLost(turn.id));
+                        LiveTurnState::Lost => return Ok(LegDriverOutcome::LeaseLost(turn.id)),
+                    },
+                    Err(error) => {
+                        self.retry_after("failure resolution", turn.id, &error)
+                            .await;
+                        if !matches!(retry, TurnFailureRetry::Permanent) {
+                            // Retry the exact failure identity and timestamp. The
+                            // immutable failure receipt is recoverable even after
+                            // the first commit released this lease into retry_wait.
+                            continue;
+                        }
+                        match self
+                            .resolution_state_retry(
+                                turn,
+                                lease_token,
+                                TerminalIdentity::Failed {
+                                    code,
+                                    detail: &detail,
+                                    event: &terminal_event,
+                                },
+                            )
+                            .await
+                        {
+                            ResolutionState::Retry => {}
+                            ResolutionState::Resolved(event) => {
+                                self.publish(turn.chat_id, *event);
+                                return Ok(LegDriverOutcome::Failed(turn.id));
+                            }
+                            ResolutionState::Cancelling => {
+                                return self
+                                    .acknowledge_cancellation(turn, lease_token, model_steps, usage)
+                                    .await;
+                            }
+                            ResolutionState::Lost => {
+                                return Ok(LegDriverOutcome::LeaseLost(turn.id));
+                            }
                         }
                     }
                 }
             }
-        }
+        })
     }
 
     async fn retry_after(&self, operation: &str, turn_id: TurnId, error: &AgentError) {

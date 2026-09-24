@@ -131,6 +131,8 @@ async fn interrupt_stops_a_running_turn_without_ending_its_browser_channel() {
     assert_eq!(interrupted.status(), reqwest::StatusCode::ACCEPTED);
     let turn = turn.unwrap();
     assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    let turn: serde_json::Value = turn.json().await.unwrap();
+    wait_for_turn_end(&client, addr, &token, json_id(&session), json_id(&turn)).await;
     assert_eq!(
         turn_statuses(&client, addr, &token, &session).await,
         ["interrupted"]
@@ -319,7 +321,10 @@ async fn an_engine_that_dies_without_saying_so_journals_an_interrupted_turn() {
     };
     let (turn, interrupted) = tokio::join!(turn_req.send(), interrupt);
     assert_eq!(interrupted.status(), reqwest::StatusCode::ACCEPTED);
-    assert_eq!(turn.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+    let turn = turn.unwrap();
+    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    let turn: serde_json::Value = turn.json().await.unwrap();
+    wait_for_turn_end(&client, addr, &token, json_id(&session), json_id(&turn)).await;
     assert_eq!(
         turn_statuses(&client, addr, &token, &session).await,
         ["interrupted"]
@@ -600,17 +605,16 @@ async fn a_session_whose_turns_keep_failing_is_fenced_rather_than_left_idle() {
     };
 
     for attempt in 1..=3 {
-        let response = client
-            .post(format!("http://{addr}/sessions/{session}/turns"))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "message": format!("attempt {attempt}") }))
-            .send()
-            .await
-            .unwrap();
-        assert!(
-            response.status().is_success(),
-            "the turn is accepted even though the engine fails it"
-        );
+        // The turn is accepted even though the engine fails it.
+        let ended = run_turn_to_end(
+            &client,
+            addr,
+            &token,
+            &session,
+            serde_json::json!({ "message": format!("attempt {attempt}") }),
+        )
+        .await;
+        assert_eq!(ended["status"], "failed");
 
         let row = lifecycle(session.clone()).await;
         if attempt < 3 {
@@ -843,6 +847,14 @@ async fn a_recovered_session_accepts_a_turn() {
         turn.text().await.unwrap()
     );
     let body: serde_json::Value = turn.json().await.unwrap();
+    let body = wait_for_turn_end(
+        &reqwest::Client::new(),
+        addr2,
+        &token2,
+        &session_id,
+        json_id(&body),
+    )
+    .await;
     assert_eq!(body["status"], "completed");
     assert_eq!(body["user_input"], "after restart");
 
@@ -896,8 +908,66 @@ async fn a_recovered_session_accepts_a_turn() {
         after_orphan_exit.text().await.unwrap()
     );
     let after_body: serde_json::Value = after_orphan_exit.json().await.unwrap();
+    let after_body =
+        wait_for_turn_end(&client3, addr3, &token3, &session_id, json_id(&after_body)).await;
     assert_eq!(after_body["status"], "completed");
     assert_eq!(after_body["user_input"], "after orphan exit");
+}
+
+/// A send answers once the turn is accepted, not once the engine is done.
+///
+/// The engine here takes a minute per event, so a route that waited for the
+/// reply would still be waiting when the timeout below fires. The answer is
+/// the running turn, and the journal already holds its start, so a client
+/// that subscribes after the answer loses nothing.
+#[tokio::test]
+async fn a_send_answers_once_the_turn_is_accepted() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_delay(Duration::from_secs(60));
+    let engine = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        client
+            .post(format!("http://{addr}/sessions/{session}/turns"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "message": "take your time" }))
+            .send(),
+    )
+    .await
+    .expect("the send answers without waiting for the engine")
+    .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let turn: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(turn["status"], "running", "{turn}");
+    assert_eq!(turn["user_input"], "take your time");
+
+    let parsed: SessionId = session.parse().unwrap();
+    let events = journaled_events(&runtime.db, parsed).await;
+    assert!(
+        events
+            .iter()
+            .any(|framed| matches!(framed.event, Event::TurnStarted { .. })),
+        "the start is journaled before the send is answered"
+    );
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(row.lifecycle, SessionLifecycle::Running);
+    // The engine is still at work on the turn it was handed.
+    wait_until(|| engine.turn_inputs().len() == 1).await;
 }
 
 #[tokio::test]
@@ -932,19 +1002,14 @@ async fn a_failed_checkpoint_does_not_fail_the_turn() {
     std::fs::create_dir_all(&worktree).unwrap();
     std::fs::write(worktree.join("orphan.txt"), "still here\n").unwrap();
 
-    let turn = client
-        .post(format!(
-            "http://{addr}/sessions/{}/turns",
-            json_id(&session)
-        ))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "keep going" }))
-        .send()
-        .await
-        .unwrap()
-        .json::<serde_json::Value>()
-        .await
-        .unwrap();
+    let turn = run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        json_id(&session),
+        serde_json::json!({ "message": "keep going" }),
+    )
+    .await;
     assert_eq!(turn["status"], "completed");
     assert!(turn["checkpoint_ref"].is_null());
 

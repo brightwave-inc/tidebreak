@@ -1,7 +1,8 @@
 //! Follow one code-mode turn over the session event socket until it settles.
 //!
-//! Subscribe before `POST /turns` so a long-lived submit cannot finish in a
-//! window this process is not watching. A timeout returns
+//! Subscribe before `POST /turns`. The submit answers as soon as the turn is
+//! accepted, and the turn's approvals and its end arrive only on the socket,
+//! so the socket is open before anything can happen. A timeout returns
 //! [`TurnStatus::Running`]; a `SubmitTurnResponse::Queued` returns
 //! [`TurnStatus::Queued`] without waiting. Reconnect uses
 //! [`crate::event_stream::CodeEventStream`]; a socket that cannot be reopened

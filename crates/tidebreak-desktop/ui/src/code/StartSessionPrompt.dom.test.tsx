@@ -140,7 +140,7 @@ describe("StartSessionPrompt", () => {
     expect(onStart).not.toHaveBeenCalled();
   });
 
-  it("does not offer attachments before a real session exists", async () => {
+  it("holds attached images until the send creates a session", async () => {
     await renderWithRouter(
       wrap(
         <StartSessionPrompt
@@ -165,9 +165,14 @@ describe("StartSessionPrompt", () => {
       },
     });
     fireEvent(box, paste);
-    expect(paste.defaultPrevented).toBe(false);
-    expect(screen.queryByLabelText("Attached images")).toBeNull();
-    expect(document.querySelector('input[type="file"][accept]')).toBeNull();
+    // The same image strip and picker as a session's composer, holding the
+    // file: there is no session yet to upload it to.
+    expect(paste.defaultPrevented).toBe(true);
+    expect(screen.getByLabelText("Attached images")).toBeInTheDocument();
+    expect(screen.queryByText(/^Uploading/)).toBeNull();
+    expect(
+      document.querySelector('input[type="file"][accept]'),
+    ).toBeInTheDocument();
   });
 
   it("defaults to the widest mode the engine honors and starts on Cmd+Enter", async () => {
@@ -204,8 +209,6 @@ describe("StartSessionPrompt", () => {
     expect(onStart).toHaveBeenCalledWith(
       "claude_code",
       "allow",
-      "list the files",
-      undefined,
       undefined,
       null,
       false,
@@ -250,8 +253,6 @@ describe("StartSessionPrompt", () => {
     expect(onStart).toHaveBeenCalledWith(
       "claude_code",
       "ask",
-      "list the files",
-      undefined,
       undefined,
       null,
       false,
@@ -352,8 +353,6 @@ describe("StartSessionPrompt", () => {
     expect(onStart).toHaveBeenCalledWith(
       "claude_code",
       "plan",
-      "list the files",
-      undefined,
       undefined,
       null,
       false,
@@ -396,8 +395,6 @@ describe("StartSessionPrompt", () => {
     expect(onStart).toHaveBeenCalledWith(
       "grok",
       "auto",
-      "list the files",
-      undefined,
       undefined,
       null,
       false,
@@ -447,9 +444,7 @@ describe("StartSessionPrompt", () => {
     expect(onStart).toHaveBeenCalledWith(
       "claude_code",
       "allow",
-      "list the files",
       "claude-opus-5",
-      undefined,
       null,
       false,
     );
@@ -518,9 +513,7 @@ describe("StartSessionPrompt", () => {
     expect(onStart).toHaveBeenCalledWith(
       "grok",
       "allow",
-      "list the files",
       "model-gateway-model-gateway/grok-4.6",
-      undefined,
       null,
       false,
     );
@@ -738,9 +731,7 @@ describe("StartSessionPrompt", () => {
     expect(onStart).toHaveBeenCalledWith(
       "claude_code",
       "allow",
-      "list the files",
       "claude-opus-5",
-      undefined,
       "high",
       true,
     );
@@ -803,9 +794,7 @@ describe("StartSessionPrompt", () => {
     expect(onStart).toHaveBeenCalledWith(
       "opencode",
       "allow",
-      "list the files",
       "gpt-5.6-sol",
-      undefined,
       null,
       false,
     );

@@ -55,26 +55,33 @@ pub fn replace_attention(session: &mut Session, next: Attention, from_user: bool
 
 /// Persist general session fields and route attention through its targeted
 /// row-locked write before publishing the stored digest.
-pub async fn persist_session(
-    db: &DbStore,
-    bus: &CodeEventBus,
-    session: &Session,
-) -> Result<bool, tidebreak_core::AgentError> {
-    let ok = save_session(db, session).await?;
-    if ok {
-        let _ =
-            replace_session_attention(db, &session.owner, session.id, &session.attention, false)
-                .await?;
-        let Some(stored) = get_session(db, &session.owner, session.id).await? else {
-            return Ok(false);
-        };
-        bus.set_maybe_stalled(
-            stored.id,
-            matches!(stored.attention.state, AttentionState::Stalled { .. }),
-        );
-        emit_digest(db, bus, &stored).await;
-    }
-    Ok(ok)
+pub fn persist_session<'fut>(
+    db: &'fut DbStore,
+    bus: &'fut CodeEventBus,
+    session: &'fut Session,
+) -> futures::future::BoxFuture<'fut, Result<bool, tidebreak_core::AgentError>> {
+    Box::pin(async move {
+        let ok = save_session(db, session).await?;
+        if ok {
+            let _ = replace_session_attention(
+                db,
+                &session.owner,
+                session.id,
+                &session.attention,
+                false,
+            )
+            .await?;
+            let Some(stored) = get_session(db, &session.owner, session.id).await? else {
+                return Ok(false);
+            };
+            bus.set_maybe_stalled(
+                stored.id,
+                matches!(stored.attention.state, AttentionState::Stalled { .. }),
+            );
+            emit_digest(db, bus, &stored).await;
+        }
+        Ok(ok)
+    })
 }
 
 /// Load, gate, persist, and publish. For callers that do not already hold
@@ -326,36 +333,38 @@ pub async fn sweep_stalled(
 /// common case — a session that is plainly working — returns without reading
 /// the row at all. The hint starts pessimistic and every read corrects it,
 /// so a wrong guess costs one query, never a missed clear.
-pub async fn note_activity(
-    db: &DbStore,
-    bus: &CodeEventBus,
-    owner: &OwnerId,
+pub fn note_activity<'fut>(
+    db: &'fut DbStore,
+    bus: &'fut CodeEventBus,
+    owner: &'fut OwnerId,
     session_id: SessionId,
-) -> Result<(), tidebreak_core::AgentError> {
-    if !bus.maybe_stalled(session_id) {
-        return Ok(());
-    }
-    let Some(session) = get_session(db, owner, session_id).await? else {
-        return Ok(());
-    };
-    let stalled = matches!(session.attention.state, AttentionState::Stalled { .. });
-    bus.set_maybe_stalled(session_id, stalled);
-    if session.lifecycle != SessionLifecycle::Running {
-        return Ok(());
-    }
-    if !stalled {
-        return Ok(());
-    }
-    let _ = apply_attention(
-        db,
-        bus,
-        owner,
-        session_id,
-        Attention::working(AttentionSource::Lifecycle),
-        false,
-    )
-    .await?;
-    Ok(())
+) -> futures::future::BoxFuture<'fut, Result<(), tidebreak_core::AgentError>> {
+    Box::pin(async move {
+        if !bus.maybe_stalled(session_id) {
+            return Ok(());
+        }
+        let Some(session) = get_session(db, owner, session_id).await? else {
+            return Ok(());
+        };
+        let stalled = matches!(session.attention.state, AttentionState::Stalled { .. });
+        bus.set_maybe_stalled(session_id, stalled);
+        if session.lifecycle != SessionLifecycle::Running {
+            return Ok(());
+        }
+        if !stalled {
+            return Ok(());
+        }
+        let _ = apply_attention(
+            db,
+            bus,
+            owner,
+            session_id,
+            Attention::working(AttentionSource::Lifecycle),
+            false,
+        )
+        .await?;
+        Ok(())
+    })
 }
 
 /// Publish one session's digest to everyone who may read it.
@@ -468,24 +477,26 @@ async fn digest_readers(db: &DbStore, bus: &CodeEventBus, session: &Session) -> 
     readers
 }
 
-pub async fn emit_workspace_digests(
-    db: &DbStore,
-    bus: &CodeEventBus,
-    owner: &OwnerId,
+pub fn emit_workspace_digests<'fut>(
+    db: &'fut DbStore,
+    bus: &'fut CodeEventBus,
+    owner: &'fut OwnerId,
     workspace_id: WorkspaceId,
-) {
-    match list_sessions_for_workspace(db, owner, workspace_id).await {
-        Ok(sessions) => {
-            for session in sessions {
-                emit_digest(db, bus, &session).await;
+) -> futures::future::BoxFuture<'fut, ()> {
+    Box::pin(async move {
+        match list_sessions_for_workspace(db, owner, workspace_id).await {
+            Ok(sessions) => {
+                for session in sessions {
+                    emit_digest(db, bus, &session).await;
+                }
             }
+            Err(err) => warn!(
+                workspace = %workspace_id,
+                error = %err,
+                "failed to list sessions for a workspace digest"
+            ),
         }
-        Err(err) => warn!(
-            workspace = %workspace_id,
-            error = %err,
-            "failed to list sessions for a workspace digest"
-        ),
-    }
+    })
 }
 
 /// Every live session digest this principal may read, restated on every

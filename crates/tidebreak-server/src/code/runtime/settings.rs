@@ -457,18 +457,24 @@ impl CodeRuntime {
         let _ = Self::shut_down_worker(intent.session_id, handle).await;
     }
 
-    pub(super) async fn commit_execution_settings(
-        &self,
-        expected: &Session,
-        next: &SessionExecutionSettings,
+    pub(super) fn commit_execution_settings<'fut>(
+        &'fut self,
+        expected: &'fut Session,
+        next: &'fut SessionExecutionSettings,
         action: &'static str,
-    ) -> Result<Session, ServerError> {
-        let applies_to_future_turn = expected.lifecycle == SessionLifecycle::Running
-            || get_open_turn(&self.db, &expected.owner, expected.id)
-                .await?
-                .is_some();
-        if applies_to_future_turn {
-            return replace_session_execution_settings(&self.db, &expected.owner, expected, next)
+    ) -> futures::future::BoxFuture<'fut, Result<Session, ServerError>> {
+        Box::pin(async move {
+            let applies_to_future_turn = expected.lifecycle == SessionLifecycle::Running
+                || get_open_turn(&self.db, &expected.owner, expected.id)
+                    .await?
+                    .is_some();
+            if applies_to_future_turn {
+                return replace_session_execution_settings(
+                    &self.db,
+                    &expected.owner,
+                    expected,
+                    next,
+                )
                 .await?
                 .ok_or_else(|| {
                     ServerError::conflict_kind(
@@ -476,69 +482,71 @@ impl CodeRuntime {
                         format!("the session settings changed before {action}"),
                     )
                 });
-        }
-
-        let handle = self.require_worker(expected.id)?;
-        if handle.spawn_epoch != expected.spawn_epoch {
-            return Err(ServerError::conflict_kind(
-                "session_worker_changed",
-                "the session worker changed before the settings update",
-            ));
-        }
-        let (reply, response) = oneshot::channel();
-        let (settlement, release) = oneshot::channel();
-        handle
-            .commands
-            .send(WorkerCommand::SetExecutionSettings {
-                settings: next.clone(),
-                settlement: release,
-                reply,
-            })
-            .await
-            .map_err(|_| {
-                ServerError::conflict_kind(
-                    "session_worker_missing",
-                    "the session worker stopped before the settings update",
-                )
-            })?;
-        response
-            .await
-            .map_err(|_| {
-                ServerError::conflict_kind(
-                    "session_worker_missing",
-                    "the session worker stopped before reserving the settings update",
-                )
-            })?
-            .map_err(map_worker)?;
-
-        let updated =
-            match replace_session_execution_settings(&self.db, &expected.owner, expected, next)
-                .await
-            {
-                Ok(Some(updated)) => updated,
-                Ok(None) => {
-                    let _ = settlement.send(ExecutionSettingsSettlement::Abort);
-                    return Err(ServerError::conflict_kind(
-                        "session_settings_changed",
-                        format!("the session settings changed before {action}"),
-                    ));
-                }
-                Err(error) => {
-                    let _ = settlement.send(ExecutionSettingsSettlement::Abort);
-                    return Err(ServerError::from(error));
-                }
-            };
-        if settlement
-            .send(ExecutionSettingsSettlement::Confirmed)
-            .is_err()
-        {
-            if let Some(handle) = self.take_worker_for_epoch(expected.id, expected.spawn_epoch) {
-                self.revoke_worker_channels(expected.id);
-                let _ = Self::shut_down_worker(expected.id, handle).await;
             }
-            return self.attach_and_spawn_worker(updated).await;
-        }
-        Ok(updated)
+
+            let handle = self.require_worker(expected.id)?;
+            if handle.spawn_epoch != expected.spawn_epoch {
+                return Err(ServerError::conflict_kind(
+                    "session_worker_changed",
+                    "the session worker changed before the settings update",
+                ));
+            }
+            let (reply, response) = oneshot::channel();
+            let (settlement, release) = oneshot::channel();
+            handle
+                .commands
+                .send(WorkerCommand::SetExecutionSettings {
+                    settings: next.clone(),
+                    settlement: release,
+                    reply,
+                })
+                .await
+                .map_err(|_| {
+                    ServerError::conflict_kind(
+                        "session_worker_missing",
+                        "the session worker stopped before the settings update",
+                    )
+                })?;
+            response
+                .await
+                .map_err(|_| {
+                    ServerError::conflict_kind(
+                        "session_worker_missing",
+                        "the session worker stopped before reserving the settings update",
+                    )
+                })?
+                .map_err(map_worker)?;
+
+            let updated =
+                match replace_session_execution_settings(&self.db, &expected.owner, expected, next)
+                    .await
+                {
+                    Ok(Some(updated)) => updated,
+                    Ok(None) => {
+                        let _ = settlement.send(ExecutionSettingsSettlement::Abort);
+                        return Err(ServerError::conflict_kind(
+                            "session_settings_changed",
+                            format!("the session settings changed before {action}"),
+                        ));
+                    }
+                    Err(error) => {
+                        let _ = settlement.send(ExecutionSettingsSettlement::Abort);
+                        return Err(ServerError::from(error));
+                    }
+                };
+            if settlement
+                .send(ExecutionSettingsSettlement::Confirmed)
+                .is_err()
+            {
+                if let Some(handle) = self.take_worker_for_epoch(expected.id, expected.spawn_epoch)
+                {
+                    self.revoke_worker_channels(expected.id);
+                    let _ = Self::shut_down_worker(expected.id, handle).await;
+                }
+                return self.attach_and_spawn_worker(updated).await;
+            }
+            Ok(updated)
+        })
     }
 
     pub(super) fn take_worker_for_epoch(

@@ -116,63 +116,71 @@ impl CodeRuntime {
     /// does not count. A repository that is not registered is a conflict
     /// the caller can word, not a not-found: the name may be right and the
     /// clone simply missing.
-    pub async fn repo_by_origin(
-        &self,
-        owner: &OwnerId,
-        origin: &str,
-    ) -> Result<CodeRepo, ServerError> {
-        let Some((origin_owner, origin_name)) = parse_repository_origin(origin) else {
-            return Err(ServerError::bad_request_kind(
-                "repo_origin_invalid",
-                format!("{origin:?} is not a repository as owner/name"),
-            ));
-        };
-        let mut matched = None;
-        for repo in self.list_repos(owner).await? {
-            let repo = self.refresh_missing_repo_origin(repo).await?;
-            if repo.removed_at.is_some()
-                || !repo
-                    .origin_host
-                    .as_deref()
-                    .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
-                || !repo
-                    .origin_owner
-                    .as_deref()
-                    .is_some_and(|value| value.eq_ignore_ascii_case(origin_owner))
-                || !repo
-                    .origin_name
-                    .as_deref()
-                    .is_some_and(|value| value.eq_ignore_ascii_case(origin_name))
-            {
-                continue;
-            }
-            if matched.is_some() {
-                return Err(ServerError::conflict_kind(
-                    "repo_ambiguous",
-                    format!(
-                        "{origin_owner}/{origin_name} has multiple registered checkouts; \
-                         select one by repo_id"
-                    ),
+    pub fn repo_by_origin<'fut>(
+        &'fut self,
+        owner: &'fut OwnerId,
+        origin: &'fut str,
+    ) -> futures::future::BoxFuture<'fut, Result<CodeRepo, ServerError>> {
+        Box::pin(async move {
+            let Some((origin_owner, origin_name)) = parse_repository_origin(origin) else {
+                return Err(ServerError::bad_request_kind(
+                    "repo_origin_invalid",
+                    format!("{origin:?} is not a repository as owner/name"),
                 ));
+            };
+            let mut matched = None;
+            for repo in self.list_repos(owner).await? {
+                let repo = self.refresh_missing_repo_origin(repo).await?;
+                if repo.removed_at.is_some()
+                    || !repo
+                        .origin_host
+                        .as_deref()
+                        .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+                    || !repo
+                        .origin_owner
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(origin_owner))
+                    || !repo
+                        .origin_name
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(origin_name))
+                {
+                    continue;
+                }
+                if matched.is_some() {
+                    return Err(ServerError::conflict_kind(
+                        "repo_ambiguous",
+                        format!(
+                            "{origin_owner}/{origin_name} has multiple registered checkouts; \
+                             select one by repo_id"
+                        ),
+                    ));
+                }
+                matched = Some(repo);
             }
-            matched = Some(repo);
-        }
-        matched.ok_or_else(|| {
-            ServerError::conflict_kind(
-                "repo_unknown",
-                format!(
-                    "{origin_owner}/{origin_name} is not registered on this machine; \
-                     clone it in Tidebreak first"
-                ),
-            )
+            matched.ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "repo_unknown",
+                    format!(
+                        "{origin_owner}/{origin_name} is not registered on this machine; \
+                         clone it in Tidebreak first"
+                    ),
+                )
+            })
         })
     }
 
-    pub async fn get_repo(&self, owner: &OwnerId, id: RepoId) -> Result<CodeRepo, ServerError> {
-        let repo = get_repo(&self.db, owner, id)
-            .await?
-            .ok_or_else(|| ServerError::not_found(format!("repo {id} not found")))?;
-        self.refresh_missing_repo_origin(repo).await
+    pub fn get_repo<'fut>(
+        &'fut self,
+        owner: &'fut OwnerId,
+        id: RepoId,
+    ) -> futures::future::BoxFuture<'fut, Result<CodeRepo, ServerError>> {
+        Box::pin(async move {
+            let repo = get_repo(&self.db, owner, id)
+                .await?
+                .ok_or_else(|| ServerError::not_found(format!("repo {id} not found")))?;
+            self.refresh_missing_repo_origin(repo).await
+        })
     }
 
     /// Backfill older registrations before callers need their origin. Only the

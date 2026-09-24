@@ -69,17 +69,19 @@ fn collision_resolved_slug(base: &str, index: u64) -> String {
 }
 
 impl CodeRuntime {
-    pub async fn create_workspace(
-        &self,
-        owner: &OwnerId,
+    pub fn create_workspace<'fut>(
+        &'fut self,
+        owner: &'fut OwnerId,
         repo_id: RepoId,
         title: Option<String>,
         suggested_title: Option<String>,
         base_ref: Option<String>,
-    ) -> Result<CodeWorkspace, ServerError> {
-        self.create_workspace_with_warning(owner, repo_id, title, suggested_title, base_ref)
-            .await
-            .map(|(workspace, _)| workspace)
+    ) -> futures::future::BoxFuture<'fut, Result<CodeWorkspace, ServerError>> {
+        Box::pin(async move {
+            self.create_workspace_with_warning(owner, repo_id, title, suggested_title, base_ref)
+                .await
+                .map(|(workspace, _)| workspace)
+        })
     }
 
     pub async fn create_workspace_with_warning(
@@ -103,205 +105,211 @@ impl CodeRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn create_workspace_with_git_credentials(
-        &self,
-        owner: &OwnerId,
+    pub(super) fn create_workspace_with_git_credentials<'fut>(
+        &'fut self,
+        owner: &'fut OwnerId,
         repo_id: RepoId,
         title: Option<String>,
         suggested_title: Option<String>,
         base_ref: Option<String>,
-        lender: Option<&dyn crate::obo_gateway::GitCredentialLender>,
+        lender: Option<&'fut dyn crate::obo_gateway::GitCredentialLender>,
         acts_as: tidebreak_core::ActsAs,
-    ) -> Result<(CodeWorkspace, Option<String>), ServerError> {
-        let repo = self.get_repo(owner, repo_id).await?;
-        Self::refuse_removed_repo(&repo)?;
-        let explicit_title = title
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-        let suggested_title = suggested_title
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-        let id = WorkspaceId::new();
-        let fallback_name = worktree::two_word_name(id.as_uuid().as_u128());
-        let fallback_branch_slug = format!("{fallback_name}-{}", worktree::short_id(id.as_uuid()));
-        let display_title = explicit_title
-            .clone()
-            .or_else(|| suggested_title.clone())
-            .unwrap_or_else(|| fallback_name.clone());
-        let use_suggested_checkout_name = explicit_title.is_none()
-            && suggested_title.is_some()
-            && naming_settings::auto_rename_branches(&*self.db, owner).await?;
-        let named_checkout = explicit_title
-            .as_deref()
-            .or_else(|| use_suggested_checkout_name.then_some(display_title.as_str()))
-            .map(slugify)
-            .filter(|slug| !slug.is_empty());
-        let checkout_slug = named_checkout
-            .clone()
-            .unwrap_or_else(|| fallback_name.clone());
-        let branch_slug_base = named_checkout.unwrap_or(fallback_branch_slug);
-        let repo_slug = {
-            let from_name = slugify(&repo.display_name);
-            if from_name.is_empty() {
-                slugify(&repo.root_path)
-            } else {
-                from_name
-            }
-        };
-        // Resolved per creation, not cached: the root is a setting an operator
-        // can change while the process runs, and it decides only where the
-        // *next* worktree lands. Existing workspaces keep the absolute path on
-        // their row (`crate::code::worktree_root`).
-        let root = self.owner_worktree_root(owner).await?;
-        let explicit_base = base_ref
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-        let requested = explicit_base
-            .clone()
-            .unwrap_or_else(|| repo.default_base_ref.clone());
-        let repo_root = std::path::Path::new(&repo.root_path);
-        let requested_repo_default = explicit_base
-            .as_deref()
-            .is_none_or(|value| value == repo.default_base_ref);
-        let creation = self.workspace_creation_lock(repo_id);
-        let creation_guard = creation.lock().await;
-        let base = if requested_repo_default {
-            worktree::resolve_default_base_ref(repo_root, Some(&requested))
-                .await
-                .map_err(map_worktree)?
-        } else {
-            worktree::resolve_named_base_ref(repo_root, &requested)
-                .await
-                .map_err(map_worktree)?
-        };
-        let refreshed = match naming_settings::keep_local_main_up_to_date(&*self.db, owner).await {
-            Ok(false) => Ok(()),
-            Ok(true) => worktree::refresh_local_base(repo_root, &base).await,
-            Err(error) => Err(error.to_string()),
-        };
-        let base_refresh_warning = refreshed.err().map(|error| {
-            tracing::debug!(repo = %repo.id, %error, "local base refresh skipped");
-            format!("Could not update {base} to the latest version. Your workspace uses the available local history.")
-        });
-        if requested_repo_default && repo.default_base_ref != base {
-            let mut repo = repo.clone();
-            repo.default_base_ref = base.clone();
-            self.save_repo(&repo).await?;
-        }
-        let repo_root = std::path::Path::new(&repo.root_path);
-        let mut existing = list_workspaces(&self.db, owner, Some(repo_id))
-            .await?
-            .into_iter()
-            .map(|workspace| workspace.branch_name)
-            .collect::<HashSet<_>>();
-        let mut collision_index = 1_u64;
-        let (mut workspace, path, operation) = loop {
-            let workspace_slug = collision_resolved_slug(&checkout_slug, collision_index);
-            let resolved_branch_slug = collision_resolved_slug(&branch_slug_base, collision_index);
-            let branch = branch_name_from_slug(&repo.branch_prefix, &resolved_branch_slug);
-            if existing.contains(&branch)
-                || worktree::branch_exists(repo_root, &branch)
+    ) -> futures::future::BoxFuture<'fut, Result<(CodeWorkspace, Option<String>), ServerError>>
+    {
+        Box::pin(async move {
+            let repo = self.get_repo(owner, repo_id).await?;
+            Self::refuse_removed_repo(&repo)?;
+            let explicit_title = title
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty());
+            let suggested_title = suggested_title
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty());
+            let id = WorkspaceId::new();
+            let fallback_name = worktree::two_word_name(id.as_uuid().as_u128());
+            let fallback_branch_slug =
+                format!("{fallback_name}-{}", worktree::short_id(id.as_uuid()));
+            let display_title = explicit_title
+                .clone()
+                .or_else(|| suggested_title.clone())
+                .unwrap_or_else(|| fallback_name.clone());
+            let use_suggested_checkout_name = explicit_title.is_none()
+                && suggested_title.is_some()
+                && naming_settings::auto_rename_branches(&*self.db, owner).await?;
+            let named_checkout = explicit_title
+                .as_deref()
+                .or_else(|| use_suggested_checkout_name.then_some(display_title.as_str()))
+                .map(slugify)
+                .filter(|slug| !slug.is_empty());
+            let checkout_slug = named_checkout
+                .clone()
+                .unwrap_or_else(|| fallback_name.clone());
+            let branch_slug_base = named_checkout.unwrap_or(fallback_branch_slug);
+            let repo_slug = {
+                let from_name = slugify(&repo.display_name);
+                if from_name.is_empty() {
+                    slugify(&repo.root_path)
+                } else {
+                    from_name
+                }
+            };
+            // Resolved per creation, not cached: the root is a setting an operator
+            // can change while the process runs, and it decides only where the
+            // *next* worktree lands. Existing workspaces keep the absolute path on
+            // their row (`crate::code::worktree_root`).
+            let root = self.owner_worktree_root(owner).await?;
+            let explicit_base = base_ref
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty());
+            let requested = explicit_base
+                .clone()
+                .unwrap_or_else(|| repo.default_base_ref.clone());
+            let repo_root = std::path::Path::new(&repo.root_path);
+            let requested_repo_default = explicit_base
+                .as_deref()
+                .is_none_or(|value| value == repo.default_base_ref);
+            let creation = self.workspace_creation_lock(repo_id);
+            let creation_guard = creation.lock().await;
+            let base = if requested_repo_default {
+                worktree::resolve_default_base_ref(repo_root, Some(&requested))
                     .await
                     .map_err(map_worktree)?
-            {
-                collision_index = collision_index.checked_add(1).ok_or_else(|| {
-                    ServerError::internal("workspace name collision limit exhausted")
-                })?;
-                continue;
-            }
-            let path = worktree_dir(&root, id, &repo_slug, &workspace_slug);
-            let workspace = CodeWorkspace {
-                id,
-                owner: owner.clone(),
-                repo_id,
-                title: display_title.clone(),
-                worktree_path: path.display().to_string(),
-                branch_name: branch.clone(),
-                base_ref: base.clone(),
-                status: CodeWorkspaceStatus::Creating,
-                pr: None,
-                created_at: Utc::now(),
-                archived_at: None,
-                released_at: None,
-                released_tip: None,
-                bundle_bytes: None,
-                setup_error: None,
+            } else {
+                worktree::resolve_named_base_ref(repo_root, &requested)
+                    .await
+                    .map_err(map_worktree)?
             };
-            insert_workspace(&self.db, &workspace).await?;
-            match create_worktree(repo_root, &path, &branch, &base).await {
-                Ok(operation) => break (workspace, path, operation),
-                Err(WorktreeError::Conflict {
-                    kind: "branch_collision",
-                    ..
-                }) => {
-                    let _ = delete_workspace(&self.db, owner, id).await;
-                    existing.insert(branch);
+            let refreshed =
+                match naming_settings::keep_local_main_up_to_date(&*self.db, owner).await {
+                    Ok(false) => Ok(()),
+                    Ok(true) => worktree::refresh_local_base(repo_root, &base).await,
+                    Err(error) => Err(error.to_string()),
+                };
+            let base_refresh_warning = refreshed.err().map(|error| {
+                tracing::debug!(repo = %repo.id, %error, "local base refresh skipped");
+                format!("Could not update {base} to the latest version. Your workspace uses the available local history.")
+            });
+            if requested_repo_default && repo.default_base_ref != base {
+                let mut repo = repo.clone();
+                repo.default_base_ref = base.clone();
+                self.save_repo(&repo).await?;
+            }
+            let repo_root = std::path::Path::new(&repo.root_path);
+            let mut existing = list_workspaces(&self.db, owner, Some(repo_id))
+                .await?
+                .into_iter()
+                .map(|workspace| workspace.branch_name)
+                .collect::<HashSet<_>>();
+            let mut collision_index = 1_u64;
+            let (mut workspace, path, operation) = loop {
+                let workspace_slug = collision_resolved_slug(&checkout_slug, collision_index);
+                let resolved_branch_slug =
+                    collision_resolved_slug(&branch_slug_base, collision_index);
+                let branch = branch_name_from_slug(&repo.branch_prefix, &resolved_branch_slug);
+                if existing.contains(&branch)
+                    || worktree::branch_exists(repo_root, &branch)
+                        .await
+                        .map_err(map_worktree)?
+                {
                     collision_index = collision_index.checked_add(1).ok_or_else(|| {
                         ServerError::internal("workspace name collision limit exhausted")
                     })?;
+                    continue;
+                }
+                let path = worktree_dir(&root, id, &repo_slug, &workspace_slug);
+                let workspace = CodeWorkspace {
+                    id,
+                    owner: owner.clone(),
+                    repo_id,
+                    title: display_title.clone(),
+                    worktree_path: path.display().to_string(),
+                    branch_name: branch.clone(),
+                    base_ref: base.clone(),
+                    status: CodeWorkspaceStatus::Creating,
+                    pr: None,
+                    created_at: Utc::now(),
+                    archived_at: None,
+                    released_at: None,
+                    released_tip: None,
+                    bundle_bytes: None,
+                    setup_error: None,
+                };
+                insert_workspace(&self.db, &workspace).await?;
+                match create_worktree(repo_root, &path, &branch, &base).await {
+                    Ok(operation) => break (workspace, path, operation),
+                    Err(WorktreeError::Conflict {
+                        kind: "branch_collision",
+                        ..
+                    }) => {
+                        let _ = delete_workspace(&self.db, owner, id).await;
+                        existing.insert(branch);
+                        collision_index = collision_index.checked_add(1).ok_or_else(|| {
+                            ServerError::internal("workspace name collision limit exhausted")
+                        })?;
+                    }
+                    Err(err) => {
+                        let _ = delete_workspace(&self.db, owner, id).await;
+                        return Err(map_worktree(err));
+                    }
+                }
+            };
+            drop(creation_guard);
+            // Before the setup script, which may itself commit: from here on,
+            // anything this workspace commits should already carry the right
+            // name.
+            self.name_workspace_author_with_lender(owner, &path, lender, acts_as)
+                .await;
+            match run_setup_script(
+                &path,
+                std::path::Path::new(&repo.root_path),
+                &workspace.title,
+                repo.setup_script.as_deref(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    workspace.status = CodeWorkspaceStatus::Active;
+                    match self.save_workspace_final(&workspace).await {
+                        Ok(true) => operation.complete().await,
+                        Ok(false) => {
+                            operation.rollback().await;
+                            return Err(ServerError::not_found(format!(
+                                "workspace {} not found",
+                                workspace.id
+                            )));
+                        }
+                        Err(error) => {
+                            operation.rollback().await;
+                            return Err(error);
+                        }
+                    }
+                    gh::run_auto_create_actions(&path, &repo.quick_actions).await;
+                    Ok((workspace, base_refresh_warning))
                 }
                 Err(err) => {
-                    let _ = delete_workspace(&self.db, owner, id).await;
-                    return Err(map_worktree(err));
+                    workspace.status = CodeWorkspaceStatus::SetupFailed;
+                    workspace.setup_error = Some(persistable_setup_error(&err));
+                    match self.save_workspace_final(&workspace).await {
+                        Ok(true) => operation.complete().await,
+                        Ok(false) => {
+                            operation.rollback().await;
+                            return Err(ServerError::not_found(format!(
+                                "workspace {} not found",
+                                workspace.id
+                            )));
+                        }
+                        Err(error) => {
+                            operation.rollback().await;
+                            return Err(error);
+                        }
+                    }
+                    Err(ServerError::unprocessable_kind(
+                        "setup_failed",
+                        err.to_string(),
+                    ))
                 }
             }
-        };
-        drop(creation_guard);
-        // Before the setup script, which may itself commit: from here on,
-        // anything this workspace commits should already carry the right
-        // name.
-        self.name_workspace_author_with_lender(owner, &path, lender, acts_as)
-            .await;
-        match run_setup_script(
-            &path,
-            std::path::Path::new(&repo.root_path),
-            &workspace.title,
-            repo.setup_script.as_deref(),
-        )
-        .await
-        {
-            Ok(()) => {
-                workspace.status = CodeWorkspaceStatus::Active;
-                match self.save_workspace_final(&workspace).await {
-                    Ok(true) => operation.complete().await,
-                    Ok(false) => {
-                        operation.rollback().await;
-                        return Err(ServerError::not_found(format!(
-                            "workspace {} not found",
-                            workspace.id
-                        )));
-                    }
-                    Err(error) => {
-                        operation.rollback().await;
-                        return Err(error);
-                    }
-                }
-                gh::run_auto_create_actions(&path, &repo.quick_actions).await;
-                Ok((workspace, base_refresh_warning))
-            }
-            Err(err) => {
-                workspace.status = CodeWorkspaceStatus::SetupFailed;
-                workspace.setup_error = Some(persistable_setup_error(&err));
-                match self.save_workspace_final(&workspace).await {
-                    Ok(true) => operation.complete().await,
-                    Ok(false) => {
-                        operation.rollback().await;
-                        return Err(ServerError::not_found(format!(
-                            "workspace {} not found",
-                            workspace.id
-                        )));
-                    }
-                    Err(error) => {
-                        operation.rollback().await;
-                        return Err(error);
-                    }
-                }
-                Err(ServerError::unprocessable_kind(
-                    "setup_failed",
-                    err.to_string(),
-                ))
-            }
-        }
+        })
     }
 
     pub(super) async fn save_workspace_final(

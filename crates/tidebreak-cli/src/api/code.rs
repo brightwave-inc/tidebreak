@@ -29,8 +29,10 @@ pub use tidebreak_server::wire::{
 
 use super::client::{Client, EventSocket};
 
-/// Result of `POST /sessions/{id}/turns`: the turn that ran or the follow-up
-/// the server parked, both on `202`. The server answers with one of
+/// Result of `POST /sessions/{id}/turns`: the turn it started or the
+/// follow-up the server parked, both on `202` as soon as the message is
+/// accepted. A started turn is still running; its end arrives on the session
+/// event socket. The server answers with one of
 /// two snapshots rather than a tagged union, so this is the one code-mode
 /// shape the client composes itself. The two share no required field, so a
 /// snapshot decodes as exactly one arm even though both ignore unknown keys.

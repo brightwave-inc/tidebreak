@@ -519,6 +519,9 @@ async fn plan_is_the_only_session_mode_and_a_turn_journals_end_to_end() {
         .unwrap();
     assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
     let turn: serde_json::Value = turn.json().await.unwrap();
+    // The send answers on acceptance; the outcome arrives afterwards.
+    assert_eq!(turn["status"], "running");
+    let turn = wait_for_turn_end(&client, addr, &token, json_id(&session), json_id(&turn)).await;
     assert_eq!(turn["status"], "completed");
 
     let busy = client
@@ -548,6 +551,121 @@ pub(super) async fn wait_until(mut ready: impl FnMut() -> bool) {
     })
     .await
     .expect("condition never held");
+}
+
+/// How long a test waits for an accepted turn to end.
+const TURN_END_WAIT: Duration = Duration::from_secs(20);
+
+/// Wait until `turn_id` has ended and its worker has finished with it, then
+/// return the turn as the route lists it.
+///
+/// `POST /sessions/{id}/turns` answers once the turn is accepted, so the
+/// outcome arrives later. The worker marks the session running before it
+/// answers and idle only after the turn's checkpoint and attention are
+/// written, so a session that no longer reads running has nothing left to
+/// write for this turn.
+pub(super) async fn wait_for_turn_end(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    session_id: &str,
+    turn_id: &str,
+) -> serde_json::Value {
+    tokio::time::timeout(TURN_END_WAIT, async {
+        loop {
+            let turns: Vec<serde_json::Value> = client
+                .get(format!("http://{addr}/sessions/{session_id}/turns"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let turn = turns
+                .into_iter()
+                .find(|turn| turn["id"] == turn_id)
+                .unwrap_or_else(|| panic!("turn {turn_id} is not listed"));
+            let status: TurnStatus = serde_json::from_value(turn["status"].clone()).unwrap();
+            if !status.is_open() {
+                let session: serde_json::Value = client
+                    .get(format!("http://{addr}/sessions/{session_id}"))
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if session["lifecycle"] != "running" {
+                    return turn;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("turn {turn_id} did not end"))
+}
+
+/// Send one message and wait for the turn it starts to end.
+///
+/// Returns the ended turn. A send that queues instead of starting is a test
+/// setup error here.
+pub(super) async fn run_turn_to_end(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    session_id: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let response = client
+        .post(format!("http://{addr}/sessions/{session_id}/turns"))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let accepted: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::ACCEPTED, "{accepted}");
+    let turn_id = accepted["id"].as_str().expect("the send started a turn");
+    assert!(
+        accepted.get("status").is_some(),
+        "the send queued instead of starting a turn: {accepted}"
+    );
+    wait_for_turn_end(client, addr, token, session_id, turn_id).await
+}
+
+/// Wait until `turn_id` has ended and the session no longer reads running,
+/// reading the store directly. The in-process counterpart of
+/// [`wait_for_turn_end`], for tests that drive the runtime rather than routes.
+pub(super) async fn wait_for_turn_end_in(
+    runtime: &CodeRuntime,
+    owner: &tidebreak_core::OwnerId,
+    session_id: SessionId,
+    turn_id: TurnId,
+) -> tidebreak_core::Turn {
+    tokio::time::timeout(TURN_END_WAIT, async {
+        loop {
+            let turn = tidebreak_core::db::code::get_turn(&runtime.db, owner, turn_id)
+                .await
+                .unwrap()
+                .expect("the accepted turn exists");
+            if !turn.status.is_open() {
+                let session = tidebreak_core::db::code::get_session(&runtime.db, owner, session_id)
+                    .await
+                    .unwrap()
+                    .expect("the session exists");
+                if session.lifecycle != tidebreak_core::SessionLifecycle::Running {
+                    return turn;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("turn {turn_id} did not end"))
 }
 
 pub(super) async fn wait_for_open_turn(runtime: &CodeRuntime, session_id: SessionId) -> TurnId {

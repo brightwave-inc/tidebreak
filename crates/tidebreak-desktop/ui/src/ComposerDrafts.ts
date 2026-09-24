@@ -245,6 +245,13 @@ export type ComposerDraftStore = {
    * the chat the draft belonged to no longer exists to send it to.
    */
   clearDraft: (key: string) => void;
+  /**
+   * Move one composer's whole draft to another key, after whatever the
+   * destination already holds. The code start surface hands its draft to the
+   * session it creates this way. Move the image bytes first, with
+   * `moveComposerDraft`, or the chips lose their files.
+   */
+  moveDraft: (from: string, to: string) => void;
   setImages: (key: string, images: ImageAttachment[]) => void;
   setFiles: (key: string, files: ImportedDocument[]) => void;
   setPastedTexts: (key: string, items: PastedTextAttachment[]) => void;
@@ -284,6 +291,41 @@ export function createComposerDraftStore() {
           delete drafts[key];
           const attachments = { ...state.attachments };
           delete attachments[key];
+          return { drafts, attachments };
+        });
+      },
+      moveDraft: (from, to) => {
+        if (from === to) return;
+        const state = get();
+        const moving = state.drafts[from] ?? "";
+        const staying = state.drafts[to] ?? "";
+        const text =
+          moving && staying
+            ? `${staying.trimEnd()}\n\n${moving}`
+            : staying || moving;
+        const source = state.attachments[from] ?? EMPTY_ATTACHMENT_DRAFT;
+        const target = state.attachments[to] ?? EMPTY_ATTACHMENT_DRAFT;
+        const merged: ComposerAttachmentDraft = {
+          images: [...target.images, ...source.images],
+          files: [...target.files, ...source.files],
+          pastedTexts: [...target.pastedTexts, ...source.pastedTexts],
+          skills: [...target.skills, ...source.skills],
+          folders: [...target.folders, ...source.folders],
+          pendingChatId: target.pendingChatId ?? source.pendingChatId,
+        };
+        writeStoredDraft(from, "");
+        writeStoredAttachmentDraft(from, EMPTY_ATTACHMENT_DRAFT);
+        writeStoredDraft(to, text);
+        writeStoredAttachmentDraft(to, merged);
+        set((current) => {
+          const drafts = { ...current.drafts };
+          delete drafts[from];
+          if (text) drafts[to] = text;
+          else delete drafts[to];
+          const attachments = { ...current.attachments };
+          delete attachments[from];
+          if (isEmptyAttachmentDraft(merged)) delete attachments[to];
+          else attachments[to] = merged;
           return { drafts, attachments };
         });
       },

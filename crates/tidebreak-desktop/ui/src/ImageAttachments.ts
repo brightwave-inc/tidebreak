@@ -53,7 +53,19 @@ export type TranscriptImageAttachment = {
 /** A published image plus the name the host picker read it under. */
 export type PickedImage = PublishedImage & { fileName: string };
 
-export type ImageAttachmentStatus = "queued" | "uploading" | "ready" | "failed";
+/**
+ * Where one attachment stands.
+ *
+ * `held` is an image attached before there is a conversation to publish it
+ * to: the code start surface holds the file until the send creates the
+ * session. No bytes are moving, so nothing about it says "uploading".
+ */
+export type ImageAttachmentStatus =
+  | "held"
+  | "queued"
+  | "uploading"
+  | "ready"
+  | "failed";
 
 export type ImageAttachment = {
   /**
@@ -104,6 +116,17 @@ export function queuedImageAttachment(
   };
 }
 
+/**
+ * An image held until a conversation exists to publish it to. The send that
+ * creates the conversation publishes it, and the chip shows that upload then.
+ */
+export function heldImageAttachment(
+  id: string,
+  file: { name: string; byteLen: number; previewUrl: string | null },
+): ImageAttachment {
+  return { ...queuedImageAttachment(id, file), status: "held" };
+}
+
 /** An image the host picked, read, and published in one step. */
 export function readyImageAttachment(
   id: string,
@@ -145,7 +168,7 @@ export function withUploadStarted(
   id: string,
 ): ImageAttachment[] {
   return mapAttachment(attachments, id, (attachment) =>
-    attachment.status === "queued"
+    attachment.status === "queued" || attachment.status === "held"
       ? { ...attachment, status: "uploading", uploadedBytes: 0, error: null }
       : attachment,
   );
@@ -299,6 +322,8 @@ export function imageUploadPercent(attachment: ImageAttachment): number {
 /** The one line under the file name that says where this attachment stands. */
 export function describeImageAttachment(attachment: ImageAttachment): string {
   switch (attachment.status) {
+    case "held":
+      return "Sent with your message";
     case "queued":
     case "uploading":
       // Queued is the instant before the host publish starts — paste already

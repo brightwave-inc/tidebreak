@@ -27,6 +27,8 @@ import {
   useCodeCatalogStore,
 } from "./CodeCatalogStore";
 import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "./CodeUiStore";
+import { useCodeComposerStatus } from "./CodeSessionSend";
+import { useComposerDrafts } from "../ComposerDrafts";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { useEngineSignInStore } from "./EngineSignIn";
 import { PERMISSION_MODE_POLICY_BLOCKED } from "./labels";
@@ -82,10 +84,12 @@ afterEach(() => {
   useCodeUiStore.setState({
     lastCreate: null,
     pendingComposerPrompt: null,
-    pendingComposerImages: null,
     newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT,
     workspaceStartups: {},
   });
+  useComposerDrafts.setState({ drafts: {}, attachments: {} });
+  useCodeComposerStatus.setState({ byKey: {} });
+  window.sessionStorage.clear();
   toastError.mockReset();
   toastWarning.mockReset();
   toastSuccess.mockReset();
@@ -1156,6 +1160,8 @@ describe("NewWorkspaceDialog", () => {
       expect(submitCodeTurn).toHaveBeenCalledWith(
         "sess-ws-prompt",
         "list the files",
+        undefined,
+        undefined,
       ),
     );
     // Sent, not parked: nothing left for the workspace composer to take.
@@ -1319,7 +1325,7 @@ describe("NewWorkspaceDialog", () => {
     expect(publishCodeImage).toHaveBeenCalledWith("sess-ws-image", image);
   });
 
-  it("drops the handoff after images publish, before the first turn finishes", async () => {
+  it("drops the handoff once the session exists and publishes images from its composer", async () => {
     const repos = [repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({
       repos,
@@ -1377,10 +1383,20 @@ describe("NewWorkspaceDialog", () => {
       metaKey: true,
     });
 
-    await waitFor(() => expect(publishCodeImage).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(publishCodeImage).toHaveBeenCalledWith(
+        "sess-ws-image-live",
+        image,
+      ),
+    );
+    // The conversation has taken over; its composer shows the upload.
     expect(
       useCodeUiStore.getState().workspaceStartups["ws-image-live"],
-    ).toEqual(expect.objectContaining({ phase: "sending_message" }));
+    ).toBeUndefined();
+    expect(
+      useComposerDrafts.getState().attachments["sess-ws-image-live"]?.images,
+    ).toEqual([expect.objectContaining({ status: "uploading" })]);
+    expect(submitCodeTurn).not.toHaveBeenCalled();
     finishPublish({
       attachmentId: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",
       mediaType: "image/png",
@@ -1388,11 +1404,20 @@ describe("NewWorkspaceDialog", () => {
       height: 600,
       byteLen: 4,
     });
-    await waitFor(() => expect(submitCodeTurn).toHaveBeenCalled());
-    expect(
-      useCodeUiStore.getState().workspaceStartups["ws-image-live"],
-    ).toBeUndefined();
-    turn.resolve({ kind: "turn" } as unknown as CodeTurnSubmission);
+    await waitFor(() =>
+      expect(submitCodeTurn).toHaveBeenCalledWith(
+        "sess-ws-image-live",
+        "Review this screenshot",
+        undefined,
+        [
+          {
+            blob_id: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",
+            media_type: "image/png",
+          },
+        ],
+      ),
+    );
+    turn.resolve({ kind: "queued" } as unknown as CodeTurnSubmission);
     await turn.promise;
   });
 
@@ -1445,15 +1470,24 @@ describe("NewWorkspaceDialog", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/code/w/ws-held-image"),
     );
+    // The refused message waits in the new session's composer, with the
+    // image it already published there and the reason.
     await waitFor(() =>
-      expect(useCodeUiStore.getState().pendingComposerPrompt).toEqual({
-        scope: "ws-held-image",
-        text: "Review this screenshot",
-        submit: false,
-        sessionId: expect.any(String),
-        images: [image],
-      }),
+      expect(useComposerDrafts.getState().drafts["sess-ws-held-image"]).toBe(
+        "Review this screenshot",
+      ),
     );
+    expect(
+      useComposerDrafts.getState().attachments["sess-ws-held-image"]?.images,
+    ).toEqual([
+      expect.objectContaining({
+        status: "ready",
+        attachmentId: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",
+      }),
+    ]);
+    expect(
+      useCodeComposerStatus.getState().byKey["sess-ws-held-image"]?.notice,
+    ).toBe("engine crashed on spawn");
   });
 
   it("hands pasted images to the workspace composer when the session cannot start", async () => {
@@ -1504,12 +1538,16 @@ describe("NewWorkspaceDialog", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/code/w/ws-recover-image"),
     );
-    expect(useCodeUiStore.getState().pendingComposerPrompt).toEqual({
-      scope: "ws-recover-image",
-      text: "Review this screenshot",
-      submit: false,
-      images: [image],
-    });
+    // No session to send to, so the workspace's start composer holds the
+    // words and the image, still held for the session it will create.
+    await waitFor(() =>
+      expect(useComposerDrafts.getState().drafts["ws-recover-image"]).toBe(
+        "Review this screenshot",
+      ),
+    );
+    expect(
+      useComposerDrafts.getState().attachments["ws-recover-image"]?.images,
+    ).toEqual([expect.objectContaining({ status: "held" })]);
   });
 
   it("hands the message to the workspace composer when the turn cannot be sent", async () => {
@@ -1554,12 +1592,9 @@ describe("NewWorkspaceDialog", () => {
       expect(router.state.location.pathname).toBe("/code/w/ws-held"),
     );
     await waitFor(() =>
-      expect(useCodeUiStore.getState().pendingComposerPrompt).toEqual({
-        scope: "ws-held",
-        text: "list the files",
-        submit: false,
-        sessionId: expect.any(String),
-      }),
+      expect(useComposerDrafts.getState().drafts["sess-ws-held"]).toBe(
+        "list the files",
+      ),
     );
     expect(toastError).toHaveBeenCalledWith(
       "Session started, but the first message could not be sent. engine crashed on spawn",
@@ -1731,12 +1766,11 @@ describe("NewWorkspaceDialog", () => {
     expect(
       useCodeCatalogStore.getState().sessionsByWorkspace[created.id],
     ).toBeUndefined();
-    // No session to send to, so the message waits in the workspace composer.
-    expect(useCodeUiStore.getState().pendingComposerPrompt).toEqual({
-      scope: "ws-recover",
-      text: "list the files",
-      submit: false,
-    });
+    // No session to send to, so the message waits in the workspace's start
+    // composer.
+    expect(useComposerDrafts.getState().drafts["ws-recover"]).toBe(
+      "list the files",
+    );
     expect(toastError).toHaveBeenCalledWith(
       "Workspace created, but the session could not start. Codex sign-in expired",
     );
@@ -1806,6 +1840,8 @@ describe("NewWorkspaceDialog", () => {
     expect(submitCodeTurn).toHaveBeenLastCalledWith(
       "sess-ws-more",
       "second task",
+      undefined,
+      undefined,
     );
   });
 

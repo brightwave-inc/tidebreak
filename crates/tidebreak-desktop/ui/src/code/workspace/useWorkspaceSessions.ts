@@ -10,11 +10,7 @@ import type {
   ReasoningEffort,
 } from "../../api/types";
 import type { CodeConversationTab } from "../CodeCenterTabs";
-import {
-  clearFirstTurnRecovery,
-  type FirstTurnRecovery,
-  writeFirstTurnRecovery,
-} from "./firstTurnRecovery";
+import { writeFirstTurnRecovery } from "./firstTurnRecovery";
 import { attentionMarkForDigest } from "../statusTone";
 import { conversationTabLabel } from "./layout";
 import { forkFraming } from "../fork";
@@ -28,12 +24,8 @@ import { workspaceCodeSessions } from "../parsers";
 import { isPutAway } from "../workspaceCards";
 import { toast } from "sonner";
 import { useCodeCatalogStore } from "../CodeCatalogStore";
+import { SessionStartedUnsent } from "../CodeSessionSend";
 import { useCodeUiStore } from "../CodeUiStore";
-import {
-  codeSessionAcceptedTurn,
-  waitForCodeSessionHydrated,
-} from "../CodeSessionRegistry";
-import { submitFirstCodeTurn } from "../publishCodeSessionImages";
 import { confirmRepositoryTrust } from "../RepositoryTrustStore";
 import { useConversationDigests } from "../CodeUpdatesStore";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -47,9 +39,9 @@ import type { useNavigate } from "@tanstack/react-router";
  * lives in `?task=` so a reload or a shared link returns to the same agent;
  * the first agent is the workspace's default and stays unnamed.
  *
- * Starting an agent is the one multi-step write here: create the session,
- * hand it any images the composer held, then send the first message. Each
- * step checks that the page, the client, and the reader's selection are
+ * Starting an agent creates its session. The start surface's composer then
+ * sends the first message through the same path as every later one. Each
+ * step here checks that the page, the client, and the reader's selection are
  * still the ones the start began with, because a connection change or a
  * click on another tab mid-flight must not land a stranger's result.
  */
@@ -271,15 +263,21 @@ export function useWorkspaceSessions({
     };
   }, [client, workspaceId, reloadToken]);
 
+  /**
+   * Create the session a start surface's first message goes to, and answer
+   * its id.
+   *
+   * Only the session. The start surface's composer sends the message next,
+   * through the same path as every later message, so this never touches the
+   * draft, its pasted text, or its images.
+   */
   async function startSession(
     harness: HarnessKind,
     permissionMode: PermissionMode,
-    message: string,
     model?: string,
-    draft = message,
     reasoningEffort?: ReasoningEffort | null,
     fastMode = false,
-  ) {
+  ): Promise<string> {
     const request = startRequestRef.current + 1;
     startRequestRef.current = request;
     const startedWithClient = client;
@@ -289,6 +287,8 @@ export function useWorkspaceSessions({
       mountedRef.current &&
       startRequestRef.current === request &&
       clientRef.current === startedWithClient;
+    const changed =
+      "The Code connection changed before the session started. Send the message again.";
     setStarting(true);
     try {
       let created: CodeSessionSnapshot;
@@ -298,11 +298,7 @@ export function useWorkspaceSessions({
           requiresHarnessModelIds(harness) || gateway.length === 0
             ? await catalog.ensureHarnessModels(startedWithClient, harness)
             : [];
-        if (!isCurrent()) {
-          throw new Error(
-            "The Code connection changed before the session started. Send the message again.",
-          );
-        }
+        if (!isCurrent()) throw new Error(changed);
         const listed = preferredCodeModels(harness, native, gateway);
         const posted =
           model ?? listed.find((option) => option.default)?.id ?? listed[0]?.id;
@@ -314,11 +310,7 @@ export function useWorkspaceSessions({
             workspace,
             harness,
           });
-          if (!isCurrent()) {
-            throw new Error(
-              "The Code connection changed before the session started. Send the message again.",
-            );
-          }
+          if (!isCurrent()) throw new Error(changed);
         }
         created = await startedWithClient.createCodeSession(workspaceId, {
           harness,
@@ -334,35 +326,25 @@ export function useWorkspaceSessions({
         throw err;
       }
 
-      const heldImages = useCodeUiStore
-        .getState()
-        .takeComposerImages(workspaceId);
-
-      const recovery: FirstTurnRecovery = {
-        id: `${created.id}:${request}`,
-        sessionId: created.id,
-        draft,
-        forkSource: startedWithFork,
-        message: "Sending your first message…",
-        status: "sending",
-      };
-      if (!isCurrent()) {
-        if (heldImages && heldImages.length > 0) {
-          useCodeUiStore
-            .getState()
-            .offerComposerPrompt(workspaceId, draft, heldImages);
-        }
-        const message =
-          "The Code connection changed after the session was created. Send the message again.";
+      // A fork's transcript rides the first message. Keep its chip beside
+      // that message until a turn carries it, in case the send is refused.
+      if (startedWithFork) {
         writeFirstTurnRecovery(startedWithClient, {
-          ...recovery,
-          message,
-          status: "failed",
+          id: `${created.id}:${request}`,
+          sessionId: created.id,
+          forkSource: startedWithFork,
         });
-        throw new Error(message);
       }
-      writeFirstTurnRecovery(startedWithClient, recovery);
-
+      if (!isCurrent()) {
+        // The session exists, so the message moves to its composer rather
+        // than back to a start surface for an agent that is already there.
+        throw new SessionStartedUnsent(
+          created.id,
+          clientRef.current === startedWithClient
+            ? "The session started, but this message was not sent. Send it when you are ready."
+            : "The Code connection changed after the session was created. Send the message again.",
+        );
+      }
       if (conversations.length === 0) catalog.rememberSession(created);
       setSessions((current) =>
         current.some((entry) => entry.id === created.id)
@@ -379,43 +361,7 @@ export function useWorkspaceSessions({
         // reload comes back to the tab the reader was on.
         if (conversations.length > 0) openWorkspaceTask(created.id);
       }
-
-      try {
-        // Publish into this session only after create, then send once. Using
-        // blob ids reserved for another session (or never published) is what
-        // yields "attachment blob … was not published to session …".
-        // Open the event socket before the post. The post does not return
-        // until the engine finishes the reply.
-        await submitFirstCodeTurn({
-          client: startedWithClient,
-          sessionId: created.id,
-          message,
-          images: heldImages ?? [],
-          beforeTurn: () => waitForCodeSessionHydrated(created.id),
-        });
-        clearFirstTurnRecovery(startedWithClient, created.id, recovery.id);
-      } catch (err) {
-        if (codeSessionAcceptedTurn(created.id)) {
-          clearFirstTurnRecovery(startedWithClient, created.id, recovery.id);
-          return;
-        }
-        if (heldImages && heldImages.length > 0) {
-          useCodeUiStore
-            .getState()
-            .offerComposerPrompt(workspaceId, draft, heldImages);
-        }
-        const detail = friendlyErrorMessage(err, "Try sending it again.");
-        writeFirstTurnRecovery(startedWithClient, {
-          ...recovery,
-          message: `The first message was not sent. Review it, then choose Send to try again. ${detail}`,
-          status: "failed",
-        });
-        if (isCurrent()) {
-          toast.error(
-            `Session started, but the first message was not sent. ${detail}`,
-          );
-        }
-      }
+      return created.id;
     } finally {
       if (isCurrent()) setStarting(false);
     }

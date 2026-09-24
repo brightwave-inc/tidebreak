@@ -128,7 +128,9 @@ pub struct RepoRegistration {
 
 /// Result of `POST /sessions/{id}/turns`.
 pub enum SubmitTurnOutcome {
-    /// The session was idle; the turn ran to a terminal event.
+    /// The session was idle and the turn was accepted: its row exists, the
+    /// session reads running, and the start is journaled. The turn keeps
+    /// running; its progress and its end arrive on the event bus.
     Ran(Box<Turn>),
     /// The session or its workspace was busy; the message parked as a
     /// durable queue row (decision 69).

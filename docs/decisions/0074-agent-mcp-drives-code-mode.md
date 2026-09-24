@@ -1,6 +1,6 @@
 # 74. Agent MCP drives code mode over the attach contract
 
-- Status: Accepted
+- Status: Accepted (amended 2026-09-23, see [Amendment](#amendment-2026-09-23))
 - Date: 2026-08-26
 - Owners: cli
 - Related: [`0073-agent-mcp-drives-chat-over-attach.md`](0073-agent-mcp-drives-chat-over-attach.md),
@@ -103,3 +103,22 @@ The registry unit test compiles every advertised input schema, including the
 new code tools. A plausible wrong implementation — auto-approving the parked
 write, treating a queued submit as `failed`, or diffing before the edit lands
 — fails those tests.
+
+## Amendment (2026-09-23)
+
+`POST /sessions/{id}/turns` no longer waits for the worker to finish the turn.
+It answers `202` once the turn is accepted: with the turn snapshot, still
+`running`, when the session was idle, or with the queue row when the message
+parked. The turn's progress, its approvals, and its end arrive on the session
+event socket, as they already did for every client that subscribed first.
+
+The tool contract does not change. `code_run_turn` already subscribed before it
+submitted and followed the socket to the settle point, so it returns the same
+statuses as before. `running` still means the follow timeout elapsed while the
+turn continues.
+
+Why: a request held open for the length of a turn kept a desktop connection and
+its draft waiting on an answer nobody needed, and every client had grown a
+workaround for it.
+
+The rest of this record stands.

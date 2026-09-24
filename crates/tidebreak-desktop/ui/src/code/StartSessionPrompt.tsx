@@ -82,8 +82,9 @@ export function SetupFailedBanner({
  * The page-level handoff while a workspace gets its first agent.
  *
  * A plain create starts at "Workspace ready". Uneff me arrives with
- * preparation steps ahead of that and a heading of its own, and the same
- * surface carries both through to the first message.
+ * preparation steps ahead of that and a heading of its own. The handoff ends
+ * when the session exists: the conversation takes over, and the first
+ * message is sent from its composer.
  */
 export function WorkspaceSessionStartingState({
   startup,
@@ -93,7 +94,6 @@ export function WorkspaceSessionStartingState({
   const label = HARNESS_LABELS[startup.harness];
   const HarnessIcon = HARNESS_ICONS[startup.harness];
   const preparing = startup.phase === "preparing";
-  const sending = startup.phase === "sending_message";
   const preparation = startup.preparation ?? [];
   const here = startup.target === "this_workspace";
   const creating =
@@ -146,8 +146,8 @@ export function WorkspaceSessionStartingState({
               />
             )}
             <StartupStep
-              label={sending ? `${label} ready` : `Starting ${label}`}
-              state={sending ? "complete" : preparing ? "pending" : "active"}
+              label={`Starting ${label}`}
+              state={preparing ? "pending" : "active"}
             />
             <StartupStep
               label={
@@ -155,7 +155,7 @@ export function WorkspaceSessionStartingState({
                   ? "Sending your first message"
                   : "Opening the conversation"
               }
-              state={sending ? "active" : "pending"}
+              state="pending"
               last
             />
           </div>
@@ -249,6 +249,10 @@ function StartupStep({
  * Cmd+Enter starts from anywhere on this surface, matching the new-workspace
  * dialog. The draft lives in the composer, so the shortcut goes through the
  * composer's own send button: one submit path, one set of disabled rules.
+ *
+ * Sending creates the session first. The draft, its pasted text, and its
+ * images then move to the new session's composer, which publishes the images
+ * and posts the message exactly as it posts every later one.
  */
 export function StartSessionPrompt({
   workspaceId,
@@ -271,15 +275,18 @@ export function StartSessionPrompt({
   starting: boolean;
   selectedMode: PermissionMode | null;
   onSelectMode: (mode: PermissionMode) => void;
+  /**
+   * Create the session with the settings on screen and answer its id. The
+   * composer calls this when the first message is sent, then sends that
+   * message to the new session through the same path as every later one.
+   */
   onStart: (
     harness: HarnessKind,
     mode: PermissionMode,
-    message: string,
     model?: string,
-    draft?: string,
     reasoningEffort?: ReasoningEffort | null,
     fastMode?: boolean,
-  ) => Promise<void> | void;
+  ) => Promise<string>;
   client?: Pick<ApiClient, "listCodeHarnessModels"> &
     Partial<Pick<ApiClient, "startHarnessInstall" | "getHarnessDoctor">>;
   catalogModels?: ModelInfo[];
@@ -303,7 +310,6 @@ export function StartSessionPrompt({
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
   const root = useRef<HTMLDivElement>(null);
-  const submittedDraft = useRef<string | null>(null);
   const ensureHarnessModels = useCodeCatalogStore(
     (state) => state.ensureHarnessModels,
   );
@@ -512,38 +518,18 @@ export function StartSessionPrompt({
               }));
             }}
             onModeChange={onSelectMode}
-            onSubmitStart={(draft) => {
-              submittedDraft.current = draft;
-            }}
-            onSend={async (message) => {
-              if (!selected) return;
-              const draft = submittedDraft.current ?? message;
-              try {
-                if (draft === message) {
-                  await onStart(
-                    selected.kind,
-                    mode,
-                    message,
-                    model,
-                    undefined,
-                    postedEffort,
-                    postedFastMode,
-                  );
-                } else {
-                  await onStart(
-                    selected.kind,
-                    mode,
-                    message,
-                    model,
-                    draft,
-                    postedEffort,
-                    postedFastMode,
-                  );
-                }
-              } finally {
-                submittedDraft.current = null;
-              }
-            }}
+            startSession={
+              selected
+                ? () =>
+                    onStart(
+                      selected.kind,
+                      mode,
+                      model,
+                      postedEffort,
+                      postedFastMode,
+                    )
+                : undefined
+            }
             onInterrupt={() => undefined}
           />
         </div>

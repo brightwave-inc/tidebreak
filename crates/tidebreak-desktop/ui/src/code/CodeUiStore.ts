@@ -103,23 +103,15 @@ export type InspectorScope = {
   label: string;
 };
 
+/**
+ * Text offered to the code composer from outside it: a header action, a
+ * review comment, a fork's framing. Words and images typed or pasted for a
+ * specific composer go straight into that composer's draft instead.
+ */
 export type PendingComposerPrompt = {
   scope: string;
   text: string;
   submit: boolean;
-  /** Files to attach once a session exists to publish them. */
-  images?: readonly File[];
-  /**
-   * The one session whose composer may take this. Panes in a workspace share
-   * a scope, so a prompt meant for an agent that is still being selected
-   * waits for that agent's composer rather than landing in the one on screen.
-   */
-  sessionId?: string;
-};
-
-export type PendingComposerImages = {
-  scope: string;
-  files: readonly File[];
 };
 
 /** One line of the startup handoff's step list. */
@@ -139,7 +131,7 @@ export type WorkspaceStartupStep = {
 export type WorkspaceStartup = {
   harness: HarnessKind;
   hasFirstMessage: boolean;
-  phase: "preparing" | "starting_session" | "sending_message";
+  phase: "preparing" | "starting_session";
   /** Heading over the steps. Omitted, the handoff reads as a plain create. */
   heading?: string;
   /** Steps that ran before the session existed, in order. */
@@ -420,21 +412,10 @@ export type CodeUiStore = {
    * the action.
    */
   pendingComposerPrompt: PendingComposerPrompt | null;
-  pendingComposerImages: PendingComposerImages | null;
   composerActionScope: string | null;
-  offerComposerPrompt: (
-    scope: string,
-    prompt: string,
-    images?: readonly File[],
-    sessionId?: string,
-  ) => void;
+  offerComposerPrompt: (scope: string, prompt: string) => void;
   runComposerPrompt: (scope: string, prompt: string) => boolean;
-  /** `sessionId` is the taker's; a prompt addressed to another session stays. */
-  takeComposerPrompt: (
-    scope: string,
-    sessionId?: string,
-  ) => PendingComposerPrompt | null;
-  takeComposerImages: (scope: string) => readonly File[] | null;
+  takeComposerPrompt: (scope: string) => PendingComposerPrompt | null;
   finishComposerAction: (scope: string) => void;
   /**
    * Asks raised by the shell keymap that only a workspace surface can carry
@@ -578,7 +559,6 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     }),
   terminalPending: false,
   pendingComposerPrompt: null,
-  pendingComposerImages: null,
   composerActionScope: null,
   quickOpenPending: false,
   newTabMenuPending: false,
@@ -649,21 +629,9 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     set({ openFilePending: null });
     return pending;
   },
-  offerComposerPrompt: (scope, prompt, images, sessionId) =>
+  offerComposerPrompt: (scope, prompt) =>
     set({
-      pendingComposerPrompt: {
-        scope,
-        text: prompt,
-        submit: false,
-        ...(images && images.length > 0 ? { images } : {}),
-        ...(sessionId ? { sessionId } : {}),
-      },
-      pendingComposerImages:
-        images && images.length > 0
-          ? { scope, files: images }
-          : get().pendingComposerImages?.scope === scope
-            ? null
-            : get().pendingComposerImages,
+      pendingComposerPrompt: { scope, text: prompt, submit: false },
     }),
   runComposerPrompt: (scope, prompt) => {
     if (get().composerActionScope !== null) return false;
@@ -673,18 +641,11 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     });
     return true;
   },
-  takeComposerPrompt: (scope, sessionId): PendingComposerPrompt | null => {
+  takeComposerPrompt: (scope): PendingComposerPrompt | null => {
     const prompt = get().pendingComposerPrompt;
     if (!prompt || prompt.scope !== scope) return null;
-    if (prompt.sessionId && prompt.sessionId !== sessionId) return null;
     set({ pendingComposerPrompt: null });
     return prompt;
-  },
-  takeComposerImages: (scope): readonly File[] | null => {
-    const held = get().pendingComposerImages;
-    if (!held || held.scope !== scope) return null;
-    set({ pendingComposerImages: null });
-    return held.files;
   },
   finishComposerAction: (scope) =>
     set((state) => {
@@ -785,7 +746,6 @@ export function resetCodeUiHostState(): void {
     inspectorTab: null,
     terminalPending: false,
     pendingComposerPrompt: null,
-    pendingComposerImages: null,
     composerActionScope: null,
     quickOpenPending: false,
     newTabMenuPending: false,

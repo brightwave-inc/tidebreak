@@ -381,13 +381,28 @@ function turnIsOpen(status: CodeTurnStatus): boolean {
   return !turnIsTerminal(status);
 }
 
-/** Record a turn that a live submit received before its journal start. */
+/** Whether the journal has already ended `turnId` in this transcript. */
+function turnHasEnded(state: CodeSessionState, turnId: string): boolean {
+  return state.items.some(
+    (item) => item.kind === "turn_boundary" && item.turnId === turnId,
+  );
+}
+
+/**
+ * Record a turn that a live submit received before its journal start.
+ *
+ * The server answers a send once the turn is accepted, so the answer says
+ * `running`. It can still land after the socket has delivered the turn's
+ * end, such as an engine that fails as it spawns. That turn keeps its prompt
+ * and stays ended: reopening it would show a running turn with a stop button
+ * that nothing will ever finish.
+ */
 export function applyAcceptedTurn(
   state: CodeSessionState,
   turn: CodeTurnSnapshot,
 ): CodeSessionState {
   const next = upsertTurnPrompt(state, turn);
-  if (!turnIsOpen(turn.status)) return next;
+  if (!turnIsOpen(turn.status) || turnHasEnded(state, turn.id)) return next;
   const continuesObservedTurn =
     state.activeTurnId === turn.id && state.turnStartObservedLive;
   return {

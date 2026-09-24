@@ -15,49 +15,52 @@ impl CodeRuntime {
     /// own path. Best effort: a machine without `gh`, a repository with no
     /// origin, or a private root that refuses the write leaves the path
     /// alone and the child's `gh` behaves as it always did.
-    async fn gh_shim_path(
-        &self,
-        private_root: &crate::code::scratch::ScratchRoot,
-        workspace: Option<&tidebreak_core::CodeWorkspace>,
-        probe_env: &[(std::ffi::OsString, std::ffi::OsString)],
-        loopback_base: &str,
-        owner: &OwnerId,
-    ) -> Option<String> {
-        let workspace = workspace?;
-        let repo = self.get_repo(owner, workspace.repo_id).await.ok()?;
-        let origin_host = repo.origin_host?;
-        let real = crate::code::gh::observe_gh(self.gh_search_path_owned().as_deref())
-            .await
-            .binary?;
-        let script = crate::code::harness_llm::gh_shim_script(&real, loopback_base, &origin_host);
-        let shim = match private_root
-            .publish_executable(
-                std::ffi::OsStr::new("bin"),
-                std::ffi::OsStr::new("gh"),
-                script.as_bytes(),
+    fn gh_shim_path<'fut>(
+        &'fut self,
+        private_root: &'fut crate::code::scratch::ScratchRoot,
+        workspace: Option<&'fut tidebreak_core::CodeWorkspace>,
+        probe_env: &'fut [(std::ffi::OsString, std::ffi::OsString)],
+        loopback_base: &'fut str,
+        owner: &'fut OwnerId,
+    ) -> futures::future::BoxFuture<'fut, Option<String>> {
+        Box::pin(async move {
+            let workspace = workspace?;
+            let repo = self.get_repo(owner, workspace.repo_id).await.ok()?;
+            let origin_host = repo.origin_host?;
+            let real = crate::code::gh::observe_gh(self.gh_search_path_owned().as_deref())
+                .await
+                .binary?;
+            let script =
+                crate::code::harness_llm::gh_shim_script(&real, loopback_base, &origin_host);
+            let shim = match private_root
+                .publish_executable(
+                    std::ffi::OsStr::new("bin"),
+                    std::ffi::OsStr::new("gh"),
+                    script.as_bytes(),
+                )
+                .await
+            {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::warn!(%error, "the session's gh wrapper was not written");
+                    return None;
+                }
+            };
+            let bin = shim.parent()?.to_path_buf();
+            let prior = probe_env
+                .iter()
+                .find(|(key, _)| key == "PATH")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default();
+            let mut paths = vec![bin];
+            paths.extend(std::env::split_paths(&prior));
+            Some(
+                std::env::join_paths(paths)
+                    .ok()?
+                    .to_string_lossy()
+                    .into_owned(),
             )
-            .await
-        {
-            Ok(path) => path,
-            Err(error) => {
-                tracing::warn!(%error, "the session's gh wrapper was not written");
-                return None;
-            }
-        };
-        let bin = shim.parent()?.to_path_buf();
-        let prior = probe_env
-            .iter()
-            .find(|(key, _)| key == "PATH")
-            .map(|(_, value)| value.clone())
-            .unwrap_or_default();
-        let mut paths = vec![bin];
-        paths.extend(std::env::split_paths(&prior));
-        Some(
-            std::env::join_paths(paths)
-                .ok()?
-                .to_string_lossy()
-                .into_owned(),
-        )
+        })
     }
 
     /// Journal that the session's own git or `gh` asked this machine for a
@@ -146,368 +149,382 @@ impl CodeRuntime {
         stopped
     }
 
-    pub async fn attach_and_spawn_worker(&self, session: Session) -> Result<Session, ServerError> {
-        if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
-            return Err(ServerError::conflict_kind(
-                "session_remote",
-                "this session runs in a sandbox and cannot attach a local worker",
-            ));
-        }
-        let mut session = session;
-        let workspace = self.session_workspace(&session).await?;
-        if workspace
-            .as_ref()
-            .is_some_and(|workspace| workspace.is_remote())
-        {
-            return Err(ServerError::conflict_kind(
-                "session_location_mismatch",
-                "the machine session has a sandbox workspace and cannot attach a local worker",
-            ));
-        }
-        let adapter = self.adapter(session.harness_kind)?;
-        // Cached, so the probe `create_session` already paid for is not paid
-        // again on the way into the worker.
-        let probe = self.probe(adapter.as_ref()).await;
-        if !probe.found {
-            return Err(ServerError::unprocessable_kind(
-                "harness_not_found",
-                format!("{} is not installed", session.harness_kind),
-            ));
-        }
-        if session.reasoning_effort.is_some() || session.fast_mode {
-            let selected = self
-                .selected_model_capabilities_for_scope(
-                    &session.owner,
-                    Some(super::settings::ModelCredentialScope::Session(session.id)),
-                    adapter.as_ref(),
-                    &probe,
-                    session.model.as_deref(),
-                )
-                .await;
-            let mut next = SessionExecutionSettings::from(&session);
-            selected.deactivate_unsupported(&mut next);
-            if next != SessionExecutionSettings::from(&session) {
-                session =
-                    replace_session_execution_settings(&self.db, &session.owner, &session, &next)
-                        .await?
-                        .ok_or_else(|| {
-                            ServerError::conflict_kind(
-                                "session_settings_changed",
-                                "the session settings changed before its worker could attach",
-                            )
-                        })?;
+    pub fn attach_and_spawn_worker<'fut>(
+        &'fut self,
+        session: Session,
+    ) -> futures::future::BoxFuture<'fut, Result<Session, ServerError>> {
+        Box::pin(async move {
+            if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
+                return Err(ServerError::conflict_kind(
+                    "session_remote",
+                    "this session runs in a sandbox and cannot attach a local worker",
+                ));
             }
-        }
-        let binary = match probe.binary_path.clone() {
-            Some(binary) => Some(binary),
-            // An in-process engine has no binary to resolve.
-            None if session.harness_kind.is_in_process() => None,
-            None => {
+            let mut session = session;
+            let workspace = self.session_workspace(&session).await?;
+            if workspace
+                .as_ref()
+                .is_some_and(|workspace| workspace.is_remote())
+            {
+                return Err(ServerError::conflict_kind(
+                    "session_location_mismatch",
+                    "the machine session has a sandbox workspace and cannot attach a local worker",
+                ));
+            }
+            let adapter = self.adapter(session.harness_kind)?;
+            // Cached, so the probe `create_session` already paid for is not paid
+            // again on the way into the worker.
+            let probe = self.probe(adapter.as_ref()).await;
+            if !probe.found {
                 return Err(ServerError::unprocessable_kind(
                     "harness_not_found",
-                    format!("{} has no path", session.harness_kind),
-                ))
+                    format!("{} is not installed", session.harness_kind),
+                ));
             }
-        };
-        let attached = attach_engine(
-            &self.db,
-            &self.bus,
-            session.id,
-            session.harness_kind,
-            probe.version.clone().or(session.harness_version.clone()),
-            None,
-        )
-        .await
-        .map_err(map_worker)?;
-        let sink = crate::code::session_worker::sink_for(
-            self.db.clone(),
-            self.bus.clone(),
-            session.owner.clone(),
-            session.id,
-            attached.spawn_epoch,
-            session.harness_kind,
-            self.harness_llm.is_some(),
-            None,
-            attached.subagents.clone(),
-            self.gh_search_path_owned(),
-            self.recap_hook(),
-            self.rewrite_hook(),
-            self.memory_capture_hook(),
-            self.hot_pull_requests(),
-        );
-        // An in-process engine parks its approvals on the adapter's own
-        // channel; the loopback MCP prompt is for engines that speak MCP.
-        let approval = if session.harness_kind.is_in_process() {
-            None
-        } else {
-            self.approval_channel(
-                &attached.owner,
-                attached.id,
-                attached.spawn_epoch,
-                session.permission_mode,
-            )
-        };
-
-        // Every external engine inherits the connected apps the in-process
-        // engine already sees, through the loopback bridge. The in-process
-        // engine reads the MCP runtime directly and needs no channel.
-        let apps = if session.harness_kind.is_in_process() {
-            None
-        } else {
-            self.apps_channel(&attached.owner, attached.id, attached.spawn_epoch)
-        };
-
-        // Mint a browser channel only when both halves are present: the
-        // native BrowserRuntime (the desktop adapter) and the trusted
-        // bridge executable (the CLI sidecar). If either is absent, browser
-        // stays None — no browser tools are advertised or injected, and the
-        // session works exactly as before the browser channel existed.
-        let browser = match (
-            self.browser_runtime.as_ref(),
-            self.browser_bridge_command.as_ref(),
-            session.workspace_id,
-        ) {
-            (Some(runtime), Some(bridge), Some(workspace)) => {
-                let browser_subject = BrowserSubject {
-                    owner: session.owner.clone(),
-                    workspace,
-                    session: session.id,
-                };
-                Some(
-                    self.browser_tokens
-                        .issue_with_capabilities(
-                            browser_subject,
-                            bridge,
-                            crate::code::browser_channel::BrowserChannelCapabilities {
-                                semantic_actions: runtime.supports_semantic_actions(),
-                                lifecycle: runtime.supports_lifecycle(),
-                                developer_diagnostics: runtime.supports_developer_diagnostics(),
-                            },
+            if session.reasoning_effort.is_some() || session.fast_mode {
+                let selected = self
+                    .selected_model_capabilities_for_scope(
+                        &session.owner,
+                        Some(super::settings::ModelCredentialScope::Session(session.id)),
+                        adapter.as_ref(),
+                        &probe,
+                        session.model.as_deref(),
+                    )
+                    .await;
+                let mut next = SessionExecutionSettings::from(&session);
+                selected.deactivate_unsupported(&mut next);
+                if next != SessionExecutionSettings::from(&session) {
+                    session = replace_session_execution_settings(
+                        &self.db,
+                        &session.owner,
+                        &session,
+                        &next,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        ServerError::conflict_kind(
+                            "session_settings_changed",
+                            "the session settings changed before its worker could attach",
                         )
-                        .map_err(ServerError::internal)?,
-                )
+                    })?;
+                }
             }
-            _ => None,
-        };
+            let binary = match probe.binary_path.clone() {
+                Some(binary) => Some(binary),
+                // An in-process engine has no binary to resolve.
+                None if session.harness_kind.is_in_process() => None,
+                None => {
+                    return Err(ServerError::unprocessable_kind(
+                        "harness_not_found",
+                        format!("{} has no path", session.harness_kind),
+                    ))
+                }
+            };
+            let attached = attach_engine(
+                &self.db,
+                &self.bus,
+                session.id,
+                session.harness_kind,
+                probe.version.clone().or(session.harness_version.clone()),
+                None,
+            )
+            .await
+            .map_err(map_worker)?;
+            let sink = crate::code::session_worker::sink_for(
+                self.db.clone(),
+                self.bus.clone(),
+                session.owner.clone(),
+                session.id,
+                attached.spawn_epoch,
+                session.harness_kind,
+                self.harness_llm.is_some(),
+                None,
+                attached.subagents.clone(),
+                self.gh_search_path_owned(),
+                self.recap_hook(),
+                self.rewrite_hook(),
+                self.memory_capture_hook(),
+                self.hot_pull_requests(),
+            );
+            // An in-process engine parks its approvals on the adapter's own
+            // channel; the loopback MCP prompt is for engines that speak MCP.
+            let approval = if session.harness_kind.is_in_process() {
+                None
+            } else {
+                self.approval_channel(
+                    &attached.owner,
+                    attached.id,
+                    attached.spawn_epoch,
+                    session.permission_mode,
+                )
+            };
 
-        // Mint a native computer-use channel only when the desktop native
-        // runtime, its bridge executable, and a workspace are all present.
-        // The session-private capfile path is injected through
-        // TIDEBREAK_NATIVE_CAPFILE; no token, URL, or ambient app token
-        // enters argv or the model. Absent runtime or bridge = no capfile,
-        // no channel, and no native tools on any harness.
-        let native = match (
-            self.native_runtime.as_ref(),
-            self.native_bridge_command.as_ref(),
-            session.workspace_id,
-        ) {
-            (Some(runtime), Some(bridge), Some(workspace)) if runtime.is_available() => {
-                let capfile = self
-                    .native_tokens
-                    .issue(NativeSubject {
+            // Every external engine inherits the connected apps the in-process
+            // engine already sees, through the loopback bridge. The in-process
+            // engine reads the MCP runtime directly and needs no channel.
+            let apps = if session.harness_kind.is_in_process() {
+                None
+            } else {
+                self.apps_channel(&attached.owner, attached.id, attached.spawn_epoch)
+            };
+
+            // Mint a browser channel only when both halves are present: the
+            // native BrowserRuntime (the desktop adapter) and the trusted
+            // bridge executable (the CLI sidecar). If either is absent, browser
+            // stays None — no browser tools are advertised or injected, and the
+            // session works exactly as before the browser channel existed.
+            let browser = match (
+                self.browser_runtime.as_ref(),
+                self.browser_bridge_command.as_ref(),
+                session.workspace_id,
+            ) {
+                (Some(runtime), Some(bridge), Some(workspace)) => {
+                    let browser_subject = BrowserSubject {
                         owner: session.owner.clone(),
                         workspace,
                         session: session.id,
-                    })
-                    .map_err(ServerError::internal)?;
-                Some(tidebreak_harness::NativeChannelSpec::new(
-                    capfile,
-                    bridge.clone(),
-                ))
+                    };
+                    Some(
+                        self.browser_tokens
+                            .issue_with_capabilities(
+                                browser_subject,
+                                bridge,
+                                crate::code::browser_channel::BrowserChannelCapabilities {
+                                    semantic_actions: runtime.supports_semantic_actions(),
+                                    lifecycle: runtime.supports_lifecycle(),
+                                    developer_diagnostics: runtime.supports_developer_diagnostics(),
+                                },
+                            )
+                            .map_err(ServerError::internal)?,
+                    )
+                }
+                _ => None,
+            };
+
+            // Mint a native computer-use channel only when the desktop native
+            // runtime, its bridge executable, and a workspace are all present.
+            // The session-private capfile path is injected through
+            // TIDEBREAK_NATIVE_CAPFILE; no token, URL, or ambient app token
+            // enters argv or the model. Absent runtime or bridge = no capfile,
+            // no channel, and no native tools on any harness.
+            let native = match (
+                self.native_runtime.as_ref(),
+                self.native_bridge_command.as_ref(),
+                session.workspace_id,
+            ) {
+                (Some(runtime), Some(bridge), Some(workspace)) if runtime.is_available() => {
+                    let capfile = self
+                        .native_tokens
+                        .issue(NativeSubject {
+                            owner: session.owner.clone(),
+                            workspace,
+                            session: session.id,
+                        })
+                        .map_err(ServerError::internal)?;
+                    Some(tidebreak_harness::NativeChannelSpec::new(
+                        capfile,
+                        bridge.clone(),
+                    ))
+                }
+                _ => None,
+            };
+
+            let private_root = match &workspace {
+                Some(workspace) => {
+                    crate::code::scratch::workspace_root(&self.data_dir, workspace.id)
+                }
+                None => crate::code::scratch::session_root(&self.data_dir, session.id),
             }
-            _ => None,
-        };
+            .map_err(|err| {
+                ServerError::internal(format!("could not open private storage: {err}"))
+            })?;
 
-        let private_root = match &workspace {
-            Some(workspace) => crate::code::scratch::workspace_root(&self.data_dir, workspace.id),
-            None => crate::code::scratch::session_root(&self.data_dir, session.id),
-        }
-        .map_err(|err| ServerError::internal(format!("could not open private storage: {err}")))?;
+            // On a gateway-authenticated machine, point the engine's own
+            // inference at this server's relay (decision 71): a per-session key
+            // stands in for provider credentials the hosted image does not have.
+            // A standalone machine that lends a forge token still mints the key
+            // so git can borrow through the loopback route, without redirecting
+            // inference.
+            let (extra_argv, extra_env, relay_key_env, child_env) = match self.harness_llm.as_ref()
+            {
+                // An in-process engine resolves inference through the server
+                // itself; there is no child to point at the relay.
+                Some(relay) if !session.harness_kind.is_in_process() => {
+                    let base = self
+                        .loopback_base
+                        .lock()
+                        .expect("loopback base")
+                        .clone()
+                        .ok_or_else(|| {
+                            ServerError::internal("harness LLM relay: loopback base not set")
+                        })?;
+                    let key = relay.issue_for_session(&session, &probe);
+                    let (argv, mut env) = if relay.forwards_inference() {
+                        crate::code::harness_llm::spawn_wiring(session.harness_kind, &base, &key)
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    if !env
+                        .iter()
+                        .any(|(name, _)| name == crate::code::harness_llm::RELAY_KEY_ENV)
+                    {
+                        env.push((
+                            crate::code::harness_llm::RELAY_KEY_ENV.to_owned(),
+                            key.clone(),
+                        ));
+                    }
+                    let mut child_env = probe.env.clone();
+                    // A repository session's own git borrows through the loopback
+                    // route under the same key. Claude Code, Codex, Opencode, and
+                    // Grok all take this overlay; the wrapper's directory is
+                    // prepended to PATH so it precedes the real `gh`.
+                    if workspace.is_some() && self.git_credentials.is_some() {
+                        env.extend(crate::code::harness_llm::git_credential_wiring(&base));
+                        if let Some(path) = self
+                            .gh_shim_path(
+                                &private_root,
+                                workspace.as_ref(),
+                                &child_env,
+                                &base,
+                                &session.owner,
+                            )
+                            .await
+                        {
+                            env.push(("PATH".to_owned(), path));
+                        }
+                        crate::code::harness_llm::scrub_forge_token_env(&mut env);
+                        crate::code::harness_llm::scrub_forge_token_os_env(&mut child_env);
+                    }
+                    (
+                        argv,
+                        env,
+                        Some(crate::code::harness_llm::RELAY_KEY_ENV.to_owned()),
+                        child_env,
+                    )
+                }
+                _ => (Vec::new(), Vec::new(), None, probe.env.clone()),
+            };
 
-        // On a gateway-authenticated machine, point the engine's own
-        // inference at this server's relay (decision 71): a per-session key
-        // stands in for provider credentials the hosted image does not have.
-        // A standalone machine that lends a forge token still mints the key
-        // so git can borrow through the loopback route, without redirecting
-        // inference.
-        let (extra_argv, extra_env, relay_key_env, child_env) = match self.harness_llm.as_ref() {
-            // An in-process engine resolves inference through the server
-            // itself; there is no child to point at the relay.
-            Some(relay) if !session.harness_kind.is_in_process() => {
-                let base = self
-                    .loopback_base
-                    .lock()
-                    .expect("loopback base")
-                    .clone()
-                    .ok_or_else(|| {
-                        ServerError::internal("harness LLM relay: loopback base not set")
-                    })?;
-                let key = relay.issue_for_session(&session, &probe);
-                let (argv, mut env) = if relay.forwards_inference() {
-                    crate::code::harness_llm::spawn_wiring(session.harness_kind, &base, &key)
-                } else {
-                    (Vec::new(), Vec::new())
-                };
-                if !env
-                    .iter()
-                    .any(|(name, _)| name == crate::code::harness_llm::RELAY_KEY_ENV)
-                {
-                    env.push((
-                        crate::code::harness_llm::RELAY_KEY_ENV.to_owned(),
-                        key.clone(),
+            // A repository's own engine config runs as the user when the engine
+            // starts, so it loads only in a repository the user trusts. A session
+            // with no workspace runs in Tidebreak's own directory: no repository
+            // is involved, so it launches as the engine would on its own.
+            let project_config = match &workspace {
+                Some(workspace) => self.workspace_project_config(workspace).await,
+                None => tidebreak_harness::ProjectConfig::Load,
+            };
+
+            let spec = SessionSpec {
+                owner: session.owner.clone(),
+                session_id: session.id,
+                // With no workspace the private root is the engine's working directory.
+                worktree: match &workspace {
+                    Some(workspace) => PathBuf::from(&workspace.worktree_path),
+                    None => private_root.path().to_path_buf(),
+                },
+                allowed_read_roots: vec![private_root.path().to_path_buf()],
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: session.harness_resume_ref.clone(),
+                extra_argv,
+                extra_env,
+                relay_key_env,
+                env: child_env,
+                approval,
+                binary: binary.clone(),
+                sink: sink.clone() as Arc<dyn HarnessEventSink>,
+                browser,
+                native,
+                tool_bridge: None,
+                apps,
+                project_config,
+            };
+            let mut attached = attached;
+            let engine = match adapter.launch(spec).await {
+                Ok(engine) => engine,
+                Err(HarnessError::ResumeLost(detail)) => {
+                    self.revoke_worker_channels(session.id);
+                    // The engine refused the stored resume ref. Fence with a
+                    // reason the UI can explain — the fence drops the dead ref, so
+                    // a reap re-attaches with a fresh engine session.
+                    recovery::fence_session(
+                        &self.db,
+                        &self.bus,
+                        &mut attached,
+                        FenceReason::ResumeLost {
+                            detail: detail.clone(),
+                        },
+                    )
+                    .await?;
+                    return Err(ServerError::conflict_kind(
+                        "session_resume_lost",
+                        format!("the engine no longer has this session: {detail}"),
                     ));
                 }
-                let mut child_env = probe.env.clone();
-                // A repository session's own git borrows through the loopback
-                // route under the same key. Claude Code, Codex, Opencode, and
-                // Grok all take this overlay; the wrapper's directory is
-                // prepended to PATH so it precedes the real `gh`.
-                if workspace.is_some() && self.git_credentials.is_some() {
-                    env.extend(crate::code::harness_llm::git_credential_wiring(&base));
-                    if let Some(path) = self
-                        .gh_shim_path(
-                            &private_root,
-                            workspace.as_ref(),
-                            &child_env,
-                            &base,
-                            &session.owner,
-                        )
-                        .await
-                    {
-                        env.push(("PATH".to_owned(), path));
-                    }
-                    crate::code::harness_llm::scrub_forge_token_env(&mut env);
-                    crate::code::harness_llm::scrub_forge_token_os_env(&mut child_env);
+                Err(err) => {
+                    self.revoke_worker_channels(session.id);
+                    return Err(ServerError::internal(format!(
+                        "failed to launch engine session: {err}"
+                    )));
                 }
-                (
-                    argv,
-                    env,
-                    Some(crate::code::harness_llm::RELAY_KEY_ENV.to_owned()),
-                    child_env,
-                )
+            };
+            attached.child_pid = engine.child_pid();
+            attached.child_process_identity = attached.child_pid.and_then(|pid| {
+                tidebreak_harness::spawned_process_identity(pid).or_else(|| {
+                    tidebreak_harness::current_process_identity(pid)
+                        .ok()
+                        .flatten()
+                })
+            });
+            if let Some(resume) = engine.resume_ref().or(session.harness_resume_ref.clone()) {
+                attached.harness_resume_ref = Some(resume);
             }
-            _ => (Vec::new(), Vec::new(), None, probe.env.clone()),
-        };
-
-        // A repository's own engine config runs as the user when the engine
-        // starts, so it loads only in a repository the user trusts. A session
-        // with no workspace runs in Tidebreak's own directory: no repository
-        // is involved, so it launches as the engine would on its own.
-        let project_config = match &workspace {
-            Some(workspace) => self.workspace_project_config(workspace).await,
-            None => tidebreak_harness::ProjectConfig::Load,
-        };
-
-        let spec = SessionSpec {
-            owner: session.owner.clone(),
-            session_id: session.id,
-            // With no workspace the private root is the engine's working directory.
-            worktree: match &workspace {
-                Some(workspace) => PathBuf::from(&workspace.worktree_path),
-                None => private_root.path().to_path_buf(),
-            },
-            allowed_read_roots: vec![private_root.path().to_path_buf()],
-            permission_mode: session.permission_mode,
-            model: session.model.clone(),
-            reasoning_effort: session.reasoning_effort,
-            fast_mode: session.fast_mode,
-            resume_ref: session.harness_resume_ref.clone(),
-            extra_argv,
-            extra_env,
-            relay_key_env,
-            env: child_env,
-            approval,
-            binary: binary.clone(),
-            sink: sink.clone() as Arc<dyn HarnessEventSink>,
-            browser,
-            native,
-            tool_bridge: None,
-            apps,
-            project_config,
-        };
-        let mut attached = attached;
-        let engine = match adapter.launch(spec).await {
-            Ok(engine) => engine,
-            Err(HarnessError::ResumeLost(detail)) => {
-                self.revoke_worker_channels(session.id);
-                // The engine refused the stored resume ref. Fence with a
-                // reason the UI can explain — the fence drops the dead ref, so
-                // a reap re-attaches with a fresh engine session.
-                recovery::fence_session(
-                    &self.db,
-                    &self.bus,
-                    &mut attached,
-                    FenceReason::ResumeLost {
-                        detail: detail.clone(),
-                    },
-                )
-                .await?;
-                return Err(ServerError::conflict_kind(
-                    "session_resume_lost",
-                    format!("the engine no longer has this session: {detail}"),
-                ));
-            }
-            Err(err) => {
-                self.revoke_worker_channels(session.id);
-                return Err(ServerError::internal(format!(
-                    "failed to launch engine session: {err}"
-                )));
-            }
-        };
-        attached.child_pid = engine.child_pid();
-        attached.child_process_identity = attached.child_pid.and_then(|pid| {
-            tidebreak_harness::spawned_process_identity(pid).or_else(|| {
-                tidebreak_harness::current_process_identity(pid)
-                    .ok()
-                    .flatten()
-            })
-        });
-        if let Some(resume) = engine.resume_ref().or(session.harness_resume_ref.clone()) {
-            attached.harness_resume_ref = Some(resume);
-        }
-        crate::code::attention::persist_session(&self.db, &self.bus, &attached).await?;
-        let mut handle = spawn_session_worker(
-            attached.clone(),
-            engine,
-            sink,
-            AttachmentStore {
-                blobs: Some(self.blobs.clone()),
-                private_root,
-                // Only an engine that states image input takes the bytes on
-                // its own protocol. The rest receive absolute private paths.
-                engine_reads_images: adapter.capabilities(&probe).image_input
-                    == CapLevel::Supported,
-            },
-            // A session with no workspace shares its working directory with
-            // nothing, so it takes a lock of its own.
-            match attached.workspace_id {
-                Some(workspace_id) => self.worktree_turn_lock(workspace_id),
-                None => Arc::new(tokio::sync::Mutex::new(())),
-            },
-            self.update_quiesce.subscribe(),
-        );
-        handle.binary = binary;
-        handle.project_config = project_config;
-        self.workers
-            .lock()
-            .expect("code workers")
-            .insert(session.id, handle);
-        let pending = list_approvals(
-            &self.db,
-            &attached.owner,
-            Some(ApprovalState::Pending),
-            Some(attached.id),
-        )
-        .await?;
-        if !pending.is_empty() {
-            crate::code::attention::replace_attention(
-                &mut attached,
-                Attention::needs_you("an approval is waiting", AttentionSource::Structured),
-                false,
-            );
             crate::code::attention::persist_session(&self.db, &self.bus, &attached).await?;
-        }
-        Ok(attached)
+            let mut handle = spawn_session_worker(
+                attached.clone(),
+                engine,
+                sink,
+                AttachmentStore {
+                    blobs: Some(self.blobs.clone()),
+                    private_root,
+                    // Only an engine that states image input takes the bytes on
+                    // its own protocol. The rest receive absolute private paths.
+                    engine_reads_images: adapter.capabilities(&probe).image_input
+                        == CapLevel::Supported,
+                },
+                // A session with no workspace shares its working directory with
+                // nothing, so it takes a lock of its own.
+                match attached.workspace_id {
+                    Some(workspace_id) => self.worktree_turn_lock(workspace_id),
+                    None => Arc::new(tokio::sync::Mutex::new(())),
+                },
+                self.update_quiesce.subscribe(),
+            );
+            handle.binary = binary;
+            handle.project_config = project_config;
+            self.workers
+                .lock()
+                .expect("code workers")
+                .insert(session.id, handle);
+            let pending = list_approvals(
+                &self.db,
+                &attached.owner,
+                Some(ApprovalState::Pending),
+                Some(attached.id),
+            )
+            .await?;
+            if !pending.is_empty() {
+                crate::code::attention::replace_attention(
+                    &mut attached,
+                    Attention::needs_you("an approval is waiting", AttentionSource::Structured),
+                    false,
+                );
+                crate::code::attention::persist_session(&self.db, &self.bus, &attached).await?;
+            }
+            Ok(attached)
+        })
     }
 
     /// Whether a worker is attached to the session right now.
