@@ -12,24 +12,69 @@ export { expect };
 
 /** Anything the page asks for that is not on this computer's loopback. */
 const OFF_HOST = /^(?!http:\/\/127\.0\.0\.1[:/])[a-z][a-z0-9+.-]*:\/\//i;
+/** A WebSocket to anywhere but this computer's loopback. */
+const OFF_HOST_SOCKET = /^(?!wss?:\/\/127\.0\.0\.1[:/])wss?:\/\//i;
 
-export const test = base.extend<{ scripts: MachineScripts; machine: Machine }>({
+/**
+ * Server errors a flow may see while an open issue tracks them, keyed by
+ * that issue. Delete an issue's entry when it is fixed.
+ */
+export type KnownServerErrors = {
+  [issue: `#${number}`]: {
+    method: string;
+    /** Matched against the request path, without the query. */
+    path: RegExp;
+  }[];
+};
+
+export const test = base.extend<{
+  scripts: MachineScripts;
+  knownServerErrors: KnownServerErrors;
+  machine: Machine;
+}>({
   /** What the machine plays for this flow. Set per file with `test.use`. */
   scripts: [{}, { option: true }],
 
+  /** Server errors this flow tolerates. Set per file with `test.use`. */
+  knownServerErrors: [{}, { option: true }],
+
   /**
-   * The browser context, held to the host: a request that would leave this
-   * computer is refused and fails the flow, so a flow can never pass on
-   * something the network happened to answer.
+   * The browser context, held to the host and to a healthy server. A request
+   * or WebSocket that would leave this computer is refused, and so is any
+   * 5xx the machine answers the page with: either fails the flow, so a flow
+   * can never pass on something the network answered or on an error the
+   * page swallowed. The context depends on the machine so that it closes
+   * first: the page never watches its server shut down.
    */
-  context: async ({ context }, use) => {
-    const refused: string[] = [];
+  context: async ({ context, knownServerErrors, machine }, use) => {
+    const offHost: string[] = [];
     await context.route(OFF_HOST, (route) => {
-      refused.push(route.request().url());
+      offHost.push(route.request().url());
       return route.abort("blockedbyclient");
     });
+    await context.routeWebSocket(OFF_HOST_SOCKET, (socket) => {
+      offHost.push(socket.url());
+      socket.close({
+        code: 1008,
+        reason: "The end-to-end lane stays on this host.",
+      });
+    });
+    const serverErrors: string[] = [];
+    context.on("response", (response) => {
+      if (response.status() < 500 || !response.url().startsWith(machine.url))
+        return;
+      const method = response.request().method();
+      const path = new URL(response.url()).pathname;
+      const known = Object.values(knownServerErrors)
+        .flat()
+        .some((entry) => entry.method === method && entry.path.test(path));
+      if (!known) serverErrors.push(`${response.status()} ${method} ${path}`);
+    });
     await use(context);
-    expect(refused, "requests that tried to leave the host").toEqual([]);
+    expect(
+      { offHost, serverErrors },
+      "requests that left the host, and server errors the page got",
+    ).toEqual({ offHost: [], serverErrors: [] });
   },
 
   /** A fresh machine for every flow: its own data directory, database, and bucket prefix. */
