@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { CodeTranscript } from "@/code/CodeTranscript";
 import type { CodeTranscriptItem } from "@/code/CodeSessionReducer";
+import { messageWithReviewComments } from "@/code/diff/reviewComments";
 
 const items: CodeTranscriptItem[] = [
   {
@@ -379,6 +380,97 @@ const pastedTurn: CodeTranscriptItem[] = [
  */
 export const PastedTextFolded: Story = {
   args: { items: pastedTurn },
+};
+
+const reviewTurn: CodeTranscriptItem[] = [
+  {
+    kind: "user",
+    id: "user-review",
+    turnId: "turn-review",
+    text: messageWithReviewComments("Fix these, then run the queue tests.", [
+      {
+        id: "r1",
+        author: { kind: "person" },
+        path: "crates/tidebreak-desktop/ui/src/code/sessionQueue.ts",
+        lines: [
+          { kind: "del", oldNo: 18, newNo: null, text: "  text: string;" },
+          { kind: "add", oldNo: null, newNo: 18, text: "  message: string;" },
+        ],
+        body: "Keep the old field name. The server journals it as `text`.",
+        createdAt: "2026-09-24T10:00:00.000Z",
+      },
+      {
+        id: "r2",
+        author: { kind: "person" },
+        path: "crates/tidebreak-desktop/ui/src/code/sessionQueue.ts",
+        lines: [
+          {
+            kind: "del",
+            oldNo: 22,
+            newNo: null,
+            text: "const MAX_QUEUED = 10;",
+          },
+        ],
+        body: "Why double the limit? The tray was designed around ten rows.",
+        createdAt: "2026-09-24T10:01:00.000Z",
+      },
+      {
+        id: "r3",
+        author: { kind: "person" },
+        path: "crates/tidebreak-server/src/code/queue.rs",
+        lines: [
+          { kind: "add", oldNo: null, newNo: 88, text: "    MAX_QUEUED_TURNS" },
+        ],
+        body: "Match the UI's limit here.",
+        createdAt: "2026-09-24T10:02:00.000Z",
+      },
+      {
+        id: "r4",
+        author: { kind: "person" },
+        path: "crates/tidebreak-server/src/code/queue.rs",
+        lines: [{ kind: "context", oldNo: 90, newNo: 91, text: "    }" }],
+        body: "And add a test for the refusal.",
+        createdAt: "2026-09-24T10:03:00.000Z",
+      },
+    ]),
+    createdAt: "2026-09-24T10:05:00.000Z",
+  },
+  {
+    kind: "assistant",
+    id: "assistant-review",
+    turnId: "turn-review",
+    parentCallId: null,
+    text: "I'll keep `text`, put the limit back to ten on both sides, and add the refusal test.",
+    streaming: false,
+  },
+];
+
+/**
+ * Diff comments went out with the message. The transcript lists them one
+ * line each and keeps the quoted lines behind the disclosure.
+ */
+export const ReviewCommentsFolded: Story = {
+  args: { items: reviewTurn },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.findByText("4 comments on 2 files"),
+    ).resolves.toBeVisible();
+  },
+};
+
+/** Opened, each comment shows the lines it quoted. */
+export const ReviewCommentsOpen: Story = {
+  args: { items: reviewTurn },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Review comments/ }),
+    );
+    await expect(
+      canvas.findByText("-const MAX_QUEUED = 10;"),
+    ).resolves.toBeVisible();
+  },
 };
 
 export const Notices: Story = {
