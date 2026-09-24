@@ -28,6 +28,11 @@ use super::validation::{
     failure_diagnostic, failure_park, validate_server, validate_servers, validation_reason,
 };
 
+/// What a failed MCP replacement's error ends with when a stored credential it
+/// changed could not be put back, so the caller does not say nothing changed.
+pub const CREDENTIALS_NOT_RESTORED: &str =
+    "Some saved environment values or sign-ins could not be put back.";
+
 /// One connection attempt's outcome, with what it taught the runtime about
 /// OAuth.
 type ConnectAttempt = (
@@ -1682,7 +1687,7 @@ impl McpRuntime {
 
     async fn replace_strict(
         &self,
-        mut definitions: Vec<McpServerDefinition>,
+        definitions: Vec<McpServerDefinition>,
         persist: bool,
     ) -> Result<()> {
         validate_servers(&definitions)?;
@@ -1719,6 +1724,74 @@ impl McpRuntime {
                 })
                 .collect()
         };
+        // Read before anything below writes: a replacement that fails puts
+        // every stored credential it touched back the way it was.
+        let snapshot = self.credential_snapshot(&ids).await?;
+        match self.apply_strict(definitions, ids, persist).await {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.restore_credentials(snapshot, error).await),
+        }
+    }
+
+    /// The stored credentials a replacement over `ids` may rewrite or clear:
+    /// each server's environment values and OAuth sign-in, for the servers
+    /// it names and for the ones it drops.
+    async fn credential_snapshot(
+        &self,
+        ids: &BTreeMap<String, ConnectedAppId>,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let mut apps: BTreeSet<ConnectedAppId> = ids.values().copied().collect();
+        apps.extend(self.state.lock().await.ids.values().copied());
+        let mut snapshot = Vec::with_capacity(apps.len() * 3);
+        for id in apps {
+            for key in [
+                env_secret_key(id),
+                crate::connectors::oauth_client_secret_key(id),
+                crate::connectors::oauth_token_secret_key(id),
+            ] {
+                let value = self.secrets.get_secret(&key).await?;
+                snapshot.push((key, value));
+            }
+        }
+        Ok(snapshot)
+    }
+
+    /// Put back what [`Self::credential_snapshot`] read, and return the
+    /// replacement's error. When a credential cannot be put back, the error
+    /// says so with [`CREDENTIALS_NOT_RESTORED`], so no caller reports that
+    /// nothing changed.
+    async fn restore_credentials(
+        &self,
+        snapshot: Vec<(String, Option<String>)>,
+        error: AgentError,
+    ) -> AgentError {
+        let mut failed = false;
+        for (key, value) in snapshot {
+            let restored = match value {
+                Some(value) => self.secrets.set_secret(&key, &value).await,
+                None => self.secrets.delete_secret(&key).await,
+            };
+            if let Err(restore_error) = restored {
+                tracing::warn!(
+                    %restore_error,
+                    "could not put back an MCP credential after a failed replacement"
+                );
+                failed = true;
+            }
+        }
+        if failed {
+            AgentError::config(format!("{error} {CREDENTIALS_NOT_RESTORED}"))
+        } else {
+            error
+        }
+    }
+
+    async fn apply_strict(
+        &self,
+        mut definitions: Vec<McpServerDefinition>,
+        ids: BTreeMap<String, ConnectedAppId>,
+        persist: bool,
+    ) -> Result<()> {
         // Before anything connects, so the children below see the environment
         // this replacement declares rather than the previous one's. A boot
         // file's values land in the same store under the same derived key:

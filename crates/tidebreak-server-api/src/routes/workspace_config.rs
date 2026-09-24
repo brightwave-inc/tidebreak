@@ -69,9 +69,10 @@ pub async fn preview_workspace_config(
 /// anything is written, so a refused entry leaves this machine exactly as it
 /// was. The writes then land together or not at all: the repositories go in
 /// one transaction, the MCP set commits after them, and an MCP set that will
-/// not commit (a server that will not start) undoes the repositories. Every
-/// refusal says that nothing changed; the one case where an undo itself fails
-/// says what is left.
+/// not commit (a server that will not start) undoes the repositories, and
+/// the MCP set puts back any saved credential it had changed. Every refusal
+/// says that nothing changed; a refusal whose undo itself failed says what is
+/// left instead.
 ///
 /// On the desktop, an import that would start a local MCP command needs the
 /// native confirmation, the same rule `PUT /mcp/servers` enforces (decision
@@ -378,8 +379,15 @@ async fn plan_apply(
 }
 
 /// Say that a refused import changed nothing, after whatever the refusal
-/// already says.
+/// already says. An MCP failure that could not put a saved credential back
+/// already says so, and is left as it is, because something did change.
 fn nothing_changed(error: ServerError) -> ServerError {
+    if error
+        .message()
+        .contains(crate::mcp_config::CREDENTIALS_NOT_RESTORED)
+    {
+        return error;
+    }
     let message = format!("{} Nothing changed.", as_sentence(error.message()));
     error.with_message(message)
 }

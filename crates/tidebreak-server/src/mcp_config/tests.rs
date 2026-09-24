@@ -1477,6 +1477,68 @@ async fn environment_values_reach_the_secret_store_and_nothing_else() {
     assert_eq!(secret, format!(r#"{{"DOCS_TOKEN":"{VALUE}"}}"#));
 }
 
+/// A replacement whose server fails to start changes no stored credential:
+/// not the environment values it would rewrite or drop, and not the sign-in
+/// it would clear. The import route says nothing changed on this promise.
+#[tokio::test]
+async fn a_replacement_that_fails_to_start_leaves_stored_credentials_alone() {
+    let (runtime, store, _directory) = test_runtime().await;
+    let mut docs = disabled_definition("docs", "/bin/docs");
+    docs.env.insert("DOCS_TOKEN".to_string());
+    docs.env_values
+        .insert("DOCS_TOKEN".to_string(), "first".to_string());
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![docs.clone()],
+        })
+        .await
+        .unwrap();
+    let id = saved_records(&store).await[0].id;
+    let secrets = runtime.secrets();
+    let client_key = crate::connectors::oauth_client_secret_key(id);
+    let token_key = crate::connectors::oauth_token_secret_key(id);
+    secrets
+        .set_secret(&client_key, "registration-placeholder")
+        .await
+        .unwrap();
+    secrets
+        .set_secret(&token_key, "session-placeholder")
+        .await
+        .unwrap();
+
+    let mut rewritten = docs.clone();
+    rewritten
+        .env_values
+        .insert("DOCS_TOKEN".to_string(), "second".to_string());
+    let dead = http_definition("dead", "http://127.0.0.1:1/mcp");
+    // One candidate rewrites the stored value; the other drops the server.
+    for servers in [vec![rewritten, dead.clone()], vec![dead]] {
+        let error = runtime
+            .replace(McpServersConfig { servers })
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("failed to start"), "{error}");
+        assert!(!error.to_string().contains(CREDENTIALS_NOT_RESTORED));
+        assert_eq!(
+            runtime
+                .stored_env(id)
+                .await
+                .get("DOCS_TOKEN")
+                .map(String::as_str),
+            Some("first")
+        );
+        assert_eq!(
+            secrets.get_secret(&client_key).await.unwrap().as_deref(),
+            Some("registration-placeholder")
+        );
+        assert_eq!(
+            secrets.get_secret(&token_key).await.unwrap().as_deref(),
+            Some("session-placeholder")
+        );
+    }
+}
+
 /// A save that leaves a value blank keeps the stored one; dropping the
 /// name takes the value with it. Without this, editing any other field of
 /// a server would silently wipe its credentials.
