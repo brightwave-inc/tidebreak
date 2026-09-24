@@ -1196,7 +1196,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/smol-rs/event-listener-strategy
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### fancy-regex 0.19.1
+### fancy-regex 0.19.2
 
 - License: `MIT`
 - Repository: https://github.com/fancy-regex/fancy-regex
@@ -2018,7 +2018,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/Stranger6667/jsonschema
 - License text: not distributed with this package
 
-### jsonwebtoken 11.0.0
+### jsonwebtoken 11.1.0
 
 - License: `MIT`
 - Repository: https://github.com/Keats/jsonwebtoken
@@ -2508,7 +2508,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/madsmtm/objc2
 - License text: not distributed with this package
 
-### object_store 0.14.1
+### object_store 0.14.2
 
 - License: `MIT/Apache-2.0`
 - Repository: https://github.com/apache/arrow-rs-object-store
@@ -3192,7 +3192,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/SeaQL/sea-bae.git
 - License text: not distributed with this package
 
-### sea-orm 2.0.2
+### sea-orm 2.0.3
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/SeaQL/sea-orm
@@ -3204,19 +3204,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/SeaQL/sea-orm
 - License text: not distributed with this package
 
-### sea-orm-cli 2.0.2
+### sea-orm-cli 2.0.3
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/SeaQL/sea-orm
 - License text: not distributed with this package
 
-### sea-orm-macros 2.0.2
+### sea-orm-macros 2.0.3
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/SeaQL/sea-orm
 - License text: not distributed with this package
 
-### sea-orm-migration 2.0.2
+### sea-orm-migration 2.0.3
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/SeaQL/sea-orm
@@ -3810,7 +3810,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/bytecodealliance/target-lexicon
 - License text: `LICENSE` ([L-23823edf2631](#l-23823edf2631))
 
-### tauri 2.11.5
+### tauri 2.11.6
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/tauri
@@ -3870,13 +3870,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
-### tauri-plugin-single-instance 2.4.4
+### tauri-plugin-single-instance 2.4.5
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-b7f455413bfe](#l-b7f455413bfe))
 
-### tauri-plugin-updater 2.11.0
+### tauri-plugin-updater 2.12.0
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/tauri-apps/plugins-workspace
@@ -4181,7 +4181,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tokio-rs/tracing
 - License text: `LICENSE` ([L-c1e08ee9a728](#l-c1e08ee9a728))
 
-### trash 5.2.8
+### trash 5.2.9
 
 - License: `MIT`
 - Repository: https://github.com/ArturKovacs/trash
