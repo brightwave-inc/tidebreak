@@ -891,11 +891,14 @@ pub(in crate::db) async fn backfill(
         let failed = match rebuilt {
             Ok(()) => transaction.commit().await.map_err(store_err).err(),
             Err(error) => {
-                // A rollback fails when the connection it ran on is gone, and
-                // the transaction went with it. The attempt still counts, on
-                // another connection: returning here would leave this session
-                // due, so it would head the queue on every step and hold back
-                // every session behind it.
+                // A rollback fails when the transaction is already gone: its
+                // connection dropped, or SQLite ended it (a trigger's
+                // `RAISE(ROLLBACK)`, a full disk, an I/O error). The pool
+                // replaces a SQLite connection left that way before it is used
+                // again, so the attempt is recorded on a sound connection.
+                // Returning here instead would leave this session due, so it
+                // would head the queue on every step and hold back every
+                // session behind it.
                 if let Err(rollback) = transaction.rollback().await {
                     tracing::warn!(
                         session = %session_id,

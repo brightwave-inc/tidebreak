@@ -2,7 +2,7 @@
 //! index keeps up with deletes, incognito, and archiving.
 
 use chrono::{DateTime, Duration, Utc};
-use sea_orm::{ConnectionTrait, EntityTrait, Statement};
+use sea_orm::{ConnectionTrait, EntityTrait, Statement, TransactionTrait};
 
 use super::{sample_chat, temp_store};
 use crate::code::{Event, ToolDetail, ToolOutcome};
@@ -1284,6 +1284,67 @@ async fn a_rebuild_whose_rollback_fails_still_counts_and_blocks_nothing() {
             .collect::<Vec<_>>(),
         [steady.id]
     );
+}
+
+/// A rollback that fails leaves the driver counting a transaction SQLite
+/// already ended. The store stops using that connection. Kept in use, the
+/// next rollback on the one writer would leave a transaction open, and every
+/// write after it would join that transaction and never commit.
+#[tokio::test]
+async fn writes_after_a_failed_rollback_are_committed() {
+    let (_dir, store) = super::temp_store_with_max_connections(2).await;
+    let steady = sample_chat();
+    store.create_chat(&steady).await.unwrap();
+    let dropping = sample_chat();
+    store.create_chat(&dropping).await.unwrap();
+    let lost = say(
+        &store,
+        dropping.id,
+        Role::User,
+        "dropping harbour",
+        Utc::now(),
+    )
+    .await;
+    forget_and_queue(&store).await;
+    store
+        .conn
+        .execute_unprepared(&format!(
+            "CREATE TRIGGER drop_rebuild BEFORE INSERT ON message_search \
+             WHEN NEW.source_key = 'message:{}' \
+             BEGIN SELECT RAISE(ROLLBACK, 'the connection dropped'); END",
+            lost.0
+        ))
+        .await
+        .unwrap();
+    backfill(&store, 8, micros_now()).await.unwrap();
+    assert_eq!(queued(&store, dropping.id).await.0, 1);
+
+    // A later transaction rolls back, as a failed write does.
+    let transaction = store.conn.begin().await.unwrap();
+    transaction.rollback().await.unwrap();
+    // Then something is written.
+    say(
+        &store,
+        steady.id,
+        Role::User,
+        "written afterwards",
+        Utc::now(),
+    )
+    .await;
+
+    // The read pool's connections see only what committed.
+    let read = store.conn.read_pool().expect("the store has a read pool");
+    let written = read
+        .query_one_raw(Statement::from_string(
+            sea_orm::DbBackend::Sqlite,
+            "SELECT COUNT(*) AS n FROM message WHERE content = 'written afterwards'",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "n")
+        .unwrap();
+    assert_eq!(written, 1, "the write after the failed rollback committed");
 }
 
 #[test]
