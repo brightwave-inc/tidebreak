@@ -878,7 +878,9 @@ mod tests {
             "file:///var/lib/blobs?mode=0700",
             "file:///var/lib/blobs#blobs",
             "FILE:///var/lib/blobs",
-            // A separator that appears only once the path is decoded.
+            // A separator that appears only once the path is decoded, with
+            // or without a `..` beside it.
+            "file:///srv/tidebreak/a%2Fb",
             "file:///srv/tidebreak/%2F..%2Fescaped",
             "file:///srv/tidebreak/..%2fescaped",
             "file:///srv/tidebreak/%5C..%5Cescaped",

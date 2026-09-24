@@ -128,11 +128,14 @@ Debian, Ubuntu, and Fedora, where each user gets a group of the same name. The
 script warns when your group has a different name. Run as root, the script
 gives both files to uid 10001 with mode `0600` instead. On macOS, Docker
 Desktop and OrbStack share files with the container's user already, so there
-both files stay `0600`. Rootless Docker and Podman map groups differently, and
-this setup is untested with them.
+both files stay `0600`. Rootless Docker and rootless Podman map uids and
+groups differently, so group sharing does not reach the server there;
+[Secrets in the database](#secrets-in-the-database) shows how to hand both
+files to the container's user instead.
 
 Keep the group read on both files. `chmod g-r tokens` or `chmod g-r
-secret.key` takes the server's only way in, and the server then stops at boot.
+secret.key` removes the server's only access to that file, and the server then
+stops at boot.
 
 If you create or replace these files by hand on Linux, keep the same shape:
 
@@ -345,44 +348,109 @@ could never report one.
 
 Administrators save provider, web-search, code-execution, and connected-app
 credentials in Settings. The stock stack keeps them in PostgreSQL, encrypted
-with the key in `secret.key`. `setup.sh` creates that file with
-`openssl rand -base64 32`, and `docker-compose.yml` mounts it read-only at
-`/run/tidebreak/secret.key` and points `TIDEBREAK_SECRET_KEY_FILE` at it.
+with the key in `secret.key`. Credentials you pass as environment variables,
+such as `ANTHROPIC_API_KEY` in `.env`, stay fallbacks: the server reads them
+when nothing is stored for that provider.
 
-Back up `secret.key` separately from the database. A database backup without
-the key restores no stored credential, so you would enter each one again. Keep
+### Secrets in the database
+
+The server encrypts each stored secret with AES-256-GCM and keeps it in the
+`deployment_secrets` table of its own PostgreSQL database
+([decision record 102](decisions/0102-self-host-secrets-in-the-database.md)).
+A dump or backup of the database alone reveals no secret. Anyone who holds
+both the key file and the database can read every secret, and if you lose the
+key file, you lose the secrets.
+
+`setup.sh` creates the key once, beside `docker-compose.yml`: 32 random bytes
+from `openssl rand -base64 32`, as one line of base64. `docker-compose.yml`
+mounts it read-only at `/run/tidebreak/secret.key` and points
+`TIDEBREAK_SECRET_KEY_FILE` at it. On a Linux host, `setup.sh` makes the file
+readable by your own group, which the compose file adds to the server's uid,
+as [What setup.sh writes](#what-setupsh-writes) describes. Outside this stack,
+create the key the same way, make it readable by the uid that runs the
+server and by nobody else, and set `TIDEBREAK_SECRET_KEY_FILE` to its path.
+
+Rootless Docker and rootless Podman map uid 10001 inside the container to a
+different uid on the host, so neither group sharing nor a plain `chown 10001`
+reaches the right account. Let the runtime apply its own mapping instead. With
+Podman, run `podman unshare chown 10001 secret.key`. With rootless Docker, run
+`chown` in a throwaway container of the server image:
+
+```sh
+docker run --rm --user 0 --entrypoint chown \
+  -v "$PWD/secret.key:/secret.key" ghcr.io/brightwave-inc/tidebreak-server:<version> 10001 /secret.key
+```
+
+Do the same for `tokens`.
+
+Back up the key file separately from the database. A database backup without
+the key restores no secret, and you would have to enter each one again. Keep
 the two backups in different places, so one stolen backup never holds both.
 
-The server logs a warning at every boot that `secret.key` can be read by
-members of its group, and names the group's id. With the files `setup.sh`
-writes, that warning is expected. The group is the setup account's own
+The server reads the key once at boot. It refuses to start when the file is
+missing, unreadable, or does not decode to exactly 32 bytes, when accounts
+other than its owner can change it, and when the `TIDEBREAK_VAULT_*`
+variables are set as well. It starts, with a warning, when the file's group or
+every account on the machine can read it. The check follows symlinks, so a
+Kubernetes secret mount is judged by the file it names.
+
+With the files `setup.sh` writes, the group warning appears at every boot and
+names your group's id. It is expected. The group is the setup account's own
 primary group, which on most Linux distributions holds only that account, and
-it is how the server's uid reads the file. Do not follow the warning's
-`chmod g-r` advice for this file, or for `tokens`, which the server reads the
-same way: the server can then read neither and stops at boot. If your group
-holds other accounts, give both files to the server's uid instead:
+group read is how the server's uid reads the file. Do not follow the warning's
+`chmod g-r` advice for `secret.key`, or for `tokens`, which the server reads
+the same way: the server can then read neither and stops at boot. If your
+group holds other accounts, give both files to the server's uid instead:
 
 ```sh
 sudo chown 10001 tokens secret.key
 sudo chmod 0600 tokens secret.key
 ```
 
-A member who can use Code mode can read `tokens`, `secret.key`, and the
-database URL: workspace terminals and coding engines run as the server's uid
-and inherit its environment. Until members' code sessions are kept away from
-the deployment's secrets
+The server also refuses to start when the database holds secrets written
+under a different key. In that case, restore the original key file and start
+the server again: it never overwrites or deletes secrets written under another
+key. Each stored secret records the id of its key, the first 8 bytes of the
+key's SHA-256 in hex, and the refusal names the ids it found. To find the id
+of a key file:
+
+```sh
+openssl base64 -d -in secret.key | openssl dgst -sha256 -r | cut -c1-16
+```
+
+If the original key is lost, the secrets written under it cannot be recovered.
+Delete those rows with the statement the refusal prints, which names their
+key ids, and enter the credentials again.
+
+At boot the server also decrypts every stored secret once. When one no longer
+decrypts, for example after a damaged restore, it refuses to start and names
+that secret. Restore the database from a backup taken before the damage, or
+delete that row with the statement the refusal prints and enter its
+credentials again.
+
+The key cannot be rotated yet. To start over with a new key, delete the rows
+from `deployment_secrets` and enter the secrets again.
+
+The key protects dumps and backups of the database, not a database someone
+can write to. Anyone who can write rows can put back an older copy of a row,
+which still decrypts, and can already run commands on the server through
+stored MCP server definitions.
+
+On a self-host machine, a member who can use Code mode can read the key file,
+the `tokens` file, and the database URL today: workspace terminals and coding
+engines run as the server's uid and inherit its environment. `tokens` holds
+every user's token, the administrators' included, so reading it lets a member
+act as anyone. The Vault token file and provider environment variables are
+exposed the same way. Until members' code sessions are kept away from the
+deployment's secrets
 ([#3590](https://github.com/brightwave-inc/tidebreak/issues/3590)), give
 self-host accounts only to people you would trust with those secrets.
 
-Credentials you pass as environment variables, such as `ANTHROPIC_API_KEY` in
-`.env`, stay fallbacks: the server reads them when nothing is stored for that
-provider.
-
-To keep credentials in HashiCorp Vault instead, delete the
+Vault remains available. To use it instead, delete the
 `TIDEBREAK_SECRET_KEY_FILE` line and the `secret.key` mount from the `server`
 service, mount a Vault token file, and add the `TIDEBREAK_VAULT_*` variables
 from the following section to `.env`. A deployment uses one or the other, and
-credentials saved in one do not move to the other.
+secrets saved in one do not move to the other.
 
 ### Vault credential custody
 
@@ -459,9 +527,10 @@ created yourself, whose permissions it leaves alone. Uploads stage in the
 directory's `_uploads/` folder, also private to the server's user, and publish
 from there. At every boot, the server checks that it can write, delete, and
 list in the directory. When it cannot, it refuses to start and names the
-reason, such as `permission denied`, without the path's contents. Only the
-top level of the directory holds blobs, so a folder the server cannot read
-there, such as `lost+found` at the root of a mounted volume, does no harm.
+reason, such as `permission denied`. Later storage errors name their reason
+the same way. Only the top level of the directory holds blobs, so a folder
+the server cannot read there, such as `lost+found` at the root of a mounted
+volume, does no harm.
 
 A `file://` URL must name one absolute directory below the root:
 `file:///absolute/path`, with no host, no `.` or `..` segments, no encoded
@@ -523,11 +592,14 @@ ports 80 and 443 must be open to the internet. Caddy keeps the certificate and
 its ACME account on the `caddy-data` volume, so keep that volume across
 restarts.
 
-Caddy writes no access log in this configuration. A browser sends its bearer
-token in the `Sec-WebSocket-Protocol` header of every WebSocket upgrade, and a
-request log would store every user's token in plain text.
-`deploy/self-host/Caddyfile` shows the log filter to use if you add a log: it
-deletes that header and `Authorization`.
+Bearer tokens travel in two request headers: `Authorization`, from the CLI
+and the API, and `Sec-WebSocket-Protocol`, which a browser sends on every
+WebSocket upgrade. Token-file tokens do not expire, so neither header may reach
+a log. Caddy writes no access log in this configuration, but its own log still
+records the request, headers included, of every error it answers, such as a
+`502` while the server restarts. `deploy/self-host/Caddyfile` therefore deletes
+both headers from that log. If you add an access log to the site, give it the
+same filter; the Caddyfile shows it.
 
 To add a domain to a deployment that runs without one, add these lines to
 `.env`, and then run `docker compose up -d`:
@@ -584,17 +656,19 @@ that happens not to include request headers today.
 
 This stack does not configure code execution, so the `exec` tool has no
 backend on it. The macOS sandbox that local execution uses does not exist in a
-Linux container, and the two container backends do not work yet when the
-server itself runs in a container:
+Linux container, and the container backends need more than this stack gives
+the server:
 
-- The `exec` tool's Docker backend runs each chat's commands in a container
-  that it starts through the `docker` command. The server image carries no
-  Docker CLI. A derived image that adds one can start sibling containers
-  through the host's Docker socket, but mounting that socket gives the server
-  root on the host. Even then, every run fails with `the container runtime
-  refused the request`: the backend runs a documents image pinned by a digest
-  that the registry does not serve, and the server has no setting to name
-  another image.
+- The `exec` tool's Docker backend runs each chat's commands in a container of
+  the pinned documents sandbox image, which it starts through the `docker`
+  command and the host's Docker daemon. The server image carries no Docker
+  CLI, and the stack does not mount the daemon's socket. A derived image that
+  adds the CLI, with `/var/run/docker.sock` mounted and the socket's group
+  added to the server, completes a run. This stack does not set that up:
+  mounting the Docker socket gives the server root on the host. Code mode
+  sessions run as the server's uid
+  ([#3590](https://github.com/brightwave-inc/tidebreak/issues/3590)), so every
+  member who can use Code mode would have root on the host too.
 - `TIDEBREAK_CONTAINER_EXECUTION_ENABLED` routes background agent runs to
   sandbox containers. That backend publishes each sandbox's port on the host's
   loopback address and connects to `127.0.0.1`. Inside the server's container,
@@ -602,9 +676,8 @@ server itself runs in a container:
   sandboxes. Without a Docker CLI in the image, the backend also reports
   itself unavailable, and runs stay in the server process.
 
-Both gaps need changes in the server. Until they land, keep the Docker socket
-out of the server container: it would give the server root on the host without
-giving it working code execution.
+Keep the Docker socket out of the server container unless every account on
+the deployment may have root on this machine.
 
 ## How the self-host profile works
 
@@ -678,7 +751,7 @@ aspirational.
 | `TIDEBREAK_VAULT_MOUNT` | no | `secret` | KV v2 mount path. |
 | `TIDEBREAK_VAULT_PATH` | no | `tidebreak` | Deployment-specific path below the mount. Tidebreak appends one encoded credential key. |
 | `TIDEBREAK_VAULT_NAMESPACE` | no | unset | Vault Enterprise or HCP namespace sent as `X-Vault-Namespace`. |
-| `TIDEBREAK_SECRET_KEY_FILE` | no | unset | Self-host only: file holding the 32-byte base64 key that encrypts stored credentials in the database. See [Secrets](#secrets). Setting it together with the Vault variables refuses to start. |
+| `TIDEBREAK_SECRET_KEY_FILE` | no | unset | Self-host only: file holding the 32-byte base64 key that encrypts stored credentials in the database. See [Secrets in the database](#secrets-in-the-database). Setting it together with the Vault variables refuses to start. |
 | `TIDEBREAK_DATA_DIR` | yes (the image sets it) | `/var/lib/tidebreak` in the image | Instance lock, logs, per-turn scratch, harness installs, and, in the compose stack, the blob directory. Nothing defaults to the current directory: a self-host server started without it refuses to start and names the variable. |
 | `HOME` | no | `/var/lib/tidebreak/home` in the image | Writable home for npm and the coding harnesses. The image keeps it on the data volume because a hosting plane may run the container as a uid with no passwd entry, which is otherwise handed `HOME=/`. The server creates it at boot. |
 | `TIDEBREAK_LOG` | no | built-in policy | `tracing` filter directives, e.g. `debug` or `warn,tidebreak_server=trace`. An invalid spec falls back to the default. |
@@ -1167,7 +1240,8 @@ the same window as the database.
 `.env`, `tokens`, and `secret.key` live beside `docker-compose.yml`, not in a
 volume. Back them up separately as secrets, and keep `secret.key` away from the
 database backups: a database backup alone reveals no stored credential, and
-one stored with its key reveals all of them.
+one stored with its key reveals all of them. See
+[Secrets in the database](#secrets-in-the-database).
 
 ## Upgrading
 
@@ -1250,6 +1324,6 @@ data in a self-host deployment yet:
 
 One more, specific to this packaging:
 
-- Code execution does not run on this stack. The `exec` tool has no backend
-  here; see [Code execution](#code-execution) for what blocks the container
-  backends.
+- Code execution does not run on this stack as shipped. The `exec` tool has
+  no backend here; see [Code execution](#code-execution) for what the
+  container backends need.
