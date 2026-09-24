@@ -537,7 +537,7 @@ function restoreRow(
   };
 }
 
-/** Git stopped partway: the row keeps the way back to every replaced file. */
+/** The restore stopped partway: the row keeps the way back to every file. */
 export const RestoreStoppedPartway: Story = {
   render: () => (
     <TranscriptFrame>
@@ -546,7 +546,7 @@ export const RestoreStoppedPartway: Story = {
           ...turnTwo,
           restoreRow(
             "partial",
-            "Git could not write src/lexer.rs: No space left on device.",
+            "Could not write src/lexer.rs: No space left on device.",
           ),
         ]}
         onForkFromTurn={fn()}
@@ -557,7 +557,10 @@ export const RestoreStoppedPartway: Story = {
   ),
 };
 
-/** A restore that did not run changed nothing, so it offers no undo. */
+/**
+ * The restore stopped and put back every file it moved, so nothing changed.
+ * The row keeps Undo, so a wrong check never strands a file.
+ */
 export const RestoreFailed: Story = {
   render: () => (
     <TranscriptFrame>
@@ -566,7 +569,7 @@ export const RestoreFailed: Story = {
           ...turnTwo,
           restoreRow(
             "failed",
-            "The workspace changed while Tidebreak was restoring it.",
+            "src/lexer.rs changed after Tidebreak checked it.",
           ),
         ]}
         onForkFromTurn={fn()}

@@ -163,27 +163,43 @@ impl CodeRuntime {
             Err(failure) => {
                 drop(claim);
                 let (status, reason, reply) = match failure {
-                    RestoreApplyError::Unchanged(error) => (
-                        CheckpointRestoreStatus::Failed,
-                        error.to_string(),
-                        map_checkpoint(error),
-                    ),
-                    RestoreApplyError::RolledBack(reason) => (
-                        CheckpointRestoreStatus::Failed,
+                    // Every path was verified to hold what it held before:
+                    // the one case the row may say nothing changed.
+                    RestoreApplyError::NothingChanged {
                         reason,
+                        changed: true,
+                    } => (
+                        CheckpointRestoreStatus::Failed,
+                        reason.clone(),
+                        ServerError::conflict_kind(
+                            "worktree_changed",
+                            format!(
+                                "{reason} Tidebreak put back every file it had changed, so \
+                                 nothing changed. Review the restore again."
+                            ),
+                        ),
+                    ),
+                    RestoreApplyError::NothingChanged {
+                        reason,
+                        changed: false,
+                    } => (
+                        CheckpointRestoreStatus::Failed,
+                        reason.clone(),
                         ServerError::conflict_kind(
                             "restore_failed",
-                            "Git could not finish the restore, so Tidebreak put back the files \
-                             it had changed. Nothing changed.",
+                            format!(
+                                "{reason} Tidebreak put back every file it had changed, so \
+                                 nothing changed."
+                            ),
                         ),
                     ),
                     RestoreApplyError::Partial(reason) => (
                         CheckpointRestoreStatus::Partial,
-                        reason,
+                        reason.clone(),
                         ServerError::conflict_kind(
                             "restore_failed",
                             format!(
-                                "The restore stopped partway. To put back every file it \
+                                "The restore stopped partway: {reason} To put back every file it \
                                  replaced, undo it from the conversation, or run `tidebreak \
                                  code restore --ws {workspace_id} --undo {restore_id}`."
                             ),
@@ -382,14 +398,15 @@ impl CodeRuntime {
                 ) {
                     return Err(turn_running());
                 }
-                let commit = checkpoint::state_before_turn(&self.db, workspace, &turn)
+                let commit = checkpoint::state_before_turn(workspace, &turn)
                     .await
                     .map_err(map_checkpoint)?
                     .ok_or_else(|| {
                         ServerError::conflict_kind(
                             "no_checkpoint",
-                            "Tidebreak has no checkpoint from before this turn, so it cannot \
-                             restore it.",
+                            "Tidebreak no longer has the checkpoint from just before this turn, \
+                             so it cannot restore it. Restoring to an older one would also undo \
+                             turns you did not pick.",
                         )
                     })?;
                 Ok(ResolvedRestoreTarget {

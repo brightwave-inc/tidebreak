@@ -1951,9 +1951,10 @@ pub struct RevertHunk {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct DiscardWorkspaceChangesBody {
-    /// Each file as the Changes list names it. Every one must have an
-    /// uncommitted change. A file renamed since the last commit goes back to
-    /// its committed name; name it by its new path.
+    /// Each path as the Changes list names it: a renamed file's row names
+    /// both its paths. Tidebreak touches only these paths, and leaves alone
+    /// a named path with nothing uncommitted. When none has anything to
+    /// discard, the request answers `409 no_change`.
     pub paths: Vec<String>,
     /// The `worktree_tree` of the file list the person reviewed. A named
     /// file that changed since answers `409 worktree_changed`, and nothing

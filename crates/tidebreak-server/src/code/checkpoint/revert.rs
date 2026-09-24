@@ -18,9 +18,9 @@ use std::path::Path;
 use tidebreak_harness::OutputBudget;
 
 use super::worktree::{
-    blocked, find_blockers, merge_blobs, name_paths, read_blob, tree_entry, tree_paths_under,
-    tree_with_changes, unsaved_under, write_blob, PrivateIndex, Switch, SwitchFailure, TreeEntry,
-    MAX_BLOB_BYTES,
+    apply, inspect, merge_blobs, name_paths, read_blob, refuse_sparse_checkout, tree_entry,
+    tree_paths_under, tree_with_changes, unsaved_under, write_blob, ApplyFailure, PrivateIndex,
+    TreeEntry, MAX_BLOB_BYTES,
 };
 use super::{
     complete_nul_terminated_records, git_bytes_bounded, git_bytes_with_literal_paths_bounded,
@@ -73,8 +73,11 @@ pub async fn revert_change(
         .unwrap_or_else(|| change.path.clone());
     let before = file_entry(worktree, from, &old).await?;
     let after = file_entry(worktree, to, &change.path).await?;
-    let index = PrivateIndex::new(worktree).await?;
-    let current = index.snapshot(worktree).await?;
+    refuse_sparse_checkout(worktree).await?;
+    let current = PrivateIndex::new(worktree)
+        .await?
+        .snapshot(worktree)
+        .await?;
     let ours = file_entry(worktree, &current, &change.path).await?;
     if [&before, &after, &ours]
         .into_iter()
@@ -109,22 +112,12 @@ pub async fn revert_change(
             "This change is already undone.",
         ));
     }
-    let in_the_way = find_blockers(worktree, &current, &target).await?;
-    if !in_the_way.is_empty() {
-        return Err(blocked(
-            "revert_blocked",
-            "Reverting this change",
-            &in_the_way,
-        ));
-    }
-    Switch {
-        index: &index,
-        from: &current,
-        to: &target,
-    }
-    .run(worktree)
-    .await
-    .map_err(SwitchFailure::into_error)?;
+    let plan = inspect(worktree, &current, &target)
+        .await?
+        .into_plan("revert_blocked", "Reverting this change")?;
+    apply(worktree, &plan)
+        .await
+        .map_err(ApplyFailure::into_error)?;
     Ok(RevertedChange {
         paths: edits.into_iter().map(|(path, _)| path).collect(),
     })
@@ -372,16 +365,19 @@ fn parse_hunk_header(line: &[u8]) -> Option<((usize, usize), (usize, usize))> {
     Some((range(old)?, range(new)?))
 }
 
-/// Put each file back to the last commit: its content and mode when `HEAD`
-/// holds it, gone when it does not. The user's index follows, so a discarded
-/// change is not left staged for the next commit.
+/// Put each named file back to the last commit: its content and mode when
+/// `HEAD` holds it, gone when it does not. The user's index follows, so a
+/// discarded change is not left staged for the next commit.
 ///
-/// Each path names a file with an uncommitted change, as the Changes list
-/// shows it. A file renamed since the last commit goes back to its old name.
-/// A discard never touches a file nobody named: when a folder, or a file
-/// that is not part of the change, stands where the committed file goes, the
-/// discard refuses and names it. `expected_tree` is the snapshot the person
-/// reviewed; a named file that changed since is left alone.
+/// A discard touches exactly the paths it names and nothing else. It never
+/// pairs a rename on its own: the Changes list pairs them against the base
+/// branch, and a renamed file's row names both of its paths. A named path
+/// that already matches the last commit, such as the old name of a rename
+/// the branch already committed, is left as it is; at least one must have
+/// something to discard. When a folder, or a file nobody named, stands where
+/// a committed file goes, the discard refuses and names it. `expected_tree`
+/// is the snapshot the person reviewed; a named file that changed since is
+/// left alone.
 pub async fn discard_paths(
     worktree: &Path,
     paths: &[String],
@@ -397,25 +393,26 @@ pub async fn discard_paths(
     if wanted.is_empty() {
         return Err(CheckpointError::user("name at least one file to discard"));
     }
-    let index = PrivateIndex::new(worktree).await?;
-    let current = index.snapshot(worktree).await?;
-    let changes = uncommitted_changes(worktree, &current).await?;
-    let mut picked: Vec<GitPath> = Vec::new();
-    for path in &wanted {
-        let Some(change) = changes
-            .iter()
-            .find(|change| &change.path == path || change.previous_path.as_ref() == Some(path))
-        else {
-            return Err(CheckpointError::conflict(
-                "no_change",
-                format!("{} has no uncommitted change to discard.", path.to_wire()),
-            ));
-        };
-        for path in std::iter::once(&change.path).chain(change.previous_path.iter()) {
-            if !picked.contains(path) {
-                picked.push(path.clone());
-            }
-        }
+    refuse_sparse_checkout(worktree).await?;
+    let current = PrivateIndex::new(worktree)
+        .await?
+        .snapshot(worktree)
+        .await?;
+    let uncommitted = uncommitted_paths(worktree, &current).await?;
+    let picked: Vec<GitPath> = wanted
+        .iter()
+        .filter(|path| uncommitted.contains(*path))
+        .cloned()
+        .collect();
+    if picked.is_empty() {
+        return Err(CheckpointError::conflict(
+            "no_change",
+            format!(
+                "{} {} no uncommitted change to discard.",
+                name_paths(&wanted),
+                if wanted.len() == 1 { "has" } else { "have" }
+            ),
+        ));
     }
     if let Some(expected) = expected_tree {
         for path in &picked {
@@ -454,22 +451,12 @@ pub async fn discard_paths(
         edits.push((path.clone(), committed));
     }
     let target = tree_with_changes(worktree, &current, &edits).await?;
-    let in_the_way = find_blockers(worktree, &current, &target).await?;
-    if !in_the_way.is_empty() {
-        return Err(blocked(
-            "discard_blocked",
-            "Discarding these changes",
-            &in_the_way,
-        ));
-    }
-    Switch {
-        index: &index,
-        from: &current,
-        to: &target,
-    }
-    .run(worktree)
-    .await
-    .map_err(SwitchFailure::into_error)?;
+    let plan = inspect(worktree, &current, &target)
+        .await?
+        .into_plan("discard_blocked", "Discarding these changes")?;
+    apply(worktree, &plan)
+        .await
+        .map_err(ApplyFailure::into_error)?;
     run_on_paths(worktree, &["reset", "-q", "HEAD", "--"], &picked).await?;
     Ok(RevertedChange { paths: picked })
 }
@@ -541,25 +528,6 @@ pub async fn uncommitted_paths(
         .filter(|name| !name.is_empty())
         .map(GitPath::from_bytes)
         .collect())
-}
-
-/// What a commit of `snapshot` would carry, renames paired.
-async fn uncommitted_changes(
-    worktree: &Path,
-    snapshot: &str,
-) -> Result<Vec<ChangedFile>, CheckpointError> {
-    let args = review_name_status_args("HEAD", snapshot);
-    let (raw, truncated) = git_bytes_bounded(
-        worktree,
-        &args[..args.len() - 1],
-        GIT_TIMEOUT,
-        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
-    )
-    .await
-    .map_err(CheckpointError::internal)?;
-    Ok(parse_name_status(complete_nul_terminated_records(
-        &raw, truncated,
-    )))
 }
 
 /// The change the diff lists for `path`, by its new name or its old one.
@@ -1083,6 +1051,29 @@ mod tests {
         );
     }
 
+    /// A sparse checkout's snapshot cannot tell a file outside the cone from
+    /// a deleted one, so an undo refuses before it takes one, and an
+    /// untracked file outside the cone stays.
+    #[tokio::test]
+    async fn an_undo_refuses_a_sparse_checkout() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "sparse");
+        run(&tree, &["git", "sparse-checkout", "set", "docs"]);
+        std::fs::write(tree.join("README.md"), "edited\n").unwrap();
+        std::fs::create_dir_all(tree.join("src")).unwrap();
+        std::fs::write(tree.join("src/outside.txt"), "outside the cone\n").unwrap();
+
+        let err = discard_paths(&tree, &["README.md".to_owned()], None)
+            .await
+            .unwrap_err();
+        assert_eq!(conflict_kind(&err), "sparse_checkout", "{err:?}");
+        assert_eq!(read(&tree.join("README.md")).as_deref(), Some("edited\n"));
+        assert_eq!(
+            read(&tree.join("src/outside.txt")).as_deref(),
+            Some("outside the cone\n")
+        );
+    }
+
     /// A committed file `config` was replaced by a folder holding a new file
     /// and an ignored one. Discarding `config` would delete that folder, so
     /// it refuses and names what is inside.
@@ -1124,23 +1115,23 @@ mod tests {
         );
     }
 
-    /// The Changes list names a renamed file by its new path. Discarding it
-    /// puts the file back under its committed name; when the rename itself
-    /// was committed, only the later edit goes.
+    /// A renamed file's row in the Changes list names both of its paths.
+    /// Discarding it puts the file back under its committed name; when the
+    /// branch already committed the rename, only the later edit goes and the
+    /// old name, which has nothing to discard, is left alone.
     #[tokio::test]
-    async fn discarding_a_renamed_file_by_its_new_path_restores_the_committed_name() {
+    async fn discarding_a_renamed_row_touches_exactly_its_two_paths() {
         let (_dir, repo) = init_repo();
         let tree = add_worktree(&repo, "discard-renamed");
         let notes = lines(20, "note");
         std::fs::write(tree.join("notes.txt"), &notes).unwrap();
         run(&tree, &["git", "add", "notes.txt"]);
         run(&tree, &["git", "commit", "-q", "-m", "notes"]);
+        let row = ["notes.md".to_owned(), "notes.txt".to_owned()];
         // An uncommitted rename with an edit.
         std::fs::remove_file(tree.join("notes.txt")).unwrap();
         std::fs::write(tree.join("notes.md"), format!("{notes}and more\n")).unwrap();
-        let discarded = discard_paths(&tree, &["notes.md".to_owned()], None)
-            .await
-            .unwrap();
+        let discarded = discard_paths(&tree, &row, None).await.unwrap();
         let mut named: Vec<String> = discarded.paths.iter().map(GitPath::to_wire).collect();
         named.sort();
         assert_eq!(named, ["notes.md", "notes.txt"]);
@@ -1151,9 +1142,7 @@ mod tests {
         run(&tree, &["git", "mv", "notes.txt", "notes.md"]);
         run(&tree, &["git", "commit", "-q", "-m", "rename"]);
         std::fs::write(tree.join("notes.md"), format!("{notes}edited after\n")).unwrap();
-        let discarded = discard_paths(&tree, &["notes.md".to_owned()], None)
-            .await
-            .unwrap();
+        let discarded = discard_paths(&tree, &row, None).await.unwrap();
         assert_eq!(
             discarded
                 .paths
@@ -1164,6 +1153,43 @@ mod tests {
         );
         assert_eq!(read(&tree.join("notes.md")), Some(notes));
         assert!(!tree.join("notes.txt").exists());
+    }
+
+    /// The branch rewrote `a.txt`, then someone deleted it and saved an
+    /// edited copy as `b.txt`. The Changes list shows two rows: `a.txt`
+    /// deleted and `b.txt` added. Against the last commit git would pair them
+    /// as a rename, so a discard that paired on its own would delete `b.txt`,
+    /// which nobody picked.
+    #[tokio::test]
+    async fn discard_never_touches_a_path_nobody_named() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "discard-unnamed");
+        let rewritten = lines(20, "rewritten on the branch");
+        std::fs::write(tree.join("a.txt"), &rewritten).unwrap();
+        run(&tree, &["git", "add", "a.txt"]);
+        run(&tree, &["git", "commit", "-q", "-m", "rewrite a"]);
+        std::fs::remove_file(tree.join("a.txt")).unwrap();
+        let copy = format!("{rewritten}one more line\n");
+        std::fs::write(tree.join("b.txt"), &copy).unwrap();
+
+        let discarded = discard_paths(&tree, &["a.txt".to_owned()], None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            discarded
+                .paths
+                .iter()
+                .map(GitPath::to_wire)
+                .collect::<Vec<_>>(),
+            ["a.txt"]
+        );
+        assert_eq!(read(&tree.join("a.txt")), Some(rewritten));
+        assert_eq!(
+            read(&tree.join("b.txt")),
+            Some(copy),
+            "b.txt was not picked, so it stays"
+        );
     }
 
     #[tokio::test]

@@ -811,25 +811,42 @@ replaces so its Undo can bring it back. They share one gate in
 - Each one publishes `files_changed` on `/updates`, like a save, so every view
   of the worktree reads it again.
 
-**How files move** (`checkpoint/worktree.rs`). Each operation snapshots the
-worktree into a private index, works out the tree the worktree should hold
-next, and runs a two-tree `read-tree -m -u <snapshot> <next>` with that
-index. Every path is checked before any is written. The checkout refuses when
-a file changed after the snapshot, and when a file the snapshot does not
-hold, an ignored one or one that just appeared, stands where it must write,
-including a folder with such files in it that must become a file. Unchanged
-files keep their stat data, and no hook runs. Before the checkout,
-`find_blockers` walks the same paths and names what is in the way, so the
-refusal can say which files to move. When the checkout stops partway anyway,
-a full disk or a killed process, every path that now holds exactly what the
-next tree holds goes back to the snapshot. A path that holds anything else
-was not written by the checkout and stays.
+**How files move** (`checkpoint/worktree.rs`). No undo runs `git checkout`,
+`read-tree`, or `checkout-index`. Each operation snapshots the worktree into
+a private index, works out the tree the worktree should hold next, and moves
+the paths that differ itself, one at a time, under the worktree lock:
+
+- `inspect` lists the paths with `diff-tree --no-renames`, records what the
+  worktree holds at each (kind, size, mode, and modification time), then
+  hashes each file and checks it against the snapshot. It names what is in
+  the way: an ignored or excluded file, a folder holding one, and a nested
+  repository, submodule, or gitlink the operation would remove or replace. A
+  snapshot holds only a nested repository's commit, never its files, so no
+  undo could bring them back.
+- `apply` removes paths first, deepest first, then writes, parents first.
+  It writes each new version, through the repository's checkout filters, to
+  a temporary file beside its path. Right before that file moves into place,
+  the path must still hold what `inspect` recorded, or still be empty, or the
+  apply stops, so an ignored file that appears after the check is never
+  overwritten. The file lands with a rename, or with a hard link where
+  nothing stood, so each path holds its old content or its new content,
+  never a mix. It never writes through a symlink: a symlink or a file where a
+  folder must be stops it.
+- When a path cannot move, every path already moved goes back, newest first,
+  and each is checked against the snapshot. A path someone changed after the
+  apply left it stays as they left it. Only when every moved path checks out
+  may the caller say nothing changed.
+- A sparse checkout answers `409 sparse_checkout`: its snapshot cannot tell a
+  file outside the cone from a deleted one.
+
+No hook runs, and a file whose content matches is never touched.
 
 **Restore** (`checkpoint/restore.rs`). The target is the state before a turn,
 which is the `from` of that turn's own diff: the previous turn's checkpoint,
 the session's start baseline for turn 1, or where the chain resumed after an
-earlier restore. A turn with none refuses with `409 no_checkpoint` rather than
-fall back to the merge base, which knows nothing of untracked files.
+earlier restore. A turn with none refuses with `409 no_checkpoint`. It never
+falls back to the merge base, which knows nothing of untracked files, or to
+an older checkpoint, which would also undo turns nobody picked.
 
 1. The preview (`GET …/checkpoints/restore?turn=` or `?restore=`) snapshots the
    worktree and lists every change since the target, whoever made it. It
@@ -844,11 +861,13 @@ fall back to the merge base, which knows nothing of untracked files.
 3. It commits that tree to `refs/tidebreak/checkpoints/<ws>/<session>/restore/<id>`
    and journals `CheckpointRestored` with status `started`, both before any
    file moves, so the restore's Undo is reachable even if the process dies
-   mid-checkout.
-4. It moves the files. When the checkout stops partway, the files it wrote go
-   back and the row ends `failed`: nothing changed. When they cannot all go
-   back, the row ends `partial`, the reply names the restore id, and the
-   row's Undo puts back everything the restore replaced.
+   mid-restore.
+4. It moves the files. When it stops partway, every path it moved goes back.
+   Only when each checks out against the saved state does the row end
+   `failed`, which says nothing changed. Otherwise the row ends `partial` and
+   the reply names the restore id. The row keeps its Undo either way, and on
+   a restore the process never finished: it puts back everything the restore
+   replaced.
 5. It points `…/<session>/after/<n>` at the restored state for every open
    session in the workspace, where `n` is that session's newest turn. The next
    turn's diff starts there, so no turn is credited with undoing what the
@@ -876,15 +895,17 @@ still exactly as the diff left it, and a renamed file goes back to its old
 name. A turn's diff is history, so the desktop marks a reverted hunk there
 instead of offering it again.
 
-**Discard** puts each named file back to `HEAD`, or removes it when `HEAD`
-lacks it, and unstages it with `reset -q HEAD --`. Each path must have an
-uncommitted change, read with renames paired, and a file renamed since the
-last commit is named by its new path and goes back under its old one. A
-folder that stands where a committed file goes, holding files nobody named,
-answers `409 discard_blocked` and names them. `expected_tree`, the
-`worktree_tree` of the list the person reviewed, refuses a named file that
-changed since. The workspace file list marks discardable paths
-`uncommitted`, which is where Source control offers Discard.
+**Discard** acts on exactly the paths it is given, as the Changes list names
+them: a renamed file's row names its new path and its old one. It puts each
+back to `HEAD`, or removes it when `HEAD` lacks it, and unstages it with
+`reset -q HEAD --`. A named path with no uncommitted change, read against
+`HEAD` with `--no-renames` as the list's `uncommitted` mark is, stays as it
+is, and a request where no path has one answers `409 no_change`. A folder
+that stands where a committed file goes, holding files nobody named, answers
+`409 discard_blocked` and names them. `expected_tree`, the `worktree_tree` of
+the list the person reviewed, refuses a named file that changed since. The
+workspace file list marks discardable paths `uncommitted`, which is where
+Source control offers Discard.
 
 **Commit** keeps its route. It refuses at once while a turn runs or waits
 (`409 turn_running`) or a message waits in an unpaused queue

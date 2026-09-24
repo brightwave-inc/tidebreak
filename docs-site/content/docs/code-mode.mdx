@@ -96,14 +96,16 @@ what an agent did, open the turn's menu on its review card and choose
   including new files the turn created and files it deleted. Files your
   `.gitignore` covers stay as they are. If one stands where the restore would
   write, Tidebreak names it and waits for you to move it, because no
-  checkpoint holds it and no undo could bring it back.
+  checkpoint holds it and no undo could bring it back. A nested Git
+  repository or a submodule in the way is refused the same way.
 - Everything changed since then is lost: that turn, later turns, other agents
   in the workspace, and edits you made by hand. The confirmation lists those
   files, and names the other agents' turns, before anything changes.
 - Tidebreak saves the state it replaces. The conversation shows the restore
   with an **Undo** that puts that state back. If a restore stops partway,
-  Tidebreak puts back the files it had changed; when it cannot, the **Undo**
-  on the restore puts back everything the restore replaced.
+  Tidebreak puts back the files it had changed and checks each one. The
+  **Undo** stays on the restore however it ended, so you can always put back
+  everything it replaced.
 - Your commits and your branch stay as they are. If a turn committed, the
   restore shows up as uncommitted changes that undo the commit.
 - The agent still remembers the turns a restore undid. When you send your next
@@ -125,9 +127,10 @@ empty to use the suggested one. If Git refuses the commit, for example because
 a hook failed, the box shows what the hook printed. A hook or a signing prompt
 gets ten minutes before Tidebreak stops the commit and says so. To throw away
 a file's uncommitted changes, open its menu in the list and choose **Discard
-uncommitted changes**. Discard puts the file back to its last commit, under its
-old name if you renamed it and have not committed the rename. It refuses when
-a folder you did not pick stands where the file goes, and it cannot be undone.
+uncommitted changes**. Discard changes only the paths that row shows: the file
+goes back to its last commit, and a rename you have not committed goes back
+to the old name. It refuses when a folder you did not pick stands where the
+file goes, and it cannot be undone.
 
 Restore, revert, discard, and commit refuse while a turn runs, and commit also
 refuses while a message waits in the queue, so an agent never has its files

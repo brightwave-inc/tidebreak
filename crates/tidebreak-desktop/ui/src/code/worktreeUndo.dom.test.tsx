@@ -453,9 +453,9 @@ const PREVIEW: CodeCheckpointRestorePreview = {
 };
 
 describe("the undo flows", () => {
-  it("discards a renamed file by the path the list shows", async () => {
-    // The list names the file by its new path. Its old path may be a
-    // committed rename, which has nothing uncommitted to discard.
+  it("discards exactly the two paths a renamed row names", async () => {
+    // The server touches no other path, and leaves the old path alone when
+    // the rename is already committed and it has nothing to discard.
     const client = undoClient();
     render(
       <UndoHarness
@@ -480,7 +480,7 @@ describe("the undo flows", () => {
     );
     expect(client.discardCodeWorkspaceChanges).toHaveBeenCalledWith(
       "ws-1",
-      ["notes.md"],
+      ["notes.md", "notes.txt"],
       "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
     );
   });
@@ -543,18 +543,43 @@ describe("a restore row", () => {
     error: null,
   };
 
-  it("offers no undo for a restore that changed nothing", () => {
+  it("keeps the way back for a restore that put every file back", async () => {
+    // The server says nothing changed only after it checks each file it
+    // moved. Undo stays anyway, so a wrong check never strands a file.
+    const onUndo = vi.fn();
     render(
       <CheckpointRestoreRow
-        restore={{ ...row, status: "failed", error: "git refused" }}
-        onUndo={vi.fn()}
+        restore={{ ...row, status: "failed", error: "The disk is full." }}
+        onUndo={onUndo}
       />,
     );
     expect(
       screen.getByText("Could not restore. Nothing changed."),
     ).toBeVisible();
-    expect(screen.getByText("git refused")).toBeVisible();
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByText("The disk is full.")).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Put back the files the restore replaced",
+      }),
+    );
+    expect(onUndo).toHaveBeenCalledWith("r-1");
+  });
+
+  it("keeps the way back for a restore the app never finished", () => {
+    render(
+      <CheckpointRestoreRow
+        restore={{ ...row, status: "started" }}
+        onUndo={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText("Started restoring to before turn 2"),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", {
+        name: "Put back the files the restore replaced",
+      }),
+    ).toBeEnabled();
   });
 
   it("keeps the way back for a restore that stopped partway", async () => {

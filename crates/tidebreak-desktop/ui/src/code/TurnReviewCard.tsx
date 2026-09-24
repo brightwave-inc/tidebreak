@@ -411,9 +411,10 @@ function TurnActionsMenu({
  * A restore runs between turns, so it reads as one of the quiet seams rather
  * than as a card. It lands as started before any file moves and changes in
  * place when the restore ends. Undo is a restore too, and it asks first, like
- * this one did. A restore that failed changed nothing, so it has nothing to
- * undo; one that stopped partway keeps its Undo, which puts back every file
- * it replaced.
+ * this one did. Every row keeps its Undo, whatever its status: the state the
+ * restore replaced is saved before any file moves, and putting it back is
+ * the way out of a restore that stopped partway or never finished. After one
+ * that verifiably changed nothing, Undo finds nothing to do and says so.
  */
 export function CheckpointRestoreRow({
   restore,
@@ -427,7 +428,6 @@ export function CheckpointRestoreRow({
 }) {
   const undoing = restore.target.kind === "before_restore";
   const label = restoreLabel(restore);
-  const offerUndo = onUndo && restore.status !== "failed";
   return (
     <SeamRow
       label={label}
@@ -447,7 +447,7 @@ export function CheckpointRestoreRow({
       {restore.status !== "failed" && hasFileChanges(restore.diffstat) && (
         <DiffstatBadge stat={restore.diffstat} />
       )}
-      {offerUndo && (
+      {onUndo && (
         <button
           type="button"
           className={cn(
@@ -458,11 +458,11 @@ export function CheckpointRestoreRow({
           disabled={undoUnavailableReason !== undefined}
           title={undoUnavailableReason}
           aria-label={
-            restore.status === "partial"
-              ? "Put back the files the restore replaced"
-              : undoing
+            restore.status === "completed"
+              ? undoing
                 ? "Redo the restore"
                 : "Undo the restore"
+              : "Put back the files the restore replaced"
           }
           onClick={() => onUndo(restore.restoreId)}
         >

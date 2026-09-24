@@ -194,9 +194,11 @@ for `run` and `watch`). `code session start` takes `--reasoning <level>` and
 and undoes every change made since, including your own and other agents'.
 `--turn N` names the turn the way `code diff` does. Run it with `--dry-run`
 first to list what it would undo, including other agents' turns. It refuses
-while a turn runs, and while an ignored file or anything else no checkpoint
-holds is in the way; the refusal names those files. A restore prints its id;
-pass it to `--undo` to put back what the restore replaced.
+while a turn runs; while an ignored file, a nested repository, or anything
+else no checkpoint holds is in the way, and the refusal names those files;
+and when the checkpoint from just before that turn is gone. A restore prints
+its id, and a restore that stops partway names it in its error; pass it to
+`--undo` to put back what the restore replaced.
 
 `code git commit` refuses at once while a turn runs or a message waits in the
 workspace's queue, so it never commits a turn's work under your message.

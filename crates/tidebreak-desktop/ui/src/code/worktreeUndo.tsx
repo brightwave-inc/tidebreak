@@ -448,12 +448,12 @@ export function useWorktreeUndo({
     ): Promise<boolean> => {
       if (!(await confirm(discardConfirmation(file)))) return false;
       try {
-        // The file as the list names it. The server puts a renamed file
-        // back under its committed name, whether or not the rename itself
-        // was committed.
+        // Exactly the row's paths: a renamed file's row names both. The
+        // server touches nothing else, and leaves a named path that has
+        // nothing to discard, such as a rename the branch already committed.
         await client.discardCodeWorkspaceChanges(
           workspaceId,
-          [file.path],
+          file.previous_path ? [file.path, file.previous_path] : [file.path],
           expectedTree,
         );
       } catch (error) {
