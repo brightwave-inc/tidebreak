@@ -387,8 +387,7 @@ fn camel_parts(chars: &[char], start: usize, end: usize) -> Vec<(usize, usize)> 
     };
     let mut starts = vec![start];
     let mut previous: Option<char> = None;
-    for index in start..end {
-        let c = chars[index];
+    for (index, &c) in chars.iter().enumerate().take(end).skip(start) {
         if is_combining_mark(c) {
             continue;
         }
@@ -883,7 +882,7 @@ mod tests {
             "{} characters",
             snippet.chars().count()
         );
-        assert_eq!(matched, [query.clone()]);
+        assert_eq!(matched, [query]);
 
         // A match whose accents make it longer than the snippet is cut at the
         // snippet's end, and so is its range.
