@@ -332,6 +332,7 @@ where
         .await
         .map_err(store_err)?;
     }
+    super::message_search::index_chat_message_on(conn, input_message_id).await?;
     Ok(())
 }
 
@@ -943,6 +944,13 @@ where
         .await
         .map_err(store_err)?;
     }
+    // A regenerate or an edit takes the attempt it replaced out of the
+    // conversation, and out of search with it. The message is indexed after
+    // the turn row exists, so a retry's copy of the question is recognized.
+    if replaces.is_some_and(|(_, kind)| kind.removes_replaced()) {
+        super::message_search::drop_replaced_turns_on(conn, chat_id).await?;
+    }
+    super::message_search::index_chat_message_on(conn, input_message_id).await?;
     entities::turn::Entity::find_by_id(id.0)
         .one(conn)
         .await

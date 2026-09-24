@@ -224,6 +224,13 @@ fn sqlite_read_policy(
 }
 
 impl DbStore {
+    /// Add the history of up to `sessions` conversations that predate the
+    /// message index, newest activity first, and answer how many are still
+    /// waiting. The server calls this until it answers zero.
+    pub async fn backfill_message_search(&self, sessions: u64) -> Result<u64> {
+        ops::message_search::backfill(self, sessions).await
+    }
+
     fn from_connection(conn: StoreConnection) -> Self {
         Self {
             conn,
@@ -1288,6 +1295,14 @@ impl Store for DbStore {
         memory_incognito: bool,
     ) -> Result<bool> {
         ops::conversation::set_chat_memory_incognito(self, id, memory_incognito, Some(owner)).await
+    }
+
+    async fn search_messages_scoped(
+        &self,
+        owner: &OwnerId,
+        request: &crate::message_search::MessageSearchRequest,
+    ) -> Result<crate::message_search::MessageSearchPage> {
+        ops::message_search::search_messages(self, owner, request).await
     }
 
     async fn update_chat_metadata_scoped(

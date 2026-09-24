@@ -715,6 +715,9 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/memory/records/{id}/revisions", get(routes::revisions))
         .route("/memory/search", get(routes::search))
+        // Search what was said in the caller's own chats and code sessions.
+        // Member plane: it reads only the caller's conversations.
+        .route("/search/messages", get(routes::search_messages))
         .route("/memory/digest", get(routes::digest))
         .route("/memory/sweep", get(routes::sweep_status))
         .route(

@@ -600,6 +600,19 @@ pub trait Store: Send + Sync {
         self.set_chat_memory_incognito(id, memory_incognito).await
     }
 
+    /// Search what was said in `owner`'s Work chats and code sessions,
+    /// newest match first.
+    ///
+    /// Only conversations `owner` owns are read, and never one with memory
+    /// incognito on. A turn a regenerate or an edit replaced is not a match.
+    /// The page also says whether the index has caught up with conversations
+    /// older than it.
+    async fn search_messages_scoped(
+        &self,
+        owner: &OwnerId,
+        request: &crate::message_search::MessageSearchRequest,
+    ) -> Result<crate::message_search::MessageSearchPage>;
+
     /// `owner`'s conversations as their list of work shows them: pinned
     /// first, then by latest activity. `archived` picks the archive instead.
     ///

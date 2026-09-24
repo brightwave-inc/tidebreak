@@ -355,6 +355,14 @@ impl Store for TerminalFaultStore {
         self.inner.create_project(project).await
     }
 
+    async fn search_messages_scoped(
+        &self,
+        owner: &tidebreak_core::OwnerId,
+        request: &tidebreak_core::MessageSearchRequest,
+    ) -> Result<tidebreak_core::MessageSearchPage> {
+        self.inner.search_messages_scoped(owner, request).await
+    }
+
     async fn get_project(
         &self,
         id: tidebreak_core::ProjectId,

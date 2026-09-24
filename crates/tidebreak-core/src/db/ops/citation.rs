@@ -68,6 +68,7 @@ pub(in crate::db) async fn append_assistant_message(
     .await
     .map_err(store_err)?;
     insert_for_message_on(&transaction, message, citations).await?;
+    super::message_search::index_chat_message_on(&transaction, message.id).await?;
     transaction.commit().await.map_err(store_err)
 }
 
@@ -148,6 +149,7 @@ pub(in crate::db) async fn append_claimed_assistant_message(
     .await
     .map_err(store_err)?;
     insert_for_message_on(&transaction, message, citations).await?;
+    super::message_search::index_chat_message_on(&transaction, message.id).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(AppendClaimedMessageOutcome::Appended)
 }

@@ -96,6 +96,17 @@ impl ScopedStore {
         self.store.list_chats_scoped(&self.owner).await
     }
 
+    /// Search what was said in the principal's own chats and code sessions,
+    /// newest match first. Nobody else's conversation is ever read.
+    pub async fn search_messages(
+        &self,
+        request: &tidebreak_core::MessageSearchRequest,
+    ) -> Result<tidebreak_core::MessageSearchPage> {
+        self.store
+            .search_messages_scoped(&self.owner, request)
+            .await
+    }
+
     /// The principal's conversations as their list of work shows them:
     /// pinned first, then by latest activity. `archived` picks the archive.
     pub async fn list_chat_listings(&self, archived: bool) -> Result<Vec<ChatListing>> {

@@ -364,6 +364,7 @@ async fn complete_turn_inner(
         return Err(store_err(error));
     }
     super::super::citation::insert_for_message_on(&transaction, output, citations).await?;
+    super::super::message_search::index_chat_message_on(&transaction, output.id).await?;
 
     let mut completed = entities::turn::Entity::update_many()
         .col_expr(

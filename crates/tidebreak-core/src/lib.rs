@@ -89,6 +89,7 @@ pub mod keychain;
 pub mod local_app;
 pub mod memory;
 pub mod memory_tool;
+pub mod message_search;
 pub mod model;
 pub mod permission;
 pub use permission::PermissionMode;
@@ -332,6 +333,10 @@ pub use memory::{
     MemorySweepStatus, MemoryWriteReceipt, MemoryWriteState, DEFAULT_MEMORY_ACTIVE_RECORD_CAP,
     DEFAULT_MEMORY_DIGEST_BYTES, MAX_MEMORY_BODY_BYTES, MAX_MEMORY_EVIDENCE, MAX_MEMORY_LINKS,
     MAX_MEMORY_SEARCH_RESULTS, MAX_MEMORY_TITLE_CHARS,
+};
+pub use message_search::{
+    MessageSearchCursor, MessageSearchHit, MessageSearchIndexing, MessageSearchKind,
+    MessageSearchPage, MessageSearchRange, MessageSearchRequest, MessageSearchSource,
 };
 pub use memory_tool::{
     memory_tool_spec, parse_memory_tool_arguments, MemoryToolArgs, MemoryToolVerb, MEMORY_TOOL,

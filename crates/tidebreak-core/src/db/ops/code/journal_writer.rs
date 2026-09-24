@@ -45,7 +45,7 @@ use crate::error::{AgentError, Result};
 use crate::{NotificationKind, OwnerId};
 
 use super::super::super::{entities, store_err, DbStore};
-use super::journal::event_row;
+use super::journal::event_row_at;
 use super::JournalError;
 
 /// Most appends one transaction commits. A longer queue waits for the next
@@ -267,6 +267,9 @@ async fn write_batch(
     let mut outcomes = Vec::with_capacity(batch.len());
     let mut rows = Vec::with_capacity(batch.len());
     let mut mints = Vec::new();
+    // What the message index reads, per session, in sequence order.
+    let mut journaled: HashMap<SessionId, Vec<(i64, &serde_json::Value, chrono::DateTime<chrono::Utc>)>> =
+        HashMap::new();
     for pending in batch {
         let append = &pending.append;
         let fence = fences
@@ -274,11 +277,18 @@ async fn write_batch(
             .filter(|fence| fence.owner == append.owner.as_str());
         match admit(&transaction, append, fence).await? {
             Ok(Admitted { seq, notification }) => {
-                rows.push(event_row(
+                let created_at = chrono::Utc::now();
+                journaled.entry(append.session_id).or_default().push((
+                    seq,
+                    &append.event,
+                    created_at,
+                ));
+                rows.push(event_row_at(
                     &append.owner,
                     append.session_id,
                     seq,
                     append.event.clone(),
+                    created_at,
                 ));
                 if let Some(mint) = notification {
                     mints.push((append, mint));
@@ -293,6 +303,10 @@ async fn write_batch(
             .exec_without_returning(&transaction)
             .await
             .map_err(store_err)?;
+    }
+    for (session_id, events) in &journaled {
+        super::super::message_search::index_code_events_on(&transaction, *session_id, events)
+            .await?;
     }
     for (append, mint) in mints {
         record_notification(&transaction, append, mint).await?;

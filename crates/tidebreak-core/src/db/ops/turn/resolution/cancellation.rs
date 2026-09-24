@@ -557,6 +557,8 @@ async fn finish_turn_cancellation_inner(
             message.insert(&transaction).await.map_err(store_err)?;
             super::super::super::citation::insert_for_message_on(&transaction, output, citations)
                 .await?;
+            super::super::super::message_search::index_chat_message_on(&transaction, output.id)
+                .await?;
             Some(output.id.0)
         }
         None => None,
