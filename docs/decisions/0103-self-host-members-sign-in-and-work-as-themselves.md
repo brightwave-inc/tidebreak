@@ -39,7 +39,13 @@ processes run apart from the server and from each other.
 Every principal that runs work, person or service, gets an operating-system
 account id from a range the operator sets, inside the first 65,536 ids so that
 rootless runtimes can map it. The server records each id and never reuses one,
-so no member inherits a departed member's files.
+so no member inherits a departed member's files. Each principal's primary group
+has the same number as its account. The range must exclude the server's own
+account and group and every group the server holds for secret files, such as
+the host group that `group_add` passes in as `TIDEBREAK_HOST_GID`. A principal
+whose group matched that one would read `tokens` and `secret.key` through its
+own group. The server refuses to boot when the range overlaps any of them, and
+the launcher refuses such an id.
 
 The image gains a launcher, a small setuid-root program that runs a process as a
 principal's account. It accepts requests only from the server's account, refuses
@@ -165,8 +171,10 @@ client, which keeps decision 98's refusal of OIDC machines.
 Each slice is one pull request, in this order. Slices 1 to 3 close #3590.
 
 1. The launcher and account ids, unused. Tests: ids are stable per owner and
-   never reused; the launcher refuses another caller, an out-of-range id, and
-   root; the probe reports the fallback under `no-new-privileges`.
+   never reused; the launcher refuses another caller, an out-of-range id, root,
+   and an id whose group equals the server's group or a secret-file group; a
+   range that overlaps those groups refuses the boot; the probe reports the
+   fallback under `no-new-privileges`.
 2. One runner for every process and write that code mode makes in a checkout,
    still as the server. Test: a source contract test fails on any other spawn.
 3. Isolation on, checkouts handed over, and the #3590 caveat removed from the
@@ -249,7 +257,10 @@ common platforms cannot run the launcher, or for a forge other than GitHub.
   Stripping variables alone passes an `env` check and fails here.
 - A member process holds only its own group. A launcher that skips `setgroups`
   passes every uid check, then reads `tokens` and `secret.key` through the host
-  group.
+  group. The image test also sets the range so that it would hand a member the
+  host group's number, and requires the boot to refuse: an allocator that only
+  avoids the server's own uid passes every other check and gives that member
+  the secret files.
 - A member's checkout holds a link to the key file when it is handed over.
   Afterward, the key file still belongs to the server. A handover that follows
   links, as a plain recursive `chown` can, gives the member the key file.
