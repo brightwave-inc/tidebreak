@@ -72,14 +72,34 @@ export async function createFixtureRepository(
   return checkout;
 }
 
-/** The subject of a checkout's latest commit. */
-export async function latestCommitSubject(
+/**
+ * A checkout's latest commit: its subject, the files it changed as
+ * `<status>\t<path>` lines, and whether anything is left uncommitted.
+ */
+export async function latestCommit(
   checkout: string,
   root: string,
-): Promise<string> {
-  return (
-    await git(checkout, join(root, "git-home"), "log", "-1", "--format=%s")
+): Promise<{ subject: string; changes: string[]; clean: boolean }> {
+  const home = join(root, "git-home");
+  const subject = (
+    await git(checkout, home, "log", "-1", "--format=%s")
   ).trim();
+  const changes = (
+    await git(checkout, home, "show", "--name-status", "--format=", "HEAD")
+  )
+    .split("\n")
+    .filter((line) => line.trim() !== "");
+  const status = await git(checkout, home, "status", "--porcelain");
+  return { subject, changes, clean: status.trim() === "" };
+}
+
+/** The bytes of `path` as the checkout's latest commit holds them. */
+export async function committedFile(
+  checkout: string,
+  root: string,
+  path: string,
+): Promise<string> {
+  return await git(checkout, join(root, "git-home"), "show", `HEAD:${path}`);
 }
 
 /**

@@ -2,18 +2,19 @@ import { registerRepository } from "../harness/api";
 import { startWorkspace, workspaceCheckouts } from "../harness/code";
 import { expect, openApp, test } from "../harness/fixtures";
 import {
+  committedFile,
   createFixtureRepository,
-  latestCommitSubject,
+  latestCommit,
 } from "../harness/repository";
 import { codeTurn } from "../harness/scripts";
+
+const CONTENTS = "hello from the scripted engine\n";
 
 test.use({
   scripts: {
     harness: codeTurn({
       reply: "Added hello.txt.",
-      writes: [
-        { path: "hello.txt", contents: "hello from the scripted engine\n" },
-      ],
+      writes: [{ path: "hello.txt", contents: CONTENTS }],
     }),
   },
 });
@@ -48,8 +49,15 @@ test("a commit from source control lands on the workspace branch", async ({
   await expect(
     main.getByRole("button", { name: "Workspace status: Unpushed commits" }),
   ).toBeVisible();
+  // The commit on the workspace branch carries the engine's file, and
+  // nothing is left behind uncommitted.
   const [checkout] = workspaceCheckouts(machine);
-  expect(await latestCommitSubject(checkout, machine.root)).toBe(
-    "Add the hello file",
+  expect(await latestCommit(checkout, machine.root)).toEqual({
+    subject: "Add the hello file",
+    changes: ["A\thello.txt"],
+    clean: true,
+  });
+  expect(await committedFile(checkout, machine.root, "hello.txt")).toBe(
+    CONTENTS,
   );
 });

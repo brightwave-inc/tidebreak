@@ -1,16 +1,18 @@
-import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, join } from "node:path";
 
 import { connectScriptedModel } from "../harness/api";
 import { expect, openApp, test } from "../harness/fixtures";
 import type { Machine } from "../harness/machine";
 import { writeFile } from "../harness/scripts";
 
+const NOTES = "# Notes\n\nKeep these.\n";
+
 test.use({
   scripts: {
     // Two turns of two steps each: ask to write a file, then answer.
     provider: [
-      writeFile("notes.md", "# Notes\n\nKeep these.\n"),
+      writeFile("notes.md", NOTES),
       { text: "Saved notes.md." },
       writeFile("draft.md", "# Draft\n\nDo not keep this.\n"),
       { text: "Left draft.md alone." },
@@ -78,15 +80,23 @@ test("a file write waits for approval, runs when allowed, and stops when denied"
   await expect(
     main.getByRole("listitem").filter({ hasText: /draft\.md\s*\d+\s*B/ }),
   ).toHaveCount(0);
-  expect(scratchFiles(machine)).toContain("notes.md");
-  expect(scratchFiles(machine)).not.toContain("draft.md");
+  const written = scratchFiles(machine);
+  const notes = written.filter((path) => basename(path) === "notes.md");
+  expect(notes).toHaveLength(1);
+  expect(readFileSync(notes[0], "utf8")).toBe(NOTES);
+  expect(readFileSync(notes[0])).toHaveLength(21);
+  expect(written.map((path) => basename(path))).not.toContain("draft.md");
 });
 
-/** The files in every conversation workspace on the machine. */
+/** The files in every conversation workspace on the machine, as full paths. */
 function scratchFiles(machine: Machine): string[] {
   const scratch = join(machine.dataDir, "scratch");
   if (!existsSync(scratch)) return [];
   return readdirSync(scratch, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
-    .flatMap((entry) => readdirSync(join(scratch, entry.name)));
+    .flatMap((entry) =>
+      readdirSync(join(scratch, entry.name)).map((file) =>
+        join(scratch, entry.name, file),
+      ),
+    );
 }
