@@ -21,7 +21,7 @@ Two transports:
 | **Arguments** | One per row. |
 | **Working directory** | Where to run it. |
 | **Environment** | Name/value pairs passed to the process. The values are kept in the OS credential store. |
-| **Forward environment names** | Variables to pass through from your own environment by name, without copying their values into the config. `HOME` and `PATH` are forwarded by default, so a script such as `npx` finds `node`. Name either one here to replace it. |
+| **Forward environment names** | Variables to pass through from your own environment by name, without copying their values into the config. `HOME` and `PATH` are forwarded by default, so a script such as `npx` finds `node`. The forwarded `PATH` keeps only absolute directories. A name you list here or under **Environment** replaces the default, and gets no default while its value is missing. |
 
 In the desktop app, saving a local server asks first in an OS dialog, which
 names the absolute path of the program that will run. For a bare name such as

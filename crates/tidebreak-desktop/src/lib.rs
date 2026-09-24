@@ -585,17 +585,15 @@ fn native_command_previews(
             })
             .collect();
         let safe_name = native_command_token(name)?;
-        // The definition's own names replace a default, so only the defaults
-        // it leaves alone are listed as forwarded by default.
-        let forwarded_by_default = tidebreak_server::mcp_stdio::FORWARDED_BY_DEFAULT
-            .into_iter()
-            .filter(|name| {
-                inherited_from_desktop_process
-                    .binary_search_by(|inherited| inherited.as_str().cmp(name))
-                    .is_err()
-                    && !stored_secrets.iter().any(|stored| stored.name == *name)
-            })
-            .collect();
+        // A name the definition declares never gets the default, stored value
+        // or not. The spawn asks the same function, so the dialog lists
+        // exactly the defaults the process gets.
+        let forwarded_by_default = tidebreak_server::mcp_stdio::defaulted_names(
+            inherited_from_desktop_process
+                .iter()
+                .map(String::as_str)
+                .chain(stored_secrets.iter().map(|stored| stored.name.as_str())),
+        );
         let manifest = serde_json::to_string_pretty(&NativeCommandApproval {
             server: &safe_name,
             executable,
@@ -1911,6 +1909,24 @@ mod server_info_tests {
         assert_eq!(
             approved_bare_commands(&resolved),
             std::collections::BTreeMap::from([("npx".to_owned(), "/opt/tools/bin/npx".to_owned())])
+        );
+    }
+
+    /// A name the definition declares in `env` gets no default even while
+    /// no value is stored for it, and the dialog lists the same defaults the
+    /// server's spawn gives the process.
+    #[test]
+    fn a_declared_name_without_a_stored_value_is_not_listed_as_defaulted() {
+        let approval = single_native_approval(serde_json::json!({
+            "servers": [{"name": "docs", "command": "/usr/bin/docs-mcp", "env": ["PATH"]}]
+        }));
+        assert_eq!(
+            approval["environment"]["forwarded_by_default"],
+            serde_json::json!(tidebreak_server::mcp_stdio::defaulted_names(["PATH"]))
+        );
+        assert_eq!(
+            approval["environment"]["forwarded_by_default"],
+            serde_json::json!(["HOME"])
         );
     }
 

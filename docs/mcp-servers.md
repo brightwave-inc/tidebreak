@@ -24,10 +24,13 @@ Each server has:
     captures (plus `PATHEXT` on Windows). Tidebreak never invokes a shell to
     run the server. The stored definition keeps what you typed. A relative path
     that contains separators is refused. Every stdio child gets `HOME` and a
-    `PATH` set to that same search path, so a script such as `npx` finds
-    `node` and its cache; Settings lists both as forwarded names. Name `HOME`
-    or `PATH` under Environment or Forward environment names to replace the
-    default; or
+    `PATH` set to the absolute directories of that same search path, so a
+    script such as `npx` finds `node` and its cache; Settings lists both as
+    forwarded names. A relative directory such as `.` never reaches the child,
+    so a script's `#!/usr/bin/env node` cannot pick up a `node` from its
+    working directory. Name `HOME` or `PATH` under Environment or Forward
+    environment names to replace the default; a name you declare gets no
+    default, even before its value is stored; or
   - **HTTP** — an `http`/`https` URL, one way to authenticate, and up to eight
     custom headers. The authentication is one of: none; a bearer token
     variable name selected from the Tidebreak host environment

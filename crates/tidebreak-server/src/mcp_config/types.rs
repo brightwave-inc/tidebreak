@@ -454,9 +454,11 @@ impl McpServerDefinition {
             return Ok(command);
         }
         // HOME and the PATH the command was resolved on, so a script such as
-        // `npx` finds `node` and its cache. A name the definition sets itself
-        // replaces the default below.
-        for (name, value) in super::stdio::forwarded_by_default().await {
+        // `npx` finds `node` and its cache. A name the definition declares
+        // itself never gets the default, even while its stored value is
+        // missing: the child gets the declared value below, or none.
+        let declared = self.env.iter().chain(&self.env_from).map(String::as_str);
+        for (name, value) in super::stdio::forwarded_by_default(declared).await {
             command.env(name, value);
         }
         for name in &self.env_from {

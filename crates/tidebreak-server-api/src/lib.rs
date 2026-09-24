@@ -50,7 +50,7 @@ pub use core::{
 /// process gets by default.
 pub mod mcp_stdio {
     pub use tidebreak_server_core::mcp_config::{
-        is_bare_command, resolve_stdio_executable, resolve_stdio_executable_on,
+        defaulted_names, is_bare_command, resolve_stdio_executable, resolve_stdio_executable_on,
         FORWARDED_BY_DEFAULT,
     };
 }

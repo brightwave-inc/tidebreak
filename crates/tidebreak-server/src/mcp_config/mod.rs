@@ -23,7 +23,7 @@ mod tests;
 
 pub use runtime::*;
 pub use stdio::{
-    is_bare_command, resolve_stdio_executable, resolve_stdio_executable_on,
+    defaulted_names, is_bare_command, resolve_stdio_executable, resolve_stdio_executable_on,
     FORWARDED_BY_DEFAULT,
 };
 pub use types::*;

@@ -23,8 +23,8 @@ const MAX_SEARCHED_DIRS: usize = 8;
 
 /// The environment names every user-configured stdio child gets by default:
 /// the desktop process's HOME, and the host search PATH its command was
-/// resolved on. A name the definition sets itself, in `env` or `env_from`,
-/// replaces the default.
+/// resolved on. A name the definition declares itself, in `env` or
+/// `env_from`, never gets the default; see [`defaulted_names`].
 pub const FORWARDED_BY_DEFAULT: [&str; 2] = ["HOME", "PATH"];
 
 /// How a spawn failure starts when a bare command would run a program the
@@ -210,18 +210,53 @@ pub fn resolve_stdio_executable_on(
     resolve_stdio_command_on_path(command, search_path).map_err(|error| error.diagnostic())
 }
 
-/// The values of the names [`FORWARDED_BY_DEFAULT`] lists. HOME is this
-/// process's. PATH is the host search path a bare command resolves on, so a
-/// script such as `npx` finds the `node` beside it. A name with no value
-/// here stays unset.
-pub(super) async fn forwarded_by_default() -> Vec<(&'static str, OsString)> {
-    let mut forwarded = Vec::with_capacity(FORWARDED_BY_DEFAULT.len());
-    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
-        forwarded.push(("HOME", home));
+/// The [`FORWARDED_BY_DEFAULT`] names a local server's child gets by
+/// default, for a definition that declares the environment names `declared`
+/// in `env` or `env_from`.
+///
+/// A declared name never gets the default, even while its stored value is
+/// missing, as it is after an import: the child gets the value the
+/// definition names, or none. The spawn and the desktop's native dialog both
+/// ask this function, so the dialog lists exactly the names the child gets.
+pub fn defaulted_names<'a>(declared: impl IntoIterator<Item = &'a str>) -> Vec<&'static str> {
+    let declared: Vec<&str> = declared.into_iter().collect();
+    FORWARDED_BY_DEFAULT
+        .into_iter()
+        .filter(|name| {
+            !declared
+                .iter()
+                .any(|declared| same_environment_name(declared, name))
+        })
+        .collect()
+}
+
+/// Environment names compare without case on Windows, whose process
+/// environment ignores case, and exactly everywhere else.
+fn same_environment_name(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
     }
-    let path = host_search_path().await;
-    if !path.is_empty() {
-        forwarded.push(("PATH", path));
+}
+
+/// The values of the [`defaulted_names`] for a definition that declares
+/// `declared`. HOME is this process's. PATH is the host search path a bare
+/// command resolves on, so a script such as `npx` finds the `node` beside
+/// it. A name with no value here stays unset.
+pub(super) async fn forwarded_by_default<'a>(
+    declared: impl IntoIterator<Item = &'a str>,
+) -> Vec<(&'static str, OsString)> {
+    let mut forwarded = Vec::with_capacity(FORWARDED_BY_DEFAULT.len());
+    for name in defaulted_names(declared) {
+        let value = match name {
+            "HOME" => std::env::var_os("HOME"),
+            "PATH" => Some(host_search_path().await),
+            _ => None,
+        };
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            forwarded.push((name, value));
+        }
     }
     forwarded
 }
@@ -274,12 +309,14 @@ fn classify_absolute(path: &Path) -> std::result::Result<PathBuf, StdioResolveEr
 }
 
 async fn host_search_path() -> OsString {
-    if let Some(overridden) = PATH_OVERRIDE
+    // A test's replacement stands in for the process PATH, and goes through
+    // the same merge, so it is cleaned the way a real one is.
+    let overridden = PATH_OVERRIDE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-    {
-        return overridden;
+        .clone();
+    if let Some(overridden) = overridden {
+        return merge_search_path(&overridden, None);
     }
     let process = std::env::var_os("PATH").unwrap_or_default();
     // Unit tests never start the person's login shell. A test that needs a
@@ -297,21 +334,26 @@ async fn host_search_path() -> OsString {
     merge_search_path(&process, login.as_deref())
 }
 
+/// The process PATH followed by the login-shell PATH, each directory once.
+///
+/// Only absolute directories stay. Resolution never searches a relative one,
+/// and a child given `.` or `node_modules/.bin` would look names up against
+/// its own working directory: a script's `#!/usr/bin/env node` could run a
+/// `node` from the checkout the server starts in.
 fn merge_search_path(process: &OsStr, login: Option<&OsStr>) -> OsString {
     let mut dirs = Vec::new();
     let mut seen = HashSet::new();
-    for source in [Some(process), login] {
-        let Some(source) = source else {
-            continue;
-        };
+    for source in [Some(process), login].into_iter().flatten() {
         for dir in std::env::split_paths(source) {
-            if dir.as_os_str().is_empty() || !seen.insert(dir.clone()) {
+            if !dir.is_absolute() || !seen.insert(dir.clone()) {
                 continue;
             }
             dirs.push(dir);
         }
     }
-    std::env::join_paths(dirs).unwrap_or_else(|_| process.to_os_string())
+    // `join_paths` refuses only a directory that contains the separator,
+    // which `split_paths` never yields.
+    std::env::join_paths(dirs).unwrap_or_default()
 }
 
 fn format_searched_directories(search_path: &OsStr) -> String {

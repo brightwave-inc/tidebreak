@@ -5067,3 +5067,83 @@ fn an_approved_program_belongs_only_to_a_bare_command() {
     }
 }
 
+/// Finding 2: the PATH a child was given kept relative entries, although
+/// resolution skips them. With `.` on the login PATH and a working directory
+/// in a checkout, a script's `#!/usr/bin/env node` ran the checkout's `node`.
+/// The forwarded PATH now keeps absolute directories only.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_forwarded_path_keeps_only_absolute_directories() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let checkout = tempfile::tempdir().unwrap();
+    let probe = "tidebreak-review-probe";
+    let planted = checkout.path().join(probe);
+    std::fs::write(&planted, "#!/bin/sh\nprintf checkout\n").unwrap();
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let json = serde_json::json!({"servers": [{
+        "name": "files",
+        "command": "/usr/bin/env",
+        "args": [probe],
+        "cwd": checkout.path(),
+    }]})
+    .to_string();
+    let config = parse(&json).unwrap();
+    let _path =
+        super::stdio::HostPathGuard::set(Some(".:node_modules/.bin:/usr/bin:/bin".into())).await;
+    let mut command = config.0[0]
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
+    let path = command
+        .as_std()
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .and_then(|(_, value)| value)
+        .map(std::ffi::OsStr::to_os_string);
+    assert_eq!(path, Some("/usr/bin:/bin".into()));
+    let output = command.output().await.unwrap();
+    assert_ne!(String::from_utf8_lossy(&output.stdout), "checkout");
+    assert!(!output.status.success(), "{output:?}");
+}
+
+/// Finding 3: a definition that declares PATH or HOME in `env` with no
+/// stored value, as after an import, still got the default, though the
+/// desktop's dialog said it would not. A declared name never gets the
+/// default: the child gets the stored value or none, and the dialog reads
+/// the same list.
+#[tokio::test]
+async fn a_declared_path_or_home_never_gets_the_default() {
+    let config =
+        parse(r#"{"servers":[{"name":"docs","command":"/bin/docs","env":["PATH","HOME"]}]}"#)
+            .unwrap();
+    let _path = super::stdio::HostPathGuard::set(Some("/opt/host/bin".into())).await;
+    let environment = |command: &tokio::process::Command| -> BTreeMap<String, String> {
+        command
+            .as_std()
+            .get_envs()
+            .filter_map(|(name, value)| {
+                Some((
+                    name.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect()
+    };
+    let unstored = config.0[0]
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
+    assert_eq!(environment(&unstored), BTreeMap::new());
+
+    let stored = BTreeMap::from([("PATH".to_string(), "/opt/declared/bin".to_string())]);
+    let command = config.0[0]
+        .build_command(&stored, CommandApproval::Optional)
+        .await
+        .unwrap();
+    assert_eq!(environment(&command), stored);
+
+    assert!(super::defaulted_names(["PATH", "HOME"]).is_empty());
+    assert_eq!(super::defaulted_names(["PATH"]), ["HOME"]);
+}
+
