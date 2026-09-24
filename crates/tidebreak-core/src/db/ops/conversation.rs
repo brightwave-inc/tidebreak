@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, QueryTrait, Set, TransactionTrait, TryInsertResult,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, EntityTrait,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait, Set, TransactionTrait, TryInsertResult,
 };
 use serde_json::Value;
 
@@ -22,7 +22,7 @@ use crate::provider::MessageReasoning;
 use crate::storage::{
     ChatTerminalTurnSnapshot, ChatTerminalTurnStatus, ChatToolActivitySnapshot,
     ChatToolActivityStatus, ChatTranscriptPage, ChatTranscriptSnapshot, DeleteChatOutcome,
-    MessageInvokedSkills, MoveChatOutcome, TranscriptPage, TurnEventAppend,
+    DiscardBranchOutcome, MessageInvokedSkills, MoveChatOutcome, TranscriptPage, TurnEventAppend,
 };
 use crate::PermissionMode;
 
@@ -1258,18 +1258,21 @@ async fn prune_empty_chat(
 /// Its folders came from its project when it was made, in the same
 /// transaction, and nothing has run in it since, so no folder change exists
 /// for it and no native authority was ever granted to it. The project keeps
-/// those folders. A folder change of any kind, a folder it did not get from
-/// its project, or running work refuses the discard exactly as it would a
-/// delete.
+/// those folders.
+///
+/// The branch is listed from the moment it commits, so someone may have used
+/// it before the refusal came back. Anything beyond the history it was made
+/// with keeps it: a turn or a queued message it was sent, a file added to it,
+/// a folder change, or a folder it did not get from its project.
 pub(in crate::db) async fn discard_branch(
     store: &DbStore,
     chat_id: SessionId,
     owner: Option<&OwnerId>,
-) -> Result<DeleteChatOutcome> {
+) -> Result<DiscardBranchOutcome> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
         transaction.rollback().await.map_err(store_err)?;
-        return Ok(DeleteChatOutcome::NotFound);
+        return Ok(DiscardBranchOutcome::NotFound);
     }
     let mut branch = entities::session::Entity::find_by_id(chat_id.0)
         .filter(internal_sessions())
@@ -1277,49 +1280,67 @@ pub(in crate::db) async fn discard_branch(
     if let Some(owner) = owner {
         branch = branch.filter(entities::session::Column::Owner.eq(owner.as_str()));
     }
-    if branch.one(&transaction).await.map_err(store_err)?.is_none() {
+    let Some(branch) = branch.one(&transaction).await.map_err(store_err)? else {
         transaction.rollback().await.map_err(store_err)?;
-        return Ok(DeleteChatOutcome::NotFound);
-    }
-    let active_turn = entities::turn::Entity::find()
+        return Ok(DiscardBranchOutcome::NotFound);
+    };
+    // A copied turn carries no admission fingerprint; every turn a message
+    // started does, and so does every running one.
+    let sent_a_turn = entities::turn::Entity::find()
         .filter(entities::turn::Column::SessionId.eq(chat_id.0))
-        .filter(entities::turn::Column::Status.is_not_in(TurnRunStatus::TERMINAL.iter().copied()))
+        .filter(
+            Condition::any()
+                .add(entities::turn::Column::Fingerprint.is_not_null())
+                .add(
+                    entities::turn::Column::Status
+                        .is_not_in(TurnRunStatus::TERMINAL.iter().copied()),
+                ),
+        )
         .one(&transaction)
         .await
         .map_err(store_err)?
         .is_some();
-    if active_turn {
-        transaction.rollback().await.map_err(store_err)?;
-        return Ok(DeleteChatOutcome::ActiveWork);
-    }
+    let queued = entities::code_queued_turn::Entity::find()
+        .filter(entities::code_queued_turn::Column::SessionId.eq(chat_id.0))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    // A copied document keeps the time it was first added, which is before
+    // the branch existed.
+    let added_a_file = entities::document::Entity::find()
+        .filter(entities::document::Column::ChatId.eq(chat_id.0))
+        .filter(entities::document::Column::CreatedAt.gte(branch.created_at))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
     let changed = entities::root_attachment_change::Entity::find()
         .filter(entities::root_attachment_change::Column::ChatId.eq(chat_id.0))
         .one(&transaction)
         .await
         .map_err(store_err)?
         .is_some();
-    let attached = entities::chat_root_attachment::Entity::find()
-        .filter(entities::chat_root_attachment::Column::ChatId.eq(chat_id.0))
-        .all(&transaction)
-        .await
-        .map_err(store_err)?;
     let from_project = attachment_origin_to_db(RootAttachmentOrigin::ProjectDefault);
-    if changed
-        || attached
-            .iter()
-            .any(|attachment| attachment.origin != from_project)
-    {
+    let other_folder = entities::chat_root_attachment::Entity::find()
+        .filter(entities::chat_root_attachment::Column::ChatId.eq(chat_id.0))
+        .filter(entities::chat_root_attachment::Column::Origin.ne(from_project))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if sent_a_turn || queued || added_a_file || changed || other_folder {
         transaction.rollback().await.map_err(store_err)?;
-        return Ok(DeleteChatOutcome::RootsAttached);
+        return Ok(DiscardBranchOutcome::Kept);
     }
     entities::chat_root_attachment::Entity::delete_many()
         .filter(entities::chat_root_attachment::Column::ChatId.eq(chat_id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    let background_run_ids = erase_quiesced_chat_on(&transaction, chat_id).await?;
+    erase_quiesced_chat_on(&transaction, chat_id).await?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(DeleteChatOutcome::Deleted { background_run_ids })
+    Ok(DiscardBranchOutcome::Discarded)
 }
 
 /// Remove one fully quiesced conversation and its terminal history.
@@ -1825,11 +1846,32 @@ where
     let Some(turns) = page.turns else {
         return Ok(window);
     };
+    // A retry sends its turn's message again, and the transcript shows the
+    // retried turn's message in its place. The copy never opens a page, so a
+    // page always starts at a message it shows and keeps a retry with the
+    // turn it continues.
+    let retry_copies: Vec<Option<uuid::Uuid>> = entities::turn::Entity::find()
+        .select_only()
+        .column(entities::turn::Column::InputMessageId)
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .filter(
+            entities::turn::Column::Replacement
+                .eq(crate::model::TurnReplacementKind::Retry.as_str()),
+        )
+        .into_tuple()
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    let retry_copies: Vec<uuid::Uuid> = retry_copies.into_iter().flatten().collect();
     // The user message that opens the oldest turn on this page. With fewer
     // turns left than asked for, the page runs to the start.
     let Some(boundary) = entities::message::Entity::find()
         .filter(entities::message::Column::ChatId.eq(chat_id.0))
         .filter(entities::message::Column::Role.eq(role_to_db(Role::User)))
+        .apply_if(
+            (!retry_copies.is_empty()).then_some(retry_copies),
+            |query, copies| query.filter(entities::message::Column::Id.is_not_in(copies)),
+        )
         .apply_if(page.before, |query, before| {
             query.filter(entities::message::Column::Seq.lt(before))
         })

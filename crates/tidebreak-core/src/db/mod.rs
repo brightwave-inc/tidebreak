@@ -2435,7 +2435,7 @@ impl Store for DbStore {
         &self,
         owner: &OwnerId,
         chat_id: SessionId,
-    ) -> Result<DeleteChatOutcome> {
+    ) -> Result<crate::storage::DiscardBranchOutcome> {
         ops::conversation::discard_branch(self, chat_id, Some(owner)).await
     }
 

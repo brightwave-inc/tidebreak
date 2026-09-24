@@ -10,8 +10,11 @@ type SeenRequest = Vec<(Role, String)>;
 #[derive(Clone, Default)]
 struct NumberedProvider {
     requests: Arc<Mutex<Vec<SeenRequest>>>,
-    /// Fail the first request with an error the worker does not retry.
-    fail_first: bool,
+    /// Fail this many first requests with an error the worker does not
+    /// retry.
+    fail_requests: usize,
+    /// Hold the first request until the test notifies this.
+    hold_first: Option<Arc<tokio::sync::Notify>>,
     /// Call [`INVOICE_TOOL`] first, then fail the next request.
     invoice_then_fail: bool,
 }
@@ -109,8 +112,11 @@ impl ModelProvider for NumberedProvider {
             requests.push(seen);
             requests.len()
         };
-        if self.fail_first && number == 1 {
+        if number <= self.fail_requests {
             return Err(AgentError::MissingCredential("no key yet".into()));
+        }
+        if let Some(hold) = self.hold_first.as_ref().filter(|_| number == 1) {
+            hold.notified().await;
         }
         // Send the invoice, then fail the way a provider outage does, with
         // the call already made.
@@ -326,7 +332,7 @@ async fn regenerating_keeps_the_earlier_answer_as_a_version_and_one_question() {
 #[tokio::test]
 async fn a_retry_after_a_failure_that_did_nothing_shows_one_question_and_the_answer() {
     let provider = NumberedProvider {
-        fail_first: true,
+        fail_requests: 1,
         ..NumberedProvider::default()
     };
     let (router, token, store, _dir) = test_app_with(Arc::new(provider.clone())).await;
@@ -1243,4 +1249,162 @@ async fn a_branch_whose_first_message_is_refused_is_removed_even_in_a_project_wi
         [chat.id],
         "no copy is left behind"
     );
+}
+
+#[tokio::test]
+async fn a_running_turn_is_refused_before_its_calls_are_read() {
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let provider = NumberedProvider {
+        hold_first: Some(hold.clone()),
+        ..NumberedProvider::default()
+    };
+    let (router, token, store, _dir) = test_app_with(Arc::new(provider.clone())).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "send the invoice").await,
+        StatusCode::ACCEPTED
+    );
+    // The turn is mid-step: its first request is out and unanswered.
+    for _ in 0..500 {
+        if provider.requests.lock().unwrap().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    let running = latest_turn(&store, chat.id).await;
+
+    // What the turn did is not final yet, so neither rerun reads it: both
+    // are refused as unsettled rather than judged on calls still to come.
+    for (action, body) in [
+        (
+            "edit",
+            serde_json::json!({ "new_turn_id": TurnId::new(), "content": "changed" }),
+        ),
+        (
+            "regenerate",
+            serde_json::json!({ "new_turn_id": TurnId::new() }),
+        ),
+    ] {
+        let response = post_json(
+            &router,
+            &bearer,
+            &format!("/chats/{}/turns/{running}/{action}", chat.id),
+            body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{action}");
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["kind"], "turn_unsettled", "{action}");
+    }
+
+    hold.notify_one();
+    wait_for_turns(&store, chat.id, 1).await;
+    assert!(store
+        .list_turn_replacements(chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn the_newest_page_names_the_latest_turn_after_retries_that_failed() {
+    let provider = NumberedProvider {
+        fail_requests: 3,
+        ..NumberedProvider::default()
+    };
+    let (router, token, store, _dir) = test_app_with(Arc::new(provider.clone())).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "try this").await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turns(&store, chat.id, 1).await;
+    // Two retries during the outage, each failing before it wrote anything.
+    for finished in [2, 3] {
+        let failed = latest_turn(&store, chat.id).await;
+        let response = post_json(
+            &router,
+            &bearer,
+            &format!("/chats/{}/turns/{failed}/retry", chat.id),
+            serde_json::json!({ "new_turn_id": TurnId::new() }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        wait_for_turns(&store, chat.id, finished).await;
+    }
+    let latest = latest_turn(&store, chat.id).await;
+
+    // The one-turn page a client reads to find the latest turn starts at the
+    // question the transcript shows, not at a hidden copy of it.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/messages?limit=1", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: serde_json::Value = json_body(response).await;
+    assert_eq!(
+        shown(&page),
+        [("user".to_owned(), "try this".to_owned(), latest.to_string())]
+    );
+}
+
+#[tokio::test]
+async fn a_branch_someone_already_used_is_kept_when_it_is_discarded() {
+    let provider = NumberedProvider::default();
+    let (router, token, store, _dir) = test_app_with(Arc::new(provider.clone())).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "first").await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turns(&store, chat.id, 1).await;
+    let through = latest_turn(&store, chat.id).await;
+    let branch = |router: Router, bearer: String| async move {
+        let response = post_json(
+            &router,
+            &bearer,
+            &format!("/chats/{}/turns/{through}/branch", chat.id),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let listing: ChatListing = json_body(response).await;
+        listing.chat.id
+    };
+    let owner = store.chat_owner(chat.id).await.unwrap().unwrap();
+
+    // Someone sends a message into the branch before the discard: it stays.
+    let used = branch(router.clone(), bearer.clone()).await;
+    assert_eq!(
+        send_message(&router, &bearer, used, "mine now").await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turns(&store, used, 2).await;
+    assert_eq!(
+        store.discard_branch_scoped(&owner, used).await.unwrap(),
+        tidebreak_core::DiscardBranchOutcome::Kept
+    );
+    assert!(store.get_chat(used).await.unwrap().is_some());
+
+    // A branch holding only the history it was made with goes.
+    let untouched = branch(router.clone(), bearer.clone()).await;
+    assert_eq!(
+        store
+            .discard_branch_scoped(&owner, untouched)
+            .await
+            .unwrap(),
+        tidebreak_core::DiscardBranchOutcome::Discarded
+    );
+    assert!(store.get_chat(untouched).await.unwrap().is_none());
 }

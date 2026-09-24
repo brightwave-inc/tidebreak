@@ -730,6 +730,18 @@ pub struct BranchChat {
     pub carry_documents: Vec<crate::id::DocumentId>,
 }
 
+/// Result of removing a branch whose first message was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardBranchOutcome {
+    /// The branch and the history copied into it are gone.
+    Discarded,
+    /// No branch the owner holds has this id.
+    NotFound,
+    /// Someone used the branch before the refusal came back, or it holds
+    /// something a discard cannot undo, so it stays.
+    Kept,
+}
+
 /// One tool call's identity and outcome, without its arguments or result.
 ///
 /// Enough to say what a turn did outside the conversation, and small enough

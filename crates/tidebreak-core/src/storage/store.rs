@@ -2256,14 +2256,14 @@ pub trait Store: Send + Sync {
     ///
     /// Unlike [`Store::delete_chat_scoped`], the folders its project gave it
     /// do not stand in the way: nothing ever ran in it, so no folder change
-    /// was ever made for it. Anything else that would stop a delete still
-    /// does, and a conversation that is not a branch is refused as
-    /// [`DeleteChatOutcome::NotFound`].
+    /// was ever made for it. A branch that holds anything beyond the history
+    /// it was made with is kept, and a conversation that is not a branch is
+    /// [`crate::storage::DiscardBranchOutcome::NotFound`].
     async fn discard_branch_scoped(
         &self,
         _owner: &OwnerId,
         _chat_id: SessionId,
-    ) -> Result<DeleteChatOutcome> {
+    ) -> Result<crate::storage::DiscardBranchOutcome> {
         turn_storage_unavailable()
     }
 

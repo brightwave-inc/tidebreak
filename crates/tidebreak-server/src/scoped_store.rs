@@ -682,7 +682,10 @@ impl ScopedStore {
 
     /// Remove one of the principal's branches whose first message was
     /// refused.
-    pub async fn discard_branch(&self, chat_id: SessionId) -> Result<DeleteChatOutcome> {
+    pub async fn discard_branch(
+        &self,
+        chat_id: SessionId,
+    ) -> Result<tidebreak_core::DiscardBranchOutcome> {
         self.store.discard_branch_scoped(&self.owner, chat_id).await
     }
 }

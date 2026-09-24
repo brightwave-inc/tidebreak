@@ -405,7 +405,11 @@ impl ClientFailure {
         let scrubbed = scrub_server_message(message);
         let detail = format!("({kind}) {scrubbed}");
         match (status, kind) {
-            (409, "native_unknown_outcome") => ClientFailure::UnknownOutcome { detail },
+            // A recovered request already ran: fetch its stored result the
+            // way an unknown outcome does, rather than report it as refused.
+            (409, "native_unknown_outcome" | "native_request_recovered") => {
+                ClientFailure::UnknownOutcome { detail }
+            }
             (400 | 409 | 422, _) => ClientFailure::InvalidArguments { detail },
             (401 | 403 | 501, _) => ClientFailure::ConfigurationRequired { detail },
             (404, _) => ClientFailure::NotFound { detail },

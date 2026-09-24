@@ -71,7 +71,10 @@ turn that can be rerun. The retried turn's tool activity, file changes,
 memory chips, and notice stay. Only a retried turn that left nothing but its
 notice drops the notice, because the answer below it says the same thing. A
 retry and the turns it retried form one attempt
-(`tidebreak_core::TurnPlacements`).
+(`tidebreak_core::TurnPlacements`). A transcript page never starts at a
+retry's copy of the question, so every page shows the question its turns
+answer, including the one-turn page a client reads to find the latest
+turn.
 
 **A regenerated or edited attempt leaves the model's view, and its rows
 stay.** Context assembly, the approval judge, memory capture, and chat
@@ -93,11 +96,13 @@ rerun branches before that attempt and sends the message in the branch. The
 rule fails closed: every call counts unless the reader declined it, it never
 ran, or its tool is on a reviewed list of tools that only read
 (`READ_ONLY_TOOLS` in `routes/turn_rerun.rs`). A tool added later counts
-until someone reviews it. The original keeps its record of what ran, which
-nothing undoes either way. The answer says so with `branched` and
-`side_effects`, and the transcript carries the latest turn's `side_effects`,
-so the desktop says so before anything is sent: in the editor for an edit,
-and in the Regenerate menu for a regenerate.
+until someone reviews it. The calls are read only once the turn has
+settled, because a running turn can still call a tool after the read; a
+settled turn never runs again, so the read is final. The original keeps its
+record of what ran, which nothing undoes either way. The answer says so with
+`branched` and `side_effects`, and the transcript carries the latest turn's
+`side_effects`, so the desktop says so before anything is sent: in the editor
+for an edit, and in the Regenerate menu for a regenerate.
 
 **A compaction summary goes where its view went.** A checkpoint summarizes
 the whole view it was written from, recent turns included, so it records the
@@ -122,6 +127,9 @@ the original (`<title> (branch)`) and keeps its model and settings. Branching
 from an earlier version copies that version. When a rerun's branch refuses
 its first message, the branch is removed, together with the folders its
 project gave it: nothing ran in it, so no folder change was ever made for it.
+A branch is listed as soon as it exists, so one that holds anything beyond
+the history it was made with, such as a message someone sent into it or a
+file added to it, is kept instead.
 
 Deliberately excluded: rerunning a turn that is not the latest; keeping edits
 as pageable versions; branching Code mode sessions differently (their fork is

@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use tidebreak_core::{
     BranchChat, BranchChatOutcome, Chat, ChatBranchPoint, ChatBranchRefusal, ChatListing,
-    DeleteChatOutcome, DocumentId, SessionId, TurnId, TurnReplacementKind,
+    DiscardBranchOutcome, DocumentId, SessionId, TurnId, TurnReplacementKind,
 };
 
 use crate::error::ServerError;
@@ -281,6 +281,11 @@ async fn rerun_or_branch(
         }
     }
 
+    // What a turn did is only final once it has settled: a running turn can
+    // still call a tool after the read, and settle before admission takes
+    // the lock. A settled turn never runs again, so this check makes the
+    // read below final; admission repeats it under the chat lock.
+    require_latest_settled(store, id, turn_id).await?;
     let side_effects = turn_side_effects(store, id, turn_id).await?;
     if side_effects.is_empty() {
         Box::pin(admit_turn(
@@ -306,11 +311,9 @@ async fn rerun_or_branch(
         ));
     }
 
-    // The same checks an in-place replacement gets under the chat lock. A
-    // branch copies history and leaves the original alone, so there is no
+    // A branch copies history and leaves the original alone, so there is no
     // lock to take; a turn that starts meanwhile only means the original
     // moved on.
-    require_latest_settled(store, id, turn_id).await?;
     let source = store.require_chat(id).await?;
     let mut answering = source.clone();
     if let Some(model) = &model {
@@ -372,12 +375,9 @@ async fn rerun_or_branch(
 /// removed is logged rather than reported in its place.
 async fn discard_refused_branch(state: &AppState, store: &ScopedStore, branch: SessionId) {
     match store.discard_branch(branch).await {
-        Ok(DeleteChatOutcome::Deleted { .. }) => state.blob_retirement_wake.notify_one(),
-        Ok(outcome) => tracing::warn!(
-            chat = %branch,
-            ?outcome,
-            "could not remove a branch whose first message was refused"
-        ),
+        Ok(DiscardBranchOutcome::Discarded) => state.blob_retirement_wake.notify_one(),
+        // Someone used it before the refusal came back; it is theirs now.
+        Ok(DiscardBranchOutcome::Kept | DiscardBranchOutcome::NotFound) => {}
         Err(error) => tracing::warn!(
             chat = %branch,
             %error,
