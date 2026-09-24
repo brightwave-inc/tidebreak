@@ -244,7 +244,7 @@ export function OutputsView({
           <p className="px-4 text-sm text-muted-foreground" role="status">
             Loading outputs for this conversation…
           </p>
-        ) : !hasOutputs ? (
+        ) : error && !hasOutputs ? null : !hasOutputs ? (
           <Empty>
             <EmptyHeader>
               <EmptyMedia variant="icon" className="text-icon-green">

@@ -111,6 +111,7 @@ import {
 } from "./nativeMenu";
 import { openInBrowser } from "./openInBrowser";
 import { SidebarExpandStrip } from "./sidebar/SidebarExpandStrip";
+import { useSidebarLayout } from "./sidebar/useSidebarLayout";
 import { Titlebar } from "./Titlebar";
 import { WindowDragStrip } from "./WindowDragStrip";
 import { useActiveChatId } from "./useActiveChatId";
@@ -312,8 +313,8 @@ export function AppShell() {
   const uncleanExit = useUncleanExitNotice();
   const desktopNavigation = useDesktopNavigation();
   const zoom = useInterfaceZoom();
-  const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
   const sidebarWidth = useUiStore((state) => state.sidebarWidth);
+  const { overlay: sidebarOverlay, showExpandStrip } = useSidebarLayout();
   // Read at keydown rather than subscribed to: which mode a shortcut fires in
   // is the route's answer, and the shell has no other reason to re-render on
   // every navigation.
@@ -1397,7 +1398,7 @@ export function AppShell() {
               }}
             />
           )}
-          {nativeTitlebar && !sidebarCollapsed && (
+          {nativeTitlebar && !showExpandStrip && !sidebarOverlay && (
             <Titlebar
               macOverlay={macOverlayTitlebar}
               navigation={desktopNavigation}

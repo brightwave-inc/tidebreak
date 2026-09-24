@@ -26,8 +26,10 @@ function NullStatePreview({
   }
 
   return (
-    <main className="content-container flex h-full min-h-0 w-full items-center justify-center overflow-auto px-[clamp(1rem,5vw,5rem)] py-10">
-      <WelcomeState onSelectPrompt={onSelectPrompt} />
+    <main className="content-container flex h-full min-h-0 w-full justify-center overflow-auto px-[clamp(1rem,5vw,5rem)] py-10">
+      <div className="my-auto w-full">
+        <WelcomeState onSelectPrompt={onSelectPrompt} />
+      </div>
     </main>
   );
 }
@@ -60,4 +62,9 @@ export const CodeMode: Story = {
 /** The work-mode stack at the narrowest supported conversation width. */
 export const WorkModeCompact: Story = {
   globals: { viewport: { value: "compact", isRotated: false } },
+};
+
+/** Home at the 720 × 480 minimum window, with compact starter rows. */
+export const WorkModeMinimumWindow: Story = {
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
 };

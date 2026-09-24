@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { userEvent, within } from "storybook/test";
 import { TranscriptImageAttachments } from "@/TranscriptImageAttachments";
 
 const PIXEL = new Blob(
@@ -56,7 +57,15 @@ type Story = StoryObj<typeof meta>;
 
 export const Thumbnails: Story = {};
 
-export const Expanded: Story = {};
+export const Expanded: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const image = await canvas.findByRole("button", {
+      name: /Expand attached image 1/,
+    });
+    await userEvent.click(image);
+  },
+};
 
 export const Unavailable: Story = {
   args: {

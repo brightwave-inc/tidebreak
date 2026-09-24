@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { fn, userEvent, within } from "storybook/test";
 import type { DeliverablesCatalog, DeliverableSummary } from "@/deliverables";
 import { OutputsView, type OutputsApis } from "@/outputs/OutputsView";
 
@@ -106,7 +106,14 @@ export const TruncatedCatalog: Story = {
   },
 };
 
-export const NoMatchingResults: Story = {};
+export const NoMatchingResults: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const search = await canvas.findByPlaceholderText("Search outputs…");
+    await userEvent.type(search, "zzq no such output");
+    await canvas.findByText("No outputs match your search.");
+  },
+};
 
 export const Compact: Story = {
   globals: { viewport: { value: "compact", isRotated: false } },

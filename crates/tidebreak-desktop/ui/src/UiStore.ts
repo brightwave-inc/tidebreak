@@ -103,6 +103,12 @@ function storeActiveTurnSendMode(mode: ActiveTurnSendMode): void {
 export type UiStore = {
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
+  /**
+   * Whether the rail is open as an overlay on a narrow window. Not persisted:
+   * crossing back above the overlay breakpoint restores the remembered width.
+   */
+  sidebarOverlayOpen: boolean;
+  setSidebarOverlayOpen: (open: boolean) => void;
   /** Expanded rail width in CSS pixels. Ignored while the rail is compact. */
   sidebarWidth: number;
   /**
@@ -140,6 +146,8 @@ export function createUiStore() {
         storeSidebarCollapsed(sidebarCollapsed);
         return { sidebarCollapsed };
       }),
+    sidebarOverlayOpen: false,
+    setSidebarOverlayOpen: (sidebarOverlayOpen) => set({ sidebarOverlayOpen }),
     sidebarWidth: readStoredSidebarWidth(),
     setSidebarWidth: (width) => {
       const sidebarWidth = clampSidebarWidth(width);
