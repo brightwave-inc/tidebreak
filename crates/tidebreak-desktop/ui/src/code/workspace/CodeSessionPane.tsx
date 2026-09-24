@@ -83,6 +83,7 @@ export function CodeSessionPane({
   defaultModelKey,
   disabled,
   onOpenTurnDiff,
+  onOpenWorkspaceDiff,
   onForkFromTurn,
   onRestoreBeforeTurn,
   onUndoRestore,
@@ -101,6 +102,8 @@ export function CodeSessionPane({
   disabled: boolean;
   /** Scope the review sidebar to one turn's changes, from a turn's diffstat. */
   onOpenTurnDiff?: (turnId: string) => void;
+  /** Open the workspace diff, from a review row whose findings are there. */
+  onOpenWorkspaceDiff?: () => void;
   /** Fork this conversation at the end of one turn, from its seam row. */
   onForkFromTurn?: (turnId: string) => void;
   /** Put the worktree back to before one turn, from its seam row. */
@@ -663,6 +666,7 @@ export function CodeSessionPane({
           approvalError={approvalError}
           approvalErrorId={approvalErrorId}
           onOpenTurnDiff={onOpenTurnDiff}
+          onOpenWorkspaceDiff={onOpenWorkspaceDiff}
           onForkFromTurn={
             subagentCallId || historyItems ? undefined : onForkFromTurn
           }

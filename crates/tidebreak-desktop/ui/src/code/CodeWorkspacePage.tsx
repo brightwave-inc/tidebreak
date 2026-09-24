@@ -53,6 +53,7 @@ import {
 } from "./inspectorLayout";
 import { DiffOverview, type ChangeRowActions } from "./DiffOverview";
 import { DiffPanel, type DiffRevertActions } from "./DiffPanel";
+import type { DiffReviewerContext } from "./review/ReviewChanges";
 import { WorkspaceCommitBox } from "./WorkspaceCommitBox";
 import { TURN_RUNNING_REASON, useWorktreeUndo } from "./worktreeUndo";
 import { DndContext, DragOverlay, useSensor, useSensors } from "@dnd-kit/core";
@@ -517,6 +518,44 @@ function CodeWorkspaceBody({
     digest,
   );
   const doctorHarnesses = catalog.doctor?.harnesses ?? [];
+  // Review changes: another engine reads this workspace's changes. It needs
+  // a conversation to record the review in and to take the findings, and a
+  // worktree on this machine to copy.
+  const reviewer = useMemo<DiffReviewerContext | undefined>(
+    () =>
+      worktreeChangeable && hostAccess && session?.kind === "interactive"
+        ? {
+            client,
+            sessionId: session.id,
+            author: session.harness_kind,
+            harnesses: doctorHarnesses,
+            catalogModels: models,
+            defaultModelKey,
+          }
+        : undefined,
+    [
+      worktreeChangeable,
+      hostAccess,
+      session?.kind,
+      session?.id,
+      session?.harness_kind,
+      client,
+      doctorHarnesses,
+      models,
+      defaultModelKey,
+    ],
+  );
+  // A Review changes action raised elsewhere, such as the workflow menu,
+  // opens the workspace diff; its form takes the request from there.
+  const reviewFormPending = useCodeUiStore(
+    (state) => state.reviewFormPending === workspaceId,
+  );
+  useEffect(() => {
+    if (!reviewFormPending) return;
+    setWorkspaceLayout(openCodeEditor(layout, { type: "diff" }, "primary"));
+    // The request is the trigger; the layout is read when it arrives.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewFormPending]);
   const title = digest?.title ?? workspace?.title;
   const repoName = repo?.display_name ?? workspace?.repo_display_name;
   const pr = digest?.pr_state ?? workspace?.pr;
@@ -619,6 +658,7 @@ function CodeWorkspaceBody({
             file={panel.path}
             contentRevision={contentRevision}
             revert={diffRevert}
+            reviewer={reviewer}
             onStepFile={(next) => {
               if (panel.path) stepFileDiff(panel.path, next, panel.turnId);
             }}
@@ -866,6 +906,11 @@ function CodeWorkspaceBody({
                   defaultModelKey={defaultModelKey}
                   disabled={blocksTurn || workspace?.status !== "active"}
                   onOpenTurnDiff={openTurnDiff}
+                  onOpenWorkspaceDiff={() =>
+                    setWorkspaceLayout(
+                      openCodeEditor(layout, { type: "diff" }, "primary"),
+                    )
+                  }
                   onForkFromTurn={
                     hostAccess && session.kind === "interactive"
                       ? (turnId) => void forkConversation(session.id, turnId)
@@ -1092,6 +1137,12 @@ function CodeWorkspaceBody({
               onOpenWatchTask={
                 prResource.data?.watch
                   ? () => openWorkspaceTask(prResource.data?.watch?.session_id)
+                  : undefined
+              }
+              onReviewChanges={
+                reviewer
+                  ? () =>
+                      useCodeUiStore.getState().requestReviewForm(workspaceId)
                   : undefined
               }
             />

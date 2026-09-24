@@ -1,11 +1,13 @@
 import { useMemo } from "react";
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 
+import type { HarnessKind } from "../../api/types";
 import { isRecord } from "@/lib/guards";
-import type {
-  CommentLineSpans,
-  ReviewComment,
-  ReviewCommentLine,
+import {
+  REVIEW_SEVERITIES,
+  type CommentLineSpans,
+  type ReviewComment,
+  type ReviewCommentLine,
 } from "./reviewComments";
 import { textKey } from "./textKey";
 
@@ -26,8 +28,15 @@ const STORAGE_KEY = "tidebreak.code-pending-review.v1";
  * fills storage must never stop the review itself from being saved.
  */
 const QUEUED_STORAGE_KEY = "tidebreak.code-queued-review.v1";
+/**
+ * Reviews whose findings already joined a workspace's pending review, so a
+ * reload never brings back findings the person dismissed.
+ */
+const IMPORTED_STORAGE_KEY = "tidebreak.code-imported-reviews.v1";
 /** Queued messages whose comments a workspace keeps, newest first. */
 export const MAX_QUEUED_REVIEWS = 10;
+/** Imported reviews a workspace remembers, newest first. */
+export const MAX_IMPORTED_REVIEWS = 50;
 
 /** The comments one queued message carries, kept whole. */
 type QueuedReview = {
@@ -55,7 +64,25 @@ type PendingReviewState = {
    * turn; deleting the message puts back these instead.
    */
   queued: Readonly<Record<string, readonly QueuedReview[]>>;
+  /** Reviews whose findings already joined each workspace's review. */
+  imported: Readonly<Record<string, readonly string[]>>;
   add: (workspaceId: string, comment: ReviewComment) => void;
+  /**
+   * Add a finished review's findings, once: a review already imported adds
+   * nothing, so findings the person dismissed stay dismissed.
+   */
+  addReviewFindings: (
+    workspaceId: string,
+    reviewId: string,
+    comments: readonly ReviewComment[],
+  ) => void;
+  /** Keep a reviewer's finding: it goes with the next message. */
+  keep: (workspaceId: string, id: string) => void;
+  /** Keep every finding a review proposed that is still waiting. */
+  keepAll: (workspaceId: string, reviewId: string) => void;
+  /** Dismiss every finding a review proposed that is still waiting. */
+  dismissAll: (workspaceId: string, reviewId: string) => void;
+  /** Rewrite a comment. A reviewer's finding is kept by the edit. */
   edit: (workspaceId: string, id: string, body: string) => void;
   remove: (workspaceId: string, id: string) => void;
   clear: (workspaceId: string) => void;
@@ -138,16 +165,35 @@ function isSpanText(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
-function isComment(value: unknown): value is ReviewComment {
+const HARNESS_KINDS: ReadonlySet<unknown> = new Set<HarnessKind>([
+  "claude_code",
+  "codex",
+  "opencode",
+  "grok",
+  "internal",
+]);
+
+function isAuthor(value: unknown): value is ReviewComment["author"] {
+  if (!isRecord(value)) return false;
+  if (value.kind === "person") return true;
   return (
-    isRecord(value) &&
+    value.kind === "reviewer" &&
+    HARNESS_KINDS.has(value.engine) &&
+    (value.model === undefined || typeof value.model === "string") &&
+    (value.reviewId === undefined || typeof value.reviewId === "string")
+  );
+}
+
+function isComment(value: unknown): value is ReviewComment {
+  if (!isRecord(value)) return false;
+  const general = value.general === true;
+  return (
     typeof value.id === "string" &&
-    isRecord(value.author) &&
-    value.author.kind === "person" &&
+    isAuthor(value.author) &&
     typeof value.path === "string" &&
     (value.turnId === undefined || typeof value.turnId === "string") &&
     Array.isArray(value.lines) &&
-    value.lines.length > 0 &&
+    (general ? value.lines.length === 0 : value.lines.length > 0) &&
     value.lines.every(isCommentLine) &&
     (value.unquoted === undefined || typeof value.unquoted === "number") &&
     (value.span === undefined ||
@@ -160,7 +206,12 @@ function isComment(value: unknown): value is ReviewComment {
         isStringList(value.context.after))) &&
     (value.outdated === undefined || typeof value.outdated === "boolean") &&
     typeof value.body === "string" &&
-    typeof value.createdAt === "string"
+    typeof value.createdAt === "string" &&
+    (value.severity === undefined ||
+      (REVIEW_SEVERITIES as readonly unknown[]).includes(value.severity)) &&
+    (value.title === undefined || typeof value.title === "string") &&
+    (value.proposed === undefined || value.proposed === true) &&
+    (value.general === undefined || general)
   );
 }
 
@@ -210,6 +261,28 @@ export function readStoredQueued(
       );
       if (valid.length > 0) {
         out[workspaceId] = valid.slice(0, MAX_QUEUED_REVIEWS);
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** The reviews storage says were already imported, per workspace. */
+export function readStoredImported(
+  storage: Pick<Storage, "getItem"> | null,
+): Record<string, string[]> {
+  if (!storage) return {};
+  try {
+    const raw = storage.getItem(IMPORTED_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed) || !isRecord(parsed.workspaces)) return {};
+    const out: Record<string, string[]> = {};
+    for (const [workspaceId, ids] of Object.entries(parsed.workspaces)) {
+      if (isStringList(ids) && ids.length > 0) {
+        out[workspaceId] = ids.slice(0, MAX_IMPORTED_REVIEWS);
       }
     }
     return out;
@@ -283,6 +356,22 @@ function sameSpan(a?: CommentLineSpans, b?: CommentLineSpans): boolean {
   return a?.lines === b?.lines && a?.oldLines === b?.oldLines;
 }
 
+/** A reviewer's finding the person kept: it goes with the next message. */
+function kept(comment: ReviewComment): ReviewComment {
+  if (!comment.proposed) return comment;
+  const { proposed: _proposed, ...rest } = comment;
+  return rest;
+}
+
+/** Whether a comment is a finding `reviewId` proposed, still waiting. */
+function proposedBy(comment: ReviewComment, reviewId: string): boolean {
+  return (
+    comment.proposed === true &&
+    comment.author.kind === "reviewer" &&
+    comment.author.reviewId === reviewId
+  );
+}
+
 /** A store over `storage`. Tests pass their own to stand in for a reload. */
 export function createPendingReviewStore(
   storage: Storage | null = browserStorage(),
@@ -305,12 +394,55 @@ export function createPendingReviewStore(
       byWorkspace: readStoredReview(storage),
       sending: {},
       queued: readStoredQueued(storage),
+      imported: readStoredImported(storage),
       add: (workspaceId, comment) =>
         update(workspaceId, (comments) => [...comments, comment]),
+      addReviewFindings: (workspaceId, reviewId, found) =>
+        set((state) => {
+          const imported = state.imported[workspaceId] ?? [];
+          if (imported.includes(reviewId)) return state;
+          const current = state.byWorkspace[workspaceId] ?? [];
+          const comments = withRestored(current, found);
+          return {
+            byWorkspace:
+              comments === current || comments.length === 0
+                ? state.byWorkspace
+                : { ...state.byWorkspace, [workspaceId]: comments },
+            imported: {
+              ...state.imported,
+              [workspaceId]: [reviewId, ...imported].slice(
+                0,
+                MAX_IMPORTED_REVIEWS,
+              ),
+            },
+          };
+        }),
+      keep: (workspaceId, id) =>
+        update(workspaceId, (comments) =>
+          comments.some((comment) => comment.id === id && comment.proposed)
+            ? comments.map((comment) =>
+                comment.id === id ? kept(comment) : comment,
+              )
+            : comments,
+        ),
+      keepAll: (workspaceId, reviewId) =>
+        update(workspaceId, (comments) =>
+          comments.some((comment) => proposedBy(comment, reviewId))
+            ? comments.map((comment) =>
+                proposedBy(comment, reviewId) ? kept(comment) : comment,
+              )
+            : comments,
+        ),
+      dismissAll: (workspaceId, reviewId) =>
+        update(workspaceId, (comments) =>
+          comments.some((comment) => proposedBy(comment, reviewId))
+            ? comments.filter((comment) => !proposedBy(comment, reviewId))
+            : comments,
+        ),
       edit: (workspaceId, id, body) =>
         update(workspaceId, (comments) =>
           comments.map((comment) =>
-            comment.id === id ? { ...comment, body } : comment,
+            comment.id === id ? { ...kept(comment), body } : comment,
           ),
         ),
       remove: (workspaceId, id) =>
@@ -321,8 +453,10 @@ export function createPendingReviewStore(
         set((state) => {
           const riding = new Set(state.sending[workspaceId] ?? []);
           const next = { ...state.byWorkspace };
+          // A reviewer's finding the person has not kept was never counted
+          // as going; it stays in the diff for them to decide on.
           const left = (state.byWorkspace[workspaceId] ?? []).filter(
-            (comment) => riding.has(comment.id),
+            (comment) => riding.has(comment.id) || comment.proposed,
           );
           if (left.length > 0) next[workspaceId] = left;
           else delete next[workspaceId];
@@ -411,7 +545,7 @@ export function createPendingReviewStore(
         const state = get();
         const riding = new Set(state.sending[workspaceId] ?? []);
         const ready = (state.byWorkspace[workspaceId] ?? []).filter(
-          (comment) => !riding.has(comment.id),
+          (comment) => !riding.has(comment.id) && !comment.proposed,
         );
         if (ready.length === 0) return [];
         set({
@@ -447,6 +581,7 @@ export function createPendingReviewStore(
   });
   let written = store.getState().byWorkspace;
   let writtenQueued = store.getState().queued;
+  let writtenImported = store.getState().imported;
   store.subscribe((state) => {
     if (state.byWorkspace !== written) {
       written = state.byWorkspace;
@@ -455,6 +590,10 @@ export function createPendingReviewStore(
     if (state.queued !== writtenQueued) {
       writtenQueued = state.queued;
       writeStored(storage, QUEUED_STORAGE_KEY, state.queued);
+    }
+    if (state.imported !== writtenImported) {
+      writtenImported = state.imported;
+      writeStored(storage, IMPORTED_STORAGE_KEY, state.imported);
     }
   });
   return store;
@@ -465,7 +604,10 @@ export const usePendingReviewStore = createPendingReviewStore();
 const NO_COMMENTS: readonly ReviewComment[] = [];
 const NO_IDS: readonly string[] = [];
 
-/** The comments a send may take: pending, and not already riding a send. */
+/**
+ * The comments a send may take: pending, kept, and not already riding a
+ * send. A reviewer's finding waits until the person keeps it.
+ */
 export function commentsReadyToSend(
   workspaceId: string,
   store: PendingReviewStore = usePendingReviewStore,
@@ -473,7 +615,7 @@ export function commentsReadyToSend(
   const state = store.getState();
   const riding = new Set(state.sending[workspaceId] ?? []);
   return (state.byWorkspace[workspaceId] ?? []).filter(
-    (comment) => !riding.has(comment.id),
+    (comment) => !riding.has(comment.id) && !comment.proposed,
   );
 }
 
@@ -492,15 +634,26 @@ export function usePendingReview(
   return { comments, sending };
 }
 
-/** How many comments go with the next message, and across how many files. */
+/**
+ * How many comments go with the next message, across how many files, how
+ * many are riding a send, and how many reviewer findings wait to be kept.
+ */
 export function reviewSummary(
   comments: readonly ReviewComment[],
   sending: ReadonlySet<string>,
-): { count: number; files: number; sending: number } {
-  const waiting = comments.filter((comment) => !sending.has(comment.id));
+): { count: number; files: number; sending: number; proposed: number } {
+  const waiting = comments.filter(
+    (comment) => !sending.has(comment.id) && !comment.proposed,
+  );
+  const riding = comments.filter((comment) => sending.has(comment.id));
   return {
     count: waiting.length,
-    files: new Set(waiting.map((comment) => comment.path)).size,
-    sending: comments.length - waiting.length,
+    files: new Set(
+      waiting
+        .filter((comment) => !comment.general)
+        .map((comment) => comment.path),
+    ).size,
+    sending: riding.length,
+    proposed: comments.filter((comment) => comment.proposed).length,
   };
 }

@@ -9,6 +9,7 @@ import type {
   CodePrCommentsSnapshot,
   CodePrMergeMethod,
   CodePushSnapshot,
+  CodeReviewSnapshot,
   CodeTriggerAction,
   CodeTriggerCondition,
   CodeTriggerSnapshot,
@@ -19,6 +20,7 @@ import type {
   CodeWorktreeChange,
   PullRequestDigest,
   RevertCodeWorkspaceChangeBody,
+  StartCodeReviewBody,
 } from "../types";
 import { type Constructor, HttpCore, HttpError, requireParsed } from "./http";
 import {
@@ -29,6 +31,8 @@ import {
   parseCodeCommit,
   parseCodePrComments,
   parseCodePush,
+  parseCodeReview,
+  parseCodeReviewList,
   parseCodeTrigger,
   parseCodeTriggers,
   parseCodeWatch,
@@ -608,6 +612,74 @@ export function withCodeGitApi<TBase extends Constructor<HttpCore>>(
           ),
         ),
         "code discard",
+      );
+    }
+
+    /**
+     * Ask another engine to review the workspace's changes, read-only. The
+     * server answers as soon as the review starts; poll `getCodeReview` for
+     * its progress and findings.
+     */
+    async startCodeReview(
+      workspaceId: string,
+      body: StartCodeReviewBody,
+    ): Promise<CodeReviewSnapshot> {
+      return requireParsed(
+        parseCodeReview(
+          await this.json(
+            `/code/workspaces/${encodeURIComponent(workspaceId)}/reviews`,
+            {
+              method: "POST",
+              headers: this.headers(true),
+              body: JSON.stringify(body),
+            },
+          ),
+        ),
+        "code review",
+      );
+    }
+
+    /** The workspace's recent reviews, newest first. */
+    async listCodeReviews(workspaceId: string): Promise<CodeReviewSnapshot[]> {
+      return requireParsed(
+        parseCodeReviewList(
+          await this.json(
+            `/code/workspaces/${encodeURIComponent(workspaceId)}/reviews`,
+            { headers: this.headers() },
+          ),
+        ),
+        "code reviews",
+      ).reviews;
+    }
+
+    async getCodeReview(
+      workspaceId: string,
+      reviewId: string,
+    ): Promise<CodeReviewSnapshot> {
+      return requireParsed(
+        parseCodeReview(
+          await this.json(
+            `/code/workspaces/${encodeURIComponent(workspaceId)}/reviews/${encodeURIComponent(reviewId)}`,
+            { headers: this.headers() },
+          ),
+        ),
+        "code review",
+      );
+    }
+
+    /** Stop a running review. It reads `cancelled` once the engine stopped. */
+    async cancelCodeReview(
+      workspaceId: string,
+      reviewId: string,
+    ): Promise<CodeReviewSnapshot> {
+      return requireParsed(
+        parseCodeReview(
+          await this.json(
+            `/code/workspaces/${encodeURIComponent(workspaceId)}/reviews/${encodeURIComponent(reviewId)}/cancel`,
+            { method: "POST", headers: this.headers() },
+          ),
+        ),
+        "code review",
       );
     }
   };

@@ -190,6 +190,80 @@ describe("reviewCommentsFromSent", () => {
   });
 });
 
+describe("a reviewer's comments in the block", () => {
+  const byCodex = comment({
+    id: "f1",
+    author: { kind: "reviewer", engine: "codex", reviewId: "rev-1" },
+    severity: "high",
+    title: 'Doubles the "limit"',
+    body: "Nothing says why the limit doubled.",
+  });
+  const whole = comment({
+    id: "summary",
+    author: { kind: "reviewer", engine: "codex", reviewId: "rev-1" },
+    path: "",
+    lines: [],
+    general: true,
+    title: "1 finding on lines outside the diff",
+    body: "- src/net.ts, line 3 (low): An unchanged helper",
+  });
+
+  it("names the reviewer, severity, and title, and says what a reviewer's comment is", () => {
+    const message = messageWithReviewComments("", [byCodex, whole]);
+    expect(message).toContain(
+      '<comment path="src/queue.ts" diff="working tree" lines="22-23" old_lines="22" reviewer="codex" severity="high" title="Doubles the &quot;limit&quot;">',
+    );
+    expect(message).toContain(
+      '<comment diff="working tree" general="true" reviewer="codex" title="1 finding on lines outside the diff">\n- src/net.ts, line 3 (low): An unchanged helper\n</comment>',
+    );
+    expect(message).toContain(
+      "A comment that names a reviewer came from another engine's read-only review",
+    );
+    // A block of the person's own comments reads exactly as it did.
+    expect(messageWithReviewComments("", [comment()])).not.toContain(
+      "names a reviewer",
+    );
+  });
+
+  it("reads them back for the transcript and for a deleted queued message", () => {
+    const sent = splitReviewComments(
+      messageWithReviewComments("Please look.", [byCodex, whole]),
+    );
+    expect(sent.prose).toBe("Please look.");
+    expect(sent.comments).toEqual([
+      expect.objectContaining({
+        path: "src/queue.ts",
+        reviewer: "codex",
+        severity: "high",
+        title: 'Doubles the "limit"',
+        body: "Nothing says why the limit doubled.",
+      }),
+      expect.objectContaining({
+        path: "",
+        general: true,
+        quote: [],
+        reviewer: "codex",
+        body: "- src/net.ts, line 3 (low): An unchanged helper",
+      }),
+    ]);
+    const restored = reviewCommentsFromSent(sent.comments, {
+      newId: () => "r",
+      now: () => "2026-09-24T12:00:00.000Z",
+    });
+    expect(restored[0]).toMatchObject({
+      author: { kind: "reviewer", engine: "codex" },
+      severity: "high",
+      title: 'Doubles the "limit"',
+    });
+    expect(restored[1]).toMatchObject({
+      author: { kind: "reviewer", engine: "codex" },
+      path: "",
+      lines: [],
+      general: true,
+    });
+  });
+});
+
 describe("commentLinesLabel", () => {
   it("names the new lines and the deleted ones a range takes in", () => {
     expect(commentLinesLabel(comment().lines)).toBe(

@@ -7,7 +7,13 @@
  * typed: the file, the lines, the lines as the diff showed them, and the
  * comment. The engine sees text, as it does for every other turn input
  * (decision 0046); the transcript reads the block back and folds it.
+ *
+ * A person writes comments, and so does another engine's review: its
+ * findings join the same pending review, marked as its own, and travel the
+ * same way once the person keeps them.
  */
+
+import type { HarnessKind } from "../../api/types";
 
 /** One quoted line, as the diff showed it when the comment was written. */
 export type ReviewCommentLine = {
@@ -23,11 +29,28 @@ export type ReviewCommentLine = {
 };
 
 /**
- * Who wrote a comment. A person, for now. A second engine's review pass can
- * later fill the same pending review with its own findings, marked as its
- * own, and they travel to the agent the same way.
+ * Who wrote a comment: the person, or an engine that reviewed the changes
+ * read-only. A reviewer's comment names the engine, the model it ran on
+ * when one was chosen, and the review it came from.
  */
-export type ReviewCommentAuthor = { readonly kind: "person" };
+export type ReviewCommentAuthor =
+  | { readonly kind: "person" }
+  | {
+      readonly kind: "reviewer";
+      readonly engine: HarnessKind;
+      readonly model?: string;
+      /** Absent on a comment read back from a sent message. */
+      readonly reviewId?: string;
+    };
+
+/** How much a reviewer's finding matters, as the reviewer judged it. */
+export type ReviewSeverity = "high" | "medium" | "low";
+
+export const REVIEW_SEVERITIES: readonly ReviewSeverity[] = [
+  "high",
+  "medium",
+  "low",
+];
 
 /** The code on either side of a comment's lines, nearest line first. */
 export type ReviewCommentContext = {
@@ -47,7 +70,7 @@ export type ReviewComment = {
   /**
    * The lines it is about, in diff order: their text as it was when the
    * comment was written, and their numbers as the diff last placed them.
-   * Never empty, and never more than `MAX_QUOTED_LINES`.
+   * Never more than `MAX_QUOTED_LINES`, and empty only on a general comment.
    */
   readonly lines: readonly ReviewCommentLine[];
   /** Lines the comment covers after the quote stops. */
@@ -63,6 +86,20 @@ export type ReviewComment = {
   readonly outdated?: boolean;
   readonly body: string;
   readonly createdAt: string;
+  /** A reviewer's judgment of how much the finding matters. */
+  readonly severity?: ReviewSeverity;
+  /** A reviewer's one-line title for the finding. */
+  readonly title?: string;
+  /**
+   * A reviewer's finding the person has not kept yet. The diff shows it, but
+   * it waits out of the next message until the person keeps or edits it.
+   */
+  readonly proposed?: true;
+  /**
+   * About the changes as a whole rather than some of their lines, such as a
+   * review's summary. Its `path` is empty and it quotes no lines.
+   */
+  readonly general?: true;
 };
 
 /** The new-file and old-file spans a comment covers, such as "12-14". */
@@ -171,6 +208,9 @@ const OPEN = "<review_comments>";
 const CLOSE = "</review_comments>";
 const PREAMBLE =
   "The person reviewing your changes left these comments on a diff. Each comment names a file and the diff it was written on: the working tree against its base branch, or the changes one turn made. It quotes its lines with diff markers (+ added, - removed) and then gives the comment. Line numbers are from the diff as the reviewer last saw it, so if the file has changed since, find the lines by their quote. A comment marked outdated quotes code that has changed since it was written. Address every comment.";
+/** Said only when the block carries a reviewer's comments. */
+const REVIEWER_NOTE =
+  "A comment that names a reviewer came from another engine's read-only review of these changes, with its severity and title; the person kept it, so treat it as theirs. A comment with no file is about the changes as a whole.";
 
 /** The diff a comment was written on, as the block names it. */
 const WORKING_TREE = "working tree";
@@ -186,8 +226,29 @@ function diffName(comment: ReviewComment, turnName?: TurnNamer): string {
   return turnName?.(comment.turnId) ?? "an earlier turn";
 }
 
+/** A reviewer's attributes on a comment's tag, empty for a person's. */
+function reviewerAttributes(comment: ReviewComment): (string | null)[] {
+  if (comment.author.kind !== "reviewer") return [];
+  return [
+    `reviewer="${escapeAttribute(comment.author.engine)}"`,
+    comment.severity ? `severity="${comment.severity}"` : null,
+    comment.title ? `title="${escapeAttribute(comment.title)}"` : null,
+  ];
+}
+
 /** One comment as the agent reads it. */
 function commentBlock(comment: ReviewComment, turnName?: TurnNamer): string {
+  const body = comment.body.trim().split("\n").map(escapeBodyLine);
+  if (comment.general) {
+    const attributes = [
+      `diff="${escapeAttribute(diffName(comment, turnName))}"`,
+      'general="true"',
+      ...reviewerAttributes(comment),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return [`<comment ${attributes}>`, ...body, "</comment>"].join("\n");
+  }
   const spans = spansOf(comment);
   const quoted = comment.lines.length;
   const covered = quoted + (comment.unquoted ?? 0);
@@ -198,12 +259,12 @@ function commentBlock(comment: ReviewComment, turnName?: TurnNamer): string {
     spans.oldLines ? `old_lines="${spans.oldLines}"` : null,
     covered > quoted ? `quote="first ${quoted} of ${covered} lines"` : null,
     comment.outdated ? 'outdated="true"' : null,
+    ...reviewerAttributes(comment),
   ]
     .filter(Boolean)
     .join(" ");
   const quote = comment.lines.map((line) => `${MARKER[line.kind]}${line.text}`);
   const fence = fenceFor(quote);
-  const body = comment.body.trim().split("\n").map(escapeBodyLine);
   return [
     `<comment ${attributes}>`,
     `${fence}diff`,
@@ -219,9 +280,12 @@ export function reviewCommentsBlock(
   comments: readonly ReviewComment[],
   options: { turnName?: TurnNamer } = {},
 ): string {
+  const reviewed = comments.some(
+    (comment) => comment.author.kind === "reviewer" || comment.general,
+  );
   return [
     OPEN,
-    PREAMBLE,
+    reviewed ? `${PREAMBLE} ${REVIEWER_NOTE}` : PREAMBLE,
     "",
     ...comments.map((comment) => commentBlock(comment, options.turnName)),
     CLOSE,
@@ -258,7 +322,37 @@ export type SentReviewComment = {
   readonly unquoted: number;
   readonly outdated: boolean;
   readonly body: string;
+  /** The engine whose review the comment came from, when one did. */
+  readonly reviewer?: HarnessKind;
+  readonly severity?: ReviewSeverity;
+  readonly title?: string;
+  /** About the changes as a whole: no file, no lines. */
+  readonly general?: true;
 };
+
+const REVIEWER_ENGINES: ReadonlySet<string> = new Set<HarnessKind>([
+  "claude_code",
+  "codex",
+  "opencode",
+  "grok",
+  "internal",
+]);
+
+function reviewerOf(
+  tag: string,
+): Pick<SentReviewComment, "reviewer" | "severity" | "title"> {
+  const engine = attribute(tag, "reviewer");
+  if (!engine || !REVIEWER_ENGINES.has(engine)) return {};
+  const severity = attribute(tag, "severity");
+  const title = attribute(tag, "title");
+  return {
+    reviewer: engine as HarnessKind,
+    ...(severity && (REVIEW_SEVERITIES as readonly string[]).includes(severity)
+      ? { severity: severity as ReviewSeverity }
+      : {}),
+    ...(title ? { title } : {}),
+  };
+}
 
 function attribute(tag: string, name: string): string | null {
   const match = new RegExp(`\\b${name}="([^"]*)"`).exec(tag);
@@ -295,15 +389,18 @@ function parseComments(inner: readonly string[]): SentReviewComment[] {
     const cut = /^first (\d+) of (\d+) lines$/.exec(
       attribute(tag, "quote") ?? "",
     );
+    const general = attribute(tag, "general") === "true";
     comments.push({
-      path: attribute(tag, "path") ?? "",
+      path: general ? "" : (attribute(tag, "path") ?? ""),
       diff: attribute(tag, "diff"),
-      lines: attribute(tag, "lines"),
-      oldLines: attribute(tag, "old_lines"),
-      quote,
+      lines: general ? null : attribute(tag, "lines"),
+      oldLines: general ? null : attribute(tag, "old_lines"),
+      quote: general ? [] : quote,
       unquoted: cut ? Math.max(0, Number(cut[2]) - Number(cut[1])) : 0,
       outdated: attribute(tag, "outdated") === "true",
       body: body.join("\n").trim(),
+      ...reviewerOf(tag),
+      ...(general ? { general: true as const } : {}),
     });
   }
   return comments;
@@ -417,7 +514,7 @@ export function reviewCommentsFromSent(
           return [];
       }
     });
-    if (lines.length === 0) return [];
+    if (lines.length === 0 && !comment.general) return [];
     const turnId =
       comment.diff && comment.diff !== WORKING_TREE
         ? (options.turnFor?.(comment.diff) ?? null)
@@ -425,11 +522,13 @@ export function reviewCommentsFromSent(
     return [
       {
         id: newId(),
-        author: { kind: "person" },
-        path: comment.path,
+        author: comment.reviewer
+          ? { kind: "reviewer", engine: comment.reviewer }
+          : { kind: "person" },
+        path: comment.general ? "" : comment.path,
         ...(turnId ? { turnId } : {}),
-        lines,
-        ...(comment.unquoted > 0
+        lines: comment.general ? [] : lines,
+        ...(comment.unquoted > 0 && !comment.general
           ? {
               unquoted: comment.unquoted,
               span: { lines: comment.lines, oldLines: comment.oldLines },
@@ -438,7 +537,19 @@ export function reviewCommentsFromSent(
         ...(comment.outdated ? { outdated: true } : {}),
         body: comment.body,
         createdAt: now(),
+        ...(comment.reviewer && comment.severity
+          ? { severity: comment.severity }
+          : {}),
+        ...(comment.reviewer && comment.title ? { title: comment.title } : {}),
+        ...(comment.general ? { general: true as const } : {}),
       },
     ];
   });
+}
+
+/** A reviewer's comment: the engine that wrote it. Null for the person's. */
+export function reviewerOfComment(
+  comment: Pick<ReviewComment, "author">,
+): Extract<ReviewCommentAuthor, { kind: "reviewer" }> | null {
+  return comment.author.kind === "reviewer" ? comment.author : null;
 }

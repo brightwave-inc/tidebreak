@@ -3,7 +3,23 @@ import { ChevronDown, ChevronRight, MessageSquareDiff } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { MiddleTruncate } from "../MiddleTruncate";
+import { HARNESS_LABELS } from "../labels";
+import { SEVERITY_LABEL } from "./DiffComments";
 import type { SentReviewComment } from "./reviewComments";
+
+/** A reviewer's mark: the engine that found it, and how much it matters. */
+function reviewerLabel(comment: SentReviewComment): string | null {
+  if (!comment.reviewer) return null;
+  const engine = HARNESS_LABELS[comment.reviewer];
+  return comment.severity
+    ? `${engine}, ${SEVERITY_LABEL[comment.severity].toLowerCase()}`
+    : engine;
+}
+
+/** What a comment says first: a reviewer's title, or its opening line. */
+function headline(comment: SentReviewComment): string {
+  return comment.title ?? comment.body.split("\n")[0] ?? "";
+}
 
 /** Comments listed before the block folds the rest behind its disclosure. */
 const PREVIEW_COMMENTS = 3;
@@ -13,6 +29,7 @@ const PREVIEW_COMMENTS = 3;
  * whether its code had changed by the time it was sent.
  */
 function spanLabel(comment: SentReviewComment, path = comment.path): string {
+  if (comment.general) return "The changes as a whole";
   const where = comment.lines
     ? `${path}:${comment.lines}`
     : comment.oldLines
@@ -39,7 +56,11 @@ export function ReviewCommentsBlock({
 }) {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
-  const files = new Set(comments.map((comment) => comment.path)).size;
+  const files = new Set(
+    comments
+      .filter((comment) => !comment.general)
+      .map((comment) => comment.path),
+  ).size;
   const shown = open ? comments : comments.slice(0, PREVIEW_COMMENTS);
   const hidden = comments.length - shown.length;
   const Chevron = open ? ChevronDown : ChevronRight;
@@ -87,6 +108,9 @@ export function ReviewCommentsBlock({
                   text={spanLabel(comment)}
                   className="text-foreground font-mono text-xs"
                 />
+                {reviewerLabel(comment) && (
+                  <span className="text-xs">{reviewerLabel(comment)}</span>
+                )}
                 {comment.quote.length > 0 && (
                   // Long quoted lines wrap: a quote that scrolled sideways
                   // would be a scroll region nothing can focus.
@@ -101,6 +125,11 @@ export function ReviewCommentsBlock({
                     ))}
                   </pre>
                 )}
+                {comment.title && (
+                  <p className="text-foreground text-sm font-medium break-words">
+                    {comment.title}
+                  </p>
+                )}
                 <p className="text-foreground text-sm break-words whitespace-pre-wrap">
                   {comment.body}
                 </p>
@@ -113,11 +142,14 @@ export function ReviewCommentsBlock({
                   className="text-foreground shrink-0 font-mono"
                   title={spanLabel(comment)}
                 >
-                  {spanLabel(comment, fileName(comment.path))}
+                  {comment.general
+                    ? "Whole change"
+                    : spanLabel(comment, fileName(comment.path))}
                 </span>
-                <span className="min-w-0 truncate">
-                  {comment.body.split("\n")[0]}
-                </span>
+                {reviewerLabel(comment) && (
+                  <span className="shrink-0">{reviewerLabel(comment)}</span>
+                )}
+                <span className="min-w-0 truncate">{headline(comment)}</span>
               </p>
             )}
           </li>
