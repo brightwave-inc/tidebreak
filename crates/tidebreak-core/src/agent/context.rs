@@ -9,9 +9,9 @@ use crate::compaction::{
 };
 use crate::context;
 use crate::error::{AgentError, Result};
-use crate::id::{MessageId, SessionId};
+use crate::id::{MessageId, SessionId, TurnId};
 use crate::image::{ImageAttachments, ImageData};
-use crate::model::{Chat, Role};
+use crate::model::{Chat, Role, TurnPlacements};
 use crate::provider::{ChatMessage, ChatRequest, ContentBlock, ProviderEvent, StopReason, Usage};
 use crate::semantic_checkpoint::{
     merge_original_requests, original_requests_from_content, ContextCheckpoint,
@@ -25,7 +25,9 @@ use super::transcript::{
     checkpoint_is_projectable, project_checkpoint, rebuild_transcript_with_boundary,
 };
 use super::types::{CONTEXT_CHECKPOINT_INSTRUCTION, CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS};
-use super::{Agent, LoadedTranscript, TranscriptSourceBoundary, USER_INTERRUPTION_NOTE};
+use super::{
+    Agent, LoadedTranscript, TranscriptSourceBoundary, RETRY_NOTE, USER_INTERRUPTION_NOTE,
+};
 
 /// Everything before the last message of the request a step is about to send.
 ///
@@ -54,6 +56,10 @@ pub(crate) struct CreateContextCheckpoint<'a> {
     /// The request the foreground step was about to send. The checkpoint call
     /// is this plus one trailing instruction message.
     pub prefix: &'a RequestPrefix,
+    /// The latest turn the request holds: the running turn, or for a
+    /// compaction between turns the chat's latest turn. The checkpoint is
+    /// only good while that turn is part of the conversation.
+    pub through_turn_id: Option<TurnId>,
     /// Compact whatever the boundary rules allow, without waiting for the
     /// transcript to cross the policy threshold. Set by a compaction the user
     /// asked for: they can see the meter, and asking is the trigger.
@@ -120,6 +126,7 @@ impl Agent {
             attempted_boundary: &mut None,
             events: &sink,
             prefix: &prefix,
+            through_turn_id: loaded.latest_turn_id,
             ignore_threshold: true,
             focus,
         })
@@ -136,7 +143,19 @@ impl Agent {
         chat_id: SessionId,
     ) -> Option<ContextCheckpoint> {
         let checkpoint = self.store.get_context_checkpoint(chat_id).await.ok()??;
-        checkpoint_is_projectable(&checkpoint, chat_id).then_some(checkpoint)
+        if !checkpoint_is_projectable(&checkpoint, chat_id) {
+            return None;
+        }
+        // A summary can repeat anything its view held. Once a rerun takes the
+        // latest turn of that view out of the conversation, the summary would
+        // bring it back.
+        if let Some(through) = checkpoint.through_turn_id {
+            let replacements = self.store.list_turn_replacements(chat_id).await.ok()?;
+            if !TurnPlacements::new(&replacements).in_conversation(through) {
+                return None;
+            }
+        }
+        Some(checkpoint)
     }
 
     pub(crate) async fn load_transcript(
@@ -145,6 +164,13 @@ impl Agent {
         checkpoint_source: Option<MessageId>,
     ) -> Result<LoadedTranscript> {
         let mut messages = self.store.list_messages(chat_id).await?;
+        // A regenerated or edited turn leaves the conversation the model sees.
+        // Its rows stay for the reader: a regenerated answer is still shown as
+        // an earlier version. A retried turn stays: the retry continues it.
+        let placements = TurnPlacements::new(&self.store.list_turn_replacements(chat_id).await?);
+        let replaced = placements.outside_conversation();
+        messages.retain(|message| !replaced.contains(&message.turn_id));
+        let latest_turn_id = messages.last().map(|message| message.turn_id);
         // The partial prose a cancelled turn committed (#1182) re-enters model
         // context annotated, so the model reads it as a response the user
         // stopped rather than one it chose to end mid-sentence. Applied here,
@@ -162,13 +188,29 @@ impl Agent {
                 }
             }
         }
-        let tool_calls = self.store.list_tool_calls(chat_id).await?;
-        let attachments = self.store.list_message_attachments(chat_id).await?;
+        let mut tool_calls = self.store.list_tool_calls(chat_id).await?;
+        tool_calls.retain(|call| !replaced.contains(&call.turn_id));
+        let kept: HashSet<MessageId> = messages.iter().map(|message| message.id).collect();
+        let mut attachments = self.store.list_message_attachments(chat_id).await?;
+        attachments.retain(|attachment| kept.contains(&attachment.message_id));
         let user_texts: Vec<(MessageId, String)> = messages
             .iter()
             .filter(|message| message.role == Role::User)
             .map(|message| (message.id, message.content_for_model().to_owned()))
             .collect();
+        // A retry sends the retried turn's message again, after everything
+        // that turn said and called. The note tells the model why the request
+        // repeats, so it builds on what already ran. Like the date below, it
+        // is context, not something the person asked.
+        let mut noted_retries = HashSet::new();
+        for message in &mut messages {
+            if message.role == Role::User
+                && placements.retried(message.turn_id).is_some()
+                && noted_retries.insert(message.turn_id)
+            {
+                message.append_model_context(RETRY_NOTE);
+            }
+        }
         // A request's date belongs beside its input, not in the shared system
         // prompt. Derive it from the saved timestamp so retries and later
         // turns keep the same cached history, including across UTC midnight.
@@ -198,6 +240,7 @@ impl Agent {
             checkpoint_boundary,
             source_boundaries,
             user_texts,
+            latest_turn_id,
         })
     }
 
@@ -266,6 +309,7 @@ impl Agent {
             attempted_boundary,
             events,
             prefix,
+            through_turn_id,
             ignore_threshold,
             focus,
         } = args;
@@ -486,6 +530,7 @@ impl Agent {
             content,
             usage,
             created_at: Utc::now(),
+            through_turn_id,
         };
         let saved = match self.store.save_context_checkpoint(&proposed).await.ok() {
             Some(
@@ -494,7 +539,7 @@ impl Agent {
                 | SaveContextCheckpointOutcome::Stale(checkpoint)
                 | SaveContextCheckpointOutcome::Conflict(checkpoint),
             ) => checkpoint_is_projectable(&checkpoint, chat_id).then_some(checkpoint),
-            None => None,
+            Some(SaveContextCheckpointOutcome::Superseded) | None => None,
         };
         finish(saved.is_some());
         Ok(saved)

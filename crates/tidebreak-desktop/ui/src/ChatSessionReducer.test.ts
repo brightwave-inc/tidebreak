@@ -918,6 +918,55 @@ describe("applyTerminalHydration", () => {
     expect(next.messages.map((message) => message.id)).toEqual(["u9", "a9"]);
     expect(next.earlierCursor).toBe(17);
   });
+
+  // A regenerate refreshes only the newest turns. The versions of an older
+  // turn, read with an earlier page, must survive that refresh.
+  it("keeps earlier answers the page does not cover, and updates the ones it does", () => {
+    const version = (turnId: string) => ({
+      turnId,
+      messages: [answer(`answer-${turnId}`)],
+    });
+    const held: ChatSessionState = {
+      ...initialChatSessionState(),
+      earlierCursor: 3,
+      messages: [question("u1"), answer("a1"), question("u2"), answer("a2")],
+      answerVersions: { t1: [version("t0")], t2: [version("t2a")] },
+    };
+    const next = applyTerminalHydration(held, {
+      messages: [question("u2"), answer("a2")],
+      messageIds: new Set(["u2", "a2"]),
+      lastEventSeq: 9,
+      lastTurnUsage: null,
+      earlierCursor: 5,
+      firstMessageId: "u2",
+      answerVersions: { t2: [version("t2a"), version("t2b")] },
+      latestSideEffects: { turnId: "t2", effects: ["files_written"] },
+    });
+    expect(next.answerVersions.t1).toEqual([version("t0")]);
+    expect(next.answerVersions.t2).toHaveLength(2);
+    expect(next.latestSideEffects).toEqual({
+      turnId: "t2",
+      effects: ["files_written"],
+    });
+  });
+});
+
+describe("the notices a turn's end leaves", () => {
+  // A retry answers the turn the notice names; a notice without one would
+  // offer nothing to retry until the refresh landed.
+  it("name the turn that stopped or failed", () => {
+    const stopped = play([TURN, { type: "turn_cancelled", usage: NO_USAGE }]);
+    expect(stopped.state.messages.at(-1)).toMatchObject({
+      role: "system",
+      text: TURN_CANCELLED_NOTICE,
+      turnId: "turn-1",
+    });
+    const failed = play([TURN, { type: "turn_failed", category: "auth" }]);
+    expect(failed.state.messages.at(-1)).toMatchObject({
+      role: "turn_failure",
+      turnId: "turn-1",
+    });
+  });
 });
 
 describe("prependEarlierPage", () => {

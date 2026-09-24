@@ -308,6 +308,16 @@ export const allowlist = [
     reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",
   },
   {
+    story: "conversation-transcript--regenerate-that-starts-new-chat",
+    rule: "aria-hidden-focus",
+    reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",
+  },
+  {
+    story: "conversation-transcript--retry-with-model",
+    rule: "aria-hidden-focus",
+    reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",
+  },
+  {
     story: "foundations-primitives--*",
     rule: "aria-hidden-focus",
     reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",

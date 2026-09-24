@@ -1039,13 +1039,180 @@ body {
     background: color-mix(in srgb, var(--accent) 60%, transparent);
   }
 
+  /* The actions under a message. In a Work chat the latest answer keeps its
+   actions in view, and every other message shows them on hover and keyboard
+   focus, so a long transcript stays quiet. They keep their space either way,
+   so the row never shifts as they appear. */
+  .message-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.125rem;
+    transition: opacity 120ms ease;
+  }
+
+  .message-actions.reveals-on-hover {
+    opacity: 0;
+  }
+
+  .message-assistant:hover .message-actions,
+  .message-assistant:focus-within .message-actions,
+  .message-user-frame:hover .message-actions,
+  .message-user-frame:focus-within .message-actions,
+  .message-actions:has([data-state="open"]) {
+    opacity: 1;
+  }
+
+  .message-action {
+    color: var(--muted-foreground);
+  }
+
+  .message-action:hover,
+  .message-action:focus-visible,
+  .message-action[data-state="open"] {
+    color: var(--ink);
+    background: color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+
+  .message-action-pair {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .message-versions {
+    display: inline-flex;
+    align-items: center;
+    margin-inline-end: 0.25rem;
+  }
+
+  .message-versions-label {
+    min-width: 2.75rem;
+    color: var(--muted-foreground);
+    font-size: var(--text-2xs);
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  /* A turn whose newest attempt said nothing still pages back to the answers
+   before it, on a row of its own. */
+  .message-versions-row {
+    display: flex;
+    min-height: 1.7rem;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  /* Said under an earlier answer while it is on screen, so the reader knows
+   the conversation goes on from the latest one. */
+  .message-versions-note {
+    margin: 0;
+    padding-inline: 0.3rem;
+    color: var(--muted-foreground);
+    font-size: var(--text-2xs);
+  }
+
+  /* Why answering again starts a new chat, at the top of the Regenerate
+   menu, before anything is sent. */
+  .message-rerun-note {
+    max-width: 18rem;
+    margin: 0;
+    padding: 0.375rem 0.5rem 0.5rem;
+    color: var(--muted-foreground);
+    font-size: var(--text-xs);
+    line-height: 1.45;
+    text-wrap: pretty;
+  }
+
+  /* Editing the latest message, in the bubble's place and shape. The bottom
+   margin stands in for the footer the bubble shows, so the answer below keeps
+   its distance. */
+  .message-user-editor {
+    display: flex;
+    width: min(36rem, 100%);
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 1.7rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.625rem 0.75rem;
+    background: var(--muted);
+    color: var(--ink);
+  }
+
+  .message-user-editor:focus-within {
+    border-color: var(--ring);
+  }
+
+  .message-user-editor-note {
+    color: var(--muted-foreground);
+    font-size: var(--text-xs);
+    line-height: 1.45;
+  }
+
+  .message-user-editor-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.375rem;
+  }
+
+  /* Where a branch's copied history ends, as a rule across the column with
+   the way back in its middle. */
+  .message-branch-notice {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 0.5rem;
+    margin-block: 0.75rem;
+    color: var(--muted-foreground);
+    font-size: var(--text-xs);
+  }
+
+  .message-branch-notice::before,
+  .message-branch-notice::after {
+    content: "";
+    height: 1px;
+    flex: 1 1 0;
+    background: var(--border);
+  }
+
+  .message-branch-notice-icon {
+    width: 0.875rem;
+    height: 0.875rem;
+    flex: none;
+  }
+
+  .message-branch-notice-link {
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--foreground);
+    font: inherit;
+    font-weight: 500;
+    text-decoration: underline;
+    text-decoration-color: var(--border);
+    text-underline-offset: 3px;
+    cursor: pointer;
+  }
+
+  .message-branch-notice-link:hover,
+  .message-branch-notice-link:focus-visible {
+    text-decoration-color: currentColor;
+  }
+
+  .message-branch-notice-link:focus-visible {
+    border-radius: 3px;
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
   .clipboard-copy-icon {
     display: inline-flex;
     align-items: center;
   }
 
   @media (hover: none) {
-    .message-footer time {
+    .message-footer time,
+    .message-actions {
       opacity: 1;
     }
   }
@@ -1378,7 +1545,11 @@ body {
   }
 
   .message-turn-failure-action {
+    display: flex;
+    flex-wrap: wrap;
     align-self: center;
+    justify-content: flex-end;
+    gap: 0.5rem;
     flex-shrink: 0;
   }
 
@@ -1390,6 +1561,7 @@ body {
     .message-turn-failure-action {
       grid-column: 2;
       justify-self: start;
+      justify-content: flex-start;
     }
   }
 
@@ -1398,6 +1570,20 @@ body {
     border-inline-start-color: var(--warning);
     color: var(--foreground);
     text-align: left;
+  }
+
+  /* A stop the reader can answer again, with the retry at the notice's end. */
+  .message-notice.has-action {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-block: 0.2rem;
+  }
+
+  .message-notice-action {
+    flex-shrink: 0;
+    color: var(--foreground);
   }
 
   .message-notice.is-compaction {
@@ -1825,6 +2011,7 @@ body {
   @media (prefers-reduced-motion: reduce) {
     .assistant-sources-chevron,
     .message-footer time,
+    .message-actions,
     .assistant-working-mark {
       animation: none;
       transition: none;

@@ -7,17 +7,20 @@ import type { ProviderKind } from "./api";
 import { providerLabel } from "./ModelSelection";
 
 /**
- * Whether a category's recovery is "send it again".
+ * Whether a category's recovery starts in provider settings.
  *
- * Derived from the category alone — there is no separate retryable flag on the
- * wire, deliberately, so nothing can contradict this.
+ * Derived from the category alone — there is no separate flag on the wire,
+ * deliberately, so nothing can contradict this.
  *
- * `auth` is the case that must stay false: the credential the provider rejected
- * is the same one a retry would present, so the button would only replay the
- * rejection. That case points at settings instead.
+ * A rejected credential or a denied account needs a fix before anything else
+ * can work, so these point at settings first. Retry sits beside the settings
+ * link for after the fix: the reader comes back to the same failure and
+ * answers it again in place.
  */
-export function turnFailureOffersRetry(category: TurnFailureCategory): boolean {
-  return category !== "auth" && category !== "provider_access";
+export function turnFailurePointsAtSettings(
+  category: TurnFailureCategory,
+): boolean {
+  return category === "auth" || category === "provider_access";
 }
 
 /**
@@ -64,11 +67,12 @@ export function turnFailureCopy(
 }
 
 /**
- * A terminal turn failure, with whatever recovery its category actually offers.
+ * A terminal turn failure, with whatever recovery its category offers.
  *
  * `onRetry` is supplied only for the newest failure in the transcript: a button
- * on a failure buried in scrollback would resend a prompt the reader has long
- * since moved past.
+ * on a failure buried in scrollback would rerun a turn the reader has long
+ * since moved past. A retry answers the same turn again rather than sending
+ * its message a second time.
  */
 export function TurnFailureNotice({
   category,
@@ -103,30 +107,26 @@ export function TurnFailureNotice({
           </p>
         )}
       </div>
-      {turnFailureOffersRetry(category) ? (
-        onRetry && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="message-turn-failure-action"
-            onClick={onRetry}
-          >
-            <RefreshCw aria-hidden="true" />
-            Try again
-          </Button>
-        )
-      ) : (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="message-turn-failure-action"
-          onClick={() => void navigate({ to: providerSettingsPath })}
-        >
-          <Settings aria-hidden="true" />
-          Open provider settings
-        </Button>
+      {(onRetry || turnFailurePointsAtSettings(category)) && (
+        <div className="message-turn-failure-action">
+          {turnFailurePointsAtSettings(category) && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void navigate({ to: providerSettingsPath })}
+            >
+              <Settings aria-hidden="true" />
+              Open provider settings
+            </Button>
+          )}
+          {onRetry && (
+            <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+              <RefreshCw aria-hidden="true" />
+              Try again
+            </Button>
+          )}
+        </div>
       )}
     </aside>
   );

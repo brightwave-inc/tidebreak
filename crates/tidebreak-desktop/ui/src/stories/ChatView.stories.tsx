@@ -222,6 +222,7 @@ const retryableMessages: ChatMessage[] = [
   {
     id: "message-failure-user",
     role: "user",
+    turnId: "turn-failure",
     text: "Generate the compact conversation review.",
     files: [
       {
@@ -236,6 +237,7 @@ const retryableMessages: ChatMessage[] = [
   {
     id: "message-failure",
     role: "turn_failure",
+    turnId: "turn-failure",
     category: "transient",
     detail: "The provider closed the stream before the response completed.",
     model: { id: "gpt-5.6-sol", provider: "model_gateway" },
@@ -864,7 +866,8 @@ function StoryChat({
     updateDraft("");
     useComposerDrafts.getState().setPastedTexts(CHAT_ID, []);
   };
-  const retryTurn = (turn: RetryableTurn) => updateDraft(turn.text);
+  // The story client has no turn lane, so a retry only shows it was offered.
+  const retryTurn = (_turn: RetryableTurn) => undefined;
 
   return (
     <ManagedPolicyContext.Provider value={storyPolicy}>

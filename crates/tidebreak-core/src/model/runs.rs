@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::id::{HostRootId, ProjectId, SessionId};
+use crate::id::{HostRootId, ProjectId, SessionId, TurnId};
 
 use super::chat_settings::{NetworkPolicy, ReasoningEffort};
 use super::identity::{
@@ -73,6 +73,27 @@ pub struct ChatListing {
     /// How many turns the conversation has had. A client hides one with none
     /// until it is named or pinned: nothing has happened in it yet.
     pub turn_count: u64,
+    /// Where this conversation was branched from, when it is a branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub branched_from: Option<ChatBranchOrigin>,
+}
+
+/// The conversation a branch came from, and where.
+///
+/// The branch owns a copy of everything it shows, so this is a link and
+/// nothing more: the original can be renamed, moved, or deleted, and the
+/// branch keeps working.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct ChatBranchOrigin {
+    /// The original conversation. It may since have been deleted.
+    pub chat_id: SessionId,
+    /// The last turn of the original the branch copied. Empty when the
+    /// branch copied no turns: an edit of the original's first message.
+    pub turn_id: Option<TurnId>,
+    /// When the branch was made. Everything in the branch older than this is
+    /// the copied history.
+    pub branched_at: DateTime<Utc>,
 }
 
 impl ChatListing {
@@ -86,6 +107,7 @@ impl ChatListing {
             running: false,
             unread: false,
             turn_count: 0,
+            branched_from: None,
         }
     }
 }

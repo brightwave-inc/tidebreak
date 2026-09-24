@@ -287,6 +287,11 @@ pub struct ContextCheckpoint {
     pub usage: Usage,
     /// Host-stamped time this current checkpoint was committed.
     pub created_at: DateTime<Utc>,
+    /// The latest turn the summarized view held. The summary can repeat
+    /// anything from that view, so it is only good while this turn is part of
+    /// the conversation. `None` for a checkpoint written before this was
+    /// recorded.
+    pub through_turn_id: Option<crate::id::TurnId>,
 }
 
 impl ContextCheckpoint {
@@ -334,6 +339,10 @@ pub enum SaveContextCheckpointOutcome {
     Stale(ContextCheckpoint),
     /// The source boundary matches, but the durable payload differs.
     Conflict(ContextCheckpoint),
+    /// A rerun took the turn this checkpoint's view ended at out of the
+    /// conversation while it was written, so it could repeat what that turn
+    /// said. Nothing was stored.
+    Superseded,
 }
 
 #[cfg(test)]

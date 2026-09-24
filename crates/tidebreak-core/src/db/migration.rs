@@ -52,6 +52,7 @@ mod session_inference;
 mod session_owner_kind;
 mod trigger_fire_context;
 mod turn_actor;
+mod turn_versions_and_branches;
 mod workspace_setup_error;
 
 #[cfg(test)]
@@ -137,6 +138,7 @@ impl MigratorTrait for Migrator {
             Box::new(notification_body::NotificationBody),
             Box::new(pull_request_observed_times::PullRequestObservedTimes),
             Box::new(conversation_list_state::ConversationListState),
+            Box::new(turn_versions_and_branches::TurnVersionsAndBranches),
         ]
     }
 }

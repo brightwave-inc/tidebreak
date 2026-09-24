@@ -19,6 +19,7 @@ const transcript: ChatTranscript = {
   messages: [
     {
       id: "assistant-durable",
+      turn_id: "turn-fixture",
       role: "assistant",
       content: "Clean durable answer",
       created_at: "2026-07-19T10:00:00Z",
@@ -37,6 +38,7 @@ const transcript: ChatTranscript = {
   last_event_seq: 12,
   has_more: false,
   earlier_cursor: null,
+  answer_versions: [],
 };
 
 describe("terminal transcript presentation", () => {
@@ -47,6 +49,7 @@ describe("terminal transcript presentation", () => {
       messages: [
         {
           id: "host-note-1",
+          turn_id: "turn-fixture",
           role: "system",
           content:
             "User restored output 'report.md' to the content of version 1.",
@@ -59,6 +62,7 @@ describe("terminal transcript presentation", () => {
       last_event_seq: 2,
       has_more: false,
       earlier_cursor: null,
+      answer_versions: [],
     });
 
     expect(presented.messages).toEqual([
@@ -75,6 +79,7 @@ describe("terminal transcript presentation", () => {
       messages: [
         {
           id: "user-1",
+          turn_id: "turn-fixture",
           role: "user",
           content: "Earlier ask",
           created_at: "2026-07-30T12:00:00Z",
@@ -82,6 +87,7 @@ describe("terminal transcript presentation", () => {
         },
         {
           id: "compaction-1",
+          turn_id: "turn-fixture",
           role: "compaction",
           content: "",
           created_at: "2026-07-30T12:01:00Z",
@@ -89,6 +95,7 @@ describe("terminal transcript presentation", () => {
         },
         {
           id: "user-2",
+          turn_id: "turn-fixture",
           role: "user",
           content: "Later ask",
           created_at: "2026-07-30T12:02:00Z",
@@ -100,6 +107,7 @@ describe("terminal transcript presentation", () => {
       last_event_seq: 3,
       has_more: false,
       earlier_cursor: null,
+      answer_versions: [],
     });
 
     expect(presented.messages.map((message) => message.role)).toEqual([
@@ -119,6 +127,7 @@ describe("terminal transcript presentation", () => {
       tool_activity: [
         {
           call_id: "call-1",
+          turn_id: "turn-fixture",
           tool: "spawn_sandbox_agent",
           result_unreadable: false,
           status: "completed",
@@ -131,6 +140,7 @@ describe("terminal transcript presentation", () => {
       last_event_seq: 4,
       has_more: false,
       earlier_cursor: null,
+      answer_versions: [],
     });
 
     expect(presented.messages).toEqual([
@@ -151,6 +161,7 @@ describe("terminal transcript presentation", () => {
       tool_activity: [
         {
           call_id: "call-2",
+          turn_id: "turn-fixture",
           tool: "web_search",
           result: { tool: "web_search_provider_required" },
           result_unreadable: false,
@@ -163,6 +174,7 @@ describe("terminal transcript presentation", () => {
       last_event_seq: 4,
       has_more: false,
       earlier_cursor: null,
+      answer_versions: [],
     });
 
     expect(presented.messages).toEqual([
@@ -181,6 +193,7 @@ describe("terminal transcript presentation", () => {
       tool_activity: [
         {
           call_id: "call-3",
+          turn_id: "turn-fixture",
           tool: "web_search",
           result_unreadable: true,
           status: "completed",
@@ -192,6 +205,7 @@ describe("terminal transcript presentation", () => {
       last_event_seq: 4,
       has_more: false,
       earlier_cursor: null,
+      answer_versions: [],
     });
 
     expect(presented.messages).toEqual([
@@ -214,6 +228,7 @@ describe("terminal transcript presentation", () => {
     expect(presented?.messages).toEqual([
       {
         id: "assistant-durable",
+        turnId: "turn-fixture",
         role: "assistant",
         text: "Clean durable answer",
         createdAt: "2026-07-19T10:00:00Z",
@@ -321,6 +336,7 @@ describe("terminal transcript presentation", () => {
     expect(presented.messages).toEqual([
       {
         id: "assistant-durable",
+        turnId: "turn-fixture",
         role: "assistant",
         text: "Clean durable answer",
         createdAt: "2026-07-19T10:00:00Z",
@@ -347,6 +363,7 @@ describe("terminal transcript presentation", () => {
       messages: [
         {
           id: "user-image",
+          turn_id: "turn-fixture",
           role: "user",
           content: "Describe this screenshot",
           created_at: "2026-07-19T10:00:00Z",
@@ -373,11 +390,13 @@ describe("terminal transcript presentation", () => {
       last_event_seq: 15,
       has_more: false,
       earlier_cursor: null,
+      answer_versions: [],
     });
 
     expect(presented.messages).toEqual([
       {
         id: "user-image",
+        turnId: "turn-fixture",
         role: "user",
         text: "Describe this screenshot",
         images: [
@@ -405,6 +424,7 @@ describe("terminal transcript presentation", () => {
       messages: [
         {
           id: "empty-refusal",
+          turn_id: "turn-fixture",
           role: "assistant",
           content: "",
           created_at: "2026-07-19T10:00:00Z",
@@ -412,6 +432,7 @@ describe("terminal transcript presentation", () => {
         },
         {
           id: "partial-refusal",
+          turn_id: "turn-fixture",
           role: "assistant",
           content: "Visible partial",
           created_at: "2026-07-19T10:01:00Z",
@@ -448,11 +469,13 @@ describe("terminal transcript presentation", () => {
       last_event_seq: 14,
       has_more: false,
       earlier_cursor: null,
+      answer_versions: [],
     });
 
     expect(presented.messages).toEqual([
       {
         id: "empty-refusal",
+        turnId: "turn-fixture",
         role: "assistant",
         text: "",
         createdAt: "2026-07-19T10:00:00Z",
@@ -466,6 +489,7 @@ describe("terminal transcript presentation", () => {
       },
       {
         id: "partial-refusal",
+        turnId: "turn-fixture",
         role: "assistant",
         text: "Visible partial",
         createdAt: "2026-07-19T10:01:00Z",
@@ -488,6 +512,7 @@ describe("terminal transcript presentation", () => {
       messages: [
         {
           id: "question",
+          turn_id: "turn-fixture",
           role: "user",
           content: "Long question",
           created_at: "2026-07-19T10:00:00Z",
@@ -495,6 +520,7 @@ describe("terminal transcript presentation", () => {
         },
         {
           id: "later-answer",
+          turn_id: "turn-fixture",
           role: "assistant",
           content: "Answer to the follow-up",
           created_at: "2026-07-19T10:03:00Z",
@@ -531,6 +557,7 @@ describe("terminal transcript presentation", () => {
       last_event_seq: 20,
       has_more: false,
       earlier_cursor: null,
+      answer_versions: [],
     });
 
     expect(
@@ -547,9 +574,11 @@ describe("terminal transcript presentation", () => {
       text: "Partial answer",
       reasoning: "Considering the first approach",
     });
+    // The notice names its turn, which is what a retry answers again.
     expect(presented.messages[2]).toEqual({
       id: "cancellation:turn-cancelled",
       role: "system",
+      turnId: "turn-cancelled",
       text: TURN_CANCELLED_NOTICE,
     });
     expect(presented.messages[3]).toMatchObject({
@@ -559,6 +588,7 @@ describe("terminal transcript presentation", () => {
     expect(presented.messages[4]).toEqual({
       id: "failure:turn-failed",
       role: "turn_failure",
+      turnId: "turn-failed",
       category: "transient",
       model: { id: "gpt-5.6-sol", provider: "openai" },
     });
@@ -569,6 +599,7 @@ describe("terminal transcript presentation", () => {
       messages: [
         {
           id: "question",
+          turn_id: "turn-fixture",
           role: "user",
           content: "Long question",
           created_at: "2026-07-19T10:00:00Z",
@@ -576,6 +607,7 @@ describe("terminal transcript presentation", () => {
         },
         {
           id: "partial-answer",
+          turn_id: "turn-fixture",
           role: "assistant",
           content: "The answer so far",
           created_at: "2026-07-19T10:00:30Z",
@@ -600,6 +632,7 @@ describe("terminal transcript presentation", () => {
       last_event_seq: 20,
       has_more: false,
       earlier_cursor: null,
+      answer_versions: [],
     });
 
     expect(
@@ -668,6 +701,7 @@ describe("terminal transcript presentation", () => {
       messages: [
         {
           id: "answer",
+          turn_id: "turn-fixture",
           role: "assistant",
           content: "Done",
           created_at: "2026-07-19T10:00:00Z",
@@ -691,6 +725,7 @@ describe("terminal transcript presentation", () => {
       last_event_seq: 21,
       has_more: false,
       earlier_cursor: null,
+      answer_versions: [],
     });
 
     expect(
@@ -703,5 +738,92 @@ describe("terminal transcript presentation", () => {
       turnId: "turn-remembered",
       records: [record],
     });
+  });
+
+  it("groups earlier answers under the turn shown in their place", () => {
+    const terminal = (turnId: string, messageId: string | null) => ({
+      turn_id: turnId,
+      ...(messageId ? { message_id: messageId } : {}),
+      status: "completed" as const,
+      partial_content: "",
+      file_changes: [],
+      memory_proposals: [],
+      usage: NO_USAGE,
+      voice_input_used: false,
+      finished_at: "2026-07-19T10:02:00Z",
+    });
+    const presented = presentChatTranscript({
+      messages: [
+        {
+          id: "question",
+          turn_id: "turn-current",
+          role: "user",
+          content: "Name a boat",
+          created_at: "2026-07-19T10:01:00Z",
+          citations: [],
+        },
+        {
+          id: "current-answer",
+          turn_id: "turn-current",
+          role: "assistant",
+          content: "Driftwood",
+          created_at: "2026-07-19T10:01:30Z",
+          citations: [],
+        },
+      ],
+      tool_activity: [],
+      terminal_turns: [
+        {
+          ...terminal("turn-current", "current-answer"),
+          side_effects: ["commands_run"],
+        },
+      ],
+      last_event_seq: 30,
+      has_more: false,
+      earlier_cursor: null,
+      answer_versions: [
+        {
+          turn_id: "turn-first",
+          current_turn_id: "turn-current",
+          messages: [
+            {
+              id: "first-answer",
+              turn_id: "turn-first",
+              role: "assistant",
+              content: "Seafoam",
+              created_at: "2026-07-19T10:00:30Z",
+              citations: [],
+            },
+          ],
+          tool_activity: [],
+          terminal_turn: terminal("turn-first", "first-answer"),
+        },
+      ],
+    });
+
+    expect(presented.answerVersions).toEqual({
+      "turn-current": [
+        {
+          turnId: "turn-first",
+          messages: [
+            expect.objectContaining({
+              id: "first-answer",
+              role: "assistant",
+              text: "Seafoam",
+              turnId: "turn-first",
+            }),
+          ],
+        },
+      ],
+    });
+    expect(presented.latestSideEffects).toEqual({
+      turnId: "turn-current",
+      effects: ["commands_run"],
+    });
+    // The current answer is the conversation; the earlier one is not in it.
+    expect(presented.messages.map((message) => message.id)).toEqual([
+      "question",
+      "current-answer",
+    ]);
   });
 });

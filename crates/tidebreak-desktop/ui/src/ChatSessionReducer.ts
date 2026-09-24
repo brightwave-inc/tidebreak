@@ -1,5 +1,9 @@
 import type { SequencedEvent } from "./api";
 import { parseToolActionPreview, parseToolResultPreview } from "./api";
+import type {
+  AnswerVersions,
+  LatestTurnSideEffects,
+} from "./ChatTranscriptPresentation";
 import { contextTruncationNotice } from "./ContextUsage";
 import type { RendererTurnUsage } from "./generated/wire";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
@@ -79,6 +83,17 @@ export type ChatSessionState = {
    */
   earlierCursor: number | null;
   /**
+   * Earlier answers to messages that were answered again, keyed by the turn
+   * shown in their place. Only a hydration writes it.
+   */
+  answerVersions: AnswerVersions;
+  /**
+   * What the latest settled turn did outside the conversation, from the
+   * newest hydration. An edit of that turn starts a new chat when this is
+   * not empty.
+   */
+  latestSideEffects: LatestTurnSideEffects | null;
+  /**
    * How the last turn you watched end ended, for the composer's status
    * region to say so. Only a live terminal frame sets it: a replayed one is
    * an ending you did not just see, and reopening a chat should not announce
@@ -149,6 +164,8 @@ export function initialChatSessionState(): ChatSessionState {
     sandboxPreparing: false,
     compacting: false,
     earlierCursor: null,
+    answerVersions: {},
+    latestSideEffects: null,
     lastTurnEnding: null,
   };
 }
@@ -554,6 +571,7 @@ export function reduceChatSessionEvent(
               id: deps.nextId(),
               role: "system",
               text: TURN_CANCELLED_NOTICE,
+              turnId: state.activeTurnId ?? undefined,
             },
           ],
         },
@@ -585,6 +603,7 @@ export function reduceChatSessionEvent(
             {
               id: deps.nextId(),
               role: "turn_failure",
+              turnId: state.activeTurnId ?? undefined,
               category: event.category,
               detail: event.detail,
               model: event.model,
@@ -670,6 +689,10 @@ export function applyTerminalHydration(
     earlierCursor?: number | null;
     /** Where the page starts, when it is a page. */
     firstMessageId?: string | null;
+    /** Earlier answers on this page, keyed by the turn shown in their place. */
+    answerVersions?: AnswerVersions;
+    /** What the newest turn on this page did outside the conversation. */
+    latestSideEffects?: LatestTurnSideEffects | null;
   },
 ): ChatSessionState {
   const earlierCursor = hydration.earlierCursor ?? null;
@@ -692,6 +715,15 @@ export function applyTerminalHydration(
       ? [...state.messages.slice(0, joinAt), ...messages]
       : messages,
     earlierCursor: spliced ? state.earlierCursor : earlierCursor,
+    // A page carries every version it holds, so it replaces what the session
+    // held for the turns it covers and keeps the rest.
+    answerVersions: spliced
+      ? { ...state.answerVersions, ...hydration.answerVersions }
+      : (hydration.answerVersions ?? {}),
+    latestSideEffects:
+      hydration.latestSideEffects === undefined
+        ? state.latestSideEffects
+        : hydration.latestSideEffects,
     reasoningBuffer: "",
     // The snapshot is authoritative when it has counts — it is rebuilt from
     // the durable turn rows. A chat with no finished turn yet leaves whatever
@@ -713,6 +745,7 @@ export function prependEarlierPage(
     messages: ChatMessage[];
     messageIds: ReadonlySet<string>;
     earlierCursor?: number | null;
+    answerVersions?: AnswerVersions;
   },
   requestedCursor: number,
 ): ChatSessionState {
@@ -728,6 +761,7 @@ export function prependEarlierPage(
       ...page.messageIds,
       ...state.hydratedMessageIds,
     ]),
+    answerVersions: { ...page.answerVersions, ...state.answerVersions },
     earlierCursor: page.earlierCursor ?? null,
   };
 }

@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, QueryTrait, Set, TransactionTrait, TryInsertResult,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, EntityTrait,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait, Set, TransactionTrait, TryInsertResult,
 };
 use serde_json::Value;
 
@@ -22,7 +22,7 @@ use crate::provider::MessageReasoning;
 use crate::storage::{
     ChatTerminalTurnSnapshot, ChatTerminalTurnStatus, ChatToolActivitySnapshot,
     ChatToolActivityStatus, ChatTranscriptPage, ChatTranscriptSnapshot, DeleteChatOutcome,
-    MessageInvokedSkills, MoveChatOutcome, TranscriptPage, TurnEventAppend,
+    DiscardBranchOutcome, MessageInvokedSkills, MoveChatOutcome, TranscriptPage, TurnEventAppend,
 };
 use crate::PermissionMode;
 
@@ -180,7 +180,7 @@ pub(in crate::db) async fn create_chat_with_project_defaults(
     Ok(chat)
 }
 
-async fn load_chat_project_roots<C>(
+pub(in crate::db) async fn load_chat_project_roots<C>(
     conn: &C,
     project_id: Option<ProjectId>,
     owner: Option<&OwnerId>,
@@ -211,7 +211,11 @@ where
     Ok(project_from_models(model, roots)?.root_attachments)
 }
 
-async fn insert_chat_on<C>(conn: &C, chat: &Chat, owner: Option<&OwnerId>) -> Result<()>
+pub(in crate::db) async fn insert_chat_on<C>(
+    conn: &C,
+    chat: &Chat,
+    owner: Option<&OwnerId>,
+) -> Result<()>
 where
     C: ConnectionTrait,
 {
@@ -282,6 +286,8 @@ where
         pinned_at: Set(None),
         archived_at: Set(None),
         unread_since: Set(None),
+        branched_from_session_id: Set(None),
+        branched_from_turn_id: Set(None),
     }
     .insert(conn)
     .await
@@ -720,6 +726,14 @@ fn chat_listing_from_models(
     let pinned_at = model.pinned_at;
     let archived_at = model.archived_at;
     let unread = model.unread_since.is_some();
+    let branched_from =
+        model
+            .branched_from_session_id
+            .map(|source| crate::model::ChatBranchOrigin {
+                chat_id: SessionId(source),
+                turn_id: model.branched_from_turn_id.map(TurnId),
+                branched_at: model.created_at,
+            });
     let chat = chat_from_models(model, roots)?;
     Ok(ChatListing {
         last_activity_at: last_activity_at.unwrap_or(chat.created_at),
@@ -728,6 +742,7 @@ fn chat_listing_from_models(
         running: activity.running,
         unread,
         turn_count: activity.turn_count,
+        branched_from,
         chat,
     })
 }
@@ -1238,6 +1253,96 @@ async fn prune_empty_chat(
     Ok(true)
 }
 
+/// Remove a branch whose first message was refused.
+///
+/// Its folders came from its project when it was made, in the same
+/// transaction, and nothing has run in it since, so no folder change exists
+/// for it and no native authority was ever granted to it. The project keeps
+/// those folders.
+///
+/// The branch is listed from the moment it commits, so someone may have used
+/// it before the refusal came back. Anything beyond the history it was made
+/// with keeps it: a turn or a queued message it was sent, a file added to it,
+/// a folder change, or a folder it did not get from its project.
+pub(in crate::db) async fn discard_branch(
+    store: &DbStore,
+    chat_id: SessionId,
+    owner: Option<&OwnerId>,
+) -> Result<DiscardBranchOutcome> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DiscardBranchOutcome::NotFound);
+    }
+    let mut branch = entities::session::Entity::find_by_id(chat_id.0)
+        .filter(internal_sessions())
+        .filter(entities::session::Column::BranchedFromSessionId.is_not_null());
+    if let Some(owner) = owner {
+        branch = branch.filter(entities::session::Column::Owner.eq(owner.as_str()));
+    }
+    let Some(branch) = branch.one(&transaction).await.map_err(store_err)? else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DiscardBranchOutcome::NotFound);
+    };
+    // A copied turn carries no admission fingerprint; every turn a message
+    // started does, and so does every running one.
+    let sent_a_turn = entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .filter(
+            Condition::any()
+                .add(entities::turn::Column::Fingerprint.is_not_null())
+                .add(
+                    entities::turn::Column::Status
+                        .is_not_in(TurnRunStatus::TERMINAL.iter().copied()),
+                ),
+        )
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    let queued = entities::code_queued_turn::Entity::find()
+        .filter(entities::code_queued_turn::Column::SessionId.eq(chat_id.0))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    // A copied document keeps the time it was first added, which is before
+    // the branch existed.
+    let added_a_file = entities::document::Entity::find()
+        .filter(entities::document::Column::ChatId.eq(chat_id.0))
+        .filter(entities::document::Column::CreatedAt.gte(branch.created_at))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    let changed = entities::root_attachment_change::Entity::find()
+        .filter(entities::root_attachment_change::Column::ChatId.eq(chat_id.0))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    let from_project = attachment_origin_to_db(RootAttachmentOrigin::ProjectDefault);
+    let other_folder = entities::chat_root_attachment::Entity::find()
+        .filter(entities::chat_root_attachment::Column::ChatId.eq(chat_id.0))
+        .filter(entities::chat_root_attachment::Column::Origin.ne(from_project))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if sent_a_turn || queued || added_a_file || changed || other_folder {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DiscardBranchOutcome::Kept);
+    }
+    entities::chat_root_attachment::Entity::delete_many()
+        .filter(entities::chat_root_attachment::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    erase_quiesced_chat_on(&transaction, chat_id).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(DiscardBranchOutcome::Discarded)
+}
+
 /// Remove one fully quiesced conversation and its terminal history.
 ///
 /// Every turn writer takes the chat fence, and all runnable work is rejected
@@ -1663,6 +1768,7 @@ pub(in crate::db) async fn get_chat_transcript(
         .collect();
     let terminal_turns = list_terminal_turns_on(&transaction, chat_id, &messages, &window).await?;
     let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id, &window).await?;
+    let replacements = super::turn::list_turn_replacements_on(&transaction, chat_id).await?;
     let last_event_seq = terminal_event_cursor_on(&transaction, chat_id).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(ChatTranscriptPage {
@@ -1674,6 +1780,7 @@ pub(in crate::db) async fn get_chat_transcript(
             message_invoked_skills,
             terminal_turns,
             tool_activity,
+            replacements,
             last_event_seq,
         },
         earlier: window.earlier,
@@ -1739,11 +1846,32 @@ where
     let Some(turns) = page.turns else {
         return Ok(window);
     };
+    // A retry sends its turn's message again, and the transcript shows the
+    // retried turn's message in its place. The copy never opens a page, so a
+    // page always starts at a message it shows and keeps a retry with the
+    // turn it continues.
+    let retry_copies: Vec<Option<uuid::Uuid>> = entities::turn::Entity::find()
+        .select_only()
+        .column(entities::turn::Column::InputMessageId)
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .filter(
+            entities::turn::Column::Replacement
+                .eq(crate::model::TurnReplacementKind::Retry.as_str()),
+        )
+        .into_tuple()
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    let retry_copies: Vec<uuid::Uuid> = retry_copies.into_iter().flatten().collect();
     // The user message that opens the oldest turn on this page. With fewer
     // turns left than asked for, the page runs to the start.
     let Some(boundary) = entities::message::Entity::find()
         .filter(entities::message::Column::ChatId.eq(chat_id.0))
         .filter(entities::message::Column::Role.eq(role_to_db(Role::User)))
+        .apply_if(
+            (!retry_copies.is_empty()).then_some(retry_copies),
+            |query, copies| query.filter(entities::message::Column::Id.is_not_in(copies)),
+        )
         .apply_if(page.before, |query, before| {
             query.filter(entities::message::Column::Seq.lt(before))
         })
@@ -2085,6 +2213,7 @@ fn tool_activity_from_call(
     };
     ChatToolActivitySnapshot {
         call_id: call.id,
+        turn_id: call.turn_id,
         tool: crate::RendererToolName::from(call.name.as_str()),
         action: crate::preview::ToolActionPreview::build(&call.name, &call.arguments),
         result,
@@ -2273,6 +2402,42 @@ pub(in crate::db) async fn list_tool_calls(
         .map_err(store_err)?
         .into_iter()
         .map(super::client_execution::tool_call_from_model)
+        .collect()
+}
+
+/// What `turns` called, read without the columns a call's arguments and
+/// result live in.
+pub(in crate::db) async fn list_turn_tool_uses(
+    store: &DbStore,
+    chat_id: SessionId,
+    turns: &[TurnId],
+) -> Result<Vec<crate::storage::TurnToolUse>> {
+    if turns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(uuid::Uuid, String, String, Option<String>)> =
+        entities::tool_call::Entity::find()
+            .select_only()
+            .column(entities::tool_call::Column::TurnId)
+            .column(entities::tool_call::Column::Name)
+            .column(entities::tool_call::Column::Status)
+            .column(entities::tool_call::Column::ErrorCode)
+            .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
+            .filter(entities::tool_call::Column::TurnId.is_in(turns.iter().map(|turn| turn.0)))
+            .order_by_asc(entities::tool_call::Column::HistoryOrder)
+            .into_tuple()
+            .all(&store.conn)
+            .await
+            .map_err(store_err)?;
+    rows.into_iter()
+        .map(|(turn_id, name, status, error_code)| {
+            Ok(crate::storage::TurnToolUse {
+                turn_id: TurnId(turn_id),
+                name,
+                status: super::client_execution::status_from_db(&status)?,
+                error_code,
+            })
+        })
         .collect()
 }
 

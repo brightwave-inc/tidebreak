@@ -1,4 +1,11 @@
-import type { ApiClient, ChatTranscript } from "./api";
+import type {
+  ApiClient,
+  ChatTerminalTurn,
+  ChatToolActivity,
+  ChatTranscript,
+  ChatMessage as WireChatMessage,
+  TurnSideEffect,
+} from "./api";
 import type { RendererTurnUsage } from "./generated/wire";
 import type { ChatMessage } from "./MessageList";
 import { TURN_CANCELLED_NOTICE } from "./MessageList";
@@ -26,10 +33,37 @@ export const TRANSCRIPT_PAGE_TURNS = 40;
  */
 export const TERMINAL_REFRESH_TURNS = 10;
 
+/** One earlier answer to a message that was answered again. */
+export type AnswerVersion = {
+  /** The turn that gave this answer. */
+  turnId: string;
+  /** The answer as the transcript shows it: prose, tool activity, notices. */
+  messages: ChatMessage[];
+};
+
+/**
+ * Earlier answers, oldest first, keyed by the turn shown in their place: the
+ * newest answer to the same message.
+ */
+export type AnswerVersions = Readonly<Record<string, readonly AnswerVersion[]>>;
+
+/** What the latest settled turn did outside the conversation. */
+export type LatestTurnSideEffects = {
+  turnId: string;
+  effects: readonly TurnSideEffect[];
+};
+
 export type PresentedTranscript = {
   lastEventSeq: number;
   messages: ChatMessage[];
   messageIds: Set<string>;
+  /** Earlier answers on this page, keyed by the turn shown in their place. */
+  answerVersions: AnswerVersions;
+  /**
+   * What the newest turn on this page did outside the conversation, when the
+   * server read it. Only the newest page carries it.
+   */
+  latestSideEffects: LatestTurnSideEffects | null;
   /**
    * Token counts from the chat's most recently finished turn, for the context
    * meter. Null for a chat that has never completed one.
@@ -48,10 +82,66 @@ export type PresentedTranscript = {
 export function presentChatTranscript(
   transcript: ChatTranscript,
 ): PresentedTranscript {
-  const hydrated = hydrateTranscriptHistory(
+  const { messages, messageIds } = presentEntries(
     transcript.messages,
     transcript.tool_activity,
     transcript.terminal_turns,
+  );
+  const latest = transcript.terminal_turns?.at(-1);
+
+  return {
+    lastEventSeq: transcript.last_event_seq,
+    messages,
+    messageIds,
+    answerVersions: presentAnswerVersions(transcript),
+    latestSideEffects:
+      latest?.side_effects !== undefined
+        ? { turnId: latest.turn_id, effects: latest.side_effects }
+        : null,
+    // The server orders terminal turns oldest-first, so the meter wants the
+    // tail. Each turn re-sends the conversation, which makes the latest turn's
+    // counts the current account of the window rather than one term in a sum.
+    lastTurnUsage: latest?.usage ?? null,
+    earlierCursor: transcript.has_more
+      ? (transcript.earlier_cursor ?? null)
+      : null,
+    firstMessageId: transcript.messages[0]?.id ?? null,
+  };
+}
+
+/**
+ * Earlier answers, grouped by the turn now shown in their place.
+ *
+ * Each version is presented exactly the way the conversation is, so paging
+ * back to one reads like the answer it was. A server older than versions
+ * sends none.
+ */
+function presentAnswerVersions(transcript: ChatTranscript): AnswerVersions {
+  const versions: Record<string, AnswerVersion[]> = {};
+  for (const version of transcript.answer_versions ?? []) {
+    const { messages } = presentEntries(
+      version.messages,
+      version.tool_activity,
+      [version.terminal_turn],
+    );
+    (versions[version.current_turn_id] ??= []).push({
+      turnId: version.turn_id,
+      messages,
+    });
+  }
+  return versions;
+}
+
+/** The renderer's messages for one set of durable rows. */
+function presentEntries(
+  wireMessages: WireChatMessage[],
+  toolActivity: ChatToolActivity[],
+  terminalTurns: ChatTerminalTurn[],
+): { messages: ChatMessage[]; messageIds: Set<string> } {
+  const hydrated = hydrateTranscriptHistory(
+    wireMessages,
+    toolActivity,
+    terminalTurns,
   );
   const messageIds = new Set(
     hydrated
@@ -67,6 +157,7 @@ export function presentChatTranscript(
               {
                 id: `terminal:${entry.id}:assistant`,
                 role: "assistant" as const,
+                turnId: entry.id,
                 text: entry.text,
                 sources: [],
                 createdAt: entry.createdAt,
@@ -79,6 +170,7 @@ export function presentChatTranscript(
           ? ({
               id: `failure:${entry.id}`,
               role: "turn_failure",
+              turnId: entry.id,
               category: entry.failureCategory ?? "unknown",
               detail: entry.failureDetail,
               model: entry.failureModel,
@@ -91,6 +183,7 @@ export function presentChatTranscript(
           : ({
               id: `cancellation:${entry.id}`,
               role: "system",
+              turnId: entry.id,
               text: TURN_CANCELLED_NOTICE,
             } satisfies ChatMessage);
       return [...partial, outcome];
@@ -156,6 +249,7 @@ export function presentChatTranscript(
       const assistant = {
         id: entry.id,
         role: "assistant",
+        turnId: entry.turnId,
         text: entry.text,
         sources: entry.sources,
         createdAt: entry.createdAt,
@@ -182,6 +276,7 @@ export function presentChatTranscript(
           {
             id: `cancellation:${entry.id}`,
             role: "system",
+            turnId: entry.turnId,
             text: TURN_CANCELLED_NOTICE,
           } satisfies ChatMessage,
         ];
@@ -192,6 +287,7 @@ export function presentChatTranscript(
       {
         id: entry.id,
         role: "user",
+        turnId: entry.turnId,
         text: entry.text,
         images: entry.images,
         files: entry.files,
@@ -201,20 +297,7 @@ export function presentChatTranscript(
       } satisfies ChatMessage,
     ];
   });
-
-  return {
-    lastEventSeq: transcript.last_event_seq,
-    messages,
-    messageIds,
-    // The server orders terminal turns oldest-first, so the meter wants the
-    // tail. Each turn re-sends the conversation, which makes the latest turn's
-    // counts the current account of the window rather than one term in a sum.
-    lastTurnUsage: transcript.terminal_turns?.at(-1)?.usage ?? null,
-    earlierCursor: transcript.has_more
-      ? (transcript.earlier_cursor ?? null)
-      : null,
-    firstMessageId: transcript.messages[0]?.id ?? null,
-  };
+  return { messages, messageIds };
 }
 
 /**

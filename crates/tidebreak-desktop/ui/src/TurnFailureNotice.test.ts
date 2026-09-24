@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { turnFailureCopy, turnFailureOffersRetry } from "./TurnFailureNotice";
+import {
+  turnFailureCopy,
+  turnFailurePointsAtSettings,
+} from "./TurnFailureNotice";
 
 describe("TurnFailureNotice copy", () => {
   it("attributes a bare provider access denial without inventing one cause", () => {
@@ -9,7 +12,8 @@ describe("TurnFailureNotice copy", () => {
     expect(copy.body).toContain("not Tidebreak");
     expect(copy.body).toContain("exhausted credits or quota");
     expect(copy.body).toContain("billing or organization restrictions");
-    expect(turnFailureOffersRetry("provider_access")).toBe(false);
+    expect(turnFailurePointsAtSettings("provider_access")).toBe(true);
+    expect(turnFailurePointsAtSettings("transient")).toBe(false);
   });
 
   it("keeps invalid credentials separate from provider account access", () => {

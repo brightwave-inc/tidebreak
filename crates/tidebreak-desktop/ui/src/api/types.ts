@@ -722,6 +722,14 @@ export type ExecFileUndoOutcome = {
 
 export type ChatTranscript = WireChatTranscript;
 
+export type {
+  ChatAnswerVersion,
+  ChatBranchOrigin,
+  ChatTurnStarted,
+  EditTurnBody,
+  TurnSideEffect,
+} from "../generated/wire";
+
 /** A durable foreground coordinator or sandboxed background run. */
 /** A durable foreground coordinator or sandboxed background run. */
 export type AgentRun = AgentRunSnapshot;

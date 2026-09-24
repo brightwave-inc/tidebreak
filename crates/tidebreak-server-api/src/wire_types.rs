@@ -431,6 +431,11 @@ mod tests {
         generate::collect_from::<crate::routes::MemoryStatusBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::MemoryIngestBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ChatTranscript>(&cfg, &mut out);
+        // Rerun and branch a chat: the request bodies and the answer.
+        generate::collect_from::<crate::routes::RetryTurnBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::RegenerateTurnBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::EditTurnBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::ChatTurnStarted>(&cfg, &mut out);
         generate::collect_from::<crate::providers::ProviderInfo>(&cfg, &mut out);
         generate::collect_from::<crate::providers::ProviderAuthMode>(&cfg, &mut out);
         generate::collect_from::<crate::model_discovery::DiscoveredModels>(&cfg, &mut out);
@@ -1478,6 +1483,7 @@ mod tests {
         "DeliverablesCatalog",
         "DeliverablePreview",
         "OutputRevisionsCatalog",
+        "ChatTurnStarted",
     ];
 
     fn at(seconds: i64) -> chrono::DateTime<chrono::Utc> {
@@ -1792,6 +1798,17 @@ mod tests {
             ],
         };
 
+        // An edit that started a new conversation, and why.
+        let edit_started = crate::wire::ChatTurnStarted {
+            chat_id: tidebreak_core::SessionId(uuid::Uuid::from_u128(0x0e11)),
+            turn_id: tidebreak_core::TurnId(uuid::Uuid::from_u128(0x0e12)),
+            branched: true,
+            side_effects: vec![
+                crate::wire::TurnSideEffect::FilesWritten,
+                crate::wire::TurnSideEffect::ConnectedAppsCalled,
+            ],
+        };
+
         fn value<T: serde::Serialize>(record: &T) -> serde_json::Value {
             serde_json::to_value(record).expect("a REST record serializes")
         }
@@ -1808,6 +1825,7 @@ mod tests {
                 "OutputRevisionsCatalog",
                 value(&revisions),
             ),
+            ("edit_started", "ChatTurnStarted", value(&edit_started)),
         ]
     }
 
@@ -1874,6 +1892,7 @@ mod tests {
                 "OutputRevisionsCatalog" => {
                     round_trip::<crate::wire::OutputRevisionsCatalog>(name, &value)
                 }
+                "ChatTurnStarted" => round_trip::<crate::wire::ChatTurnStarted>(name, &value),
                 other => panic!("fixture {name} has an unknown type tag {other}"),
             }
         }
@@ -1943,6 +1962,7 @@ mod tests {
                 "OutputRevisionsCatalog" => {
                     ignores::<crate::wire::OutputRevisionsCatalog>(name, &value)
                 }
+                "ChatTurnStarted" => ignores::<crate::wire::ChatTurnStarted>(name, &value),
                 other => panic!("fixture {name} has an unknown type tag {other}"),
             }
         }

@@ -477,6 +477,7 @@ impl Agent {
                                 attempted_boundary: &mut checkpoint_attempt_boundary,
                                 events,
                                 prefix: &prefix,
+                                through_turn_id: Some(turn_id),
                                 // The threshold is the automatic trigger, and
                                 // this pass answers no particular request.
                                 ignore_threshold: false,

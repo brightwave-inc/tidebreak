@@ -328,5 +328,18 @@
         }
       ]
     }
+  },
+  {
+    "name": "edit_started",
+    "type": "ChatTurnStarted",
+    "value": {
+      "branched": true,
+      "chat_id": "00000000-0000-0000-0000-000000000e11",
+      "side_effects": [
+        "files_written",
+        "connected_apps_called"
+      ],
+      "turn_id": "00000000-0000-0000-0000-000000000e12"
+    }
   }
 ]

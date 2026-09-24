@@ -19,6 +19,8 @@ export type HydratedTranscriptEntry =
       id: string;
       kind: "message";
       role: ChatMessage["role"];
+      /** The turn this message belongs to; absent from an older server. */
+      turnId?: string;
       text: string;
       images: TranscriptImageAttachment[];
       files: TranscriptFileAttachment[];
@@ -96,6 +98,7 @@ export function hydrateTranscriptHistory(
         id: message.id,
         kind: "message" as const,
         role: message.role,
+        turnId: message.turn_id,
         text: message.content,
         images:
           message.role === "user"

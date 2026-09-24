@@ -54,6 +54,12 @@ pub struct ChatTranscriptSnapshot {
     /// closed previews and lifecycle timestamps only; canonical tool records
     /// never leave storage.
     pub tool_activity: Vec<ChatToolActivitySnapshot>,
+    /// Every turn in the chat that reran another, whatever page this is.
+    ///
+    /// The rows above include replaced turns. The reader decides what a
+    /// replaced turn becomes: a regenerated answer is an earlier version, and
+    /// an edited turn is gone from the conversation.
+    pub replacements: Vec<crate::model::TurnReplacement>,
     pub last_event_seq: i64,
 }
 
@@ -568,6 +574,9 @@ pub struct ChatToolActivitySnapshot {
     /// and every replayed app view fetched a payload the server could only
     /// reject.
     pub call_id: crate::id::CallId,
+    /// The turn that made the call, so a reader can tell which answer it
+    /// belongs to when a turn has been answered more than once.
+    pub turn_id: crate::id::TurnId,
     /// Allowlisted renderer tool name, never a provider-supplied one.
     ///
     /// A name rather than display copy: the renderer already derives a live
@@ -690,6 +699,90 @@ pub enum ReservedTurnAcceptanceOutcome {
     Outcome(Box<AcceptTurnOutcome>),
     /// The lease expired, was released, or was taken over before commit.
     LeaseLost,
+    /// A replacement turn named a turn it cannot rerun. Nothing was written.
+    ReplacementRefused(crate::model::TurnReplacementRefusal),
+}
+
+/// Where a branch stops copying the original conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatBranchPoint {
+    /// Copy the conversation through this settled turn.
+    Through(TurnId),
+    /// Copy the conversation up to this turn and leave the turn out: an edit
+    /// that starts a new conversation instead of replacing the turn.
+    Before(TurnId),
+}
+
+/// One request to branch a conversation into a new one.
+#[derive(Debug, Clone)]
+pub struct BranchChat {
+    /// The conversation to copy from.
+    pub source: SessionId,
+    /// Where the copy stops.
+    pub point: ChatBranchPoint,
+    /// The new conversation: its id, title, and settings. Its folders must be
+    /// empty; a branch in a project gets the project's folders the way any new
+    /// conversation does.
+    pub chat: crate::model::Chat,
+    /// Documents of the source to copy whenever they were added: the files a
+    /// message sent into the new conversation carries. Every other document
+    /// is copied only when it was added before the branch point.
+    pub carry_documents: Vec<crate::id::DocumentId>,
+}
+
+/// Result of removing a branch whose first message was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardBranchOutcome {
+    /// The branch and the history copied into it are gone.
+    Discarded,
+    /// No branch the owner holds has this id.
+    NotFound,
+    /// Someone used the branch before the refusal came back, or it holds
+    /// something a discard cannot undo, so it stays.
+    Kept,
+}
+
+/// One tool call's identity and outcome, without its arguments or result.
+///
+/// Enough to say what a turn did outside the conversation, and small enough
+/// to read on every transcript request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnToolUse {
+    /// The turn that made the call.
+    pub turn_id: TurnId,
+    /// The tool's name.
+    pub name: String,
+    /// Where the call stands.
+    pub status: crate::model::ToolCallStatus,
+    /// Why it failed, when it did.
+    pub error_code: Option<String>,
+}
+
+/// Result of branching a conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchChatOutcome {
+    /// The new conversation exists, with its copied history. `documents` maps
+    /// each of the original's documents to its copy, so a caller can carry a
+    /// message's files over.
+    Branched {
+        chat_id: SessionId,
+        documents: std::collections::HashMap<crate::id::DocumentId, crate::id::DocumentId>,
+    },
+    /// There is no such conversation for this owner.
+    NotFound,
+    /// The branch point cannot be branched from. Nothing was written.
+    Refused(ChatBranchRefusal),
+}
+
+/// Why a branch point was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatBranchRefusal {
+    /// The turn is not part of this conversation.
+    UnknownTurn,
+    /// The turn, or one before it, has not finished.
+    Unsettled,
+    /// An edit took the turn out of the conversation.
+    NotInConversation,
 }
 
 /// Result of committing one pending admission into the durable FIFO queue.

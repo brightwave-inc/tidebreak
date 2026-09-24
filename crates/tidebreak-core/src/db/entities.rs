@@ -250,6 +250,7 @@ pub mod context_checkpoint {
         pub cache_read_input_tokens: i64,
         pub cache_creation_input_tokens: i64,
         pub created_at: DateTimeUtc,
+        pub through_turn_id: Option<Uuid>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1510,6 +1511,12 @@ pub mod session {
         pub archived_at: Option<DateTimeUtc>,
         /// When a turn finished that the owner has not opened since.
         pub unread_since: Option<DateTimeUtc>,
+        /// The conversation this one was branched from, when it is a branch.
+        /// Not a foreign key: the original can be deleted and the branch
+        /// keeps everything it copied.
+        pub branched_from_session_id: Option<Uuid>,
+        /// The last turn of the original that the branch copied.
+        pub branched_from_turn_id: Option<Uuid>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1608,6 +1615,12 @@ pub mod turn {
         pub fingerprint: Option<Vec<u8>>,
         #[sea_orm(column_type = "JsonBinary", nullable)]
         pub actor: Option<Json>,
+        /// The turn this one reran, when it is a regenerate or an edit of the
+        /// conversation's latest turn. A replaced turn leaves the model's view
+        /// of the conversation.
+        pub replaces_turn_id: Option<Uuid>,
+        /// `regenerate` or `edit`, set exactly when `replaces_turn_id` is.
+        pub replacement: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -2379,6 +2379,66 @@ impl Store for DbStore {
         .await
     }
 
+    async fn accept_reserved_replacement_turn(
+        &self,
+        lease: TurnAdmissionLease,
+        chat_id: SessionId,
+        replaces: TurnId,
+        kind: crate::model::TurnReplacementKind,
+        model: &str,
+        content: &str,
+        images: &[ImageRef],
+        documents: &[DocumentId],
+        invoked_skills: &[String],
+        voice_input_used: bool,
+    ) -> Result<ReservedTurnAcceptanceOutcome> {
+        ops::turn::accept_reserved_replacement_turn(
+            self,
+            lease,
+            chat_id,
+            replaces,
+            kind,
+            model,
+            content,
+            images,
+            documents,
+            invoked_skills,
+            voice_input_used,
+        )
+        .await
+    }
+
+    async fn list_turn_replacements(
+        &self,
+        chat_id: SessionId,
+    ) -> Result<Vec<crate::model::TurnReplacement>> {
+        ops::turn::list_turn_replacements(self, chat_id).await
+    }
+
+    async fn branch_chat_scoped(
+        &self,
+        owner: &OwnerId,
+        request: &crate::storage::BranchChat,
+    ) -> Result<crate::storage::BranchChatOutcome> {
+        ops::branch::branch_chat(self, Some(owner), request).await
+    }
+
+    async fn list_turn_tool_uses(
+        &self,
+        chat_id: SessionId,
+        turns: &[TurnId],
+    ) -> Result<Vec<crate::storage::TurnToolUse>> {
+        ops::conversation::list_turn_tool_uses(self, chat_id, turns).await
+    }
+
+    async fn discard_branch_scoped(
+        &self,
+        owner: &OwnerId,
+        chat_id: SessionId,
+    ) -> Result<crate::storage::DiscardBranchOutcome> {
+        ops::conversation::discard_branch(self, chat_id, Some(owner)).await
+    }
+
     async fn claim_turn(
         &self,
         lease_token: uuid::Uuid,

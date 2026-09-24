@@ -7,6 +7,7 @@ describe("hydrateTranscriptHistory", () => {
       [
         {
           id: "user-1",
+          turn_id: "turn-fixture",
           role: "user",
           content: "find this",
           created_at: "2026-07-16T10:00:00Z",
@@ -14,6 +15,7 @@ describe("hydrateTranscriptHistory", () => {
         },
         {
           id: "assistant-1",
+          turn_id: "turn-fixture",
           role: "assistant",
           content: "done",
           created_at: "2026-07-16T10:00:02Z",
@@ -23,6 +25,7 @@ describe("hydrateTranscriptHistory", () => {
       [
         {
           call_id: "call-1",
+          turn_id: "turn-fixture",
           tool: "web_search",
           result_unreadable: false,
           status: "completed",
@@ -51,6 +54,7 @@ describe("hydrateTranscriptHistory", () => {
       [
         {
           call_id: "call-2",
+          turn_id: "turn-fixture",
           tool: "spawn_sandbox_agent",
           result_unreadable: false,
           status: "completed",
@@ -59,6 +63,7 @@ describe("hydrateTranscriptHistory", () => {
         },
         {
           call_id: "call-3",
+          turn_id: "turn-fixture",
           tool: "wait_for_agents",
           result_unreadable: false,
           status: "completed",
@@ -81,6 +86,7 @@ describe("hydrateTranscriptHistory", () => {
       [
         {
           call_id: "call-4",
+          turn_id: "turn-fixture",
           tool: "ask_user_questions",
           result_unreadable: false,
           status: "completed",
@@ -101,6 +107,7 @@ describe("hydrateTranscriptHistory", () => {
       [
         {
           call_id: "call-5",
+          turn_id: "turn-fixture",
           tool: "read_delegated_file",
           result_unreadable: false,
           status: "completed",
@@ -122,6 +129,7 @@ describe("hydrateTranscriptHistory", () => {
       [
         {
           call_id: "call-6",
+          turn_id: "turn-fixture",
           tool: "list_documents",
           result_unreadable: false,
           status: "completed",
@@ -130,6 +138,7 @@ describe("hydrateTranscriptHistory", () => {
         },
         {
           call_id: "call-7",
+          turn_id: "turn-fixture",
           tool: "read_document",
           result_unreadable: false,
           status: "completed",
@@ -138,6 +147,7 @@ describe("hydrateTranscriptHistory", () => {
         },
         {
           call_id: "call-8",
+          turn_id: "turn-fixture",
           tool: "search",
           result_unreadable: false,
           status: "completed",
@@ -163,6 +173,7 @@ describe("hydrateTranscriptHistory", () => {
       [
         {
           id: "assistant-1",
+          turn_id: "turn-fixture",
           role: "assistant",
           content: "first",
           created_at: "2026-07-16T10:00:00Z",
@@ -177,6 +188,7 @@ describe("hydrateTranscriptHistory", () => {
         },
         {
           id: "assistant-2",
+          turn_id: "turn-fixture",
           role: "assistant",
           content: "second",
           created_at: "2026-07-16T10:00:01Z",
@@ -204,6 +216,7 @@ describe("hydrateTranscriptHistory", () => {
       [
         {
           id: "assistant-legacy",
+          turn_id: "turn-fixture",
           role: "assistant",
           content: "still readable",
           created_at: "2026-07-16T10:00:00Z",
@@ -225,6 +238,7 @@ describe("hydrateTranscriptHistory", () => {
       [
         {
           call_id: "call-10",
+          turn_id: "turn-fixture",
           tool: "other",
           result_unreadable: false,
           status: "failed",

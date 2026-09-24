@@ -1,5 +1,6 @@
-import type { RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 import {
   ClipboardCopyButton,
   copyPlainText,
@@ -18,6 +19,21 @@ type MessageFooterProps = {
    *  the copy action and timestamp belong to the turn, so only the bubble
    *  that closes it carries them. */
   sequenceEnd?: boolean;
+  /** The chat's other actions, after Copy: edit, regenerate, branch. */
+  actions?: ReactNode;
+  /** The answer's version pager, ahead of every action. */
+  versions?: ReactNode;
+  /**
+   * Show the actions only on hover and keyboard focus. A Work chat does this
+   * for every message but the latest answer, so a long transcript stays
+   * quiet; elsewhere the actions stay in view.
+   */
+  revealOnHover?: boolean;
+  /**
+   * Offer Copy. Always for an answer; a surface opts its own messages in, as
+   * Work chats do.
+   */
+  copyable?: boolean;
 };
 
 export function MessageFooter({
@@ -27,6 +43,10 @@ export function MessageFooter({
   settled = true,
   richContentRef,
   sequenceEnd = true,
+  actions,
+  versions,
+  revealOnHover = false,
+  copyable = role === "assistant",
 }: MessageFooterProps) {
   if (role === "assistant" && !sequenceEnd) return null;
   const hasContent = text.trim().length > 0;
@@ -34,22 +54,36 @@ export function MessageFooter({
     createdAt && (role === "user" || (settled && hasContent))
       ? formatMessageTimestamp(createdAt, new Date())
       : null;
-  const canCopy = role === "assistant" && settled && hasContent;
+  const canCopy = copyable && settled && hasContent;
+  const hasActions = canCopy || Boolean(actions) || Boolean(versions);
 
-  if (!canCopy && !timestamp) return null;
+  if (!hasActions && !timestamp) return null;
 
   return (
     <footer className="message-footer">
-      {canCopy && (
-        <ClipboardCopyButton
-          copy={() =>
-            copyMessageContent(richContentRef?.current?.innerHTML ?? "", text)
-          }
-          label="Copy"
-          copiedAnnouncement="Message copied to clipboard."
-          failedAnnouncement="Message could not be copied."
-          className="message-copy"
-        />
+      {hasActions && (
+        <div
+          className={cn("message-actions", revealOnHover && "reveals-on-hover")}
+        >
+          {versions}
+          {canCopy && (
+            <ClipboardCopyButton
+              copy={() =>
+                role === "assistant"
+                  ? copyMessageContent(
+                      richContentRef?.current?.innerHTML ?? "",
+                      text,
+                    )
+                  : copyPlainText(text)
+              }
+              label="Copy"
+              copiedAnnouncement="Message copied to clipboard."
+              failedAnnouncement="Message could not be copied."
+              className="message-copy"
+            />
+          )}
+          {actions}
+        </div>
       )}
       <span className="message-footer-spacer" />
       {timestamp && (

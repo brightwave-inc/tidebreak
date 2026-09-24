@@ -688,6 +688,90 @@ fn parse_setup(family: &str, args: Vec<String>) -> (SetupCommand, OutputFormat) 
                 format,
             );
         }
+        ("chat", "retry") => {
+            let chat = parse_chat_id(&cursor.positional("a chat id"));
+            let mut turn = None;
+            let mut wait = false;
+            let mut format = OutputFormat::Text;
+            while let Some(flag) = cursor.next() {
+                match flag.as_str() {
+                    "--turn" => turn = Some(parse_turn_id(&cursor.value("--turn"))),
+                    "--wait" => wait = true,
+                    "--output-format" => format = parse_format(cursor.value("--output-format")),
+                    other => usage_error(&format!("unknown chat retry argument {other:?}")),
+                }
+            }
+            return (SetupCommand::ChatRetry { chat, turn, wait }, format);
+        }
+        ("chat", "regenerate") => {
+            let chat = parse_chat_id(&cursor.positional("a chat id"));
+            let mut turn = None;
+            let mut model = None;
+            let mut wait = false;
+            let mut format = OutputFormat::Text;
+            while let Some(flag) = cursor.next() {
+                match flag.as_str() {
+                    "--turn" => turn = Some(parse_turn_id(&cursor.value("--turn"))),
+                    "--model" => model = Some(cursor.value("--model")),
+                    "--wait" => wait = true,
+                    "--output-format" => format = parse_format(cursor.value("--output-format")),
+                    other => usage_error(&format!("unknown chat regenerate argument {other:?}")),
+                }
+            }
+            return (
+                SetupCommand::ChatRegenerate {
+                    chat,
+                    turn,
+                    model,
+                    wait,
+                },
+                format,
+            );
+        }
+        ("chat", "edit") => {
+            // The remaining positionals are the new message, as with steer.
+            let chat = parse_chat_id(&cursor.positional("a chat id"));
+            let mut turn = None;
+            let mut wait = false;
+            let mut content_parts = Vec::new();
+            let mut format = OutputFormat::Text;
+            while let Some(arg) = cursor.next() {
+                match arg.as_str() {
+                    "--turn" => turn = Some(parse_turn_id(&cursor.value("--turn"))),
+                    "--wait" => wait = true,
+                    "--output-format" => format = parse_format(cursor.value("--output-format")),
+                    other if other.starts_with("--") => {
+                        usage_error(&format!("unknown chat edit argument {other:?}"));
+                    }
+                    other => content_parts.push(other.to_owned()),
+                }
+            }
+            if content_parts.is_empty() {
+                usage_error("expected the new message after the chat id");
+            }
+            return (
+                SetupCommand::ChatEdit {
+                    chat,
+                    turn,
+                    content: content_parts.join(" "),
+                    wait,
+                },
+                format,
+            );
+        }
+        ("chat", "branch") => {
+            let chat = parse_chat_id(&cursor.positional("a chat id"));
+            let mut turn = None;
+            let mut format = OutputFormat::Text;
+            while let Some(flag) = cursor.next() {
+                match flag.as_str() {
+                    "--turn" => turn = Some(parse_turn_id(&cursor.value("--turn"))),
+                    "--output-format" => format = parse_format(cursor.value("--output-format")),
+                    other => usage_error(&format!("unknown chat branch argument {other:?}")),
+                }
+            }
+            return (SetupCommand::ChatBranch { chat, turn }, format);
+        }
         ("agent-run", "list") => {
             let chat = parse_chat_id(&cursor.positional("a chat id"));
             SetupCommand::AgentRunList { chat }

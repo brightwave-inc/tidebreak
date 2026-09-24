@@ -41,16 +41,18 @@ pub use runs::{
     AgentRun, AgentRunCancellationReason, AgentRunCancellationSignal, AgentRunCheckInReason,
     AgentRunExecutionLocation, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunProgressEntry,
     AgentRunResult, AgentRunResultPayload, AgentRunStatus, AgentRunSubmittedOutput, AgentRunTier,
-    Chat, ChatListing, DelegatedFileReadClaim, SandboxAgentAdmission, SandboxSpawnCheckpoint,
-    SandboxSpawnCheckpointRequest, SandboxToolCall, SandboxToolCallParkEntry,
-    SandboxToolCallReceipt, SandboxToolCallRequest, SandboxToolCallStatus,
+    Chat, ChatBranchOrigin, ChatListing, DelegatedFileReadClaim, SandboxAgentAdmission,
+    SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest, SandboxToolCall,
+    SandboxToolCallParkEntry, SandboxToolCallReceipt, SandboxToolCallRequest,
+    SandboxToolCallStatus,
 };
 pub use turns::{
-    AgentRunWaitCondition, AgentRunWaitSetCandidate, AgentRunWaitSetCheckpointRequest,
-    ClientToolCallRequest, QueuedAgentTurn, TurnAdmissionLease, TurnAdmissionRequest,
-    TurnAgentRunWaitSet, TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWait,
-    TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer,
-    TurnSteerStatus,
+    turns_outside_conversation, AgentRunWaitCondition, AgentRunWaitSetCandidate,
+    AgentRunWaitSetCheckpointRequest, ClientToolCallRequest, QueuedAgentTurn, TurnAdmissionLease,
+    TurnAdmissionRequest, TurnAgentRunWaitSet, TurnAgentRunWaitStatus, TurnCheckpointProgress,
+    TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnPlacement,
+    TurnPlacements, TurnReplacement, TurnReplacementKind, TurnReplacementRefusal, TurnRun,
+    TurnRunStatus, TurnSteer, TurnSteerStatus,
 };
 
 pub(crate) use messages::user_message_llm_content;

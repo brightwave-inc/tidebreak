@@ -98,6 +98,7 @@ mod root_attachment;
 mod sandbox;
 mod sandbox_runtime;
 mod stack;
+mod turn_rerun;
 mod websocket;
 mod workers;
 mod workspace_config;
@@ -161,6 +162,7 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
     let message_id = MessageId::new();
     let snapshot = crate::routes::ChatMessageSnapshot {
         id: message_id,
+        turn_id: tidebreak_core::TurnId::new(),
         role: crate::routes::TranscriptRole::Assistant,
         content: "answer".into(),
         created_at: chrono::Utc::now(),

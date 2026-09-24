@@ -88,10 +88,10 @@ pub use crate::model_roles::ModelRole;
 pub use crate::providers::{CustomModelConfig, ProviderAuthMode, ProviderInfo};
 pub use crate::routes::{
     AgentActivitySnapshot, AgentActivityStatus, AgentRunSnapshot, AgentRunTaskPlanProgress,
-    AgentRunUsageSnapshot, DeliverablePreview, DeliverableSummary, DeliverablesCatalog,
-    ExecProviderSnapshot, ModelCatalog, ModelInfo, ModelRoleInfo, OutputRevisionInfo,
-    OutputRevisionProducer, OutputRevisionSource, OutputRevisionsCatalog, ProvidersList,
-    SubmittedOutputSnapshot,
+    AgentRunUsageSnapshot, ChatTurnStarted, DeliverablePreview, DeliverableSummary,
+    DeliverablesCatalog, ExecProviderSnapshot, ModelCatalog, ModelInfo, ModelRoleInfo,
+    OutputRevisionInfo, OutputRevisionProducer, OutputRevisionSource, OutputRevisionsCatalog,
+    ProvidersList, SubmittedOutputSnapshot, TurnSideEffect,
 };
 
 // Code mode: the snapshots the REST routes return, the per-session event

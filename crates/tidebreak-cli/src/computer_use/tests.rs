@@ -238,6 +238,25 @@ fn unknown_outcomes_instruct_inspection_before_acting() {
 }
 
 #[test]
+fn a_recovered_request_counts_as_an_action_that_ran() {
+    let failure = ClientFailure::from_http_status(
+        409,
+        "native_request_recovered",
+        "that request already completed; fetch its stored result",
+    );
+    assert!(matches!(failure, ClientFailure::UnknownOutcome { .. }));
+    assert_eq!(
+        failure.to_tool_error_category(),
+        ToolErrorCategory::ToolFailed
+    );
+    // Any other conflict is still a refusal that ran nothing.
+    assert!(matches!(
+        ClientFailure::from_http_status(409, "native_request_conflict", "mint a new id"),
+        ClientFailure::InvalidArguments { .. }
+    ));
+}
+
+#[test]
 fn rejected_results_become_failures() {
     let result = ComputerUseResult {
         request_id: Uuid::new_v4(),

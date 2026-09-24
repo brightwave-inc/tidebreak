@@ -9,7 +9,8 @@ use crate::event::{AgentEvent, SequencedAgentEvent};
 use crate::id::{AgentRunId, DocumentId, MessageId, SessionId, TurnId};
 use crate::image::ImageRef;
 use crate::model::{
-    user_message_llm_content, AgentRunStatus, TurnAdmissionLease, TurnAdmissionRequest, TurnRun,
+    user_message_llm_content, AgentRunStatus, TurnAdmissionLease, TurnAdmissionRequest,
+    TurnPlacements, TurnReplacement, TurnReplacementKind, TurnReplacementRefusal, TurnRun,
     TurnRunStatus,
 };
 use crate::provider::Usage;
@@ -410,12 +411,16 @@ pub(in crate::db) async fn accept_turn(
         documents,
         invoked_skills,
         voice_input_used,
+        None,
     )
     .await?
     {
         ReservedTurnAcceptanceOutcome::Outcome(outcome) => Ok(*outcome),
         ReservedTurnAcceptanceOutcome::LeaseLost => Err(AgentError::Store(format!(
             "turn {id} has an unresolved admission owned by another process"
+        ))),
+        ReservedTurnAcceptanceOutcome::ReplacementRefused(_) => Err(AgentError::Store(format!(
+            "turn {id} was refused as a replacement it never asked to be"
         ))),
     }
 }
@@ -443,8 +448,185 @@ pub(in crate::db) async fn accept_reserved_turn(
         documents,
         invoked_skills,
         voice_input_used,
+        None,
     )
     .await
+}
+
+/// Accept a turn that reruns the conversation's latest settled turn.
+///
+/// The same atomic acceptance as an ordinary message, plus one check under the
+/// chat lock: `replaces` must be this chat's latest turn, settled, and not
+/// already replaced. The new turn records what it replaced, which is what
+/// takes the old turn out of the model's view.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn accept_reserved_replacement_turn(
+    store: &DbStore,
+    lease: TurnAdmissionLease,
+    chat_id: SessionId,
+    replaces: TurnId,
+    kind: TurnReplacementKind,
+    model: &str,
+    content: &str,
+    images: &[ImageRef],
+    documents: &[DocumentId],
+    invoked_skills: &[String],
+    voice_input_used: bool,
+) -> Result<ReservedTurnAcceptanceOutcome> {
+    accept_turn_inner(
+        store,
+        Some(lease),
+        lease.id,
+        chat_id,
+        model,
+        content,
+        images,
+        documents,
+        invoked_skills,
+        voice_input_used,
+        Some((replaces, kind)),
+    )
+    .await
+}
+
+/// Why `replaces` cannot be rerun right now, read under the chat lock.
+async fn refuse_replacement_on<C>(
+    conn: &C,
+    chat_id: SessionId,
+    replaces: TurnId,
+    kind: TurnReplacementKind,
+) -> Result<Option<TurnReplacementRefusal>>
+where
+    C: ConnectionTrait,
+{
+    let Some(target) = entities::turn::Entity::find_by_id(replaces.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .filter(|turn| turn.session_id == chat_id.0)
+    else {
+        return Ok(Some(TurnReplacementRefusal::UnknownTurn));
+    };
+    if !TurnRunStatus::TERMINAL.contains(&target.status.as_str()) {
+        return Ok(Some(TurnReplacementRefusal::Unsettled));
+    }
+    let latest = entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .order_by_desc(entities::turn::Column::Ordinal)
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    // A turn that was rerun is followed by the turn that reran it, so this
+    // also refuses a second rerun of the same turn.
+    if latest.is_some_and(|latest| latest.id != target.id) {
+        return Ok(Some(TurnReplacementRefusal::NotLatest));
+    }
+    // A retry continues work that stopped short. A finished answer is
+    // regenerated or edited instead.
+    Ok(
+        (kind == TurnReplacementKind::Retry && target.status == TurnRunStatus::Completed.as_str())
+            .then_some(TurnReplacementRefusal::NotRetryable),
+    )
+}
+
+/// Drop the chat's checkpoint when its summary could hold anything the
+/// replaced attempt said.
+///
+/// A checkpoint summarizes the whole view it was written from. One whose view
+/// reached a turn of the attempt being replaced would carry that turn into
+/// every later request, which is the opposite of what a regenerate or an
+/// edit asks for. A checkpoint from before this was recorded falls back to
+/// its time: written after the attempt began, it may have seen it.
+async fn drop_checkpoint_of_replaced_attempt_on<C>(
+    conn: &C,
+    chat_id: SessionId,
+    replaces: TurnId,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let Some(checkpoint) = entities::context_checkpoint::Entity::find_by_id(chat_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(());
+    };
+    let placements = TurnPlacements::new(&list_turn_replacements_on(conn, chat_id).await?);
+    let attempt = placements.attempt_turns(replaces);
+    let saw_attempt = match checkpoint.through_turn_id {
+        Some(through) => attempt.contains(&TurnId(through)),
+        None => {
+            let began = entities::turn::Entity::find()
+                .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+                .filter(entities::turn::Column::Id.is_in(attempt.iter().map(|turn| turn.0)))
+                .all(conn)
+                .await
+                .map_err(store_err)?
+                .into_iter()
+                .map(|turn| turn.started_at)
+                .min();
+            began.is_some_and(|began| checkpoint.created_at >= began)
+        }
+    };
+    if saw_attempt {
+        entities::context_checkpoint::Entity::delete_by_id(chat_id.0)
+            .exec(conn)
+            .await
+            .map_err(store_err)?;
+    }
+    Ok(())
+}
+
+/// Every turn in this chat that reran another, oldest first.
+pub(in crate::db) async fn list_turn_replacements(
+    store: &DbStore,
+    chat_id: SessionId,
+) -> Result<Vec<TurnReplacement>> {
+    list_turn_replacements_on(&store.conn, chat_id).await
+}
+
+pub(in crate::db) async fn list_turn_replacements_on<C>(
+    conn: &C,
+    chat_id: SessionId,
+) -> Result<Vec<TurnReplacement>>
+where
+    C: ConnectionTrait,
+{
+    entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::turn::Column::ReplacesTurnId.is_not_null())
+        .order_by_asc(entities::turn::Column::Ordinal)
+        .all(conn)
+        .await
+        .map_err(store_err)?
+        .iter()
+        .filter_map(|turn| turn_replacement_from_model(turn).transpose())
+        .collect()
+}
+
+/// The replacement a turn row records, or `None` for an ordinary turn.
+pub(in crate::db) fn turn_replacement_from_model(
+    turn: &entities::turn::Model,
+) -> Result<Option<TurnReplacement>> {
+    let Some(replaces) = turn.replaces_turn_id else {
+        return Ok(None);
+    };
+    let kind = turn
+        .replacement
+        .as_deref()
+        .and_then(TurnReplacementKind::from_db)
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "turn {} records a replacement with no readable kind",
+                TurnId(turn.id)
+            ))
+        })?;
+    Ok(Some(TurnReplacement {
+        turn_id: TurnId(turn.id),
+        replaces: TurnId(replaces),
+        kind,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -459,6 +641,7 @@ async fn accept_turn_inner(
     documents: &[DocumentId],
     invoked_skills: &[String],
     voice_input_used: bool,
+    replaces: Option<(TurnId, TurnReplacementKind)>,
 ) -> Result<ReservedTurnAcceptanceOutcome> {
     validate_turn_input(id, model, content, invoked_skills)?;
     message_attachment_ops::validate(images)?;
@@ -471,6 +654,7 @@ async fn accept_turn_inner(
         file_attachments: documents.to_vec(),
         invoked_skills: invoked_skills.to_vec(),
         voice_input_used,
+        replaces,
     };
     admission::validate_request(&request)?;
 
@@ -500,6 +684,7 @@ async fn accept_turn_inner(
             documents,
             invoked_skills,
             voice_input_used,
+            replaces,
         )
         .await?;
         transaction.commit().await.map_err(store_err)?;
@@ -527,6 +712,16 @@ async fn accept_turn_inner(
         )));
     }
 
+    if let Some((target, kind)) = replaces {
+        if let Some(refusal) = refuse_replacement_on(&transaction, chat_id, target, kind).await? {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(ReservedTurnAcceptanceOutcome::ReplacementRefused(refusal));
+        }
+        if kind.removes_replaced() {
+            drop_checkpoint_of_replaced_attempt_on(&transaction, chat_id, target).await?;
+        }
+    }
+
     let now = super::agent_run::database_now(&transaction).await?;
     let inserted = match insert_accepted_turn_on(
         &transaction,
@@ -539,6 +734,7 @@ async fn accept_turn_inner(
         documents,
         invoked_skills,
         voice_input_used,
+        replaces,
         now,
     )
     .await
@@ -562,6 +758,7 @@ async fn accept_turn_inner(
                     documents,
                     invoked_skills,
                     voice_input_used,
+                    replaces,
                 )
                 .await
                 .map(|outcome| ReservedTurnAcceptanceOutcome::Outcome(Box::new(outcome)));
@@ -570,6 +767,15 @@ async fn accept_turn_inner(
                 return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(
                     AcceptTurnOutcome::ChatBusy(turn_run_from_model(active)?),
                 )));
+            }
+            // The unique index on `replaces_turn_id` backs the check above
+            // when two replacements race past it.
+            if let Some((target, kind)) = replaces {
+                if let Some(refusal) =
+                    refuse_replacement_on(&store.conn, chat_id, target, kind).await?
+                {
+                    return Ok(ReservedTurnAcceptanceOutcome::ReplacementRefused(refusal));
+                }
             }
             return Err(error);
         }
@@ -597,6 +803,7 @@ pub(super) async fn insert_accepted_turn_on<C>(
     documents: &[DocumentId],
     invoked_skills: &[String],
     voice_input_used: bool,
+    replaces: Option<(TurnId, TurnReplacementKind)>,
     now: chrono::DateTime<Utc>,
 ) -> Result<entities::turn::Model>
 where
@@ -640,6 +847,7 @@ where
         file_attachments: documents.to_vec(),
         invoked_skills: invoked_skills.to_vec(),
         voice_input_used,
+        replaces,
     }
     .fingerprint()
     .to_vec();
@@ -701,6 +909,8 @@ where
         updated_at: Set(Some(now)),
         fingerprint: Set(Some(fingerprint)),
         actor: Set(None),
+        replaces_turn_id: Set(replaces.map(|(turn, _)| turn.0)),
+        replacement: Set(replaces.map(|(_, kind)| kind.as_str().to_owned())),
     }
     .insert(conn)
     .await
@@ -1590,6 +1800,7 @@ pub(super) async fn exact_accepted_turn_on<C>(
     documents: &[DocumentId],
     invoked_skills: &[String],
     voice_input_used: bool,
+    replaces: Option<(TurnId, TurnReplacementKind)>,
 ) -> Result<AcceptTurnOutcome>
 where
     C: ConnectionTrait,
@@ -1635,7 +1846,10 @@ where
         && accepted_images == images
         && accepted_documents == documents
         && invoked_skills_from_model(&existing)? == invoked_skills
-        && existing.voice_input_used == voice_input_used;
+        && existing.voice_input_used == voice_input_used
+        && turn_replacement_from_model(&existing)?
+            .map(|replacement| (replacement.replaces, replacement.kind))
+            == replaces;
     Ok(if exact {
         AcceptTurnOutcome::Existing(turn_run_from_model(existing)?)
     } else {

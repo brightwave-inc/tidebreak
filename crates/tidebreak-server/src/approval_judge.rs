@@ -412,7 +412,14 @@ impl ApprovalJudgeWorker {
         else {
             return Ok(false);
         };
-        let context = conversation_digest(&self.store.list_messages(approval.chat_id).await?);
+        // The judge reads the conversation the model is in, which leaves out
+        // every regenerated or edited turn.
+        let replaced = tidebreak_core::turns_outside_conversation(
+            &self.store.list_turn_replacements(approval.chat_id).await?,
+        );
+        let mut messages = self.store.list_messages(approval.chat_id).await?;
+        messages.retain(|message| !replaced.contains(&message.turn_id));
+        let context = conversation_digest(&messages);
         let provider = self.resolver.resolve_for(owner.as_ref()).await;
         let verdict = request_verdict(
             provider.as_ref(),

@@ -16,7 +16,7 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use super::wire::{
     AgentActivityHistoryItem, AgentRunSnapshot, ApprovalGrantRung, Chat, ChatListing,
-    DeliverablePreview, DeliverablesCatalog, ModelCatalog, OutputRevisionsCatalog,
+    ChatTurnStarted, DeliverablePreview, DeliverablesCatalog, ModelCatalog, OutputRevisionsCatalog,
     PendingPlanApproval, PendingUserQuestions, ProviderInfo, ProvidersList, ServerVersion,
 };
 use crate::connect::ListenSource;
@@ -690,6 +690,86 @@ impl Client {
             .map_err(request_error)?;
         Self::expect_success(response).await?;
         Ok(())
+    }
+
+    /// The chat's latest turn: the turn its newest message belongs to.
+    pub async fn latest_turn(&self, chat: SessionId) -> Result<TurnId> {
+        #[derive(Deserialize)]
+        struct Page {
+            messages: Vec<PageMessage>,
+        }
+        #[derive(Deserialize)]
+        struct PageMessage {
+            turn_id: TurnId,
+        }
+        let page: Page = self
+            .get_json(format!("{}/chats/{chat}/messages?limit=1", self.base))
+            .await?;
+        page.messages
+            .last()
+            .map(|message| message.turn_id)
+            .ok_or_else(|| AgentError::msg(format!("chat {chat} has no turns yet")))
+    }
+
+    /// Continue `turn` after it failed or was stopped, as `new_turn` (`202`).
+    pub async fn retry_turn(
+        &self,
+        chat: SessionId,
+        turn: TurnId,
+        new_turn: TurnId,
+    ) -> Result<ChatTurnStarted> {
+        self.post_json(
+            format!("{}/chats/{chat}/turns/{turn}/retry", self.base),
+            &serde_json::json!({ "new_turn_id": new_turn }),
+        )
+        .await
+    }
+
+    /// Answer `turn`'s message again as `new_turn` (`202`), under `model`
+    /// when given and the chat's model otherwise. The answer says whether the
+    /// regenerate started a new chat.
+    pub async fn regenerate_turn(
+        &self,
+        chat: SessionId,
+        turn: TurnId,
+        new_turn: TurnId,
+        model: Option<&str>,
+    ) -> Result<ChatTurnStarted> {
+        let mut body = serde_json::json!({ "new_turn_id": new_turn });
+        if let Some(model) = model {
+            body["model"] = serde_json::json!(model);
+        }
+        self.post_json(
+            format!("{}/chats/{chat}/turns/{turn}/regenerate", self.base),
+            &body,
+        )
+        .await
+    }
+
+    /// Replace `turn`'s message with `content` and answer it as `new_turn`
+    /// (`202`). The answer says whether the edit started a new chat.
+    pub async fn edit_turn(
+        &self,
+        chat: SessionId,
+        turn: TurnId,
+        new_turn: TurnId,
+        content: &str,
+    ) -> Result<ChatTurnStarted> {
+        self.post_json(
+            format!("{}/chats/{chat}/turns/{turn}/edit", self.base),
+            &serde_json::json!({ "new_turn_id": new_turn, "content": content }),
+        )
+        .await
+    }
+
+    /// Start a new chat with a copy of this one's history through `turn`
+    /// (`201`).
+    pub async fn branch_turn(&self, chat: SessionId, turn: TurnId) -> Result<ChatListing> {
+        self.post_json(
+            format!("{}/chats/{chat}/turns/{turn}/branch", self.base),
+            &serde_json::json!({}),
+        )
+        .await
     }
 
     /// Read one turn's durable terminal state after live event delivery fails.

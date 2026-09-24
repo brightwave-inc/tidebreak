@@ -309,6 +309,26 @@ async fn cross_principal_rest_surface_is_disjoint() {
             format!("/chats/{}/cancel", chat.id),
             Some(serde_json::json!({"turn_id": TurnId::new()})),
         ),
+        (
+            "POST",
+            format!("/chats/{}/turns/{}/retry", chat.id, TurnId::new()),
+            Some(serde_json::json!({"new_turn_id": TurnId::new()})),
+        ),
+        (
+            "POST",
+            format!("/chats/{}/turns/{}/regenerate", chat.id, TurnId::new()),
+            Some(serde_json::json!({"new_turn_id": TurnId::new()})),
+        ),
+        (
+            "POST",
+            format!("/chats/{}/turns/{}/edit", chat.id, TurnId::new()),
+            Some(serde_json::json!({"new_turn_id": TurnId::new(), "content": "mine now"})),
+        ),
+        (
+            "POST",
+            format!("/chats/{}/turns/{}/branch", chat.id, TurnId::new()),
+            None,
+        ),
         ("GET", format!("/chats/{}/approvals", chat.id), None),
         ("GET", format!("/chats/{}/agent-runs", chat.id), None),
         (

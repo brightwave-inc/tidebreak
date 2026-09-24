@@ -116,6 +116,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260923_000003_notification_body",
             "m20260923_000004_pull_request_observed_times",
             "m20260923_000005_conversation_list_state",
+            "m20260924_000003_turn_versions_and_branches",
         ]
     );
     assert!(db

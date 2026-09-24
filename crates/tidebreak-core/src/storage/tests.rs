@@ -497,6 +497,7 @@ impl Store for MemStore {
             message_invoked_skills: Vec::new(),
             terminal_turns: Vec::new(),
             tool_activity: Vec::new(),
+            replacements: Vec::new(),
             last_event_seq,
         }))
     }

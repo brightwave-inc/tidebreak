@@ -152,12 +152,132 @@ pub enum Command {
         turn: TurnId,
         content: String,
     },
+    /// Continue a chat's latest turn after it failed or was stopped, with
+    /// what it already did in view. `turn` defaults to the latest turn.
+    ChatRetry {
+        chat: SessionId,
+        turn: Option<TurnId>,
+        wait: bool,
+    },
+    /// Answer a chat's latest message again. `turn` defaults to the latest
+    /// turn; `model` answers with another model this once. A regenerate that
+    /// replaces an answer that changed things outside the chat starts a new
+    /// chat instead.
+    ChatRegenerate {
+        chat: SessionId,
+        turn: Option<TurnId>,
+        model: Option<String>,
+        wait: bool,
+    },
+    /// Replace a chat's latest message and answer it. An edit that replaces
+    /// an answer that changed things outside the chat starts a new chat
+    /// instead.
+    ChatEdit {
+        chat: SessionId,
+        turn: Option<TurnId>,
+        content: String,
+        wait: bool,
+    },
+    /// Start a new chat with a copy of this one's history through `turn`, or
+    /// through the latest turn.
+    ChatBranch {
+        chat: SessionId,
+        turn: Option<TurnId>,
+    },
     /// Background (and foreground) agent runs for one chat.
     AgentRunList { chat: SessionId },
     /// One run's status plus its ordered activity timeline.
     AgentRunShow { chat: SessionId, run: AgentRunId },
     /// Ask a background run to stop.
     AgentRunCancel { chat: SessionId, run: AgentRunId },
+}
+
+/// Report a rerun the server accepted, and with `wait`, its answer.
+///
+/// Without `wait`, stdout is the new turn's id. With it, stdout is the answer,
+/// and a turn that failed or was stopped exits with an error.
+async fn finish_rerun(
+    client: &Client,
+    replaced: TurnId,
+    started: &crate::api::wire::ChatTurnStarted,
+    wait: bool,
+    format: OutputFormat,
+) -> Result<()> {
+    let settled = if wait {
+        Some(wait_for_turn(client, started.chat_id, started.turn_id).await?)
+    } else {
+        None
+    };
+    if format == OutputFormat::Json {
+        let mut document = serde_json::json!({
+            "chat": started.chat_id,
+            "turn": started.turn_id,
+            "replaces": replaced,
+            "branched": started.branched,
+            "side_effects": started.side_effects,
+        });
+        if let Some(settled) = &settled {
+            document["status"] = serde_json::json!(match settled.status {
+                crate::api::client::DurableTurnStatus::Completed => "completed",
+                crate::api::client::DurableTurnStatus::Failed => "failed",
+                crate::api::client::DurableTurnStatus::Cancelled => "cancelled",
+            });
+            document["answer"] = serde_json::json!(settled.content);
+        }
+        emit(&document)?;
+    } else {
+        if started.branched {
+            eprintln!(
+                "tidebreak: this replaces an answer that changed things outside the chat \
+                 ({}), so it started chat {}",
+                side_effect_words(&started.side_effects),
+                started.chat_id
+            );
+        }
+        match &settled {
+            Some(settled) => println!("{}", settled.content),
+            None => println!("{}", started.turn_id),
+        }
+    }
+    match settled.map(|settled| settled.status) {
+        Some(crate::api::client::DurableTurnStatus::Failed) => {
+            Err(AgentError::msg(format!("turn {} failed", started.turn_id)))
+        }
+        Some(crate::api::client::DurableTurnStatus::Cancelled) => Err(AgentError::msg(format!(
+            "turn {} was stopped",
+            started.turn_id
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Poll the chat's transcript until `turn` has finished.
+async fn wait_for_turn(
+    client: &Client,
+    chat: SessionId,
+    turn: TurnId,
+) -> Result<crate::api::client::DurableTurn> {
+    loop {
+        if let Some(settled) = client.durable_turn(chat, turn).await? {
+            return Ok(settled);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// What a turn did outside the chat, in words.
+fn side_effect_words(effects: &[crate::api::wire::TurnSideEffect]) -> String {
+    use crate::api::wire::TurnSideEffect;
+    effects
+        .iter()
+        .map(|effect| match effect {
+            TurnSideEffect::FilesWritten => "wrote files",
+            TurnSideEffect::ConnectedAppsCalled => "called connected apps",
+            TurnSideEffect::CommandsRun => "ran commands",
+            TurnSideEffect::OtherActions => "took other actions",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Run one setup command against the profile's server, and shut down anything
@@ -519,6 +639,65 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                 }));
             }
             println!("tidebreak: steered turn {turn}");
+        }
+        Command::ChatRetry { chat, turn, wait } => {
+            let turn = match turn {
+                Some(turn) => turn,
+                None => client.latest_turn(chat).await?,
+            };
+            let started = client.retry_turn(chat, turn, TurnId::new()).await?;
+            return finish_rerun(client, turn, &started, wait, format).await;
+        }
+        Command::ChatRegenerate {
+            chat,
+            turn,
+            model,
+            wait,
+        } => {
+            let turn = match turn {
+                Some(turn) => turn,
+                None => client.latest_turn(chat).await?,
+            };
+            let started = client
+                .regenerate_turn(chat, turn, TurnId::new(), model.as_deref())
+                .await?;
+            return finish_rerun(client, turn, &started, wait, format).await;
+        }
+        Command::ChatEdit {
+            chat,
+            turn,
+            content,
+            wait,
+        } => {
+            let turn = match turn {
+                Some(turn) => turn,
+                None => client.latest_turn(chat).await?,
+            };
+            let started = client
+                .edit_turn(chat, turn, TurnId::new(), &content)
+                .await?;
+            return finish_rerun(client, turn, &started, wait, format).await;
+        }
+        Command::ChatBranch { chat, turn } => {
+            let turn = match turn {
+                Some(turn) => turn,
+                None => client.latest_turn(chat).await?,
+            };
+            let branch = client.branch_turn(chat, turn).await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({
+                    "id": branch.chat.id,
+                    "title": branch.chat.title,
+                    "branched_from": { "chat": chat, "turn": turn },
+                }));
+            }
+            // The id alone on stdout, as `chat create` does, so a script can
+            // capture it.
+            println!("{}", branch.chat.id);
+            eprintln!(
+                "tidebreak: branched chat {chat} through turn {turn} into {}",
+                branch.chat.id
+            );
         }
         Command::AgentRunList { chat } => {
             let runs = client.list_agent_runs(chat).await?;
@@ -1041,6 +1220,79 @@ mod tests {
             .await
             .expect("archive")
             .is_empty());
+
+        serve.abort();
+    }
+
+    /// Regenerate and branch reach the same routes the desktop's message
+    /// actions call, so a script can rerun an answer and fork a conversation
+    /// without the app. The model is scripted: the first turn answers with
+    /// the first step, the regenerate with the second.
+    #[tokio::test]
+    async fn regenerate_and_branch_rerun_and_fork_a_chat() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        tidebreak_core::KeychainSecretProvider::use_mock();
+        // Read once, when the server binds; no other test here runs a turn.
+        std::env::set_var(
+            "TIDEBREAK_SCRIPTED_PROVIDER",
+            serde_json::json!([{"text": "first answer"}, {"text": "second answer"}]).to_string(),
+        );
+        let bound = tidebreak_server::bind_configured(Config::desktop(dir.path())).await;
+        std::env::remove_var("TIDEBREAK_SCRIPTED_PROVIDER");
+        let server = bound.expect("bind the server");
+        let client = Client::new(server.local_addr(), server.token()).expect("build the client");
+        let serve = tokio::spawn(server.serve());
+
+        let chat = client.create_chat().await.expect("create a chat");
+        let first = TurnId::new();
+        client
+            .post_message(chat, first, "name the tide", &[], &[])
+            .await
+            .expect("send a message");
+        wait_for_turn(&client, chat, first)
+            .await
+            .expect("the first turn settles");
+
+        execute(
+            &client,
+            Command::ChatRegenerate {
+                chat,
+                turn: None,
+                model: None,
+                wait: true,
+            },
+            OutputFormat::Text,
+        )
+        .await
+        .expect("regenerate the latest answer");
+        let latest = client.latest_turn(chat).await.expect("the latest turn");
+        assert_ne!(latest, first, "the regenerate is the latest turn now");
+        let answer = client
+            .durable_turn(chat, latest)
+            .await
+            .expect("read the transcript")
+            .expect("the regenerate settled");
+        assert_eq!(answer.content, "second answer");
+
+        execute(
+            &client,
+            Command::ChatBranch { chat, turn: None },
+            OutputFormat::Text,
+        )
+        .await
+        .expect("branch the chat");
+        let listings = client.list_chat_listings(false).await.expect("list");
+        assert_eq!(listings.len(), 2);
+        let branch = listings
+            .iter()
+            .find(|listing| listing.chat.id != chat)
+            .expect("the branch is listed");
+        let origin = branch
+            .branched_from
+            .as_ref()
+            .expect("the branch links back");
+        assert_eq!(origin.chat_id, chat);
+        assert_eq!(origin.turn_id, Some(latest));
 
         serve.abort();
     }

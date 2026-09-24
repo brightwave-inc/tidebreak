@@ -647,6 +647,47 @@ impl ScopedStore {
     pub async fn list_tool_calls(&self, chat_id: SessionId) -> Result<Vec<ToolCallRecord>> {
         self.store.list_tool_calls(chat_id).await
     }
+
+    /// [`Store::list_turns`]. The caller has already authorized the chat.
+    pub async fn list_turns(&self, chat_id: SessionId) -> Result<Vec<TurnRun>> {
+        self.store.list_turns(chat_id).await
+    }
+
+    /// [`Store::list_turn_replacements`]. The caller has already authorized
+    /// the chat.
+    pub async fn list_turn_replacements(
+        &self,
+        chat_id: SessionId,
+    ) -> Result<Vec<tidebreak_core::TurnReplacement>> {
+        self.store.list_turn_replacements(chat_id).await
+    }
+
+    /// [`Store::list_turn_tool_uses`]. The caller has already authorized the
+    /// chat.
+    pub async fn list_turn_tool_uses(
+        &self,
+        chat_id: SessionId,
+        turns: &[tidebreak_core::TurnId],
+    ) -> Result<Vec<tidebreak_core::TurnToolUse>> {
+        self.store.list_turn_tool_uses(chat_id, turns).await
+    }
+
+    /// Branch one of the principal's conversations into a new one they own.
+    pub async fn branch_chat(
+        &self,
+        request: &tidebreak_core::BranchChat,
+    ) -> Result<tidebreak_core::BranchChatOutcome> {
+        self.store.branch_chat_scoped(&self.owner, request).await
+    }
+
+    /// Remove one of the principal's branches whose first message was
+    /// refused.
+    pub async fn discard_branch(
+        &self,
+        chat_id: SessionId,
+    ) -> Result<tidebreak_core::DiscardBranchOutcome> {
+        self.store.discard_branch_scoped(&self.owner, chat_id).await
+    }
 }
 
 impl FromRequestParts<AppState> for ScopedStore {
