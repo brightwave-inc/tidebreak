@@ -43,6 +43,7 @@ flate2 = "=1.1.10"
 minisign-verify.workspace = true
 tidebreak-code-execution = { path = "../tidebreak-code-execution" }
 tidebreak-core = { path = "../tidebreak-core", default-features = false, features = ["keychain"] }
+tidebreak-harness = { path = "../tidebreak-harness" }
 tidebreak-host-broker = { path = "../tidebreak-host-broker" }
 tidebreak-managed-node = { path = "../tidebreak-managed-node" }
 tidebreak-server = { path = "../tidebreak-server-api" }

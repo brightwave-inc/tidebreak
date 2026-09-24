@@ -80,6 +80,11 @@ computer_use_state: reads the native control state (active app and halt latch) t
 stop_computer_use_control: sets the native halt latch that short-circuits control ops before their next broker round-trip.
 resume_computer_use_control: clears that latch on an explicit user gesture.
 
+# The tidebreak command on this computer's PATH
+cli_command_status: reads which links to the app bundle's own CLI sidecar exist in this computer's PATH folders and what a login shell on this computer resolves; a server cannot see the client machine's bundle, home folder, or shell.
+install_cli_command: links the CLI sidecar inside this app bundle into ~/.local/bin, or into /usr/local/bin through the macOS administrator prompt; only the native shell knows where its bundle is and can raise that prompt.
+uninstall_cli_command: removes only a link to a Tidebreak app bundle from those folders, through the same administrator prompt for /usr/local/bin.
+
 # Office converter and Node runtime installers
 convert_office_to_pdf: drives the user's locally installed LibreOffice inside the desktop sandbox.
 install_presentation_converter: installs the local office converter onto this machine.
@@ -99,6 +104,7 @@ set_automatic_update_downloads: turns the native auto-updater's automatic downlo
 quit_prompt_state: reports the quit prompt the shell is holding the app's exit on; only the native shell receives the operating system's quit request.
 quit_prompt_opened: tells the shell the renderer is showing its quit prompt, so it does not fall back to a native dialog.
 answer_quit_prompt: carries the person's answer to the shell, which alone can stop, park, or keep the process and then exit it.
+restart_app: quits through that same prompt and opens the app again, so macOS applies a Screen Recording grant it only gives to a process started after it; only the native shell can end and relaunch itself.
 unclean_exit_notice: reports that the previous desktop process ended without its exit handler, which only the shell's own run marker records.
 dismiss_unclean_exit_notice: clears that notice for this run.
 save_diagnostics_report: writes the diagnostics export to a file chosen in the native save dialog.

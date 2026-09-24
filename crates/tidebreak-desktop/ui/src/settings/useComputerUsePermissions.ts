@@ -5,14 +5,19 @@ import type {
   ComputerUsePermissionPane,
   ComputerUsePermissionStatus,
 } from "@/computerUsePermissions";
+import { useComputerUsePermissionAsk } from "@/computerUsePermissionAsk";
 
-export type PermissionErrorKind = "status" | "request" | "open_settings";
+export type PermissionErrorKind =
+  | "status"
+  | "request"
+  | "open_settings"
+  | "restart";
 
 /**
  * What went wrong, in the words of the surface it went wrong on.
  *
  * `refreshable` is whether the caller draws a Refresh button. Settings does,
- * so its copy sends the reader to it; the setup dialog re-reads on window
+ * so its copy sends the reader to it; the permission ask re-reads on window
  * focus instead and must not name a control that is not there.
  */
 export function permissionErrorMessage(
@@ -30,6 +35,8 @@ export function permissionErrorMessage(
         : "macOS permissions could not be requested. Open System Settings to enable them.";
     case "open_settings":
       return "System Settings could not be opened. Open Privacy & Security in System Settings and select the permission.";
+    case "restart":
+      return "Tidebreak could not restart. Quit Tidebreak and open it again.";
   }
 }
 
@@ -49,9 +56,17 @@ export interface ComputerUsePermissions {
   opening: ComputerUsePermissionPane | null;
   /** A request or a settings launch is in flight. */
   busy: boolean;
+  /**
+   * Screen Recording is still off after macOS was asked for it in this run.
+   * macOS applies that grant only to a process started after it, so if the
+   * person turned it on, Tidebreak has to restart before it takes effect.
+   */
+  restartSuggested: boolean;
+  restarting: boolean;
   refresh: () => Promise<void>;
   request: () => Promise<void>;
   openSettings: (pane: ComputerUsePermissionPane) => Promise<void>;
+  restart: () => Promise<void>;
 }
 
 /**
@@ -77,6 +92,13 @@ export function useComputerUsePermissions(
   const [requesting, setRequesting] = useState(false);
   const [opening, setOpening] = useState<ComputerUsePermissionPane | null>(
     null,
+  );
+  const [restarting, setRestarting] = useState(false);
+  const screenRecordingRequested = useComputerUsePermissionAsk(
+    (state) => state.screenRecordingRequested,
+  );
+  const noteScreenRecordingRequested = useComputerUsePermissionAsk(
+    (state) => state.noteScreenRecordingRequested,
   );
   const generation = useRef(0);
   const requestGeneration = useRef(0);
@@ -124,6 +146,9 @@ export function useComputerUsePermissions(
     setError(null);
     try {
       const next = await host.request();
+      // macOS has now asked, so a Screen Recording grant made from here on
+      // needs a restart to apply. A failed request asked nothing.
+      noteScreenRecordingRequested();
       if (!isCurrentRequest()) return;
       if (current === generation.current) {
         setStatus(next);
@@ -142,7 +167,7 @@ export function useComputerUsePermissions(
     } finally {
       if (isCurrentRequest()) setRequesting(false);
     }
-  }, [host, refresh, refreshable]);
+  }, [host, refresh, refreshable, noteScreenRecordingRequested]);
 
   const openSettings = useCallback(
     async (pane: ComputerUsePermissionPane) => {
@@ -150,6 +175,9 @@ export function useComputerUsePermissions(
       setError(null);
       try {
         await host.openSettings(pane);
+        // The person can turn Screen Recording on from here, and that grant
+        // applies only after a restart.
+        if (pane === "screen_recording") noteScreenRecordingRequested();
       } catch {
         if (mounted.current)
           setError(permissionErrorMessage("open_settings", refreshable));
@@ -157,8 +185,24 @@ export function useComputerUsePermissions(
         if (mounted.current) setOpening(null);
       }
     },
-    [host, refreshable],
+    [host, refreshable, noteScreenRecordingRequested],
   );
+
+  const restart = useCallback(async () => {
+    setRestarting(true);
+    setError(null);
+    try {
+      // Resolves as soon as the shell takes the request, before it counts
+      // working agents. The app then exits and opens again, or the quit
+      // prompt asks about the agents first.
+      await host.restart();
+    } catch {
+      if (mounted.current)
+        setError(permissionErrorMessage("restart", refreshable));
+    } finally {
+      if (mounted.current) setRestarting(false);
+    }
+  }, [host, refreshable]);
 
   const permissions = status?.status === "available" ? status : null;
   return {
@@ -173,9 +217,14 @@ export function useComputerUsePermissions(
     loading,
     requesting,
     opening,
-    busy: requesting || opening !== null,
+    busy: requesting || opening !== null || restarting,
+    restartSuggested: Boolean(
+      permissions && !permissions.screenRecording && screenRecordingRequested,
+    ),
+    restarting,
     refresh,
     request,
     openSettings,
+    restart,
   };
 }

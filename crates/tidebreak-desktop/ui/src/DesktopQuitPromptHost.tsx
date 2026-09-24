@@ -17,6 +17,7 @@ export function DesktopQuitPromptHost({
     <QuitPrompt
       prompt={update.prompt}
       error={update.error}
+      restart={update.restart ?? false}
       answering={answering}
       onChoose={answer}
       onOpenInbox={onOpenInbox}

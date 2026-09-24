@@ -87,11 +87,10 @@ import { useProjectListStore } from "./ProjectListStore";
 import { useComposerDrafts } from "./ComposerDrafts";
 import { useConfirm } from "./components/ConfirmDialog";
 import { ComputerUseIndicator } from "./ComputerUseIndicator";
-import { ComputerUseSetupDialog } from "./ComputerUseSetupDialog";
 import {
-  markComputerUseSetupAsked,
-  useComputerUseSetupPrompt,
-} from "./computerUseSetupPrompt";
+  ComputerUsePermissionAskHost,
+  ComputerUsePermissionNoticeHost,
+} from "./ComputerUsePermissionAskHost";
 import { useDesktopNavigation } from "./DesktopNavigation";
 import {
   hasMacOverlayTitlebar,
@@ -153,6 +152,10 @@ import { rendererErrors } from "./rendererErrors";
  */
 const CLOSE_TAB_REQUESTED_EVENT = "desktop-close-tab-requested";
 const DISMISSED_UPDATE_VERSION_KEY = "tidebreak.dismissed-update-version";
+
+// Settings sections are generated routes, so their paths are plain strings.
+const PERMISSIONS_SETTINGS: string = "/settings/permissions";
+const COMMAND_LINE_SETTINGS: string = "/settings/command-line";
 
 /** Move focus to whichever composer the current route has on screen. */
 function focusComposer(): void {
@@ -294,12 +297,6 @@ export function AppShell() {
   const [explicitUpdateCheck, setExplicitUpdateCheck] = useState<
     "running" | "settled" | null
   >(null);
-  // The first-run macOS setup ask. The hook answers false for every install
-  // past the ask, and the dialog reads permissions and watches window focus
-  // for as long as it is mounted, so it is mounted only when it is asking.
-  const computerUseSetupPrompt = useComputerUseSetupPrompt();
-  const [computerUseSetupDismissed, setComputerUseSetupDismissed] =
-    useState(false);
   const openChatId = useActiveChatId();
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
@@ -377,6 +374,14 @@ export function AppShell() {
   // documentation matters most when the app has not got that far.
   useNativeHostEvent(MENU_COMMAND_EVENT, (command) => {
     if (command === "documentation") void openInBrowser(DOCUMENTATION_URL);
+    // The install runs on the page that reports what it did and offers the
+    // install for all users and the uninstall.
+    if (command === "install-cli-command") {
+      void navigate({
+        to: COMMAND_LINE_SETTINGS,
+        search: { install: "user" },
+      });
+    }
   });
 
   /**
@@ -1400,15 +1405,11 @@ export function AppShell() {
           <CommandPaletteDialog />
           <RepositoryTrustSheetHost />
           <EngineSignInHost />
-          {computerUseSetupPrompt && (
-            <ComputerUseSetupDialog
-              open={!computerUseSetupDismissed}
-              onDone={() => {
-                markComputerUseSetupAsked();
-                setComputerUseSetupDismissed(true);
-              }}
-            />
-          )}
+          {/* The macOS permission ask opens when a task first needs a
+              permission, never at launch. */}
+          <ComputerUsePermissionAskHost
+            onOpenSettings={() => void navigate({ to: PERMISSIONS_SETTINGS })}
+          />
           {nativeTitlebar && !showExpandStrip && !sidebarOverlay && (
             <Titlebar
               macOverlay={macOverlayTitlebar}
@@ -1418,6 +1419,9 @@ export function AppShell() {
           <SidebarExpandStrip macOverlay={macOverlayTitlebar} />
           <ComputerUseIndicator />
           <FloatingNotices>
+            <ComputerUsePermissionNoticeHost
+              onOpenSettings={() => void navigate({ to: PERMISSIONS_SETTINGS })}
+            />
             {uncleanExit.notice && (
               <UncleanExitNotice
                 save={uncleanExit.save}

@@ -46,6 +46,7 @@ mod browser_url_observer;
 mod channel;
 mod chat_debug;
 mod chrome_runtime_adapter;
+mod cli_command;
 mod client_execution;
 mod code_browser;
 mod code_editor;
@@ -1077,6 +1078,9 @@ pub fn run() {
             computer_use_permissions::computer_use_permission_status,
             computer_use_permissions::request_computer_use_permissions,
             computer_use_permissions::open_computer_use_permission_settings,
+            cli_command::cli_command_status,
+            cli_command::install_cli_command,
+            cli_command::uninstall_cli_command,
             client_execution::computer_use::computer_use_state,
             client_execution::computer_use::stop_computer_use_control,
             client_execution::computer_use::resume_computer_use_control,
@@ -1103,6 +1107,7 @@ pub fn run() {
             quit::quit_prompt_state,
             quit::quit_prompt_opened,
             quit::answer_quit_prompt,
+            quit::restart_app,
             unclean_exit::unclean_exit_notice,
             unclean_exit::dismiss_unclean_exit_notice,
             unclean_exit::save_diagnostics_report
@@ -1219,6 +1224,14 @@ pub fn run() {
             // ours answers on.
             if let Some(listen_file) = app.try_state::<PublishedListenFile>() {
                 listen_file.remove();
+            }
+            // A restart the person asked for opens the app again once this
+            // process is gone.
+            if app
+                .try_state::<quit::QuitController>()
+                .is_some_and(|quit| quit.restarting())
+            {
+                updater::relaunch_once_exited();
             }
             // Last: write out log lines still queued for the log files.
             tidebreak_server::logging::shutdown();

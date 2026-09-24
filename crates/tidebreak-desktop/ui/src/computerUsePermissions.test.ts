@@ -31,6 +31,8 @@ describe("computerUsePermissionHost", () => {
       "open_computer_use_permission_settings",
       { pane: "screen_recording" },
     );
+    await computerUsePermissionHost.restart();
+    expect(mocks.invoke).toHaveBeenLastCalledWith("restart_app");
   });
   it.each(["remote", "web"])(
     "refuses %s use before invoking the local helper",
@@ -43,6 +45,7 @@ describe("computerUsePermissionHost", () => {
       expect(() =>
         computerUsePermissionHost.openSettings("accessibility"),
       ).toThrow();
+      expect(() => computerUsePermissionHost.restart()).toThrow();
       expect(mocks.invoke).not.toHaveBeenCalled();
     },
   );

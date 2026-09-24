@@ -17,6 +17,11 @@ export interface ComputerUsePermissionHost {
   status(): Promise<ComputerUsePermissionStatus>;
   request(): Promise<ComputerUsePermissionStatus>;
   openSettings(pane: ComputerUsePermissionPane): Promise<void>;
+  /**
+   * Quit and reopen Tidebreak. macOS applies a Screen Recording grant only to
+   * a process started after it. Working agents get the quit prompt first.
+   */
+  restart(): Promise<void>;
 }
 
 function requireLocalHost(): void {
@@ -39,5 +44,9 @@ export const computerUsePermissionHost: ComputerUsePermissionHost = {
   openSettings: (pane) => {
     requireLocalHost();
     return invoke("open_computer_use_permission_settings", { pane });
+  },
+  restart: () => {
+    requireLocalHost();
+    return invoke("restart_app");
   },
 };

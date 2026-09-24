@@ -20,6 +20,8 @@ type QuitPromptProps = {
   prompt: QuitPromptState;
   /** Why waiting for a safe point failed, when it did. */
   error?: string | null;
+  /** The quit is a restart the person asked for, so the words say restart. */
+  restart?: boolean;
   /** An answer is on its way to the shell. */
   answering?: boolean;
   onChoose: (choice: QuitChoice) => void;
@@ -73,19 +75,26 @@ function waitingForYouShort({
   return `${waitingForYou} need your answers first.`;
 }
 
-/** The words of the prompt, which follow how many agents are working. */
-export function quitPromptCopy(prompt: QuitPromptState): QuitPromptCopy {
+/**
+ * The words of the prompt, which follow how many agents are working and
+ * whether the person asked to quit or to restart.
+ */
+export function quitPromptCopy(
+  prompt: QuitPromptState,
+  restart = false,
+): QuitPromptCopy {
+  const verb = restart ? "Restart" : "Quit";
   const one = "agents" in prompt && prompt.agents === 1;
-  const stopLabel = one ? "Quit and stop it" : "Quit and stop them";
+  const stopLabel = one ? `${verb} and stop it` : `${verb} and stop them`;
   const safePointLabel = one
-    ? "Quit when it reaches a safe point"
-    : "Quit when they reach a safe point";
+    ? `${verb} when it reaches a safe point`
+    : `${verb} when they reach a safe point`;
   switch (prompt.phase) {
     case "asking":
       return {
         title: one
-          ? "Quit while an agent is working?"
-          : `Quit while ${prompt.agents} agents are working?`,
+          ? `${verb} while an agent is working?`
+          : `${verb} while ${prompt.agents} agents are working?`,
         description: one
           ? "Stopping it ends its current turn. At a safe point, a code turn finishes first, and a chat continues the next time Tidebreak opens."
           : "Stopping them ends their current turns. At a safe point, code turns finish first, and chats continue the next time Tidebreak opens.",
@@ -96,8 +105,8 @@ export function quitPromptCopy(prompt: QuitPromptState): QuitPromptCopy {
     case "waiting":
       return {
         title: one
-          ? "Quitting when the agent reaches a safe point"
-          : `Quitting when ${prompt.agents} agents reach a safe point`,
+          ? `${restart ? "Restarting" : "Quitting"} when the agent reaches a safe point`
+          : `${restart ? "Restarting" : "Quitting"} when ${prompt.agents} agents reach a safe point`,
         description:
           waitingForYouShort(prompt) ??
           "New messages wait until Tidebreak opens again.",
@@ -108,7 +117,9 @@ export function quitPromptCopy(prompt: QuitPromptState): QuitPromptCopy {
     case "stopping":
       return {
         title: "Stopping agents",
-        description: "Tidebreak quits as soon as they stop.",
+        description: restart
+          ? "Tidebreak restarts as soon as they stop."
+          : "Tidebreak quits as soon as they stop.",
         stopLabel,
         safePointLabel,
         waitingNote: null,
@@ -138,6 +149,7 @@ export function quitPromptCopy(prompt: QuitPromptState): QuitPromptCopy {
 export function QuitPrompt({
   prompt,
   error = null,
+  restart = false,
   answering = false,
   onChoose,
   onOpenInbox,
@@ -146,13 +158,14 @@ export function QuitPrompt({
     return (
       <QuitWaitingBar
         prompt={prompt}
+        restart={restart}
         answering={answering}
         onChoose={onChoose}
         onOpenInbox={onOpenInbox}
       />
     );
   }
-  const copy = quitPromptCopy(prompt);
+  const copy = quitPromptCopy(prompt, restart);
   const asking = prompt.phase === "asking";
 
   return (
@@ -243,20 +256,22 @@ export function QuitPrompt({
  */
 function QuitWaitingBar({
   prompt,
+  restart,
   answering,
   onChoose,
   onOpenInbox,
 }: {
   prompt: Extract<QuitPromptState, { phase: "waiting" }>;
+  restart: boolean;
   answering: boolean;
   onChoose: (choice: QuitChoice) => void;
   onOpenInbox?: () => void;
 }) {
-  const copy = quitPromptCopy(prompt);
+  const copy = quitPromptCopy(prompt, restart);
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
       <section
-        aria-label="Quitting"
+        aria-label={restart ? "Restarting" : "Quitting"}
         className="pointer-events-auto flex w-full min-w-0 max-w-xl flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border bg-popover px-3 py-2.5 text-popover-foreground shadow-lg"
       >
         <Spinner aria-hidden="true" className="size-4 shrink-0" />

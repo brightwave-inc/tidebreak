@@ -28,6 +28,7 @@ function host(overrides: Partial<ComputerUsePermissionHost> = {}) {
     status: vi.fn().mockResolvedValue(missing),
     request: vi.fn().mockResolvedValue({ ...missing, accessibility: true }),
     openSettings: vi.fn().mockResolvedValue(undefined),
+    restart: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -68,12 +69,14 @@ describe("ComputerUsePermissionsSection", () => {
     render(<ComputerUsePermissionsSection host={native} />);
     await userEvent.click(
       await screen.findByRole("button", {
-        name: "Open Accessibility settings",
+        name: "Open Accessibility in System Settings",
       }),
     );
     expect(native.openSettings).toHaveBeenCalledWith("accessibility");
     await userEvent.click(
-      screen.getByRole("button", { name: "Open Screen Recording settings" }),
+      screen.getByRole("button", {
+        name: "Open Screen Recording in System Settings",
+      }),
     );
     expect(native.openSettings).toHaveBeenLastCalledWith("screen_recording");
     act(() => window.dispatchEvent(new Event("focus")));

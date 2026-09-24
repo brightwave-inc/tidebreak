@@ -128,6 +128,8 @@ pub(crate) struct QuitPromptUpdate {
     prompt: QuitPrompt,
     /// Why waiting for a safe point failed, when it did.
     error: Option<String>,
+    /// The person asked to restart, so the app opens again once it quits.
+    restart: bool,
 }
 
 /// The person's answer to the prompt.
@@ -172,6 +174,9 @@ struct QuitState {
     error: Option<String>,
     /// Ends the wait for a safe point, when one is running.
     wait: Option<watch::Sender<Option<WaitEnd>>>,
+    /// The quit under way is a restart the person asked for: the app opens
+    /// again once it has exited. Cancelling the quit cancels the restart.
+    restart: bool,
 }
 
 /// What a quit request does next.
@@ -239,6 +244,7 @@ impl Default for QuitController {
                 native_dialog_open: false,
                 error: None,
                 wait: None,
+                restart: false,
             }),
             gate: tokio::sync::Mutex::new(()),
         }
@@ -262,6 +268,7 @@ impl QuitState {
             request: self.request,
             prompt: self.prompt(),
             error: self.error.clone(),
+            restart: self.restart,
         }
     }
 
@@ -277,8 +284,23 @@ impl QuitController {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Ask to quit. A quit asked for while a restart is under way turns it
+    /// into a quit: Cmd+Q during a restart's wait means quit.
     fn begin_request(&self) -> RequestAction {
+        self.begin(false)
+    }
+
+    /// Ask to restart: a quit that opens the app again once it has exited. It
+    /// asks first when agents are working, exactly as a quit does.
+    fn begin_restart(&self) -> RequestAction {
+        self.begin(true)
+    }
+
+    /// The latest request decides whether the exit reopens the app, and the
+    /// prompt it resurfaces is worded for it.
+    fn begin(&self, restart: bool) -> RequestAction {
         let mut state = self.lock();
+        state.restart = restart;
         match state.phase {
             Phase::Exiting => RequestAction::Proceed,
             Phase::Idle => {
@@ -321,9 +343,10 @@ impl QuitController {
         state.acknowledged = state.acknowledged.max(request);
     }
 
-    /// The prompt to ask natively, when the renderer has not acknowledged
-    /// `request` and it is still the prompt that matters.
-    fn native_fallback(&self, request: u64) -> Option<QuitPrompt> {
+    /// The prompt to ask natively, and whether it is for a restart, when the
+    /// renderer has not acknowledged `request` and it is still the prompt that
+    /// matters.
+    fn native_fallback(&self, request: u64) -> Option<(QuitPrompt, bool)> {
         let mut state = self.lock();
         if state.request != request || state.acknowledged >= request || state.native_dialog_open {
             return None;
@@ -331,7 +354,7 @@ impl QuitController {
         match state.phase {
             Phase::Asking(_) | Phase::Waiting(_) => {
                 state.native_dialog_open = true;
-                Some(state.prompt())
+                Some((state.prompt(), state.restart))
             }
             _ => None,
         }
@@ -346,11 +369,13 @@ impl QuitController {
         match (state.phase, choice) {
             (Phase::Asking(_), QuitChoice::Cancel) => {
                 state.phase = Phase::Idle;
+                state.restart = false;
                 ChoiceAction::Show(state.next_update())
             }
             (Phase::Waiting(_), QuitChoice::Cancel) => {
                 state.end_wait(WaitEnd::Cancelled);
                 state.phase = Phase::Idle;
+                state.restart = false;
                 ChoiceAction::Show(state.next_update())
             }
             (Phase::Asking(count), QuitChoice::SafePoint) => {
@@ -434,7 +459,13 @@ impl QuitController {
             request: state.request,
             prompt: state.prompt(),
             error: state.error.clone(),
+            restart: state.restart,
         }
+    }
+
+    /// Whether the exit under way should open the app again.
+    pub(crate) fn restarting(&self) -> bool {
+        self.lock().restart
     }
 }
 
@@ -519,7 +550,19 @@ async fn guarded<T>(
 /// Ask to quit: from the Quit menu item, the Dock, or a window close that
 /// quits. Returns at once; the exit, the prompt, or nothing follows.
 pub(crate) fn request_quit(app: &AppHandle) -> QuitDecision {
-    match app.state::<QuitController>().begin_request() {
+    act_on_request(app, app.state::<QuitController>().begin_request())
+}
+
+/// Ask to restart, which is a quit that opens the app again once it has
+/// exited. macOS applies a Screen Recording grant only to a process started
+/// after it, so the permission setup offers this. Working agents get the same
+/// prompt a quit gives them.
+pub(crate) fn request_restart(app: &AppHandle) -> QuitDecision {
+    act_on_request(app, app.state::<QuitController>().begin_restart())
+}
+
+fn act_on_request(app: &AppHandle, action: RequestAction) -> QuitDecision {
+    match action {
         RequestAction::Proceed => QuitDecision::Proceed,
         RequestAction::Count => {
             spawn_count(app);
@@ -566,8 +609,8 @@ fn present(app: &AppHandle, update: QuitPromptUpdate) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(RENDERER_ACK_TIMEOUT).await;
-        if let Some(prompt) = app.state::<QuitController>().native_fallback(request) {
-            ask_natively(&app, prompt);
+        if let Some((prompt, restart)) = app.state::<QuitController>().native_fallback(request) {
+            ask_natively(&app, prompt, restart);
         }
     });
 }
@@ -728,9 +771,11 @@ async fn stop_agents(controller: &QuitController, work: &impl QuitWork) {
     controller.stopped();
 }
 
-/// The native fallback dialog: its message and its three button labels.
+/// The native fallback dialog: its title, its message, and its three button
+/// labels.
 #[derive(Debug, PartialEq, Eq)]
 struct NativeQuestion {
+    title: &'static str,
     message: String,
     stop: &'static str,
     safe_point: &'static str,
@@ -738,8 +783,9 @@ struct NativeQuestion {
 
 const NATIVE_CANCEL: &str = "Cancel";
 
-/// The words of the native fallback dialog, which follow the renderer's.
-fn native_question(prompt: QuitPrompt) -> Option<NativeQuestion> {
+/// The words of the native fallback dialog, which follow the renderer's,
+/// including its words for a restart.
+fn native_question(prompt: QuitPrompt, restart: bool) -> Option<NativeQuestion> {
     let (count, waiting) = match prompt {
         QuitPrompt::Asking(count) => (count, false),
         QuitPrompt::Waiting(count) => (count, true),
@@ -751,20 +797,32 @@ fn native_question(prompt: QuitPrompt) -> Option<NativeQuestion> {
     } else {
         format!("{} agents are working", count.agents)
     };
-    let (stop, reach) = if one {
-        ("Quit and stop it", "Quit when it reaches a safe point")
+    let (stop, reach) = match (restart, one) {
+        (false, true) => ("Quit and stop it", "Quit when it reaches a safe point"),
+        (false, false) => ("Quit and stop them", "Quit when they reach a safe point"),
+        (true, true) => (
+            "Restart and stop it",
+            "Restart when it reaches a safe point",
+        ),
+        (true, false) => (
+            "Restart and stop them",
+            "Restart when they reach a safe point",
+        ),
+    };
+    let (now, later, then) = if restart {
+        ("Restarting", "restart", "restarts")
     } else {
-        ("Quit and stop them", "Quit when they reach a safe point")
+        ("Quitting", "quit", "quits")
     };
     let mut message = match (waiting, one) {
         (false, true) => format!(
-            "{working}. Quitting now stops it. To keep its work, quit when it reaches a safe point."
+            "{working}. {now} now stops it. To keep its work, {later} when it reaches a safe point."
         ),
         (false, false) => format!(
-            "{working}. Quitting now stops them. To keep their work, quit when they reach a safe point."
+            "{working}. {now} now stops them. To keep their work, {later} when they reach a safe point."
         ),
-        (true, true) => format!("{working}. Tidebreak quits when it reaches a safe point."),
-        (true, false) => format!("{working}. Tidebreak quits when they reach a safe point."),
+        (true, true) => format!("{working}. Tidebreak {then} when it reaches a safe point."),
+        (true, false) => format!("{working}. Tidebreak {then} when they reach a safe point."),
     };
     if let Some(note) = waiting_for_you_note(count) {
         message.push(' ');
@@ -772,6 +830,11 @@ fn native_question(prompt: QuitPrompt) -> Option<NativeQuestion> {
         message.push_str(" Open the inbox to answer.");
     }
     Some(NativeQuestion {
+        title: if restart {
+            "Restart Tidebreak?"
+        } else {
+            "Quit Tidebreak?"
+        },
         message,
         stop,
         safe_point: if waiting { "Keep waiting" } else { reach },
@@ -796,8 +859,8 @@ fn waiting_for_you_note(count: AgentCount) -> Option<String> {
 }
 
 /// Ask in a native dialog because the renderer did not answer.
-fn ask_natively(app: &AppHandle, prompt: QuitPrompt) {
-    let Some(question) = native_question(prompt) else {
+fn ask_natively(app: &AppHandle, prompt: QuitPrompt, restart: bool) {
+    let Some(question) = native_question(prompt, restart) else {
         app.state::<QuitController>().native_dialog_closed();
         return;
     };
@@ -805,7 +868,7 @@ fn ask_natively(app: &AppHandle, prompt: QuitPrompt) {
     let mut dialog = app
         .dialog()
         .message(question.message.clone())
-        .title("Quit Tidebreak?")
+        .title(question.title)
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::YesNoCancelCustom(
             question.stop.to_owned(),
@@ -851,6 +914,17 @@ pub(crate) fn quit_prompt_opened(controller: State<'_, QuitController>, request:
 #[tauri::command]
 pub(crate) fn answer_quit_prompt(app: AppHandle, choice: QuitChoice) {
     choose(&app, choice);
+}
+
+/// Restart Tidebreak so macOS applies a permission it granted since launch.
+/// Working agents get the quit prompt, worded for a restart.
+#[tauri::command]
+pub(crate) fn restart_app(app: AppHandle, webview: tauri::Webview) -> Result<(), String> {
+    if webview.label() != "main" {
+        return Err("Tidebreak can be restarted only from its own window.".to_owned());
+    }
+    request_restart(&app);
+    Ok(())
 }
 
 /// Closing the main window. On macOS the window hides and the app keeps
@@ -1457,7 +1531,7 @@ mod tests {
         assert_eq!(controller.native_fallback(update.request), None, "stale");
         assert_eq!(
             controller.native_fallback(again.request),
-            Some(QuitPrompt::Asking(agents(2)))
+            Some((QuitPrompt::Asking(agents(2)), false))
         );
         assert_eq!(
             controller.native_fallback(again.request),
@@ -1469,7 +1543,7 @@ mod tests {
 
     #[test]
     fn the_native_dialog_maps_every_answer_to_a_choice() {
-        let asking = native_question(QuitPrompt::Asking(agents(2))).unwrap();
+        let asking = native_question(QuitPrompt::Asking(agents(2)), false).unwrap();
         assert_eq!(
             native_choice(
                 &MessageDialogResult::Custom("Quit and stop them".to_owned()),
@@ -1484,7 +1558,7 @@ mod tests {
             ),
             QuitChoice::SafePoint
         );
-        let waiting = native_question(QuitPrompt::Waiting(agents(2))).unwrap();
+        let waiting = native_question(QuitPrompt::Waiting(agents(2)), false).unwrap();
         assert_eq!(
             native_choice(
                 &MessageDialogResult::Custom("Keep waiting".to_owned()),
@@ -1504,7 +1578,7 @@ mod tests {
             native_choice(&MessageDialogResult::Cancel, &asking),
             QuitChoice::Cancel
         );
-        assert_eq!(native_question(QuitPrompt::Stopping), None);
+        assert_eq!(native_question(QuitPrompt::Stopping, false), None);
     }
 
     /// The fallback says the same thing as the renderer, in the singular for
@@ -1512,8 +1586,9 @@ mod tests {
     #[test]
     fn the_native_dialog_speaks_of_one_agent_in_the_singular() {
         assert_eq!(
-            native_question(QuitPrompt::Asking(agents(1))),
+            native_question(QuitPrompt::Asking(agents(1)), false),
             Some(NativeQuestion {
+                title: "Quit Tidebreak?",
                 message: "An agent is working. Quitting now stops it. To keep its work, quit when it reaches a safe point."
                     .to_owned(),
                 stop: "Quit and stop it",
@@ -1521,7 +1596,7 @@ mod tests {
             })
         );
         assert_eq!(
-            native_question(QuitPrompt::Waiting(agents(3))).map(|question| question.message),
+            native_question(QuitPrompt::Waiting(agents(3)), false).map(|question| question.message),
             Some("3 agents are working. Tidebreak quits when they reach a safe point.".to_owned())
         );
     }
@@ -1531,10 +1606,13 @@ mod tests {
     #[test]
     fn the_native_dialog_says_an_agent_is_waiting_for_an_answer() {
         assert_eq!(
-            native_question(QuitPrompt::Asking(AgentCount {
-                agents: 1,
-                waiting_for_you: 1,
-            }))
+            native_question(
+                QuitPrompt::Asking(AgentCount {
+                    agents: 1,
+                    waiting_for_you: 1,
+                }),
+                false
+            )
             .map(|question| question.message),
             Some(
                 "An agent is working. Quitting now stops it. To keep its work, quit when it reaches a safe point. \
@@ -1543,10 +1621,13 @@ mod tests {
             )
         );
         assert_eq!(
-            native_question(QuitPrompt::Waiting(AgentCount {
-                agents: 3,
-                waiting_for_you: 1,
-            }))
+            native_question(
+                QuitPrompt::Waiting(AgentCount {
+                    agents: 3,
+                    waiting_for_you: 1,
+                }),
+                false
+            )
             .map(|question| question.message),
             Some(
                 "3 agents are working. Tidebreak quits when they reach a safe point. \
@@ -1554,6 +1635,104 @@ mod tests {
                     .to_owned()
             )
         );
+    }
+
+    /// A restart asks about working agents the way a quit does, says it is a
+    /// restart, and a cancel takes the restart back with it.
+    #[test]
+    fn a_restart_is_a_quit_that_remembers_to_open_again() {
+        let controller = QuitController::default();
+        assert!(!controller.restarting());
+
+        assert_eq!(controller.begin_restart(), RequestAction::Count);
+        let CountAction::Ask(update) = controller.counted(Ok(agents(2))) else {
+            panic!("working agents are asked about");
+        };
+        assert!(update.restart, "the prompt is worded for a restart");
+        assert!(controller.restarting());
+
+        let ChoiceAction::Show(update) = controller.choose(QuitChoice::Cancel) else {
+            panic!("a cancel goes back to idle");
+        };
+        assert!(!update.restart);
+        assert!(
+            !controller.restarting(),
+            "a later quit must not reopen the app"
+        );
+
+        // With nothing working, the restart exits at once and reopens.
+        assert_eq!(controller.begin_restart(), RequestAction::Count);
+        assert_eq!(controller.counted(Ok(agents(0))), CountAction::Exit);
+        assert!(controller.restarting());
+    }
+
+    /// Cmd+Q while a restart waits for a safe point means quit: the prompt
+    /// it resurfaces says quit, and the exit does not reopen the app. A
+    /// restart asked for during a quit's wait turns it back into a restart.
+    #[test]
+    fn a_quit_during_a_restart_quits() {
+        let controller = QuitController::default();
+        assert_eq!(controller.begin_restart(), RequestAction::Count);
+        let CountAction::Ask(update) = controller.counted(Ok(agents(1))) else {
+            panic!("a working agent is asked about");
+        };
+        assert!(update.restart);
+        let _end = waiting(&controller);
+
+        let RequestAction::Resurface(update) = controller.begin_request() else {
+            panic!("a quit during the wait brings the prompt back");
+        };
+        assert!(!update.restart, "the prompt now says quit");
+        assert!(!controller.restarting(), "the exit must not reopen the app");
+        assert_eq!(controller.safe_point_reached(), AfterWait::Exit);
+        assert!(!controller.restarting());
+
+        let controller = QuitController::default();
+        let _ = asking(&controller, 1);
+        let RequestAction::Resurface(update) = controller.begin_restart() else {
+            panic!("a restart during a quit's prompt brings it back");
+        };
+        assert!(update.restart);
+        assert!(controller.restarting());
+    }
+
+    /// The native fallback words a restart as a restart, title included.
+    #[test]
+    fn the_native_dialog_says_restart_for_a_restart() {
+        assert_eq!(
+            native_question(QuitPrompt::Asking(agents(2)), true),
+            Some(NativeQuestion {
+                title: "Restart Tidebreak?",
+                message: "2 agents are working. Restarting now stops them. To keep their work, restart when they reach a safe point."
+                    .to_owned(),
+                stop: "Restart and stop them",
+                safe_point: "Restart when they reach a safe point",
+            })
+        );
+        assert_eq!(
+            native_question(QuitPrompt::Waiting(agents(1)), true).map(|question| question.message),
+            Some(
+                "An agent is working. Tidebreak restarts when it reaches a safe point.".to_owned()
+            )
+        );
+        let controller = QuitController::default();
+        assert_eq!(controller.begin_restart(), RequestAction::Count);
+        let CountAction::Ask(update) = controller.counted(Ok(agents(2))) else {
+            panic!("working agents are asked about");
+        };
+        assert_eq!(
+            controller.native_fallback(update.request),
+            Some((QuitPrompt::Asking(agents(2)), true))
+        );
+    }
+
+    /// A plain quit never reopens the app.
+    #[test]
+    fn a_quit_does_not_restart() {
+        let controller = QuitController::default();
+        assert_eq!(controller.begin_request(), RequestAction::Count);
+        assert_eq!(controller.counted(Ok(agents(0))), CountAction::Exit);
+        assert!(!controller.restarting());
     }
 
     /// The renderer reads the prompt as tagged JSON.
@@ -1566,6 +1745,7 @@ mod tests {
                 waiting_for_you: 1,
             }),
             error: None,
+            restart: false,
         };
         assert_eq!(
             serde_json::to_value(update).unwrap(),
@@ -1573,6 +1753,7 @@ mod tests {
                 "request": 4,
                 "prompt": {"phase": "waiting", "agents": 2, "waitingForYou": 1},
                 "error": null,
+                "restart": false,
             })
         );
         assert_eq!(

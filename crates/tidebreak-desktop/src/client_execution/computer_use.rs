@@ -74,6 +74,107 @@ const MAX_WINDOW_ROWS: usize = 64;
 const MAX_MARK_TABLES: usize = 64;
 /// Renderer event carrying the full control/consent snapshot on every change.
 const STATE_EVENT: &str = "computer-use-state-changed";
+
+/// Raised when a task's computer-use operation stopped because macOS has not
+/// granted a permission the operation needs. The window tells the person what
+/// is missing and asks for it then, at the moment it was needed, rather than
+/// on the first launch. The payload is a [`PermissionRequired`].
+const PERMISSION_REQUIRED_EVENT: &str = "computer-use-permission-required";
+
+/// A macOS permission the helper reported missing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MissingPermission {
+    Accessibility,
+    ScreenRecording,
+}
+
+/// Which permission a helper refusal names. Only the canonical messages
+/// identify one; anything else says a permission is missing without which.
+fn missing_permission(message: &str) -> Option<MissingPermission> {
+    match message {
+        "Accessibility permission is not granted" => Some(MissingPermission::Accessibility),
+        "Screen Recording permission is not granted" => Some(MissingPermission::ScreenRecording),
+        _ => None,
+    }
+}
+
+/// What the window hears when a task needs a macOS permission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionRequired {
+    /// The conversation or code session the task runs in.
+    task_id: String,
+    /// The missing permission, when the helper named it.
+    permission: Option<MissingPermission>,
+    /// The task was working in a web browser's own window.
+    browser: bool,
+    /// The person had just allowed the task to use the app, which turns
+    /// computer use on for it. The window asks even if the person chose Not
+    /// now before, because they acted again.
+    after_consent: bool,
+}
+
+/// The notice a broker refusal raises, if it is a missing macOS permission.
+fn permission_required(
+    call: &ToolCallRecord,
+    error: &BrokerClientError,
+    bundle_id: Option<&str>,
+    after_consent: bool,
+) -> Option<PermissionRequired> {
+    let BrokerClientError::Broker {
+        code: ErrorCode::OsPermissionDenied,
+        message,
+        ..
+    } = error
+    else {
+        return None;
+    };
+    Some(PermissionRequired {
+        task_id: call.chat_id.0.to_string(),
+        permission: missing_permission(message),
+        browser: bundle_id.is_some_and(is_browser_bundle),
+        after_consent,
+    })
+}
+
+/// Tell the window a task needs a macOS permission, when `error` says so.
+fn notify_permission_required(
+    app: &AppHandle,
+    call: &ToolCallRecord,
+    error: &BrokerClientError,
+    bundle_id: Option<&str>,
+    after_consent: bool,
+) {
+    emit_permission_required(
+        app,
+        permission_required(call, error, bundle_id, after_consent),
+    );
+}
+
+fn emit_permission_required(app: &AppHandle, notice: Option<PermissionRequired>) {
+    if let Some(notice) = notice {
+        if let Err(error) = app.emit(PERMISSION_REQUIRED_EVENT, notice) {
+            eprintln!("tidebreak-desktop: could not report a missing macOS permission: {error}");
+        }
+    }
+}
+
+/// Web browsers whose own windows computer use can control. Control of one
+/// reaches every tab it shows, so its consent says so, and a missing
+/// permission is worded for the browser.
+fn is_browser_bundle(bundle_id: &str) -> bool {
+    matches!(
+        bundle_id,
+        "com.google.Chrome"
+            | "com.google.Chrome.beta"
+            | "com.google.Chrome.dev"
+            | "com.google.Chrome.canary"
+            | "com.apple.Safari"
+            | "com.microsoft.edgemac"
+            | "org.mozilla.firefox"
+    )
+}
 /// A control op touches the indicator as recently active for this long after
 /// its last broker round-trip; the renderer re-arms the banner on this window.
 const INDICATOR_IDLE_REARM: std::time::Duration = std::time::Duration::from_secs(30);
@@ -620,16 +721,7 @@ fn computer_use_consent_message(view: &ConsentPromptView) -> String {
         if tidebreak_host_broker::blocklist::is_development_control_bundle(&view.bundle_id) {
             message.push_str(" This app can run commands on your Mac. Allowing control lets Tidebreak use those commands with your account's permissions, including access outside the coding sandbox.");
         }
-        if matches!(
-            view.bundle_id.as_str(),
-            "com.google.Chrome"
-                | "com.google.Chrome.beta"
-                | "com.google.Chrome.dev"
-                | "com.google.Chrome.canary"
-                | "com.apple.Safari"
-                | "com.microsoft.edgemac"
-                | "org.mozilla.firefox"
-        ) {
+        if is_browser_bundle(&view.bundle_id) {
             message.push_str(" This permission covers the browser app and its visible tabs. It is broader than sharing one website.");
         }
     }
@@ -1531,14 +1623,17 @@ async fn dispatch_broker(
             if cu.is_halted() {
                 return stopped_resolution();
             }
-            dispatch_confirmation(app, state, call, held, admission).await
+            dispatch_confirmation(app, state, call, held, admission, false).await
         }
         Ok(result) => map_result(app, state, context, call, result, delivery).await,
         Err(error) => match map_broker_error(&error) {
             BrokerFailure::ConsentRequired => {
                 dispatch_consent(app, state, context, call, request, admission, delivery).await
             }
-            BrokerFailure::Resolution(resolution) => resolution,
+            BrokerFailure::Resolution(resolution) => {
+                notify_permission_required(app, call, &error, bundle_id.as_deref(), false);
+                resolution
+            }
         },
     }
 }
@@ -1572,14 +1667,14 @@ fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
             "os_permission_required",
             // Older brokers report one generic message. Only the canonical
             // messages identify which permission the helper refused.
-            match message.as_str() {
-                "Accessibility permission is not granted" => {
+            match missing_permission(message) {
+                Some(MissingPermission::Accessibility) => {
                     "macOS has not granted Tidebreak Accessibility. Ask the user to enable Accessibility in System Settings, then retry."
                 }
-                "Screen Recording permission is not granted" => {
+                Some(MissingPermission::ScreenRecording) => {
                     "macOS has not granted Tidebreak Screen Recording. Ask the user to enable Screen Recording in System Settings, then retry."
                 }
-                _ => "A macOS permission required for this operation is missing. Ask the user to check Tidebreak's permissions in System Settings, then retry.",
+                None => "A macOS permission required for this operation is missing. Ask the user to check Tidebreak's permissions in System Settings, then retry.",
             },
         )),
         // The helper cannot act independently and ran no input. Keep this a
@@ -1734,12 +1829,15 @@ async fn dispatch_consent(
             {
                 stopped_resolution()
             } else {
-                dispatch_confirmation(app, state, call, held, admission).await
+                dispatch_confirmation(app, state, call, held, admission, true).await
             }
         }
         Ok(result) => map_result(app, state, context, call, result, delivery).await,
         Err(error) => match map_broker_error(&error) {
-            BrokerFailure::Resolution(resolution) => resolution,
+            BrokerFailure::Resolution(resolution) => {
+                notify_permission_required(app, call, &error, bundle_id.as_deref(), true);
+                resolution
+            }
             BrokerFailure::ConsentRequired => unavailable(
                 "denied",
                 "The computer-use grant did not cover this operation. Ask the user to review the app's grants in Settings.",
@@ -1781,12 +1879,16 @@ async fn revoke_once_grant(
 /// The act-time consequential confirmation: the broker is holding the action
 /// and honors the native confirmation only while the target's label still
 /// matches.
+///
+/// `after_consent` says the person allowed the task to use the app just
+/// before this, which a missing macOS permission reports along with it.
 async fn dispatch_confirmation(
     app: &AppHandle,
     state: &HostAccess,
     call: &ToolCallRecord,
     held: tidebreak_host_broker::CuNeedsConfirmationResult,
     admission: NativeInputAdmission,
+    after_consent: bool,
 ) -> StoredResolution {
     let cu = &state.computer_use;
     if !cu.admission_is_current(call.chat_id, admission) {
@@ -1841,14 +1943,39 @@ async fn dispatch_confirmation(
             "operation_failed",
             "The computer-use confirmation returned an unexpected result.",
         ),
-        Err(error) => match map_broker_error(&error) {
-            BrokerFailure::Resolution(resolution) => resolution,
-            BrokerFailure::ConsentRequired => unavailable(
-                "grant_declined",
-                "The computer-use grant no longer covers this app. Ask the user to review the app's grants in Settings.",
-            ),
-        },
+        Err(error) => {
+            let (resolution, notice) =
+                confirmation_failure(call, &error, &view.bundle_id, after_consent);
+            emit_permission_required(app, notice);
+            resolution
+        }
     }
+}
+
+/// The answer to a confirmed action the broker could not carry out, and the
+/// permission notice it raises when macOS is what refused.
+///
+/// The broker holds a Return or shortcut press for confirmation before the
+/// helper sees it, so on a fresh install the confirmed press is the first
+/// operation that needs Accessibility. It asks the way any other operation
+/// does.
+fn confirmation_failure(
+    call: &ToolCallRecord,
+    error: &BrokerClientError,
+    bundle_id: &str,
+    after_consent: bool,
+) -> (StoredResolution, Option<PermissionRequired>) {
+    let resolution = match map_broker_error(error) {
+        BrokerFailure::Resolution(resolution) => resolution,
+        BrokerFailure::ConsentRequired => unavailable(
+            "grant_declined",
+            "The computer-use grant no longer covers this app. Ask the user to review the app's grants in Settings.",
+        ),
+    };
+    (
+        resolution,
+        permission_required(call, error, Some(bundle_id), after_consent),
+    )
 }
 
 /// Preserve screenshot badge numbers when a tree read returns a smaller or
@@ -3400,6 +3527,110 @@ mod tests {
             assert!(!guidance.contains(other_permission));
             assert!(guidance.contains("System Settings"));
         }
+    }
+
+    #[test]
+    fn a_missing_macos_permission_tells_the_window_which_task_needs_what() {
+        let session = SessionId::new();
+        let call = session_call_record(
+            session,
+            CallId::new(),
+            "computer_capture_screen",
+            serde_json::json!({}),
+        );
+        let refusal = |message: &str| BrokerClientError::Broker {
+            code: ErrorCode::OsPermissionDenied,
+            message: message.to_owned(),
+            retryable: true,
+        };
+
+        let notice = permission_required(
+            &call,
+            &refusal("Screen Recording permission is not granted"),
+            Some("com.apple.Notes"),
+            false,
+        )
+        .expect("a missing permission is reported");
+        assert_eq!(
+            serde_json::to_value(&notice).unwrap(),
+            serde_json::json!({
+                "taskId": session.0.to_string(),
+                "permission": "screen_recording",
+                "browser": false,
+                "afterConsent": false,
+            })
+        );
+
+        let browser = permission_required(
+            &call,
+            &refusal("Accessibility permission is not granted"),
+            Some("com.apple.Safari"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(browser.permission, Some(MissingPermission::Accessibility));
+        assert!(browser.browser);
+        assert!(browser.after_consent);
+
+        let unnamed =
+            permission_required(&call, &refusal("private helper details"), None, false).unwrap();
+        assert_eq!(unnamed.permission, None);
+
+        // A grant miss or any other refusal is not a macOS permission.
+        let denied = BrokerClientError::Broker {
+            code: ErrorCode::Denied,
+            message: "Accessibility permission is not granted".to_owned(),
+            retryable: false,
+        };
+        assert_eq!(permission_required(&call, &denied, None, false), None);
+    }
+
+    /// The broker holds Return and shortcut presses for confirmation before
+    /// the helper sees them, so the confirmed press is where a fresh install
+    /// first meets Accessibility. It must ask like any other operation.
+    #[test]
+    fn a_confirmed_key_press_that_needs_accessibility_asks_for_it() {
+        let session = SessionId::new();
+        let call = session_call_record(
+            session,
+            CallId::new(),
+            tidebreak_core::COMPUTER_KEY_PRESS_TOOL,
+            serde_json::json!({"app_id": "com.apple.Notes", "key": "n", "modifiers": ["cmd"]}),
+        );
+        let refusal = BrokerClientError::Broker {
+            code: ErrorCode::OsPermissionDenied,
+            message: "Accessibility permission is not granted".to_owned(),
+            retryable: true,
+        };
+
+        let (resolution, notice) = confirmation_failure(&call, &refusal, "com.apple.Notes", true);
+
+        let StoredResolution::Failed { error_code, .. } = &resolution else {
+            panic!("a refused press fails the call");
+        };
+        assert_eq!(error_code, "os_permission_required");
+        assert_eq!(
+            notice,
+            Some(PermissionRequired {
+                task_id: session.0.to_string(),
+                permission: Some(MissingPermission::Accessibility),
+                browser: false,
+                after_consent: true,
+            })
+        );
+
+        // A grant that lapsed before the press is not a macOS permission.
+        let lapsed = BrokerClientError::Broker {
+            code: ErrorCode::Denied,
+            message: "denied".to_owned(),
+            retryable: false,
+        };
+        let (resolution, notice) = confirmation_failure(&call, &lapsed, "com.apple.Notes", false);
+        let StoredResolution::Failed { error_code, .. } = &resolution else {
+            panic!("a lapsed grant fails the call");
+        };
+        assert_eq!(error_code, "grant_declined");
+        assert_eq!(notice, None);
     }
 
     #[test]

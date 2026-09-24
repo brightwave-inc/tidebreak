@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
+import { useComputerUsePermissionAsk } from "@/computerUsePermissionAsk";
 import type {
   ComputerUsePermissionHost,
   ComputerUsePermissionStatus,
@@ -21,6 +22,7 @@ const localHost = (
   status: fn(async () => status),
   request: fn(async () => status),
   openSettings: fn(async () => {}),
+  restart: fn(async () => {}),
 });
 const meta = {
   title: "Settings/Computer use permissions",
@@ -37,6 +39,11 @@ const meta = {
     ),
   ],
   args: { host: localHost(missing) },
+  // Whether macOS was asked for Screen Recording in this run is app-wide;
+  // each story starts from a fresh launch.
+  beforeEach: () => {
+    useComputerUsePermissionAsk.setState({ screenRecordingRequested: false });
+  },
 } satisfies Meta<typeof ComputerUsePermissionsSection>;
 export default meta;
 type Story = StoryObj<typeof meta>;
@@ -60,6 +67,21 @@ export const Ready: Story = {
   },
   play: async ({ canvasElement }) => {
     await within(canvasElement).findByText(/macOS permissions are ready/);
+  },
+};
+/**
+ * Screen Recording was requested in this run and still reads off. macOS
+ * applies it after a restart, so the panel offers one.
+ */
+export const RestartToApply: Story = {
+  args: { host: localHost({ ...missing, accessibility: true }) },
+  beforeEach: () => {
+    useComputerUsePermissionAsk.setState({ screenRecordingRequested: true });
+  },
+  play: async ({ canvasElement }) => {
+    await within(canvasElement).findByRole("button", {
+      name: "Restart Tidebreak",
+    });
   },
 };
 export const Loading: Story = {

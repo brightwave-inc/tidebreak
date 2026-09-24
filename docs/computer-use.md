@@ -37,11 +37,22 @@ for an approved upload.
 
 Native capture and control require macOS 14 or later, the packaged helper,
 Accessibility permission, and Screen Recording permission where applicable.
-To check them, open **Settings → Permissions → Computer use on this Mac**.
-The panel identifies the running app and shows each permission separately.
-Choose **Request macOS permissions** or open the corresponding System Settings
-pane, then enable the permission for that app. If macOS asks you to quit and
-reopen the app, do that before retrying.
+
+Tidebreak asks for Accessibility and Screen Recording the first time a task
+needs them, not when the app opens. The ask names each permission and what it
+lets Tidebreak do, and **Not now** is the default. If you choose **Not now**,
+each task that stopped leaves its own notice, which names the task and the
+missing permission and says how to allow it. Tidebreak does not ask again on
+its own until you act again: choose **Allow** on a notice, or allow a task to
+use an app.
+**Settings → Permissions → Computer use on this Mac** still shows each
+permission for the running app, requests them, and opens their System
+Settings panes.
+
+macOS applies Screen Recording only after Tidebreak restarts. Once Tidebreak
+has asked for it, the ask and the settings panel offer **Restart Tidebreak**.
+If agents are working, the restart asks what to do about them first, the way
+quitting does.
 
 Tidebreak asks for app access through a native dialog. Read and screenshot access
 do not authorize control. A whole-display screenshot needs its own grant.
