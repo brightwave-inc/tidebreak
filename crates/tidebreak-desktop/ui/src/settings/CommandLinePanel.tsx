@@ -40,8 +40,12 @@ function homeRelative(path: string, status: Available): string {
     : path;
 }
 
+/**
+ * A path in the machine's voice. It wraps only where it has to, so a path
+ * that fits on the next line moves there whole.
+ */
 function Path({ children }: { children: string }) {
-  return <code className="break-all font-mono text-xs">{children}</code>;
+  return <code className="wrap-anywhere font-mono text-xs">{children}</code>;
 }
 
 type Verdict = {
@@ -122,9 +126,8 @@ export function commandLineVerdict(
           description: (
             <>
               The command is at {userPath}, but a new terminal does not look in
-              that folder. Add this line to your shell profile, such as{" "}
-              <Path>~/.zshrc</Path>, then open a new terminal:{" "}
-              <Path>{LOCAL_BIN_PATH_LINE}</Path>
+              that folder. Add the line below to your shell profile, such as{" "}
+              <Path>~/.zshrc</Path>, then open a new terminal.
             </>
           ),
         };
@@ -297,6 +300,8 @@ export function CommandLinePanel({
   const verdict = commandLineVerdict(status, native);
   const available = status?.status === "available" ? status : null;
   const busy = work !== null;
+  const needsPathLine =
+    available?.user.state === "installed" && available.user.onPath === false;
 
   return (
     <SettingsPanel
@@ -306,7 +311,7 @@ export function CommandLinePanel({
     >
       <SettingsSection
         title="The tidebreak command"
-        description="Installs for your account in ~/.local/bin, without a password."
+        description="Installs for your account, without a password."
       >
         {verdict ? (
           <SettingsStatus
@@ -318,6 +323,15 @@ export function CommandLinePanel({
           <p role="status" className="text-sm text-muted-foreground">
             Checking the tidebreak command…
           </p>
+        )}
+        {needsPathLine && (
+          // Its own line, so one click selects exactly what to paste.
+          <code
+            aria-label="Line to add to your shell profile"
+            className="block rounded-md bg-muted px-3 py-2 font-mono text-xs select-all wrap-anywhere"
+          >
+            {LOCAL_BIN_PATH_LINE}
+          </code>
         )}
         {summary && (
           <p role="status" className="text-sm text-muted-foreground">
@@ -347,7 +361,7 @@ export function CommandLinePanel({
       {available && (
         <SettingsSection
           title="All users of this Mac"
-          description="Links the command in /usr/local/bin. macOS asks for an administrator password."
+          description="Installs for every account on this Mac. macOS asks for an administrator password."
         >
           <SystemRow
             link={available.system}
@@ -445,7 +459,7 @@ function SystemRow({
     ) : link.state === "foreign" ? (
       <>Tidebreak did not make {path}, so it will not replace it.</>
     ) : (
-      <>Not installed for all users.</>
+      <>Not installed in {path}.</>
     );
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
