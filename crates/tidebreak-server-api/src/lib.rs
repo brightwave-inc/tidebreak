@@ -44,6 +44,17 @@ pub use core::{
     ServerStop, UpdateQuiesce,
 };
 
+/// How the server resolves and starts a local MCP command, for the desktop's
+/// native confirmation, which shows the executable a bare name resolves to,
+/// records it as the approved program, and lists the names the server's
+/// process gets by default.
+pub mod mcp_stdio {
+    pub use tidebreak_server_core::mcp_config::{
+        defaulted_names, is_bare_command, resolve_stdio_executable, resolve_stdio_executable_on,
+        FORWARDED_BY_DEFAULT,
+    };
+}
+
 pub mod routes;
 #[cfg(test)]
 mod tests;

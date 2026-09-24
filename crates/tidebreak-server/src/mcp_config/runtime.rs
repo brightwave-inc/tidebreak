@@ -1,9 +1,7 @@
 //! Live MCP connection supervision and tool registry publication.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -23,6 +21,7 @@ use crate::mcp_curated::{curation_for, McpCuration};
 use crate::mcp_oauth_runtime::{McpOAuthState, McpOAuthStatus};
 
 use super::oauth::{self, OAuthAccess, OAuthNeed, SignInProgress, SignInRecord, SignInView};
+use super::stdio::CommandApproval;
 use super::types::*;
 use super::validation::{
     failure_diagnostic, failure_park, validate_server, validate_servers, validation_reason,
@@ -308,6 +307,10 @@ pub struct McpRuntime {
     /// reuse this copy, and a write that did read it fresh updates it. That
     /// way no write drops a roster another write just fetched.
     gateway_roster: std::sync::Mutex<Vec<GatewayRosterApp>>,
+    /// Whether the desktop app's native dialog guards local commands here
+    /// (decision 27). When it does, a command given as a bare name starts
+    /// only the program the dialog approved. Set once, at assembly.
+    command_approval: AtomicBool,
     /// Lets a test's fake authorization server live on loopback.
     #[cfg(test)]
     oauth_loopback: AtomicBool,
@@ -347,8 +350,28 @@ impl McpRuntime {
             boot_deadline: std::sync::Mutex::new(None),
             tool_changes,
             gateway_roster: std::sync::Mutex::new(Vec::new()),
+            command_approval: AtomicBool::new(false),
             #[cfg(test)]
             oauth_loopback: AtomicBool::new(false),
+        }
+    }
+
+    /// Declare that the desktop app's native dialog guards local commands on
+    /// this server (decision 27). From then on a command given as a bare name
+    /// starts only the program the dialog approved, recorded on its
+    /// definition, and one with no approved program needs approval. Call it
+    /// once, at assembly, before boot connects anything. The CLI and a
+    /// self-hosted server never call it: no dialog guards their commands.
+    pub fn require_command_approval(&self) {
+        self.command_approval.store(true, Ordering::Relaxed);
+    }
+
+    /// How this server holds a local command's program to an approval.
+    fn command_approval(&self) -> CommandApproval {
+        if self.command_approval.load(Ordering::Relaxed) {
+            CommandApproval::Required
+        } else {
+            CommandApproval::Optional
         }
     }
 
@@ -374,7 +397,13 @@ impl McpRuntime {
     /// session, if it has one. When such a server refuses the handshake with
     /// a `401`, it is asked how to authorize: one that names an OAuth sign-in
     /// fails as "sign in required" rather than as an authentication failure,
-    /// so Settings can offer Connect.
+    /// so Settings can offer Connect. A server with a static bearer that
+    /// refuses it with a `401` naming OAuth metadata fails as "sign-in
+    /// available", so Settings can offer Use OAuth.
+    ///
+    /// An HTTP server's stored bearer token and header values are read from
+    /// the credential store here, per attempt, so a value changed since the
+    /// last connection takes effect on the next one.
     async fn connect_server(
         &self,
         definition: &McpServerDefinition,
@@ -391,21 +420,50 @@ impl McpRuntime {
             }
             _ => None,
         };
+        let http = match app_id {
+            Some(id) if uses_stored_http_values(definition) => self.stored_http(id).await,
+            _ => StoredHttpValues::default(),
+        };
         let result = definition
-            .connect_with_views(&self.gateway, env, access.as_ref())
+            .connect_with_views(
+                &self.gateway,
+                env,
+                &http,
+                access.as_ref(),
+                self.command_approval(),
+            )
             .await;
-        let (Err(error), Some(access), Some(url)) = (&result, &access, &definition.url) else {
+        let (Err(error), Some(url)) = (&result, &definition.url) else {
             return (result, None);
         };
         if !tidebreak_mcp::is_unauthorized(error) {
             return (result, None);
         }
+        let Some(access) = &access else {
+            if !oauth::may_offer_sign_in(definition) {
+                return (result, None);
+            }
+            let Ok(client) = self.oauth_client() else {
+                return (result, None);
+            };
+            return match oauth::detect_offer(url, &client).await {
+                Some(need) => (
+                    Err(AgentError::config(
+                        "the MCP server refused the bearer token and offers an OAuth sign-in",
+                    )),
+                    Some(need),
+                ),
+                None => (result, None),
+            };
+        };
         match oauth::detect(url, &access.client).await {
             Some(need) => {
                 let error = match &need {
-                    OAuthNeed::SignIn { .. } => AgentError::SignInRequired(
-                        "the MCP server asks for an OAuth sign-in".into(),
-                    ),
+                    OAuthNeed::SignIn { .. } | OAuthNeed::Offered { .. } => {
+                        AgentError::SignInRequired(
+                            "the MCP server asks for an OAuth sign-in".into(),
+                        )
+                    }
                     OAuthNeed::Unsupported(reason) => AgentError::config(format!(
                         "the MCP server asks for an OAuth sign-in Tidebreak cannot complete: {}",
                         reason.reason()
@@ -481,6 +539,20 @@ impl McpRuntime {
         }
     }
 
+    /// One HTTP server's stored bearer token and header values, by record
+    /// id. A missing or unreadable entry resolves empty, and a connection
+    /// that needs a value then fails naming what is not stored.
+    pub(super) async fn stored_http(&self, id: ConnectedAppId) -> StoredHttpValues {
+        match self.secrets.get_secret(&http_secret_key(id)).await {
+            Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
+            Ok(None) => StoredHttpValues::default(),
+            Err(error) => {
+                tracing::warn!(%error, "could not read stored MCP server credentials");
+                StoredHttpValues::default()
+            }
+        }
+    }
+
     /// The environment to hand each definition's child, resolved once for a
     /// whole replacement so the connections below can run concurrently.
     async fn resolve_envs(
@@ -503,13 +575,15 @@ impl McpRuntime {
         resolved
     }
 
-    /// Commit each definition's environment values to the secret store and
-    /// return the definitions with `env_values` emptied, ready to persist.
+    /// Commit each definition's environment values, and each HTTP
+    /// definition's stored bearer token and header values, to the secret
+    /// store and return the definitions with the inbound values emptied,
+    /// ready to persist.
     ///
     /// The stored entry becomes exactly what the definition declares: values
     /// just set win, names dropped from `env` lose their stored value, and a
     /// name kept without a new value keeps the one already stored. Records
-    /// that no longer exist have their entry deleted, so removing a server
+    /// that no longer exist have their entries deleted, so removing a server
     /// takes its credentials with it.
     ///
     /// With a `journal`, every write is recorded there as it happens.
@@ -525,16 +599,98 @@ impl McpRuntime {
             let _ = self
                 .write_credential(journal.as_deref_mut(), &name, &env_secret_key(id), None)
                 .await;
+            if self.configured_uses_stored_http(id).await {
+                let _ = self
+                    .write_credential(journal.as_deref_mut(), &name, &http_secret_key(id), None)
+                    .await;
+            }
         }
         for definition in definitions {
             let Some(id) = ids.get(&definition.name).copied() else {
                 definition.env_values.clear();
+                definition.bearer_token_value = None;
+                definition.header_values.clear();
                 continue;
             };
             self.commit_env_value(definition, id, journal.as_deref_mut())
                 .await?;
+            if uses_stored_http_values(definition) || self.configured_uses_stored_http(id).await {
+                self.commit_http_value(definition, id, journal.as_deref_mut())
+                    .await?;
+            }
         }
         Ok(())
+    }
+
+    /// Whether the server configured now under record `id` keeps a stored
+    /// bearer token or header values, so a save that stops using them has
+    /// something to delete.
+    async fn configured_uses_stored_http(&self, id: ConnectedAppId) -> bool {
+        let state = self.state.lock().await;
+        state
+            .ids
+            .iter()
+            .filter(|(_, configured)| **configured == id)
+            .filter_map(|(name, _)| {
+                state
+                    .definitions
+                    .iter()
+                    .find(|definition| &definition.name == name)
+            })
+            .any(uses_stored_http_values)
+    }
+
+    /// Commit one HTTP definition's stored bearer token and header values
+    /// under record `id`, and empty its inbound values.
+    ///
+    /// The stored entry becomes exactly what the definition declares, bound
+    /// to its URL: a value just set wins, a header dropped from `headers` or
+    /// a bearer no longer stored loses its value, and one kept without a new
+    /// value keeps the value already stored. A value stored for another URL,
+    /// including another path on the same host, is dropped unless this save
+    /// sets it again, so editing a server to point somewhere else never
+    /// carries a credential there.
+    async fn commit_http_value(
+        &self,
+        definition: &mut McpServerDefinition,
+        id: ConnectedAppId,
+        journal: Option<&mut CredentialJournal>,
+    ) -> Result<()> {
+        let binding = definition.url.as_deref().and_then(http_binding);
+        let stored = self.stored_http(id).await;
+        let mut values = if binding.is_some() && stored.url == binding {
+            stored.clone()
+        } else {
+            StoredHttpValues::default()
+        };
+        values.url = binding;
+        if let Some(bearer) = definition.bearer_token_value.take() {
+            values.bearer = Some(bearer);
+        }
+        if !definition.bearer_token_stored {
+            values.bearer = None;
+        }
+        values.headers.append(&mut definition.header_values);
+        values
+            .headers
+            .retain(|name, _| definition.headers.contains(name));
+        let key = http_secret_key(id);
+        if values.is_empty() {
+            if !stored.is_empty() {
+                let _ = self
+                    .write_credential(journal, &definition.name, &key, None)
+                    .await;
+            }
+            return Ok(());
+        }
+        if values == stored {
+            return Ok(());
+        }
+        let encoded = serde_json::to_string(&values).map_err(|error| {
+            AgentError::config(format!("could not encode MCP server credentials: {error}"))
+        })?;
+        self.write_credential(journal, &definition.name, &key, Some(&encoded))
+            .await
     }
 
     /// Commit one definition's environment values under record `id` and
@@ -1146,8 +1302,9 @@ impl McpRuntime {
             .collect()
     }
 
-    /// Delete one skipped record, with the environment values and the OAuth
-    /// session stored under its id. Returns whether it was skipped.
+    /// Delete one skipped record, with the environment values, the stored
+    /// bearer token and header values, and the OAuth session stored under its
+    /// id. Returns whether it was skipped.
     pub async fn remove_skipped(&self, id: ConnectedAppId) -> Result<bool> {
         let _mutation = self.mutation.lock().await;
         let (configured, ids, remaining) = {
@@ -1176,6 +1333,7 @@ impl McpRuntime {
         // Best effort, like removing a server: nothing references the id now,
         // so a leftover entry is unreachable.
         let _ = self.secrets.delete_secret(&env_secret_key(id)).await;
+        let _ = self.secrets.delete_secret(&http_secret_key(id)).await;
         let _ = McpOAuthCredentialVault::new(self.secrets.clone(), id)
             .clear_all()
             .await;
@@ -1380,7 +1538,7 @@ impl McpRuntime {
         // progress is read under the same lock as what the last connection
         // learned: a finished sign-in updates both under it, so no read sees
         // one without the other.
-        let (mut servers, oauth_servers) = {
+        let (mut servers, oauth_servers, credential_servers) = {
             let state = self.state.lock().await;
             let sign_ins = self
                 .sign_ins
@@ -1388,6 +1546,10 @@ impl McpRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut servers = Vec::with_capacity(state.definitions.len());
             let mut oauth_servers = Vec::new();
+            // Servers whose stored bearer token or header values Settings
+            // says are set: read, like the OAuth status, once the lock is
+            // released.
+            let mut credential_servers = Vec::new();
             for (index, definition) in state.definitions.iter().enumerate() {
                 let managed = state.servers.get(&definition.name);
                 if let (Some(id), Some(url)) = (
@@ -1406,6 +1568,11 @@ impl McpRuntime {
                             .map(|record| record.progress.view()),
                     });
                 }
+                if let Some(id) = state.ids.get(&definition.name) {
+                    if uses_stored_http_values(definition) {
+                        credential_servers.push((index, *id));
+                    }
+                }
                 servers.push(McpServerInfo {
                     health: managed.map_or(
                         if definition.enabled {
@@ -1421,14 +1588,24 @@ impl McpRuntime {
                     diagnostic: managed.and_then(|server| server.diagnostic.clone()),
                     resolved_command: managed.and_then(|server| server.resolved_command.clone()),
                     curated: curation(definition),
-                    oauth_status: None,
+                    // A server with a static bearer that offers OAuth
+                    // instead; one that signs in is projected below.
+                    oauth_status: oauth::offered_status(
+                        managed.and_then(|server| server.oauth.as_ref()),
+                    ),
+                    stored_credentials: None,
                     definition: definition.clone(),
                 });
             }
-            (servers, oauth_servers)
+            (servers, oauth_servers, credential_servers)
         };
         for snapshot in oauth_servers {
             servers[snapshot.index].oauth_status = self.oauth_status_of(&snapshot).await;
+        }
+        for (index, id) in credential_servers {
+            let stored = self.stored_http(id).await;
+            let server = &mut servers[index];
+            server.stored_credentials = Some(McpStoredCredentials::of(&server.definition, &stored));
         }
         McpServersInfo { servers }
     }
@@ -1694,8 +1871,13 @@ impl McpRuntime {
                 env_values: BTreeMap::new(),
                 env_from: Vec::new(),
                 cwd: None,
+                approved_executable: None,
                 url: None,
                 bearer_token_env: None,
+                bearer_token_stored: false,
+                bearer_token_value: None,
+                headers: BTreeSet::new(),
+                header_values: BTreeMap::new(),
                 oauth: false,
                 gateway_endpoint: Some(slug.clone()),
                 request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
@@ -3237,7 +3419,12 @@ impl McpRuntime {
                         // lock, so it cannot read the credential store. Callers
                         // that need the OAuth status use the async `info`; the
                         // reconnect paths that build this only render health.
-                        oauth_status: None,
+                        // An offer to switch to OAuth needs no stored session,
+                        // so it projects here too.
+                        oauth_status: oauth::offered_status(
+                            managed.and_then(|server| server.oauth.as_ref()),
+                        ),
+                        stored_credentials: None,
                         definition: definition.clone(),
                     }
                 })
@@ -3266,6 +3453,15 @@ fn curation(definition: &McpServerDefinition) -> Option<McpCuration> {
 /// restores exactly what the profile had.
 fn connects(definition: &McpServerDefinition, lockdown: ManualLockdown) -> bool {
     definition.enabled && !manual_lockdown_applies(definition, lockdown)
+}
+
+/// Whether a definition sends, or is setting, a stored bearer token or header
+/// value: the definitions whose credentials live under [`http_secret_key`].
+fn uses_stored_http_values(definition: &McpServerDefinition) -> bool {
+    definition.bearer_token_stored
+        || definition.bearer_token_value.is_some()
+        || !definition.headers.is_empty()
+        || !definition.header_values.is_empty()
 }
 
 /// The configured definition a finishing sign-in belongs to: the same name,

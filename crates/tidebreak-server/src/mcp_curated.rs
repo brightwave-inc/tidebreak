@@ -65,19 +65,36 @@ struct CuratedMcpServer {
 /// and drove its auth, tool schemas, streaming, and approval previews — not
 /// that the server is popular or that its vendor is trusted. Adding one is an
 /// editorial act with a date attached; see `docs/mcp-tested-servers.md`.
-const CURATED_MCP_SERVERS: &[CuratedMcpServer] = &[CuratedMcpServer {
-    display_name: "Tidebreak workspace tools",
-    stdio: Some(CuratedCommand {
-        program: "tidebreak",
-        args_prefix: &["mcp"],
-    }),
-    url_origin: None,
-    tested_on: "2026-08-05",
-    notes: "Tidebreak's own read-only workspace server over stdio. The \
-            workspace's integration tests mount it through the same \
-            configuration path the desktop uses, so discovery, tool schemas, \
-            and the approval gate are exercised on every run.",
-}];
+const CURATED_MCP_SERVERS: &[CuratedMcpServer] = &[
+    CuratedMcpServer {
+        display_name: "Tidebreak workspace tools",
+        stdio: Some(CuratedCommand {
+            program: "tidebreak",
+            args_prefix: &["mcp"],
+        }),
+        url_origin: None,
+        tested_on: "2026-08-05",
+        notes: "Tidebreak's own read-only workspace server over stdio. The \
+                workspace's integration tests mount it through the same \
+                configuration path the desktop uses, so discovery, tool schemas, \
+                and the approval gate are exercised on every run.",
+    },
+    CuratedMcpServer {
+        display_name: "Filesystem (MCP reference server)",
+        stdio: Some(CuratedCommand {
+            program: "npx",
+            args_prefix: &["-y", "@modelcontextprotocol/server-filesystem"],
+        }),
+        url_origin: None,
+        tested_on: "2026-09-24",
+        notes: "Mounted as its README shows it, a bare npx with -y and the \
+                package, through the configuration path the desktop saves: the \
+                name resolved on the host PATH, the child found node and its npm \
+                cache through the forwarded PATH and HOME, all 14 tools passed \
+                discovery's bounds, and read_text_file and list_directory \
+                answered through Tidebreak's MCP client.",
+    },
+];
 
 /// The curated entry this definition matches, if any.
 ///
@@ -197,5 +214,24 @@ mod tests {
         assert!(curation_for(Some("tidebreak"), &["serve".to_string()], None).is_none());
         assert!(curation_for(Some("tidebreak-fork"), &args, None).is_none());
         assert!(curation_for(None, &[], Some("https://example.invalid/mcp")).is_none());
+
+        // The npx entry names the package, so npx alone, or npx running any
+        // other package, is not the tested server. A path and a bare name
+        // land on the same entry, and the directories it serves follow.
+        let filesystem = |args: &[&str]| {
+            args.iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>()
+        };
+        let served = filesystem(&["-y", "@modelcontextprotocol/server-filesystem", "/Users/me"]);
+        assert!(curation_for(Some("npx"), &served, None).is_some());
+        assert!(curation_for(Some("/opt/homebrew/bin/npx"), &served, None).is_some());
+        assert!(curation_for(Some("npx"), &filesystem(&["-y"]), None).is_none());
+        assert!(curation_for(
+            Some("npx"),
+            &filesystem(&["-y", "@modelcontextprotocol/server-everything"]),
+            None
+        )
+        .is_none());
     }
 }

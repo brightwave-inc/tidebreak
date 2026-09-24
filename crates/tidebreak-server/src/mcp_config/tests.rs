@@ -9,6 +9,7 @@ use tidebreak_core::{AgentError, Result, SecretProvider, Store, ToolRegistry};
 
 use super::*;
 
+use super::stdio::CommandApproval;
 use super::validation::{connection_diagnostic, validate_servers};
 
 use tidebreak_core::DbStore;
@@ -151,8 +152,13 @@ fn disabled_definition(name: &str, command: &str) -> McpServerDefinition {
         env_values: BTreeMap::new(),
         env_from: Vec::new(),
         cwd: None,
+        approved_executable: None,
         url: None,
         bearer_token_env: None,
+        bearer_token_stored: false,
+        bearer_token_value: None,
+        headers: Default::default(),
+        header_values: Default::default(),
         oauth: false,
         gateway_endpoint: None,
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
@@ -171,8 +177,13 @@ fn http_definition(name: &str, url: &str) -> McpServerDefinition {
         env_values: BTreeMap::new(),
         env_from: Vec::new(),
         cwd: None,
+        approved_executable: None,
         url: Some(url.to_string()),
         bearer_token_env: None,
+        bearer_token_stored: false,
+        bearer_token_value: None,
+        headers: Default::default(),
+        header_values: Default::default(),
         oauth: false,
         gateway_endpoint: None,
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
@@ -191,8 +202,13 @@ fn gateway_definition(name: &str, slug: &str) -> McpServerDefinition {
         env_values: BTreeMap::new(),
         env_from: Vec::new(),
         cwd: None,
+        approved_executable: None,
         url: None,
         bearer_token_env: None,
+        bearer_token_stored: false,
+        bearer_token_value: None,
+        headers: Default::default(),
+        header_values: Default::default(),
         oauth: false,
         gateway_endpoint: Some(slug.to_string()),
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
@@ -449,8 +465,76 @@ async fn defaults_to_an_isolated_environment_and_sixty_second_timeout() {
     assert!(server.env.is_empty());
     assert!(server.env_from.is_empty());
     assert_eq!(server.request_timeout_ms, 60_000);
-    let command = server.build_command(&BTreeMap::new()).await.unwrap();
-    assert!(command.as_std().get_envs().next().is_none());
+    let _path = super::stdio::HostPathGuard::set(Some("/opt/tools/bin:/usr/bin".into())).await;
+    let command = server
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
+    // Nothing ambient beyond the two names every child is given.
+    let mut names: Vec<_> = command
+        .as_std()
+        .get_envs()
+        .map(|(name, _)| name.to_os_string())
+        .collect();
+    names.sort();
+    let expected: Vec<std::ffi::OsString> = if std::env::var_os("HOME").is_some() {
+        vec!["HOME".into(), "PATH".into()]
+    } else {
+        vec!["PATH".into()]
+    };
+    assert_eq!(names, expected);
+}
+
+/// SET-02: a child started with no PATH could not find the interpreter a
+/// script names, so even an absolute path to `npx` failed to find `node`,
+/// and with no HOME it had no cache. Every user-configured stdio child gets
+/// the host search PATH its command was resolved on, and HOME.
+#[tokio::test]
+async fn a_stdio_child_is_given_the_host_search_path_and_home() {
+    let config = parse(r#"{"servers":[{"name":"docs","command":"/bin/docs"}]}"#).unwrap();
+    let search_path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+    let _path = super::stdio::HostPathGuard::set(Some(search_path.into())).await;
+    let command = config.0[0]
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
+    let env: BTreeMap<String, String> = command
+        .as_std()
+        .get_envs()
+        .filter_map(|(name, value)| {
+            Some((
+                name.to_string_lossy().into_owned(),
+                value?.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect();
+    assert_eq!(env.get("PATH").map(String::as_str), Some(search_path));
+    assert_eq!(
+        env.get("HOME").map(String::as_str),
+        std::env::var("HOME").ok().as_deref()
+    );
+
+    // They reach the process, not only the builder: a script that prints
+    // them sees both.
+    let script = parse(
+        r#"{"servers":[{"name":"echo","command":"/bin/sh","args":["-c","printf '%s|%s' \"$PATH\" \"$HOME\""]}]}"#,
+    )
+    .unwrap();
+    let output = script.0[0]
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
+    let printed = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        printed,
+        format!(
+            "{search_path}|{}",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    );
 }
 
 #[test]
@@ -534,15 +618,24 @@ async fn forwards_only_explicitly_selected_parent_environment_values() {
             }]}"#,
     )
     .unwrap();
-    let command = config.0[0].build_command(&BTreeMap::new()).await.unwrap();
+    let _path = super::stdio::HostPathGuard::set(Some("/opt/seeded/bin".into())).await;
+    let command = config.0[0]
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
     let forwarded_path = command
         .as_std()
         .get_envs()
-        .find(|(name, _)| *name == "PATH")
+        .filter(|(name, _)| *name == "PATH")
+        .last()
         .and_then(|(_, value)| value)
         .expect("PATH is selected for forwarding");
+    // A name the definition forwards itself replaces the default.
     assert_eq!(Some(forwarded_path), std::env::var_os("PATH").as_deref());
-    assert!(command.as_std().get_envs().all(|(name, _)| name == "PATH"));
+    assert!(command
+        .as_std()
+        .get_envs()
+        .all(|(name, _)| name == "PATH" || name == "HOME"));
 }
 
 #[tokio::test]
@@ -559,7 +652,13 @@ async fn missing_selected_parent_environment_fails_before_spawn_without_a_value(
     .unwrap();
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = config.0[0]
-        .connect(&gateway, &BTreeMap::new(), None)
+        .connect(
+            &gateway,
+            &BTreeMap::new(),
+            &Default::default(),
+            None,
+            CommandApproval::Optional,
+        )
         .await
         .err()
         .unwrap();
@@ -1120,7 +1219,13 @@ async fn missing_selected_bearer_token_fails_by_name_without_a_value() {
     definition.bearer_token_env = Some(MISSING.to_string());
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = definition
-        .connect(&gateway, &BTreeMap::new(), None)
+        .connect(
+            &gateway,
+            &BTreeMap::new(),
+            &Default::default(),
+            None,
+            CommandApproval::Optional,
+        )
         .await
         .err()
         .unwrap();
@@ -1988,8 +2093,8 @@ async fn stdio_bare_npx_resolves_on_overridden_host_path() {
     std::fs::write(&npx, "#!/bin/sh\nexit 0\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
-    super::stdio::override_host_path(Some(directory.path().as_os_str().to_os_string()));
-    let _guard = super::stdio::HostPathGuard;
+    let _guard =
+        super::stdio::HostPathGuard::set(Some(directory.path().as_os_str().to_os_string())).await;
     let resolved = super::stdio::resolve_stdio_command("npx").await.unwrap();
     assert_eq!(resolved, npx);
 
@@ -1998,7 +2103,10 @@ async fn stdio_bare_npx_resolves_on_overridden_host_path() {
         .0
         .remove(0);
     assert_eq!(definition.command.as_deref(), Some("npx"));
-    let command = definition.build_command(&BTreeMap::new()).await.unwrap();
+    let command = definition
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
     assert_eq!(command.as_std().get_program(), npx.as_os_str());
 
     let missing = super::stdio::resolve_stdio_command("definitely-not-npx-9f3a")
@@ -3272,27 +3380,36 @@ async fn a_server_without_client_registration_says_sign_in_is_unsupported() {
     assert_eq!(connect.state, McpOAuthState::Unsupported);
 }
 
-/// A server configured with a static bearer keeps that path: a `401` means
-/// the token is wrong, so there is no sign-in to offer.
+/// A server configured with a static bearer from a variable keeps that path
+/// until the person switches it. When the server refuses the token with a
+/// `401` that names OAuth metadata, the save keeps the server and offers Use
+/// OAuth, but not Connect: while the server carries a bearer it does not sign
+/// in.
 #[tokio::test]
-async fn a_static_bearer_server_never_offers_a_sign_in() {
+async fn a_static_bearer_server_offers_use_oauth_but_not_connect() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
     let fake = FakeOAuthServer::approving().await;
     let (runtime, _store, _directory) = oauth_test_runtime().await;
     let mut definition = http_definition("vercel", &fake.mcp_url());
     // PATH always exists and is never the fake's token.
     definition.bearer_token_env = Some("PATH".to_string());
-    let error = runtime
+    let info = runtime
         .replace(McpServersConfig {
             servers: vec![definition],
         })
         .await
-        .expect_err("a rejected static token fails the save")
-        .to_string();
-    assert!(
-        error.contains("Authentication failed (401 Unauthorized)"),
-        "{error}"
+        .expect("a refused token that names OAuth metadata saves");
+    let server = &info.servers[0];
+    assert_eq!(server.health, McpHealth::Degraded);
+    assert_eq!(oauth_state(server), Some(McpOAuthState::Available));
+    let listed = runtime.info().await;
+    assert_eq!(
+        oauth_state(&listed.servers[0]),
+        Some(McpOAuthState::Available)
     );
-    assert!(runtime.info().await.servers.is_empty());
+    let connect = runtime.oauth_connect("vercel").await.unwrap();
+    assert_eq!(connect.state, McpOAuthState::Unsupported);
 }
 
 // ---------------------------------------------------------------------------
@@ -4156,4 +4273,986 @@ async fn an_auto_mount_never_saves_a_plugin_server() {
         "{running:?}"
     );
     assert!(running.contains(&("tools", false)), "{running:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Stored bearer tokens and custom headers for remote servers
+// ---------------------------------------------------------------------------
+
+/// A fixture value built at run time, so no credential-shaped literal sits
+/// in the source.
+fn fixture_value(label: &str) -> String {
+    [label, "fixture", &uuid::Uuid::new_v4().simple().to_string()].join("-")
+}
+
+/// What one request to [`serve_credentialed_mcp`] carried, and the path it
+/// went to.
+#[derive(Clone, Debug, Default)]
+struct SeenRequest {
+    path: String,
+    authorization: Option<String>,
+    api_key: Option<String>,
+}
+
+type SeenRequests = Arc<std::sync::Mutex<Vec<SeenRequest>>>;
+
+/// A loopback MCP server that records the `Authorization` and `X-Api-Key`
+/// headers of every request and answers like a well-behaved server.
+/// An MCP server at `/mcp`, and a second tenant's at `/tenant-b/mcp` on the
+/// same host, that records every request.
+async fn serve_credentialed_mcp() -> (std::net::SocketAddr, SeenRequests) {
+    use axum::http::{HeaderMap, Uri};
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+
+    let seen: SeenRequests = Arc::default();
+    let recorded = Arc::clone(&seen);
+    let handler = post(move |uri: Uri, headers: HeaderMap, body: String| {
+        let recorded = Arc::clone(&recorded);
+        async move {
+            let header = |name: &str| {
+                headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string)
+            };
+            recorded.lock().unwrap().push(SeenRequest {
+                path: uri.path().to_string(),
+                authorization: header("authorization"),
+                api_key: header("x-api-key"),
+            });
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let Some(id) = request.get("id").cloned() else {
+                return axum::http::StatusCode::ACCEPTED.into_response();
+            };
+            let result = match request["method"].as_str().unwrap_or_default() {
+                "initialize" => serde_json::json!({
+                    "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "credentialed-fixture", "version": "1"}
+                }),
+                "tools/list" => serde_json::json!({
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Look something up",
+                        "inputSchema": {"type": "object"}
+                    }]
+                }),
+                _ => serde_json::json!({}),
+            };
+            (
+                [("content-type", "application/json")],
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+            )
+                .into_response()
+        }
+    });
+    let app = axum::Router::new()
+        .route("/mcp", handler.clone())
+        .route("/tenant-b/mcp", handler);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (address, seen)
+}
+
+/// A remote server whose bearer token and one custom header live in the
+/// credential store.
+fn stored_credential_definition(
+    name: &str,
+    url: &str,
+    bearer: Option<&str>,
+    api_key: Option<&str>,
+) -> McpServerDefinition {
+    let mut definition = http_definition(name, url);
+    definition.bearer_token_stored = true;
+    definition.bearer_token_value = bearer.map(str::to_string);
+    definition.headers.insert("X-Api-Key".to_string());
+    if let Some(api_key) = api_key {
+        definition
+            .header_values
+            .insert("X-Api-Key".to_string(), api_key.to_string());
+    }
+    definition
+}
+
+/// SET-04: a bearer token and a header value typed into Settings land in the
+/// credential store, reach the server on every request, and appear nowhere
+/// else: not in the saved record, not in any projection, not in a save's
+/// answer. A later save that leaves them blank keeps them, and removing the
+/// server deletes them.
+#[tokio::test]
+async fn stored_bearer_and_header_reach_the_server_and_nothing_else() {
+    let (address, seen) = serve_credentialed_mcp().await;
+    let (runtime, store, _directory) = test_runtime().await;
+    let bearer = fixture_value("bearer");
+    let api_key = fixture_value("header");
+    let url = format!("http://{address}/mcp");
+    let definition = stored_credential_definition("docs", &url, Some(&bearer), Some(&api_key));
+
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .unwrap();
+    assert_eq!(info.servers[0].health, McpHealth::Healthy, "{info:?}");
+    let requests = seen.lock().unwrap().clone();
+    assert!(!requests.is_empty());
+    let expected_authorization = format!("Bearer {bearer}");
+    for request in &requests {
+        assert_eq!(
+            request.authorization.as_deref(),
+            Some(expected_authorization.as_str())
+        );
+        assert_eq!(request.api_key.as_deref(), Some(api_key.as_str()));
+    }
+
+    // Names only, everywhere a definition leaves this process.
+    let answer = serde_json::to_string(&info).unwrap();
+    let listing = serde_json::to_string(&runtime.info().await).unwrap();
+    let record = saved_records(&store)
+        .await
+        .into_iter()
+        .map(|record| record.definition.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for surface in [&answer, &listing, &record] {
+        assert!(!surface.contains(&bearer), "{surface}");
+        assert!(!surface.contains(&api_key), "{surface}");
+    }
+    assert!(
+        listing.contains("\"bearer_token_stored\":true"),
+        "{listing}"
+    );
+    assert!(listing.contains("X-Api-Key"), "{listing}");
+    let debug = format!("{:?}", runtime.definitions().await);
+    assert!(
+        !debug.contains(&bearer) && !debug.contains(&api_key),
+        "{debug}"
+    );
+
+    // The values sit under the record's own key, bound to its URL.
+    let id = saved_records(&store).await[0].id;
+    let stored = runtime.stored_http(id).await;
+    assert_eq!(stored.bearer.as_deref(), Some(bearer.as_str()));
+    assert_eq!(stored.headers["X-Api-Key"], api_key);
+    assert_eq!(stored.url, super::types::http_binding(&url));
+    assert!(!format!("{stored:?}").contains(&bearer));
+
+    // Saving again with the values blank keeps what is stored.
+    seen.lock().unwrap().clear();
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition("docs", &url, None, None)],
+        })
+        .await
+        .unwrap();
+    let requests = seen.lock().unwrap().clone();
+    assert!(!requests.is_empty());
+    assert!(requests
+        .iter()
+        .all(|request| request.api_key.as_deref() == Some(api_key.as_str())));
+    assert_eq!(
+        runtime.stored_http(id).await.bearer.as_deref(),
+        Some(bearer.as_str())
+    );
+
+    // Removing the server takes its stored values with it.
+    runtime
+        .replace(McpServersConfig { servers: vec![] })
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .secrets()
+            .get_secret(&http_secret_key(id))
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+/// A stored value goes only to the origin it was entered for. Pointing the
+/// server somewhere else without entering the values again drops them, and
+/// the verify says what is missing instead of sending the old token.
+#[tokio::test]
+async fn moving_a_server_to_another_origin_never_carries_its_stored_values() {
+    let (first, _) = serve_credentialed_mcp().await;
+    let (second, seen_second) = serve_credentialed_mcp().await;
+    let (runtime, store, _directory) = test_runtime().await;
+    let bearer = fixture_value("bearer");
+    let api_key = fixture_value("header");
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition(
+                "docs",
+                &format!("http://{first}/mcp"),
+                Some(&bearer),
+                Some(&api_key),
+            )],
+        })
+        .await
+        .unwrap();
+    let id = saved_records(&store).await[0].id;
+
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition(
+                "docs",
+                &format!("http://{second}/mcp"),
+                None,
+                None,
+            )],
+        })
+        .await
+        .expect_err("the moved server has no stored values for its new origin");
+    let message = error.to_string();
+    assert!(message.contains("Not stored:"), "{message}");
+    assert!(!message.contains(&bearer), "{message}");
+    assert!(
+        seen_second.lock().unwrap().is_empty(),
+        "nothing reached the new origin"
+    );
+    // The failed save put back what it changed.
+    assert_eq!(
+        runtime.stored_http(id).await.bearer.as_deref(),
+        Some(bearer.as_str())
+    );
+}
+
+/// A failed save rolls back the stored bearer and header values it wrote,
+/// the way it rolls back environment values and sign-ins.
+#[tokio::test]
+async fn a_failed_save_puts_back_stored_http_values() {
+    let (address, _) = serve_credentialed_mcp().await;
+    let (runtime, store, _directory) = test_runtime().await;
+    let url = format!("http://{address}/mcp");
+    let first = fixture_value("first");
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition(
+                "docs",
+                &url,
+                Some(&first),
+                Some(&first),
+            )],
+        })
+        .await
+        .unwrap();
+    let id = saved_records(&store).await[0].id;
+
+    let second = fixture_value("second");
+    let dead = http_definition("dead", "http://127.0.0.1:1/mcp");
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![
+                stored_credential_definition("docs", &url, Some(&second), Some(&second)),
+                dead,
+            ],
+        })
+        .await
+        .expect_err("the dead server fails the save");
+    assert!(error.to_string().contains("failed to start"), "{error}");
+    assert!(!error.to_string().contains(&second), "{error}");
+    let stored = runtime.stored_http(id).await;
+    assert_eq!(stored.bearer.as_deref(), Some(first.as_str()));
+    assert_eq!(stored.headers["X-Api-Key"], first);
+}
+
+/// Settings says a stored value is set only when the credential store holds
+/// it for the server's origin, as it does not after an import on a new
+/// computer, and the listing never carries the value itself.
+#[tokio::test]
+async fn the_listing_says_which_stored_values_are_set() {
+    let (runtime, _store, _directory) = test_runtime().await;
+    let url = "https://mcp.example.test/mcp";
+    let mut imported = stored_credential_definition("docs", url, None, None);
+    imported.enabled = false;
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![imported],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        info.servers[0].stored_credentials,
+        Some(McpStoredCredentials {
+            bearer: false,
+            headers: Vec::new()
+        })
+    );
+
+    let bearer = fixture_value("bearer");
+    let api_key = fixture_value("header");
+    let mut entered = stored_credential_definition("docs", url, Some(&bearer), Some(&api_key));
+    entered.enabled = false;
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![entered],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        info.servers[0].stored_credentials,
+        Some(McpStoredCredentials {
+            bearer: true,
+            headers: vec!["X-Api-Key".to_string()]
+        })
+    );
+    let listing = serde_json::to_string(&runtime.info().await).unwrap();
+    assert!(
+        listing.contains(r#""stored_credentials":{"bearer":true,"headers":["X-Api-Key"]}"#),
+        "{listing}"
+    );
+    assert!(!listing.contains(&bearer) && !listing.contains(&api_key));
+}
+
+/// SET-04: custom headers are a small, bounded set. A name the connection
+/// owns, a hop-by-hop or framing field, an Authorization header, or one past
+/// the cap is refused before anything is saved, naming the header, never a
+/// value.
+#[test]
+fn disallowed_and_excess_headers_are_refused() {
+    for name in [
+        "Host",
+        "Content-Length",
+        "Transfer-Encoding",
+        "Connection",
+        "Keep-Alive",
+        "Upgrade",
+        "Mcp-Session-Id",
+        "Content-Type",
+    ] {
+        let mut definition = http_definition("docs", "https://mcp.example.test/mcp");
+        definition.headers.insert(name.to_string());
+        let error = validate_servers(&[definition]).expect_err(name).to_string();
+        assert!(error.contains("not allowed"), "{name}: {error}");
+        assert!(error.contains(name), "{name}: {error}");
+    }
+
+    let mut authorization = http_definition("docs", "https://mcp.example.test/mcp");
+    authorization.headers.insert("Authorization".to_string());
+    let error = validate_servers(&[authorization]).unwrap_err().to_string();
+    assert!(
+        error.contains("bearer token under authentication"),
+        "{error}"
+    );
+
+    let mut malformed = http_definition("docs", "https://mcp.example.test/mcp");
+    malformed.headers.insert("X Api Key".to_string());
+    assert!(validate_servers(&[malformed]).is_err());
+
+    let mut too_many = http_definition("docs", "https://mcp.example.test/mcp");
+    for index in 0..=MAX_HEADERS {
+        too_many.headers.insert(format!("X-Custom-{index}"));
+    }
+    let error = validate_servers(&[too_many]).unwrap_err().to_string();
+    assert!(error.contains("more than 8 custom headers"), "{error}");
+
+    let mut duplicate = http_definition("docs", "https://mcp.example.test/mcp");
+    duplicate.headers.insert("X-Api-Key".to_string());
+    duplicate.headers.insert("x-api-key".to_string());
+    assert!(validate_servers(&[duplicate])
+        .unwrap_err()
+        .to_string()
+        .contains("more than once"));
+
+    // A value that could smuggle header syntax never gets that far, and the
+    // error does not echo it.
+    let secret = fixture_value("value");
+    let mut injected = http_definition("docs", "https://mcp.example.test/mcp");
+    injected.headers.insert("X-Api-Key".to_string());
+    injected
+        .header_values
+        .insert("X-Api-Key".to_string(), format!("{secret}\r\nHost: evil"));
+    let error = validate_servers(&[injected]).unwrap_err().to_string();
+    assert!(!error.contains(&secret), "{error}");
+
+    // Headers, like a stored bearer, belong to url servers.
+    let mut stdio = disabled_definition("docs", "/bin/docs");
+    stdio.headers.insert("X-Api-Key".to_string());
+    assert!(validate_servers(&[stdio]).is_err());
+    let mut stdio = disabled_definition("docs", "/bin/docs");
+    stdio.bearer_token_stored = true;
+    assert!(validate_servers(&[stdio]).is_err());
+}
+
+/// A stored credential rides the same https rule as a bearer variable: it
+/// may travel in cleartext only to a literal loopback address. And a server
+/// authenticates one way at a time.
+#[test]
+fn stored_credentials_need_https_and_one_way_to_authenticate() {
+    let mut cleartext = http_definition("docs", "http://remote.example/mcp");
+    cleartext.bearer_token_stored = true;
+    assert!(validate_servers(&[cleartext])
+        .unwrap_err()
+        .to_string()
+        .contains("must use https"));
+    let mut header = http_definition("docs", "http://remote.example/mcp");
+    header.headers.insert("X-Api-Key".to_string());
+    assert!(validate_servers(&[header]).is_err());
+    let mut loopback = http_definition("docs", "http://127.0.0.1:9000/mcp");
+    loopback.bearer_token_stored = true;
+    loopback.headers.insert("X-Api-Key".to_string());
+    assert!(validate_servers(&[loopback]).is_ok());
+
+    let mut both = http_definition("docs", "https://mcp.example.test/mcp");
+    both.bearer_token_stored = true;
+    both.bearer_token_env = Some("MCP_TOKEN".to_string());
+    assert!(validate_servers(&[both]).is_err());
+    let mut oauth = http_definition("docs", "https://mcp.example.test/mcp");
+    oauth.bearer_token_stored = true;
+    oauth.oauth = true;
+    assert!(validate_servers(&[oauth]).is_err());
+
+    let mut prefixed = http_definition("docs", "https://mcp.example.test/mcp");
+    prefixed.bearer_token_stored = true;
+    prefixed.bearer_token_value = Some(format!("Bearer {}", fixture_value("token")));
+    assert!(validate_servers(&[prefixed])
+        .unwrap_err()
+        .to_string()
+        .contains("without the \"Bearer\" prefix"));
+
+    // A value only travels with the setting that stores it.
+    let mut orphan = http_definition("docs", "https://mcp.example.test/mcp");
+    orphan.bearer_token_value = Some(fixture_value("token"));
+    assert!(validate_servers(&[orphan]).is_err());
+}
+
+/// SET-03: a server configured with a static bearer that refuses it with a
+/// `401` naming protected-resource metadata is saved instead of failing the
+/// save, and its row offers Use OAuth with the host the sign-in opens.
+/// Switching it to OAuth saves it waiting for a sign-in, and drops the
+/// stored bearer the server refused.
+#[tokio::test]
+async fn a_refused_bearer_with_oauth_metadata_saves_and_offers_oauth() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let fake = FakeOAuthServer::approving().await;
+    let (runtime, store, _directory) = oauth_test_runtime().await;
+    let refused = fixture_value("refused");
+    let mut definition = http_definition("vercel", &fake.mcp_url());
+    definition.bearer_token_stored = true;
+    definition.bearer_token_value = Some(refused.clone());
+
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .expect("a refused bearer that names OAuth metadata still saves");
+    let server = &info.servers[0];
+    assert_eq!(server.health, McpHealth::Degraded);
+    let status = server
+        .oauth_status
+        .as_ref()
+        .expect("the offer is projected");
+    assert_eq!(status.state, McpOAuthState::Available);
+    assert_eq!(status.sign_in_host.as_deref(), Some("127.0.0.1"));
+    let diagnostic = server.diagnostic.as_deref().unwrap();
+    assert!(diagnostic.contains("Use OAuth"), "{diagnostic}");
+    assert!(!diagnostic.contains(&refused), "{diagnostic}");
+    // The bearer reached the server; the refusal is what taught the offer.
+    assert!(fake.mcp_bearers().contains(&refused));
+    // Retrying the refused bearer cannot help until the settings change.
+    assert_eq!(
+        parked(&runtime, "vercel").await,
+        Some(ReconnectPark::Configuration)
+    );
+    // Connect is for a server that signs in, which this one does not yet.
+    let connect = runtime.oauth_connect("vercel").await.unwrap();
+    assert_eq!(connect.state, McpOAuthState::Unsupported);
+    let id = saved_records(&store).await[0].id;
+    assert!(runtime.stored_http(id).await.bearer.is_some());
+
+    // Use OAuth: the same server, switched to sign in.
+    let mut switched = http_definition("vercel", &fake.mcp_url());
+    switched.oauth = true;
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![switched],
+        })
+        .await
+        .expect("an OAuth server waiting for a sign-in saves");
+    assert_eq!(
+        oauth_state(&info.servers[0]),
+        Some(McpOAuthState::NotConnected)
+    );
+    assert_eq!(
+        runtime
+            .secrets()
+            .get_secret(&http_secret_key(id))
+            .await
+            .unwrap(),
+        None,
+        "the refused bearer is gone"
+    );
+    let status = runtime.oauth_connect("vercel").await.unwrap();
+    assert_eq!(status.state, McpOAuthState::Authorizing);
+}
+
+/// A `401` that names no OAuth metadata is what it always was for a server
+/// with a bearer: the token is wrong, and the save fails saying so.
+#[tokio::test]
+async fn a_refused_bearer_without_oauth_metadata_still_fails_the_save() {
+    let address =
+        serve_http_response(axum::http::StatusCode::UNAUTHORIZED, "text/plain", b"").await;
+    let (runtime, _store, _directory) = oauth_test_runtime().await;
+    let mut definition = http_definition("docs", &format!("http://{address}/mcp"));
+    definition.bearer_token_stored = true;
+    definition.bearer_token_value = Some(fixture_value("token"));
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .expect_err("a plain 401 fails the save");
+    assert!(
+        error
+            .to_string()
+            .contains("Authentication failed (401 Unauthorized)"),
+        "{error}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Security review of bare commands and stored values (#3573)
+// ---------------------------------------------------------------------------
+
+/// Write an executable `npx` into `directory` that prints `label`, and
+/// return its path.
+#[cfg(unix)]
+fn write_printing_npx(directory: &Path, label: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let npx = directory.join("npx");
+    std::fs::write(&npx, format!("#!/bin/sh\nprintf '%s' {label}\n")).unwrap();
+    std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+    npx
+}
+
+/// Write an executable `npx` into `directory` that notes `label` in `ran`
+/// each time it starts, then answers as an MCP server with no tools.
+#[cfg(unix)]
+fn write_mcp_npx(directory: &Path, label: &str, ran: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let npx = directory.join("npx");
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s\n' '{label}' >> '{ran}'
+read _initialize
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"{version}","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"{label}","version":"1"}}}}}}'
+read _initialized
+read _list
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[]}}}}'
+while read _line; do :; done
+"#,
+        ran = ran.display(),
+        version = tidebreak_mcp::PROTOCOL_VERSION,
+    );
+    std::fs::write(&npx, script).unwrap();
+    std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+    npx
+}
+
+/// What a definition's child prints, started the way a spawn starts it.
+async fn spawned_output(definition: &McpServerDefinition, approval: CommandApproval) -> String {
+    let output = definition
+        .build_command(&BTreeMap::new(), approval)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Finding 1: the desktop's dialog showed the absolute path a bare `npx`
+/// resolved to, but the definition kept only `npx` and every spawn resolved
+/// it again, so a program that later appeared earlier on the search path
+/// ran with no new approval. A bare command now starts only the program the
+/// dialog approved, which its definition records, until a save approves
+/// another.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_bare_command_starts_only_the_program_the_dialog_approved() {
+    let approved = tempfile::tempdir().unwrap();
+    let shadow = tempfile::tempdir().unwrap();
+    let approved_npx = write_printing_npx(approved.path(), "approved");
+    // The shadow directory comes first on the search path, and starts empty.
+    let search_path = std::env::join_paths([shadow.path(), approved.path()]).unwrap();
+    let _path = super::stdio::HostPathGuard::set(Some(search_path)).await;
+
+    // What the dialog shows for a bare `npx`, and the desktop records.
+    let shown = super::resolve_stdio_executable("npx").await.unwrap();
+    assert_eq!(shown, approved_npx);
+    let mut definition = parse(r#"{"servers":[{"name":"files","command":"npx"}]}"#)
+        .unwrap()
+        .0
+        .remove(0);
+    definition.approved_executable = Some(shown.to_string_lossy().into_owned());
+    assert_eq!(
+        spawned_output(&definition, CommandApproval::Required).await,
+        "approved"
+    );
+
+    // Another `npx` appears earlier on the search path. It does not start,
+    // whether or not this process has the dialog, and the refusal names
+    // both programs.
+    let shadow_npx = write_printing_npx(shadow.path(), "shadow");
+    for approval in [CommandApproval::Required, CommandApproval::Optional] {
+        let message = definition
+            .build_command(&BTreeMap::new(), approval)
+            .await
+            .expect_err("nobody approved the new program")
+            .to_string();
+        assert!(message.contains("Needs approval:"), "{message}");
+        assert!(
+            message.contains(&shadow_npx.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&approved_npx.display().to_string()),
+            "{message}"
+        );
+    }
+
+    // A save through the dialog approves the new program, and it runs.
+    let shown = super::resolve_stdio_executable("npx").await.unwrap();
+    assert_eq!(shown, shadow_npx);
+    definition.approved_executable = Some(shown.to_string_lossy().into_owned());
+    assert_eq!(
+        spawned_output(&definition, CommandApproval::Required).await,
+        "shadow"
+    );
+}
+
+/// Where the desktop's dialog guards local commands, a bare command with no
+/// approved program does not start. An absolute command names its program
+/// and needs none. Without the dialog, as in the CLI or on a self-hosted
+/// server, a bare name runs what it resolves to, as before.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_bare_command_without_an_approved_program_runs_only_without_the_dialog() {
+    let directory = tempfile::tempdir().unwrap();
+    let npx = write_printing_npx(directory.path(), "found");
+    let _path =
+        super::stdio::HostPathGuard::set(Some(directory.path().as_os_str().to_owned())).await;
+    let bare = parse(r#"{"servers":[{"name":"files","command":"npx"}]}"#)
+        .unwrap()
+        .0
+        .remove(0);
+    let message = bare
+        .build_command(&BTreeMap::new(), CommandApproval::Required)
+        .await
+        .expect_err("the dialog approved no program")
+        .to_string();
+    assert!(message.contains("Needs approval:"), "{message}");
+    assert!(message.contains(&npx.display().to_string()), "{message}");
+    assert_eq!(
+        spawned_output(&bare, CommandApproval::Optional).await,
+        "found"
+    );
+
+    let mut absolute = bare.clone();
+    absolute.command = Some(npx.to_string_lossy().into_owned());
+    assert_eq!(
+        spawned_output(&absolute, CommandApproval::Required).await,
+        "found"
+    );
+}
+
+/// Finding 1 end to end on a desktop server: saved with the program the
+/// dialog approved, the server runs it. Once another `npx` appears earlier
+/// on the search path, a reconnect refuses to start it, the server reads as
+/// needing approval with both paths named, and the supervisor stops
+/// retrying it. A save that approves the new program runs that one.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_shadowed_command_needs_approval_until_a_save_approves_it() {
+    let (runtime, _store, directory) = test_runtime().await;
+    runtime.require_command_approval();
+    let approved = tempfile::tempdir().unwrap();
+    let shadow = tempfile::tempdir().unwrap();
+    let ran = directory.path().join("ran.log");
+    let approved_npx = write_mcp_npx(approved.path(), "approved", &ran);
+    let search_path = std::env::join_paths([shadow.path(), approved.path()]).unwrap();
+    let _path = super::stdio::HostPathGuard::set(Some(search_path)).await;
+
+    let mut definition = disabled_definition("files", "npx");
+    definition.enabled = true;
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition.clone()],
+        })
+        .await
+        .expect_err("the dialog approved no program");
+    assert!(error.to_string().contains("Needs approval:"), "{error}");
+    assert!(!ran.exists(), "nothing started");
+
+    definition.approved_executable = Some(approved_npx.to_string_lossy().into_owned());
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition.clone()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(info.servers[0].health, McpHealth::Healthy, "{info:?}");
+    assert_eq!(std::fs::read_to_string(&ran).unwrap(), "approved\n");
+
+    let shadow_npx = write_mcp_npx(shadow.path(), "shadow", &ran);
+    let error = runtime
+        .reconnect("files")
+        .await
+        .expect_err("nobody approved the new program");
+    assert!(error.to_string().contains("Needs approval:"), "{error}");
+    let info = runtime.info().await;
+    assert_eq!(info.servers[0].health, McpHealth::Degraded);
+    let diagnostic = info.servers[0].diagnostic.clone().unwrap();
+    assert!(diagnostic.starts_with("Needs approval:"), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&shadow_npx.display().to_string()),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(&approved_npx.display().to_string()),
+        "{diagnostic}"
+    );
+    assert!(
+        runtime
+            .supervised_servers(ManualLockdown::Open)
+            .await
+            .is_empty(),
+        "the supervisor leaves a server that needs approval alone"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&ran).unwrap(),
+        "approved\n",
+        "the new program never started"
+    );
+
+    definition.approved_executable = Some(shadow_npx.to_string_lossy().into_owned());
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .unwrap();
+    assert_eq!(info.servers[0].health, McpHealth::Healthy, "{info:?}");
+    assert_eq!(std::fs::read_to_string(&ran).unwrap(), "approved\nshadow\n");
+}
+
+/// An approved program belongs only to a bare command, as an absolute path.
+#[test]
+fn an_approved_program_belongs_only_to_a_bare_command() {
+    parse(
+        r#"{"servers":[{"name":"files","command":"npx","approved_executable":"/opt/tools/bin/npx"}]}"#,
+    )
+    .unwrap();
+    for (json, expected) in [
+        (
+            r#"{"servers":[{"name":"files","command":"/opt/tools/bin/npx","approved_executable":"/opt/tools/bin/npx"}]}"#,
+            "bare name",
+        ),
+        (
+            r#"{"servers":[{"name":"files","command":"npx","approved_executable":"bin/npx"}]}"#,
+            "absolute path",
+        ),
+        (
+            r#"{"servers":[{"name":"docs","url":"https://mcp.example.com/mcp","approved_executable":"/opt/tools/bin/npx"}]}"#,
+            "only to command servers",
+        ),
+    ] {
+        let error = parse(json).err().unwrap().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+/// Finding 2: the PATH a child was given kept relative entries, although
+/// resolution skips them. With `.` on the login PATH and a working directory
+/// in a checkout, a script's `#!/usr/bin/env node` ran the checkout's `node`.
+/// The forwarded PATH now keeps absolute directories only.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_forwarded_path_keeps_only_absolute_directories() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let checkout = tempfile::tempdir().unwrap();
+    let probe = "tidebreak-review-probe";
+    let planted = checkout.path().join(probe);
+    std::fs::write(&planted, "#!/bin/sh\nprintf checkout\n").unwrap();
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let json = serde_json::json!({"servers": [{
+        "name": "files",
+        "command": "/usr/bin/env",
+        "args": [probe],
+        "cwd": checkout.path(),
+    }]})
+    .to_string();
+    let config = parse(&json).unwrap();
+    let _path =
+        super::stdio::HostPathGuard::set(Some(".:node_modules/.bin:/usr/bin:/bin".into())).await;
+    let mut command = config.0[0]
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
+    let path = command
+        .as_std()
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .and_then(|(_, value)| value)
+        .map(std::ffi::OsStr::to_os_string);
+    assert_eq!(path, Some("/usr/bin:/bin".into()));
+    let output = command.output().await.unwrap();
+    assert_ne!(String::from_utf8_lossy(&output.stdout), "checkout");
+    assert!(!output.status.success(), "{output:?}");
+}
+
+/// Finding 3: a definition that declares PATH or HOME in `env` with no
+/// stored value, as after an import, still got the default, though the
+/// desktop's dialog said it would not. A declared name never gets the
+/// default: the child gets the stored value or none, and the dialog reads
+/// the same list.
+#[tokio::test]
+async fn a_declared_path_or_home_never_gets_the_default() {
+    let config =
+        parse(r#"{"servers":[{"name":"docs","command":"/bin/docs","env":["PATH","HOME"]}]}"#)
+            .unwrap();
+    let _path = super::stdio::HostPathGuard::set(Some("/opt/host/bin".into())).await;
+    let environment = |command: &tokio::process::Command| -> BTreeMap<String, String> {
+        command
+            .as_std()
+            .get_envs()
+            .filter_map(|(name, value)| {
+                Some((
+                    name.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect()
+    };
+    let unstored = config.0[0]
+        .build_command(&BTreeMap::new(), CommandApproval::Optional)
+        .await
+        .unwrap();
+    assert_eq!(environment(&unstored), BTreeMap::new());
+
+    let stored = BTreeMap::from([("PATH".to_string(), "/opt/declared/bin".to_string())]);
+    let command = config.0[0]
+        .build_command(&stored, CommandApproval::Optional)
+        .await
+        .unwrap();
+    assert_eq!(environment(&command), stored);
+
+    assert!(super::defaulted_names(["PATH", "HOME"]).is_empty());
+    assert_eq!(super::defaulted_names(["PATH"]), ["HOME"]);
+}
+
+/// Stored values bind to the URL as the parser normalizes it: two spellings
+/// of one URL bind the same values, and any change to where requests go
+/// binds none.
+#[test]
+fn stored_values_bind_to_the_normalized_url() {
+    use super::types::http_binding;
+
+    let base = http_binding("https://api.example.com/mcp");
+    assert!(base.is_some());
+    for same in [
+        "https://API.Example.COM:443/mcp",
+        "https://api.example.com/./mcp",
+        "https://api.example.com/other/../mcp",
+        "https://api.example.com/mcp#section",
+    ] {
+        assert_eq!(http_binding(same), base, "{same}");
+    }
+    for other in [
+        "http://api.example.com/mcp",
+        "https://api.example.com:8443/mcp",
+        "https://api.example.com./mcp",
+        "https://api.example.com.evil.test/mcp",
+        "https://api.example.com/tenant-b/mcp",
+        "https://api.example.com/mcp/",
+        "https://api.example.com/MCP",
+        "https://api.example.com/mcp?tenant=b",
+    ] {
+        assert_ne!(http_binding(other), base, "{other}");
+    }
+    assert_eq!(
+        http_binding("https://bücher.example/mcp"),
+        http_binding("https://xn--bcher-kva.example/mcp")
+    );
+    assert_ne!(
+        http_binding("https://ex\u{0430}mple.com/mcp"),
+        http_binding("https://example.com/mcp")
+    );
+    assert_eq!(http_binding("not a url"), None);
+}
+
+/// Finding 4: stored values were bound to the URL's origin, so an edit that
+/// moved a server to another path on the same host carried its stored bearer
+/// and header there with nothing entered again. They are bound to the whole
+/// URL now: the moved server has none until they are entered for it.
+#[tokio::test]
+async fn moving_a_server_to_another_path_never_carries_its_stored_values() {
+    let (address, seen) = serve_credentialed_mcp().await;
+    let (runtime, store, _directory) = test_runtime().await;
+    let bearer = fixture_value("bearer");
+    let api_key = fixture_value("header");
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition(
+                "docs",
+                &format!("http://{address}/mcp"),
+                Some(&bearer),
+                Some(&api_key),
+            )],
+        })
+        .await
+        .unwrap();
+    let id = saved_records(&store).await[0].id;
+    seen.lock().unwrap().clear();
+
+    let moved = format!("http://{address}/tenant-b/mcp");
+    let message = runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition("docs", &moved, None, None)],
+        })
+        .await
+        .expect_err("the moved server has no stored values for its new path")
+        .to_string();
+    assert!(message.contains("Not stored:"), "{message}");
+    assert!(!message.contains(&bearer), "{message}");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "nothing reached the new path"
+    );
+    assert_eq!(
+        runtime.stored_http(id).await.bearer.as_deref(),
+        Some(bearer.as_str())
+    );
+
+    // Entered again for the new path, they go there.
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition(
+                "docs",
+                &moved,
+                Some(&bearer),
+                Some(&api_key),
+            )],
+        })
+        .await
+        .unwrap();
+    let requests = seen.lock().unwrap().clone();
+    assert!(!requests.is_empty());
+    let expected = format!("Bearer {bearer}");
+    for request in &requests {
+        assert_eq!(request.path, "/tenant-b/mcp");
+        assert_eq!(request.authorization.as_deref(), Some(expected.as_str()));
+        assert_eq!(request.api_key.as_deref(), Some(api_key.as_str()));
+    }
 }

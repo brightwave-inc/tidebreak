@@ -413,6 +413,40 @@ async fn enabled_local_mcp_commands_require_the_native_executor_surface() {
     assert_ne!(error.kind, "native_confirmation_required");
 }
 
+/// Security review of #3573: the program a bare command was approved to run
+/// comes only from the desktop's native dialog. The renderer's route drops
+/// any it sends, and the native route keeps the one the dialog recorded.
+#[tokio::test]
+async fn only_the_native_route_records_an_approved_program() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let body = serde_json::json!({
+        "servers": [{
+            "name": "files",
+            "command": "npx",
+            "approved_executable": "/opt/tools/bin/npx",
+            "enabled": false
+        }]
+    });
+
+    let renderer = put_mcp_servers(&router, &bearer, body.clone()).await;
+    assert_eq!(renderer.status(), StatusCode::OK);
+    let listed = get_mcp_servers(&router, &bearer).await;
+    assert_eq!(listed["servers"][0]["command"], "npx");
+    assert!(
+        listed["servers"][0].get("approved_executable").is_none(),
+        "{listed}"
+    );
+
+    let native = put_native_mcp_servers(&router, &bearer, body).await;
+    assert_eq!(native.status(), StatusCode::OK);
+    let listed = get_mcp_servers(&router, &bearer).await;
+    assert_eq!(
+        listed["servers"][0]["approved_executable"],
+        "/opt/tools/bin/npx"
+    );
+}
+
 #[tokio::test]
 async fn failed_mcp_candidate_does_not_replace_the_active_configuration() {
     const MISSING: &str = "TIDEBREAK_TEST_MCP_ROUTE_MISSING_ENV_65B7A2";

@@ -135,8 +135,11 @@ pub(crate) fn static_headers(
         }
         let name = reqwest::header::HeaderName::from_bytes(lowercase.as_bytes())
             .map_err(|_| mcp_message("configured MCP header name is not a valid HTTP field"))?;
-        let value = reqwest::header::HeaderValue::from_str(value)
+        let mut value = reqwest::header::HeaderValue::from_str(value)
             .map_err(|_| mcp_message("configured MCP header value is not a valid field value"))?;
+        // A configured header can carry an API key; keep it out of any
+        // `Debug` rendering the way the bearer is.
+        value.set_sensitive(true);
         map.insert(name, value);
     }
     Ok(map)

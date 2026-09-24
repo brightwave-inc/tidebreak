@@ -46,11 +46,21 @@ pub async fn get_mcp_servers(
 /// run forced-disabled) or be removed. An org that deploys the
 /// `AllowLocalMcpServers` policy key narrows the lockdown to remote (`url`)
 /// servers, leaving local stdio servers to the user.
+///
+/// The program a bare command such as `npx` was approved to run comes only
+/// from the desktop's native dialog (decision 27): a request without the
+/// native host's credential cannot choose it, so this route drops whatever
+/// `approved_executable` such a request sends.
 pub async fn put_mcp_servers(
     State(state): State<AppState>,
     auth: AuthContext,
-    Json(body): Json<McpServersConfig>,
+    Json(mut body): Json<McpServersConfig>,
 ) -> Result<Json<McpServersInfo>, ServerError> {
+    if !auth.client_executor {
+        for server in &mut body.servers {
+            server.approved_executable = None;
+        }
+    }
     if state.config.profile == tidebreak_core::Profile::Desktop
         && !auth.client_executor
         && body

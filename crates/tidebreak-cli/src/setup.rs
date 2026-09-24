@@ -965,12 +965,16 @@ fn decode_mcp(listing: &serde_json::Value) -> Result<McpServersInfo> {
 /// refuses in a body, and the live projection fields (health, tool counts,
 /// OAuth status), which are not part of a definition.
 fn configured_servers(listing: &serde_json::Value) -> Result<Vec<serde_json::Value>> {
-    const PROJECTED: [&str; 5] = [
+    // Every field `GET /mcp/servers` projects beside a definition. The route
+    // refuses a field a definition does not declare, so each one comes off.
+    const PROJECTED: [&str; 7] = [
         "health",
         "tool_count",
         "diagnostic",
         "curated",
         "oauth_status",
+        "resolved_command",
+        "stored_credentials",
     ];
     let servers = listing["servers"]
         .as_array()
@@ -1034,7 +1038,9 @@ mod mcp_listing_tests {
             "tool_count": 0,
             "diagnostic": "This server needs you to sign in.",
             "curated": null,
-            "oauth_status": {"state": "not_connected"}
+            "oauth_status": {"state": "not_connected"},
+            "resolved_command": "/usr/local/bin/npx",
+            "stored_credentials": {"bearer": false, "headers": []}
         }]});
         let servers = configured_servers(&listing).unwrap();
         assert_eq!(servers.len(), 1);
@@ -1045,6 +1051,8 @@ mod mcp_listing_tests {
             "diagnostic",
             "curated",
             "oauth_status",
+            "resolved_command",
+            "stored_credentials",
         ] {
             assert!(!fields.contains_key(projected), "{projected} was sent back");
         }

@@ -1,11 +1,13 @@
 //! Validation for MCP server definitions.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use tidebreak_core::{AgentError, Result};
 use tidebreak_mcp::MAX_SERVER_NAME_BYTES;
 
 use super::oauth::OAuthNeed;
+use super::stdio::{is_bare_command, NEEDS_APPROVAL};
 use super::types::*;
 
 pub(super) fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
@@ -48,26 +50,48 @@ pub(super) fn validate_server(server: &McpServerDefinition) -> Result<()> {
                     "bearer_token_env applies only to url servers",
                 ));
             }
+            validate_no_http_fields(server)?;
+            if let Some(approved) = &server.approved_executable {
+                validate_process_string(&server.name, "approved_executable", approved)?;
+                if !is_bare_command(command) {
+                    return Err(server_error(
+                        &server.name,
+                        "approved_executable applies only to a command given as a bare name",
+                    ));
+                }
+                if !Path::new(approved).is_absolute() {
+                    return Err(server_error(
+                        &server.name,
+                        "approved_executable must be an absolute path",
+                    ));
+                }
+            }
         }
         (None, Some(url), None) => {
             validate_process_string(&server.name, "url", url)?;
-            tidebreak_mcp::validate_http_url_with_credentials(
-                url,
-                server.bearer_token_env.is_some() || server.oauth,
-            )
-            .map_err(|error| server_error(&server.name, error))?;
+            tidebreak_mcp::validate_http_url_with_credentials(url, sends_credentials(server))
+                .map_err(|error| server_error(&server.name, error))?;
             validate_no_process_fields(server)?;
-            if server.oauth && server.bearer_token_env.is_some() {
+            let authentications = [
+                server.bearer_token_env.is_some(),
+                server.bearer_token_stored,
+                server.oauth,
+            ]
+            .into_iter()
+            .filter(|chosen| *chosen)
+            .count();
+            if authentications > 1 {
                 return Err(server_error(
                     &server.name,
-                    "oauth and bearer_token_env are mutually exclusive; an OAuth \
-                     server obtains its bearer through sign-in, not a static \
-                     environment variable",
+                    "choose one way to authenticate: oauth, bearer_token_env, or \
+                     bearer_token_stored; an OAuth server obtains its bearer through \
+                     sign-in, not a static token",
                 ));
             }
             if let Some(bearer_name) = &server.bearer_token_env {
                 validate_environment_name(&server.name, bearer_name)?;
             }
+            validate_http_credentials(server)?;
         }
         (None, None, Some(slug)) => {
             validate_gateway_endpoint_slug(&server.name, slug)?;
@@ -79,6 +103,7 @@ pub(super) fn validate_server(server: &McpServerDefinition) -> Result<()> {
                      endpoint's bearer comes from the signed-in session",
                 ));
             }
+            validate_no_http_fields(server)?;
         }
         _ => {
             return Err(server_error(
@@ -176,6 +201,194 @@ pub(super) fn validate_no_process_fields(server: &McpServerDefinition) -> Result
         return Err(server_error(
             &server.name,
             "cwd applies only to command servers",
+        ));
+    }
+    if server.approved_executable.is_some() {
+        return Err(server_error(
+            &server.name,
+            "approved_executable applies only to command servers",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a url server sends a credential with its requests: a bearer from
+/// either source, an OAuth token, or a custom header, whose value may be an
+/// API key. A server that does must use https unless its URL names a literal
+/// loopback address.
+pub(super) fn sends_credentials(server: &McpServerDefinition) -> bool {
+    server.bearer_token_env.is_some()
+        || server.bearer_token_stored
+        || server.oauth
+        || !server.headers.is_empty()
+}
+
+/// A stored bearer and custom headers belong to url servers only.
+fn validate_no_http_fields(server: &McpServerDefinition) -> Result<()> {
+    if server.bearer_token_stored || server.bearer_token_value.is_some() {
+        return Err(server_error(
+            &server.name,
+            "a stored bearer token applies only to url servers",
+        ));
+    }
+    if !server.headers.is_empty() || !server.header_values.is_empty() {
+        return Err(server_error(
+            &server.name,
+            "headers apply only to url servers",
+        ));
+    }
+    Ok(())
+}
+
+/// Header names the transport owns or that describe one connection rather
+/// than the request, lowercase. A custom header may name none of them.
+const REFUSED_HEADERS: &[&str] = &[
+    // Hop-by-hop fields (RFC 9110 §7.6.1) describe a single connection.
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    // Framing and routing belong to the request the transport builds.
+    "content-encoding",
+    "content-length",
+    "expect",
+    "host",
+    // Proxy credentials go to a proxy, not the server.
+    "proxy-authenticate",
+    "proxy-authorization",
+    // The transport sets these itself.
+    "accept",
+    "content-type",
+    "mcp-protocol-version",
+    "mcp-session-id",
+];
+
+/// A stored bearer token and custom headers: bounded, header-safe, and never
+/// echoed. Errors name a field or a header name, never a value.
+fn validate_http_credentials(server: &McpServerDefinition) -> Result<()> {
+    if let Some(value) = &server.bearer_token_value {
+        if !server.bearer_token_stored {
+            return Err(server_error(
+                &server.name,
+                "bearer_token_value applies only with bearer_token_stored",
+            ));
+        }
+        validate_credential_value(&server.name, "the bearer token", value)?;
+        let lower = value.trim_start().to_ascii_lowercase();
+        if lower.starts_with("bearer ") {
+            return Err(server_error(
+                &server.name,
+                "enter the bearer token without the \"Bearer\" prefix",
+            ));
+        }
+    }
+    if server.headers.len() > MAX_HEADERS {
+        return Err(server_error(
+            &server.name,
+            format!("must not send more than {MAX_HEADERS} custom headers"),
+        ));
+    }
+    let mut lowercase = HashSet::new();
+    for name in &server.headers {
+        validate_header_name(&server.name, name)?;
+        if !lowercase.insert(name.to_ascii_lowercase()) {
+            return Err(server_error(
+                &server.name,
+                format!("header {name:?} is configured more than once"),
+            ));
+        }
+    }
+    for (name, value) in &server.header_values {
+        if !server.headers.contains(name) {
+            return Err(server_error(
+                &server.name,
+                format!("header value {name:?} names no configured header"),
+            ));
+        }
+        validate_credential_value(
+            &server.name,
+            &format!("the value of header {name:?}"),
+            value,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_header_name(server_name: &str, name: &str) -> Result<()> {
+    // RFC 9110 §5.6.2 `token` characters.
+    let token = !name.is_empty()
+        && name.len() <= MAX_HEADER_NAME_BYTES
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        });
+    if !token {
+        return Err(server_error(
+            server_name,
+            format!(
+                "header name {name:?} is not a valid HTTP field name of at most \
+                 {MAX_HEADER_NAME_BYTES} characters"
+            ),
+        ));
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower == "authorization" {
+        return Err(server_error(
+            server_name,
+            "set the bearer token under authentication instead of an Authorization header",
+        ));
+    }
+    if REFUSED_HEADERS.contains(&lower.as_str()) {
+        return Err(server_error(
+            server_name,
+            format!("header {name:?} is not allowed: the connection sets it itself"),
+        ));
+    }
+    Ok(())
+}
+
+/// A value sent in a header: not empty, at most
+/// [`MAX_CREDENTIAL_VALUE_BYTES`], and visible ASCII, space, or tab only, so
+/// it can never smuggle header syntax. `what` names the value in the error.
+fn validate_credential_value(server_name: &str, what: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(server_error(
+            server_name,
+            format!("{what} must not be empty"),
+        ));
+    }
+    if value.len() > MAX_CREDENTIAL_VALUE_BYTES {
+        return Err(server_error(
+            server_name,
+            format!("{what} exceeds {MAX_CREDENTIAL_VALUE_BYTES} bytes"),
+        ));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte == b'\t' || (b' '..=b'~').contains(&byte))
+    {
+        return Err(server_error(
+            server_name,
+            format!("{what} must be visible ASCII text"),
         ));
     }
     Ok(())
@@ -301,7 +514,32 @@ pub(super) fn reconnect_park(
     if definition.gateway_endpoint.is_none() && missing_parent_environment(definition).is_some() {
         return Some(ReconnectPark::Configuration);
     }
+    // A value the credential store does not hold stays missing until someone
+    // enters it.
+    if definition.gateway_endpoint.is_none() && is_missing_stored_value(error) {
+        return Some(ReconnectPark::Configuration);
+    }
+    // A program nobody approved stays unapproved until a save through the
+    // native dialog approves it. A manual reconnect only tries again: it
+    // succeeds only once the name resolves to the approved program.
+    if definition.command.is_some() && is_missing_approval(error) {
+        return Some(ReconnectPark::Configuration);
+    }
     None
+}
+
+/// Whether a spawn was refused because the command would run a program the
+/// desktop's native dialog did not approve.
+fn is_missing_approval(error: &AgentError) -> bool {
+    matches!(error, AgentError::Config(message) | AgentError::Message(message)
+        if message.starts_with(NEEDS_APPROVAL))
+}
+
+/// Whether a connection failed because the credential store lacks a stored
+/// bearer token or header value the definition declares.
+fn is_missing_stored_value(error: &AgentError) -> bool {
+    matches!(error, AgentError::Config(message) | AgentError::Message(message)
+        if message.starts_with(NOT_STORED))
 }
 
 /// The diagnostic for a failed connection, given what it taught the runtime
@@ -327,9 +565,9 @@ pub(super) fn failure_park(
     error: &AgentError,
     oauth: Option<&OAuthNeed>,
 ) -> Option<ReconnectPark> {
-    match oauth {
-        Some(need) if need.parks() => Some(ReconnectPark::Authorization),
-        _ => reconnect_park(definition, error),
+    match oauth.and_then(OAuthNeed::park) {
+        Some(park) => Some(park),
+        None => reconnect_park(definition, error),
     }
 }
 
@@ -381,6 +619,10 @@ fn classified_transport_detail(error: &AgentError) -> Option<String> {
         "Not executable:",
         "Permission denied:",
         "Relative executable path",
+        // A bare command that now resolves to a program nobody approved.
+        NEEDS_APPROVAL,
+        // A stored bearer token or header value this computer does not hold.
+        NOT_STORED,
         // A token refresh the sign-in service did not answer: temporary, and
         // worded for the person by the OAuth connector.
         "Sign-in service unavailable",
@@ -410,8 +652,13 @@ mod tests {
             env_values: BTreeMap::new(),
             env_from: Vec::new(),
             cwd: None,
+            approved_executable: None,
             url: Some(url.to_string()),
             bearer_token_env: bearer_token_env.map(str::to_string),
+            bearer_token_stored: false,
+            bearer_token_value: None,
+            headers: BTreeSet::new(),
+            header_values: BTreeMap::new(),
             oauth: false,
             gateway_endpoint: None,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,

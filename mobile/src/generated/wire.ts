@@ -3140,6 +3140,18 @@ export type ExportedCodeRepository = { display_name: string, origin_url?: string
  */
 export type ExportedMcpServer = { name: string, command?: string, args: Array<string>, env: Array<string>, env_from: Array<string>, cwd?: string, url?: string, bearer_token_env?: string,
 /**
+ * Whether the server's bearer token is held in the OS credential store.
+ * The token never travels in the file, so an imported server needs it
+ * entered on this computer before it connects. Omitted when false.
+ */
+bearer_token_stored?: boolean,
+/**
+ * Names of the custom headers the server receives. Their values stay in
+ * the credential store of the computer that exported them. Omitted when
+ * there are none.
+ */
+headers?: Array<string>,
+/**
  * Whether the server authenticates with OAuth. An exported definition
  * carries the flag but never a token: the credential stays in the OS
  * store, so an imported OAuth server is authenticatable but not yet
@@ -3916,7 +3928,7 @@ export type McpHealth = "initializing" | "healthy" | "degraded" | "reconnecting"
  * refused them). A server needs no saved flag to be detected: an HTTP server
  * that answers `401` with OAuth metadata is enough.
  */
-export type McpOAuthState = "unsupported" | "not_connected" | "authorizing" | "connected" | "expired" | "access_denied";
+export type McpOAuthState = "unsupported" | "not_connected" | "authorizing" | "connected" | "expired" | "access_denied" | "available";
 
 /**
  * Renderer-safe OAuth status for one server. Carries no token material: the
@@ -3947,7 +3959,7 @@ sign_in_host?: string, };
  * remote Streamable HTTP endpoint (`url`), or a gateway-managed endpoint
  * (`gateway_endpoint`). Exactly one of the three is set;
  * [`validate_servers`] enforces that process fields stay with `command` and
- * `bearer_token_env` stays with `url`.
+ * the bearer and header fields stay with `url`.
  */
 export type McpServerDefinition = { name: string, command: string | null, args: Array<string>,
 /**
@@ -3970,6 +3982,20 @@ env_values?: { [key in string]: string },
  */
 env_from: Array<string>, cwd: string | null,
 /**
+ * The absolute path of the program the desktop's native dialog showed
+ * when the person allowed this server, for a `command` given as a bare
+ * name such as `npx` (decision 27). Every spawn resolves the name again
+ * and starts it only when it still resolves here; otherwise the server
+ * needs approval until a save through the dialog approves the new path.
+ *
+ * Only the desktop's native save sets it: the server drops it from every
+ * other request, so a renderer cannot choose the program it names. It is
+ * absent for an absolute `command`, which names its program itself, and
+ * wherever no native dialog guards local commands, such as the CLI or a
+ * self-hosted server, where a bare name runs whatever it resolves to.
+ */
+approved_executable?: string,
+/**
  * Streamable HTTP endpoint for a remote server.
  */
 url: string | null,
@@ -3979,10 +4005,36 @@ url: string | null,
  */
 bearer_token_env: string | null,
 /**
+ * Whether this HTTP server's bearer token is held in the OS credential
+ * store, under [`http_secret_key`], instead of a parent environment
+ * variable. Valid only with `url`, and exclusive with
+ * `bearer_token_env` and `oauth`. The value never enters this type.
+ */
+bearer_token_stored?: boolean,
+/**
+ * Inbound-only: a new value for the stored bearer token. A commit writes
+ * it into the credential store and drops it; leaving it out keeps the
+ * value already stored. `skip_serializing` keeps it out of the persisted
+ * record and every projection.
+ */
+bearer_token_value?: string | null,
+/**
+ * Names of the custom headers this HTTP server receives on every request.
+ * The values live in the OS credential store under [`http_secret_key`],
+ * like a stdio server's [`env`](Self::env) values.
+ */
+headers?: Array<string>,
+/**
+ * Inbound-only: values for [`headers`](Self::headers) names being set or
+ * changed. A name present in `headers` but absent here keeps the value
+ * already stored.
+ */
+header_values?: { [key in string]: string },
+/**
  * Whether this HTTP server always authenticates with OAuth (RFC 9728
  * discovery, RFC 7591 registration, PKCE sign-in) instead of a static
- * bearer. Valid only with `url`, and mutually exclusive with
- * `bearer_token_env`. The flag is optional: a server without it that
+ * bearer. Valid only with `url`, and exclusive with `bearer_token_env`
+ * and `bearer_token_stored`. The flag is optional: a server without it that
  * answers `401` with OAuth metadata signs in the same way. The obtained
  * tokens live in the OS credential store under
  * [`oauth_token_secret_key`], never in this type or the record.
@@ -4030,7 +4082,14 @@ curated: McpCuration | null,
  * from the OS credential store per request, never stored in the
  * definition. The status carries no token material.
  */
-oauth_status?: McpOAuthStatus, name: string, command: string | null, args: Array<string>,
+oauth_status?: McpOAuthStatus,
+/**
+ * Which of this HTTP server's stored bearer token and header values the
+ * OS credential store holds for its URL, so Settings can say a value is
+ * set without ever showing it. Absent for a server that stores none.
+ * Read per request, and never carries a value.
+ */
+stored_credentials?: McpStoredCredentials, name: string, command: string | null, args: Array<string>,
 /**
  * Names of the environment variables this server is given directly. The
  * values live in the secret store under [`env_secret_key`] and never
@@ -4051,6 +4110,20 @@ env_values?: { [key in string]: string },
  */
 env_from: Array<string>, cwd: string | null,
 /**
+ * The absolute path of the program the desktop's native dialog showed
+ * when the person allowed this server, for a `command` given as a bare
+ * name such as `npx` (decision 27). Every spawn resolves the name again
+ * and starts it only when it still resolves here; otherwise the server
+ * needs approval until a save through the dialog approves the new path.
+ *
+ * Only the desktop's native save sets it: the server drops it from every
+ * other request, so a renderer cannot choose the program it names. It is
+ * absent for an absolute `command`, which names its program itself, and
+ * wherever no native dialog guards local commands, such as the CLI or a
+ * self-hosted server, where a bare name runs whatever it resolves to.
+ */
+approved_executable?: string,
+/**
  * Streamable HTTP endpoint for a remote server.
  */
 url: string | null,
@@ -4060,10 +4133,36 @@ url: string | null,
  */
 bearer_token_env: string | null,
 /**
+ * Whether this HTTP server's bearer token is held in the OS credential
+ * store, under [`http_secret_key`], instead of a parent environment
+ * variable. Valid only with `url`, and exclusive with
+ * `bearer_token_env` and `oauth`. The value never enters this type.
+ */
+bearer_token_stored?: boolean,
+/**
+ * Inbound-only: a new value for the stored bearer token. A commit writes
+ * it into the credential store and drops it; leaving it out keeps the
+ * value already stored. `skip_serializing` keeps it out of the persisted
+ * record and every projection.
+ */
+bearer_token_value?: string | null,
+/**
+ * Names of the custom headers this HTTP server receives on every request.
+ * The values live in the OS credential store under [`http_secret_key`],
+ * like a stdio server's [`env`](Self::env) values.
+ */
+headers?: Array<string>,
+/**
+ * Inbound-only: values for [`headers`](Self::headers) names being set or
+ * changed. A name present in `headers` but absent here keeps the value
+ * already stored.
+ */
+header_values?: { [key in string]: string },
+/**
  * Whether this HTTP server always authenticates with OAuth (RFC 9728
  * discovery, RFC 7591 registration, PKCE sign-in) instead of a static
- * bearer. Valid only with `url`, and mutually exclusive with
- * `bearer_token_env`. The flag is optional: a server without it that
+ * bearer. Valid only with `url`, and exclusive with `bearer_token_env`
+ * and `bearer_token_stored`. The flag is optional: a server without it that
  * answers `401` with OAuth metadata signs in the same way. The obtained
  * tokens live in the OS credential store under
  * [`oauth_token_secret_key`], never in this type or the record.
@@ -4111,6 +4210,19 @@ name: string,
  * environment variable names, never a value.
  */
 reason: string, };
+
+/**
+ * Which stored credentials one HTTP server has on this computer, by name.
+ */
+export type McpStoredCredentials = {
+/**
+ * Whether a bearer token is stored for the server's URL.
+ */
+bearer: boolean,
+/**
+ * The configured header names whose value is stored, in name order.
+ */
+headers: Array<string>, };
 
 /**
  * Where the sandboxed iframe should load one view from, valid once.

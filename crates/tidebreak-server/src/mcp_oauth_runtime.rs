@@ -41,6 +41,10 @@ pub enum McpOAuthState {
     Expired,
     /// The authorization server refused access for this user.
     AccessDenied,
+    /// The server did not accept the static bearer token it is configured
+    /// with, and offers an OAuth sign-in instead. Settings offers Use OAuth,
+    /// which switches the server to OAuth; Connect is not on offer until then.
+    Available,
 }
 
 /// Renderer-safe OAuth status for one server. Carries no token material: the

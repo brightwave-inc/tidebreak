@@ -77,22 +77,30 @@ pub(crate) async fn pick_workspace_config(
 /// parsed, and the list comes from the same resolution the server's apply
 /// uses, so the dialog names exactly the commands the import writes. An
 /// import that starts nothing is forwarded without a dialog.
+///
+/// The request carries the program the dialog showed for each bare command
+/// as its approved program. Whatever the renderer sent in that field is
+/// replaced, so the approved program only ever comes from the dialog.
 #[tauri::command]
 pub(crate) async fn apply_native_workspace_config(
     app: AppHandle,
     state: State<'_, Arc<crate::AppState>>,
     request: Value,
 ) -> Result<Value, String> {
-    let request: WorkspaceConfigApplyRequest = serde_json::from_value(request)
+    let mut request: WorkspaceConfigApplyRequest = serde_json::from_value(request)
         .map_err(|error| format!("The import request is not valid: {error}"))?;
+    request.approved_executables.clear();
     let commands = local_commands_to_confirm(&request);
     if !commands.is_empty() {
         let config = serde_json::json!({ "servers": commands });
-        if !crate::approve_local_mcp_commands(&app, &config, "Allow and import").await? {
+        let Some(resolved) =
+            crate::approve_local_mcp_commands(&app, &config, "Allow and import").await?
+        else {
             return Err(
                 "You did not allow the local MCP commands, so nothing was imported.".to_owned(),
             );
-        }
+        };
+        request.approved_executables = crate::approved_bare_commands(&resolved);
     }
 
     let info = crate::wait_server_info(state.inner()).await?;

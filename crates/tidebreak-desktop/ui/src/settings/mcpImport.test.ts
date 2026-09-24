@@ -430,18 +430,72 @@ describe("parseMcpImport", () => {
     ]);
   });
 
-  it("rejects custom or literal HTTP headers without retaining their values", () => {
+  it("keeps a literal Authorization token and header values for the credential store and says so", () => {
+    // Built at run time so no credential-shaped literal sits in the source.
+    const token = ["import", "bearer", "value"].join("-");
+    const apiKey = ["import", "header", "value"].join("-");
     const result = parseMcpImport(
       {
         mcpServers: {
           literal: {
             url: "https://mcp.example.test/literal",
-            headers: { Authorization: "Bearer do-not-retain" },
+            headers: { Authorization: `Bearer ${token}` },
           },
           custom: {
             url: "https://mcp.example.test/custom",
-            headers: { "X-API-Key": "also-do-not-retain" },
+            headers: {
+              "X-Api-Key": apiKey,
+              "X-Workspace": "${env:WORKSPACE_ID}",
+            },
           },
+        },
+      },
+      [],
+    );
+
+    expect(result.skipped).toEqual([]);
+    expect(result.servers[0]).toMatchObject({
+      name: "literal",
+      bearer_token_env: null,
+      bearer_token_stored: true,
+      bearer_token_value: token,
+      oauth: false,
+    });
+    expect(result.servers[1]).toMatchObject({
+      name: "custom",
+      bearer_token_env: null,
+      headers: ["X-Api-Key", "X-Workspace"],
+      header_values: { "X-Api-Key": apiKey },
+    });
+    expect(result.servers[1]?.bearer_token_stored).toBeUndefined();
+    // The import result says what goes to the credential store, and what
+    // the person still has to enter, by name only.
+    expect(result.stored).toEqual([
+      { server: "literal", kind: "bearer" },
+      { server: "custom", kind: "header", name: "X-Api-Key" },
+    ]);
+    expect(result.secrets).toEqual([
+      { server: "custom", name: "X-Workspace", kind: "header" },
+    ]);
+    expect(JSON.stringify([result.stored, result.secrets])).not.toContain(
+      token,
+    );
+  });
+
+  it("refuses headers the connection owns and Authorization schemes it cannot send, without echoing values", () => {
+    const hidden = ["refused", "value"].join("-");
+    const result = parseMcpImport(
+      {
+        mcpServers: {
+          framing: {
+            url: "https://mcp.example.test/framing",
+            headers: { "Transfer-Encoding": hidden },
+          },
+          basic: {
+            url: "https://mcp.example.test/basic",
+            headers: { Authorization: `Basic ${hidden}` },
+          },
+          stdio: { command: "npx", headers: { "X-Api-Key": hidden } },
         },
       },
       [],
@@ -449,15 +503,64 @@ describe("parseMcpImport", () => {
 
     expect(result.servers).toEqual([]);
     expect(result.skipped.map((item) => item.name)).toEqual([
-      "literal",
-      "custom",
+      "framing",
+      "basic",
+      "stdio",
     ]);
     expect(result.skipped[0]?.reason).toContain(
-      "mcpServers.literal.headers.Authorization",
+      'mcpServers.framing.headers["Transfer-Encoding"]',
     );
-    expect(result.skipped[1]?.reason).toContain("mcpServers.custom.headers");
-    expect(JSON.stringify(result)).not.toContain("do-not-retain");
-    expect(JSON.stringify(result)).not.toContain("also-do-not-retain");
+    expect(result.skipped[1]?.reason).toContain("Bearer");
+    expect(result.skipped[2]?.reason).toContain("apply only to URL servers");
+    expect(JSON.stringify(result)).not.toContain(hidden);
+  });
+
+  it("reads oauth, and refuses it beside a bearer token", () => {
+    const result = parseMcpImport(
+      {
+        mcpServers: {
+          vercel: { url: "https://mcp.vercel.com", oauth: true },
+          both: {
+            url: "https://mcp.example.test/both",
+            oauth: true,
+            headers: { Authorization: "Bearer ${env:TOKEN}" },
+          },
+        },
+      },
+      [],
+    );
+    expect(result.servers).toEqual([
+      expect.objectContaining({ name: "vercel", oauth: true }),
+    ]);
+    expect(result.skipped[0]?.reason).toContain(
+      "Set oauth or a bearer token, not both.",
+    );
+  });
+
+  it("asks for the values a Tidebreak file names but never carries", () => {
+    const result = parseMcpImport(
+      {
+        servers: [
+          {
+            name: "remote",
+            url: "https://mcp.example.test/remote",
+            bearer_token_stored: true,
+            headers: ["X-Api-Key"],
+          },
+        ],
+      },
+      [],
+    );
+    expect(result.servers[0]).toMatchObject({
+      bearer_token_stored: true,
+      headers: ["X-Api-Key"],
+    });
+    expect(result.servers[0]?.bearer_token_value).toBeUndefined();
+    expect(result.stored).toEqual([]);
+    expect(result.secrets).toEqual([
+      { server: "remote", name: "X-Api-Key", kind: "header" },
+      { server: "remote", name: "bearer token", kind: "bearer" },
+    ]);
   });
 
   it("rejects files without a supported top-level shape", () => {

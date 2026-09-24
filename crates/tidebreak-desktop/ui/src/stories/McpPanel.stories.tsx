@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { userEvent, within } from "storybook/test";
 import type { ApiClient, GatewayStatus, McpServerInfo } from "@/api";
 import { McpPanel } from "@/settings/McpPanel";
 import {
@@ -130,6 +131,25 @@ export const StdioLaunchFailure: Story = {
   },
 };
 
+/** A bare `npx` now resolves to another program than the one the system
+ * dialog approved, such as one that appeared earlier on the search path. The
+ * server does not start until a save approves the new program. */
+export const StdioNeedsApproval: Story = {
+  args: {
+    client: stubClient([
+      stdioServer({
+        health: "degraded",
+        tool_count: 0,
+        resolved_command: undefined,
+        approved_executable: "/opt/homebrew/bin/npx",
+        diagnostic:
+          'Needs approval: "npx" now resolves to /Users/avery/.local/bin/npx, not to /opt/homebrew/bin/npx, the program you allowed. Tidebreak did not start it. To run the new program, save the server again and allow it in the dialog.',
+      }),
+    ]),
+  },
+  parameters: { layout: "padded" },
+};
+
 export const StdioProtocolFailure: Story = {
   args: {
     client: stubClient([
@@ -188,6 +208,160 @@ export const AddedServerNeedsSignIn: Story = {
         },
       }),
     ]),
+  },
+  parameters: { layout: "padded" },
+};
+
+/** A saved remote server, healthy, with the authentication and headers a
+ * story sets. */
+function remoteServer(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
+  return {
+    name: "docs",
+    command: null,
+    args: [],
+    env: [],
+    env_from: [],
+    cwd: null,
+    url: "https://mcp.example.com/mcp",
+    bearer_token_env: null,
+    oauth: false,
+    gateway_endpoint: null,
+    request_timeout_ms: 60_000,
+    enabled: true,
+    plugin: null,
+    health: "healthy",
+    tool_count: 6,
+    diagnostic: null,
+    curated: null,
+    ...overrides,
+  };
+}
+
+/** Authentication: None. Tidebreak sends no credential; a server that asks
+ * for a sign-in would offer Connect after the save. */
+export const HttpAuthenticationNone: Story = {
+  args: { client: stubClient([remoteServer()]) },
+  parameters: { layout: "padded" },
+};
+
+/** Authentication: a bearer token stored in the OS credential store, with
+ * two custom headers. The fields say a value is stored and never show it. */
+export const HttpAuthenticationStoredToken: Story = {
+  args: {
+    client: stubClient([
+      remoteServer({
+        bearer_token_stored: true,
+        headers: ["X-Api-Key", "X-Workspace-Routing-Tenant-Identifier"],
+        stored_credentials: {
+          bearer: true,
+          headers: ["X-Api-Key", "X-Workspace-Routing-Tenant-Identifier"],
+        },
+      }),
+    ]),
+  },
+  parameters: { layout: "padded" },
+};
+
+/** The URL of a server with a stored token and header, edited to another
+ * path on the same host. Each stored value goes only to the URL it was
+ * entered for, so the editor says a save drops them. */
+export const HttpUrlEditDropsStoredValues: Story = {
+  args: {
+    client: stubClient([
+      remoteServer({
+        bearer_token_stored: true,
+        headers: ["X-Api-Key"],
+        stored_credentials: { bearer: true, headers: ["X-Api-Key"] },
+      }),
+    ]),
+  },
+  parameters: { layout: "padded" },
+  play: async ({ canvasElement }) => {
+    const url = await within(canvasElement).findByLabelText("Server URL");
+    await userEvent.clear(url);
+    await userEvent.type(url, "https://mcp.example.com/tenant-b/mcp");
+  },
+};
+
+/** Authentication: a bearer token read from a variable in the environment
+ * Tidebreak started with. */
+export const HttpAuthenticationVariable: Story = {
+  args: {
+    client: stubClient([remoteServer({ bearer_token_env: "DOCS_TOKEN" })]),
+  },
+  parameters: { layout: "padded" },
+};
+
+/** Authentication: OAuth, chosen in the editor. The saved flag offers
+ * Connect before the server has answered. */
+export const HttpAuthenticationOAuth: Story = {
+  args: {
+    client: stubClient([
+      remoteServer({
+        oauth: true,
+        health: "degraded",
+        tool_count: 0,
+        diagnostic: mcpSignInDiagnostic,
+        oauth_status: { state: "not_connected", sign_in_host: "example.com" },
+      }),
+    ]),
+  },
+  parameters: { layout: "padded" },
+};
+
+/** A stored token this computer does not hold, as after an import from
+ * another computer: the row names the field to fill in. */
+export const HttpStoredTokenMissing: Story = {
+  args: {
+    client: stubClient([
+      remoteServer({
+        bearer_token_stored: true,
+        stored_credentials: { bearer: false, headers: [] },
+        health: "degraded",
+        tool_count: 0,
+        diagnostic:
+          "Not stored: this server's bearer token is not in the credential store on this computer. Enter it under Authentication, then save.",
+      }),
+    ]),
+  },
+  parameters: { layout: "padded" },
+};
+
+/** The server refused its stored bearer token and offers an OAuth sign-in
+ * instead: Use OAuth switches it and opens the sign-in page. */
+export const UseOAuthOffer: Story = {
+  args: {
+    client: stubClient([
+      remoteServer({
+        name: "vercel",
+        url: "https://mcp.vercel.com",
+        bearer_token_stored: true,
+        stored_credentials: { bearer: true, headers: [] },
+        health: "degraded",
+        tool_count: 0,
+        diagnostic:
+          "This server did not accept the bearer token. It offers an OAuth sign-in on vercel.com instead: select Use OAuth to sign in with your browser, or correct the token.",
+        oauth_status: { state: "available", sign_in_host: "vercel.com" },
+      }),
+    ]),
+  },
+  parameters: { layout: "padded" },
+};
+
+/** A local server lists HOME and PATH as forwarded by default above the
+ * names it forwards itself. */
+export const StdioForwardedDefaults: Story = {
+  args: {
+    client: stubClient([stdioServer({ env_from: ["BEEPER_WORKSPACE"] })]),
+  },
+  parameters: { layout: "padded" },
+};
+
+/** A local server that forwards its own PATH: the default row for PATH
+ * gives way, and HOME stays. */
+export const StdioForwardedDefaultsReplaced: Story = {
+  args: {
+    client: stubClient([stdioServer({ env_from: ["PATH"] })]),
   },
   parameters: { layout: "padded" },
 };

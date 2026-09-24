@@ -247,15 +247,20 @@ async fn disconnect_remote_machine(
 /// Save MCP configuration through the native-only server surface. Command
 /// transports receive an OS-native confirmation before the host credential is
 /// attached; renderer JavaScript can request the prompt but cannot approve it.
+///
+/// Each enabled bare command is forwarded with the program the dialog showed
+/// for it as its approved program, so the server starts that program and no
+/// other that the name comes to resolve to later.
 #[tauri::command]
 async fn put_native_mcp_servers(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
     config: Value,
 ) -> Result<Value, String> {
-    if !approve_local_mcp_commands(&app, &config, "Allow and save").await? {
+    let Some(approved) = approve_local_mcp_commands(&app, &config, "Allow and save").await? else {
         return Err("local MCP command configuration was not approved".to_owned());
-    }
+    };
+    let config = with_approved_executables(config, &approved)?;
 
     let info = wait_server_info(state.inner()).await?;
     let response = documents::native_auth(
@@ -271,17 +276,30 @@ async fn put_native_mcp_servers(
 }
 
 /// Ask, in an OS dialog, whether the enabled local MCP commands in `config`
-/// (`{"servers": [...]}`) may run. `Ok(true)` means the person allowed them,
-/// or that `config` starts no local command and there was nothing to ask.
-/// Renderer JavaScript can request the prompt but cannot answer it.
+/// (`{"servers": [...]}`) may run. `Ok(Some(programs))` means the person
+/// allowed them, or that `config` starts no local command and there was
+/// nothing to ask; `Ok(None)` means they declined. Renderer JavaScript can
+/// request the prompt but cannot answer it.
+///
+/// Each command is resolved the way the embedded server resolves it at
+/// verify and launch, so the dialog names the executable that would run: a
+/// bare `npx` shows the absolute path it resolves to on the host search PATH.
+/// `programs` maps each command, as typed, to that path: the caller forwards
+/// it as the approved program, and the server starts nothing else.
 pub(crate) async fn approve_local_mcp_commands(
     app: &tauri::AppHandle,
     config: &Value,
     allow_label: &str,
-) -> Result<bool, String> {
-    let commands = native_command_previews(config)?;
+) -> Result<Option<std::collections::BTreeMap<String, PathBuf>>, String> {
+    let resolved = resolve_native_commands(config).await?;
+    let commands = native_command_previews(config, &|command| {
+        resolved
+            .get(command)
+            .cloned()
+            .ok_or_else(|| format!("MCP command {command:?} was not resolved"))
+    })?;
     if commands.is_empty() {
-        return Ok(true);
+        return Ok(Some(resolved));
     }
     let preview = commands.join("\n");
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -300,7 +318,59 @@ pub(crate) async fn approve_local_mcp_commands(
     dialog.show(move |approved| {
         let _ = sender.send(approved);
     });
-    Ok(receiver.await.unwrap_or(false))
+    Ok(receiver.await.unwrap_or(false).then_some(resolved))
+}
+
+/// The approved program for each bare command in `resolved`, the programs
+/// the native dialog showed, as the server records them. An absolute command
+/// names its program itself and needs none.
+pub(crate) fn approved_bare_commands(
+    resolved: &std::collections::BTreeMap<String, PathBuf>,
+) -> std::collections::BTreeMap<String, String> {
+    resolved
+        .iter()
+        .filter(|(command, _)| tidebreak_server::mcp_stdio::is_bare_command(command))
+        .map(|(command, path)| (command.clone(), path.to_string_lossy().into_owned()))
+        .collect()
+}
+
+/// `config` as the native host forwards it once the person allowed its
+/// commands: each enabled server whose command is a bare name records, as
+/// `approved_executable`, the program the dialog showed for it, and every
+/// other server records none. Whatever the renderer put in that field is
+/// dropped, so the approved program only ever comes from the dialog.
+fn with_approved_executables(
+    mut config: Value,
+    resolved: &std::collections::BTreeMap<String, PathBuf>,
+) -> Result<Value, String> {
+    let approved = approved_bare_commands(resolved);
+    let servers = config
+        .get_mut("servers")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "MCP configuration must contain a servers array".to_owned())?;
+    for server in servers {
+        let program = if native_server_enabled(server) {
+            match server.get("command").and_then(Value::as_str) {
+                Some(command) if tidebreak_server::mcp_stdio::is_bare_command(command) => Some(
+                    approved
+                        .get(command)
+                        .cloned()
+                        .ok_or_else(|| format!("MCP command {command:?} was not resolved"))?,
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let Some(fields) = server.as_object_mut() else {
+            continue;
+        };
+        fields.remove("approved_executable");
+        if let Some(program) = program {
+            fields.insert("approved_executable".to_owned(), Value::String(program));
+        }
+    }
+    Ok(config)
 }
 
 /// Read the embedded server's answer to a native request: its JSON body, or
@@ -340,6 +410,9 @@ const MAX_NATIVE_APPROVAL_MANIFEST_CHARS: usize = 16_384;
 #[derive(Serialize)]
 struct NativeCommandApproval<'a> {
     server: &'a str,
+    /// The absolute path of the program that runs: the command as typed
+    /// when it is absolute, or where a bare name resolves on the host PATH.
+    executable: String,
     argv: Vec<String>,
     cwd: NativeCommandCwd,
     environment: NativeCommandEnvironment,
@@ -355,6 +428,9 @@ enum NativeCommandCwd {
 #[derive(Serialize)]
 struct NativeCommandEnvironment {
     ambient_environment: &'static str,
+    /// HOME and the host search PATH, which every local server gets unless
+    /// its definition sets that name itself.
+    forwarded_by_default: Vec<&'static str>,
     inherited_from_desktop_process: Vec<String>,
     stored_secrets: Vec<NativeStoredSecret>,
 }
@@ -372,18 +448,59 @@ enum NativeStoredSecretEffect {
     PreserveExistingStoredValue,
 }
 
-fn native_command_previews(config: &Value) -> Result<Vec<String>, String> {
-    let servers = config
+/// Whether a server entry in a native MCP configuration is enabled. An
+/// omitted flag means enabled, as it does on the server.
+fn native_server_enabled(server: &Value) -> bool {
+    server
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Resolve every enabled local command in `config` the way the embedded
+/// server resolves it at verify and launch, keyed by the command as typed. A
+/// command that cannot resolve refuses the save with the sentence Settings
+/// shows for the same failure, before any dialog appears.
+async fn resolve_native_commands(
+    config: &Value,
+) -> Result<std::collections::BTreeMap<String, PathBuf>, String> {
+    let servers = native_servers(config)?;
+    let mut resolved = std::collections::BTreeMap::new();
+    for server in servers
+        .iter()
+        .filter(|server| native_server_enabled(server))
+    {
+        let Some(command) = server.get("command").and_then(Value::as_str) else {
+            continue;
+        };
+        let command = native_command_token(command)?;
+        if resolved.contains_key(&command) {
+            continue;
+        }
+        let executable = tidebreak_server::mcp_stdio::resolve_stdio_executable(&command).await?;
+        resolved.insert(command, executable);
+    }
+    Ok(resolved)
+}
+
+fn native_servers(config: &Value) -> Result<&Vec<Value>, String> {
+    config
         .get("servers")
         .and_then(Value::as_array)
-        .ok_or_else(|| "MCP configuration must contain a servers array".to_owned())?;
+        .ok_or_else(|| "MCP configuration must contain a servers array".to_owned())
+}
+
+/// One approval manifest per enabled local command in `config`. `resolve`
+/// turns the command as typed into the absolute executable that runs, the
+/// same answer the server's verify and launch reach.
+fn native_command_previews(
+    config: &Value,
+    resolve: &dyn Fn(&str) -> Result<PathBuf, String>,
+) -> Result<Vec<String>, String> {
+    let servers = native_servers(config)?;
     let mut previews = Vec::new();
     for server in servers {
-        if !server
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-        {
+        if !native_server_enabled(server) {
             continue;
         }
         let Some(command) = server.get("command").and_then(Value::as_str) else {
@@ -394,11 +511,13 @@ fn native_command_previews(config: &Value) -> Result<Vec<String>, String> {
             .and_then(Value::as_str)
             .unwrap_or("unnamed");
         let command = native_command_token(command)?;
-        if !std::path::Path::new(&command).is_absolute() {
+        let executable = resolve(&command)?;
+        if !executable.is_absolute() {
             return Err(
-                "enabled MCP local commands must use an absolute executable path".to_owned(),
+                "an MCP local command must resolve to an absolute executable path".to_owned(),
             );
         }
+        let executable = native_command_token(&executable.to_string_lossy())?;
         let mut argv = vec![command];
         if let Some(args) = server.get("args") {
             let args = args
@@ -454,7 +573,7 @@ fn native_command_previews(config: &Value) -> Result<Vec<String>, String> {
                 }
             }
         }
-        let stored_secrets = stored_names
+        let stored_secrets: Vec<NativeStoredSecret> = stored_names
             .into_iter()
             .map(|name| NativeStoredSecret {
                 effect: if env_values.is_some_and(|values| values.contains_key(&name)) {
@@ -466,12 +585,23 @@ fn native_command_previews(config: &Value) -> Result<Vec<String>, String> {
             })
             .collect();
         let safe_name = native_command_token(name)?;
+        // A name the definition declares never gets the default, stored value
+        // or not. The spawn asks the same function, so the dialog lists
+        // exactly the defaults the process gets.
+        let forwarded_by_default = tidebreak_server::mcp_stdio::defaulted_names(
+            inherited_from_desktop_process
+                .iter()
+                .map(String::as_str)
+                .chain(stored_secrets.iter().map(|stored| stored.name.as_str())),
+        );
         let manifest = serde_json::to_string_pretty(&NativeCommandApproval {
             server: &safe_name,
+            executable,
             argv,
             cwd,
             environment: NativeCommandEnvironment {
                 ambient_environment: "cleared",
+                forwarded_by_default,
                 inherited_from_desktop_process,
                 stored_secrets,
             },
@@ -1538,8 +1668,23 @@ mod bundle_tests {
 mod server_info_tests {
     use super::*;
 
+    /// The approval manifests for `config`, resolving each command the way
+    /// the server does against an empty search path: an absolute path stands
+    /// as typed, and a bare name is not found.
+    fn previews(config: &Value) -> Result<Vec<String>, String> {
+        previews_on(config, std::ffi::OsStr::new(""))
+    }
+
+    /// [`previews`], resolving bare names on `search_path` instead of the
+    /// host's, so a test does not depend on what this machine installed.
+    fn previews_on(config: &Value, search_path: &std::ffi::OsStr) -> Result<Vec<String>, String> {
+        native_command_previews(config, &|command| {
+            tidebreak_server::mcp_stdio::resolve_stdio_executable_on(command, search_path)
+        })
+    }
+
     fn single_native_approval(config: Value) -> Value {
-        let previews = native_command_previews(&config).expect("valid native command preview");
+        let previews = previews(&config).expect("valid native command preview");
         assert_eq!(previews.len(), 1);
         serde_json::from_str(&previews[0]).expect("approval is a canonical JSON manifest")
     }
@@ -1669,16 +1814,138 @@ mod server_info_tests {
     }
 
     #[test]
-    fn enabled_native_commands_require_an_absolute_executable_path() {
-        for command in ["node", "./node", "tools/node"] {
+    fn enabled_native_commands_refuse_relative_paths_and_names_that_do_not_resolve() {
+        for command in ["./node", "tools/node"] {
             let config = serde_json::json!({
                 "servers": [{"name": "ambiguous", "command": command, "enabled": true}]
             });
-            assert_eq!(
-                native_command_previews(&config).unwrap_err(),
-                "enabled MCP local commands must use an absolute executable path"
-            );
+            let error = previews(&config).unwrap_err();
+            assert!(error.contains("Relative executable path"), "{error}");
         }
+        let config = serde_json::json!({
+            "servers": [{"name": "missing", "command": "node", "enabled": true}]
+        });
+        let error = previews(&config).unwrap_err();
+        assert!(error.starts_with("Command not found: \"node\""), "{error}");
+    }
+
+    /// The finding this gate had: the editor, the docs, and import all
+    /// promise a bare command name, and the gate refused every one. A bare
+    /// `npx` or `node` now passes, resolved on the search path the server
+    /// uses, and the dialog names the absolute executable that will run
+    /// beside the argv as typed, with HOME and PATH forwarded by default.
+    #[cfg(unix)]
+    #[test]
+    fn a_bare_command_resolves_to_the_absolute_executable_it_runs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = tempfile::tempdir().unwrap();
+        for program in ["npx", "node"] {
+            let path = bin.path().join(program);
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for (program, args) in [
+            (
+                "npx",
+                serde_json::json!(["-y", "@modelcontextprotocol/server-filesystem"]),
+            ),
+            ("node", serde_json::json!(["server.mjs"])),
+        ] {
+            let config = serde_json::json!({
+                "servers": [{"name": "files", "command": program, "args": args}]
+            });
+            let previews = previews_on(&config, bin.path().as_os_str()).unwrap();
+            assert_eq!(previews.len(), 1);
+            let approval: Value = serde_json::from_str(&previews[0]).unwrap();
+            let executable = bin.path().join(program);
+            assert_eq!(
+                approval["executable"],
+                executable.to_string_lossy().as_ref()
+            );
+            assert!(executable.is_absolute());
+            assert_eq!(approval["argv"][0], program);
+            assert_eq!(
+                approval["environment"]["forwarded_by_default"],
+                serde_json::json!(["HOME", "PATH"])
+            );
+            // The dialog text carries the resolved path, so the person sees
+            // which program a bare name runs before they allow it.
+            let prompt = native_mcp_command_confirmation(&previews[0]);
+            assert!(prompt.contains(executable.to_string_lossy().as_ref()));
+        }
+    }
+
+    /// Security review of #3573: the gate resolved a bare `npx` only to show
+    /// it, then forwarded the configuration unchanged, so the server resolved
+    /// the name again at every spawn. The gate now forwards the program it
+    /// showed as each enabled bare command's approved program, and drops
+    /// whatever the renderer put in that field.
+    #[test]
+    fn the_gate_forwards_the_program_it_showed_and_never_the_renderers() {
+        let config = serde_json::json!({
+            "servers": [
+                {"name": "files", "command": "npx", "approved_executable": "/tmp/renderer/npx"},
+                {"name": "shell", "command": "/bin/sh", "approved_executable": "/tmp/renderer/sh"},
+                {
+                    "name": "draft",
+                    "command": "node",
+                    "enabled": false,
+                    "approved_executable": "/tmp/renderer/node"
+                },
+                {"name": "remote", "url": "https://example.test/mcp"}
+            ]
+        });
+        let resolved = std::collections::BTreeMap::from([
+            ("npx".to_owned(), PathBuf::from("/opt/tools/bin/npx")),
+            ("/bin/sh".to_owned(), PathBuf::from("/bin/sh")),
+        ]);
+        let forwarded = with_approved_executables(config, &resolved).unwrap();
+        let servers = forwarded["servers"].as_array().unwrap();
+        assert_eq!(servers[0]["approved_executable"], "/opt/tools/bin/npx");
+        for server in &servers[1..] {
+            assert!(server.get("approved_executable").is_none(), "{server}");
+        }
+        assert_eq!(
+            approved_bare_commands(&resolved),
+            std::collections::BTreeMap::from([("npx".to_owned(), "/opt/tools/bin/npx".to_owned())])
+        );
+    }
+
+    /// A name the definition declares in `env` gets no default even while
+    /// no value is stored for it, and the dialog lists the same defaults the
+    /// server's spawn gives the process.
+    #[test]
+    fn a_declared_name_without_a_stored_value_is_not_listed_as_defaulted() {
+        let approval = single_native_approval(serde_json::json!({
+            "servers": [{"name": "docs", "command": "/usr/bin/docs-mcp", "env": ["PATH"]}]
+        }));
+        assert_eq!(
+            approval["environment"]["forwarded_by_default"],
+            serde_json::json!(tidebreak_server::mcp_stdio::defaulted_names(["PATH"]))
+        );
+        assert_eq!(
+            approval["environment"]["forwarded_by_default"],
+            serde_json::json!(["HOME"])
+        );
+    }
+
+    /// A name the definition sets itself replaces the default, so the dialog
+    /// no longer lists it as forwarded by default.
+    #[test]
+    fn a_definition_that_sets_path_or_home_itself_is_not_listed_as_defaulted() {
+        let approval = single_native_approval(serde_json::json!({
+            "servers": [{
+                "name": "docs",
+                "command": "/usr/bin/docs-mcp",
+                "env_from": ["PATH"],
+                "env": ["HOME"]
+            }]
+        }));
+        assert_eq!(
+            approval["environment"]["forwarded_by_default"],
+            serde_json::json!([])
+        );
     }
 
     #[test]
@@ -1708,7 +1975,7 @@ mod server_info_tests {
                 "enabled": true
             }]
         });
-        assert!(native_command_previews(&config).is_err());
+        assert!(previews(&config).is_err());
     }
 
     #[test]
@@ -1716,7 +1983,7 @@ mod server_info_tests {
         let servers = (0..9)
             .map(|index| serde_json::json!({"name": format!("server-{index}"), "command": "/bin/true"}))
             .collect::<Vec<_>>();
-        let previews = native_command_previews(&serde_json::json!({"servers": servers})).unwrap();
+        let previews = previews(&serde_json::json!({"servers": servers})).unwrap();
         assert_eq!(previews.len(), 9);
         let ninth: Value = serde_json::from_str(&previews[8]).unwrap();
         assert_eq!(ninth["server"], "server-8");
@@ -1729,7 +1996,7 @@ mod server_info_tests {
         let config = serde_json::json!({
             "servers": [{"name": "long", "command": "/bin/sh", "args": ["-c", argument]}]
         });
-        let previews = native_command_previews(&config).unwrap();
+        let previews = previews(&config).unwrap();
         assert!(previews[0].contains(suffix));
     }
 
@@ -1839,6 +2106,6 @@ mod server_info_tests {
                 "env_from": ["X".repeat(MAX_NATIVE_APPROVAL_FIELD_CHARS + 1)]
             }]
         });
-        assert!(native_command_previews(&config).is_err());
+        assert!(previews(&config).is_err());
     }
 }

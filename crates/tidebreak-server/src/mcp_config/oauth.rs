@@ -27,7 +27,7 @@ use crate::connectors::{
 };
 use crate::mcp_oauth_runtime::{McpOAuthState, McpOAuthStatus};
 
-use super::types::McpServerDefinition;
+use super::types::{McpServerDefinition, ReconnectPark};
 
 /// How long the runtime waits for a server's `401` challenge when it asks the
 /// server how to authorize.
@@ -58,6 +58,11 @@ pub(super) enum OAuthNeed {
     /// The server asks for an OAuth sign-in Tidebreak can run. The person
     /// signs in with Connect, on a page at `host`.
     SignIn { host: String },
+    /// The server refused the static bearer token it is configured with, and
+    /// its challenge names protected-resource metadata for an OAuth sign-in
+    /// Tidebreak can run, on a page at `host`. Settings offers Use OAuth,
+    /// which switches the server to OAuth.
+    Offered { host: String },
     /// The server asks for an OAuth sign-in Tidebreak cannot complete.
     Unsupported(OAuthUnsupported),
     /// The server asks for an OAuth sign-in, but its sign-in service did not
@@ -73,6 +78,11 @@ impl OAuthNeed {
                 "This server needs you to sign in. Select Connect to sign in with your browser."
                     .to_string()
             }
+            Self::Offered { host } => format!(
+                "This server did not accept the bearer token. It offers an OAuth sign-in on \
+                 {host} instead: select Use OAuth to sign in with your browser, or correct the \
+                 token."
+            ),
             Self::Unsupported(reason) => format!(
                 "This server asks you to sign in, but Tidebreak cannot complete its sign-in. {} \
                  If the server offers access tokens, set a bearer token variable instead.",
@@ -84,15 +94,29 @@ impl OAuthNeed {
         }
     }
 
+    /// Why retrying cannot help until someone signs in or changes the server,
+    /// if that is so. A sign-in service that did not answer may answer next
+    /// time. A bearer the server refused stays refused until the settings
+    /// change.
+    pub(super) fn park(&self) -> Option<ReconnectPark> {
+        match self {
+            Self::SignIn { .. } | Self::Unsupported(_) => Some(ReconnectPark::Authorization),
+            Self::Offered { .. } => Some(ReconnectPark::Configuration),
+            Self::Unavailable => None,
+        }
+    }
+
     /// Whether retrying cannot help until someone signs in or changes the
-    /// server. A sign-in service that did not answer may answer next time.
+    /// server.
+    #[cfg(test)]
     pub(super) fn parks(&self) -> bool {
-        !matches!(self, Self::Unavailable)
+        self.park().is_some()
     }
 
     /// Whether Save and verify keeps the server. Only a saved server can be
-    /// signed in to, so one that asks for a sign-in saves; one whose sign-in
-    /// Tidebreak cannot complete fails the save with the reason.
+    /// signed in to, so one that asks for a sign-in saves, and so does one
+    /// that offers a sign-in in place of the bearer it refused. One whose
+    /// sign-in Tidebreak cannot complete fails the save with the reason.
     pub(super) fn saves(&self) -> bool {
         !matches!(self, Self::Unsupported(_))
     }
@@ -109,6 +133,22 @@ pub(super) fn signs_in(definition: &McpServerDefinition) -> bool {
         && definition.plugin.is_none()
         && definition.launch.is_none()
         && definition.bearer_token_env.is_none()
+        && !definition.bearer_token_stored
+        && definition
+            .url
+            .as_deref()
+            .is_some_and(|url| tidebreak_mcp::validate_http_url_with_credentials(url, true).is_ok())
+}
+
+/// Whether `definition` is a server the person configured with a static
+/// bearer token, from a variable or the credential store, whose URL can carry
+/// an OAuth token. When such a server refuses its bearer and names OAuth
+/// metadata, Settings offers to switch it to OAuth.
+pub(super) fn may_offer_sign_in(definition: &McpServerDefinition) -> bool {
+    definition.gateway_endpoint.is_none()
+        && definition.plugin.is_none()
+        && definition.launch.is_none()
+        && (definition.bearer_token_env.is_some() || definition.bearer_token_stored)
         && definition
             .url
             .as_deref()
@@ -153,6 +193,46 @@ pub(super) async fn detect(url: &str, client: &McpOAuthClient) -> Option<OAuthNe
         .await
         .ok()
         .flatten()
+}
+
+/// Ask a server that refused its static bearer token whether it offers an
+/// OAuth sign-in instead.
+///
+/// Only a `401` challenge that names protected-resource metadata (RFC 9728
+/// §5.1) counts, and only when that metadata leads to a sign-in Tidebreak
+/// can run. `None` leaves the `401` an ordinary authentication failure: the
+/// token is wrong, and nothing else is on offer.
+pub(super) async fn detect_offer(url: &str, client: &McpOAuthClient) -> Option<OAuthNeed> {
+    let resource = url::Url::parse(url).ok()?;
+    let ask = async {
+        let challenge = tidebreak_mcp::authorization_challenge(url, CHALLENGE_TIMEOUT)
+            .await
+            .ok()
+            .flatten()?;
+        crate::connectors::resource_metadata_from_challenge(&challenge)?;
+        match client.discover(&resource, Some(&challenge)).await? {
+            Discovery::Supported(discovered) => Some(OAuthNeed::Offered {
+                host: discovered.sign_in_host,
+            }),
+            Discovery::Unsupported(_) | Discovery::Unavailable => None,
+        }
+    };
+    tokio::time::timeout(DETECTION_TIMEOUT, ask)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The status Settings shows for a server that refused its static bearer and
+/// offers an OAuth sign-in instead: `Available`, with the sign-in host. `None`
+/// for any other need.
+pub(super) fn offered_status(need: Option<&OAuthNeed>) -> Option<McpOAuthStatus> {
+    match need {
+        Some(OAuthNeed::Offered { host }) => {
+            Some(McpOAuthStatus::of(McpOAuthState::Available).with_sign_in_host(Some(host.clone())))
+        }
+        _ => None,
+    }
 }
 
 /// One server's sign-in, with the URL it signs in to. A record whose URL no
@@ -253,6 +333,7 @@ pub(super) fn project_status(
         return Some(McpOAuthStatus::failed(*state, message.clone()).with_sign_in_host(host));
     }
     let status = match need {
+        Some(OAuthNeed::Offered { .. }) => return offered_status(need),
         Some(OAuthNeed::Unsupported(reason)) => {
             return Some(McpOAuthStatus::failed(
                 McpOAuthState::Unsupported,
@@ -453,8 +534,13 @@ mod tests {
             env_values: Default::default(),
             env_from: Vec::new(),
             cwd: None,
+            approved_executable: None,
             url: Some(url.to_string()),
             bearer_token_env: None,
+            bearer_token_stored: false,
+            bearer_token_value: None,
+            headers: Default::default(),
+            header_values: Default::default(),
             oauth: false,
             gateway_endpoint: None,
             request_timeout_ms: super::super::types::DEFAULT_REQUEST_TIMEOUT_MS,
@@ -475,6 +561,14 @@ mod tests {
         bearer.bearer_token_env = Some("MCP_TOKEN".to_string());
         assert!(!signs_in(&bearer));
         assert_eq!(sign_in_url(&bearer), None);
+        assert!(may_offer_sign_in(&bearer));
+
+        // A bearer held in the credential store is just as static.
+        let mut stored = http("https://mcp.example.test/mcp");
+        stored.bearer_token_stored = true;
+        assert!(!signs_in(&stored));
+        assert!(may_offer_sign_in(&stored));
+        assert!(!may_offer_sign_in(&http("https://mcp.example.test/mcp")));
 
         let mut plugin = http("https://mcp.example.test/mcp");
         plugin.plugin = Some("docs-plugin".to_string());

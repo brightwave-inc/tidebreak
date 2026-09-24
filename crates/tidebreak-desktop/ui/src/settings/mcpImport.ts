@@ -10,6 +10,33 @@ const MAX_REQUEST_TIMEOUT_MS = 3_600_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const MAX_NAMESPACE_BYTES = 32;
 const MAX_IMPORT_BYTES = 1024 * 1024;
+/** The server's limits on custom headers, checked here so an import says
+ * which header is wrong instead of failing the save. */
+const MAX_HEADERS = 8;
+const MAX_HEADER_NAME_BYTES = 64;
+const MAX_CREDENTIAL_VALUE_BYTES = 8 * 1024;
+/** Header names the connection owns: hop-by-hop and framing fields, proxy
+ * credentials, and what the transport sets itself. The server refuses them,
+ * as it refuses Authorization, which the bearer token setting carries. */
+const REFUSED_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "content-encoding",
+  "content-length",
+  "expect",
+  "host",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "accept",
+  "content-type",
+  "mcp-protocol-version",
+  "mcp-session-id",
+]);
 
 type ImportShape = "tidebreak" | "common";
 
@@ -26,20 +53,36 @@ export type McpImportSkip = {
   reason: string;
 };
 
+/** A value the file did not carry, which the person enters before saving:
+ * an environment variable's value, a header value the file read from a
+ * placeholder, or a bearer token it named but did not give. */
 export type McpImportSecret = {
   server: string;
   name: string;
+  kind?: "environment" | "header" | "bearer";
+};
+
+/** A value the file carried that the import keeps for the OS credential
+ * store: a literal Authorization token or header value. The editor holds it
+ * until Save and verify writes it to the store, and it never comes back. */
+export type McpImportStored = {
+  server: string;
+  kind: "bearer" | "header";
+  /** The header's name; absent for the bearer token. */
+  name?: string;
 };
 
 export type McpImportResult = {
   servers: McpServerInfo[];
   skipped: McpImportSkip[];
   secrets: McpImportSecret[];
+  stored: McpImportStored[];
 };
 
 type ParsedEntry = {
   server: McpServerInfo;
   secrets: McpImportSecret[];
+  stored: McpImportStored[];
 };
 
 type FieldResult<T> = { value: T } | { error: string };
@@ -96,6 +139,7 @@ export function parseMcpImport(
   const servers: McpServerInfo[] = [];
   const skipped: McpImportSkip[] = [];
   const secrets: McpImportSecret[] = [];
+  const stored: McpImportStored[] = [];
 
   for (const [index, entry] of entries.entries()) {
     const rawName =
@@ -163,10 +207,11 @@ export function parseMcpImport(
     }
     servers.push(parsed.value.server);
     secrets.push(...parsed.value.secrets);
+    stored.push(...parsed.value.stored);
     taken.add(rawName);
   }
 
-  return { servers, skipped, secrets };
+  return { servers, skipped, secrets, stored };
 }
 
 function sourceEntries(value: unknown): SourceEntry[] {
@@ -482,12 +527,13 @@ function parseEntry(
   if ("error" in cwd) return cwd;
   const bearer = nullableString(raw, "bearer_token_env", path);
   if ("error" in bearer) return bearer;
-  const headerBearer = bearerEnvironmentFromHeaders(raw.headers, path);
-  if ("error" in headerBearer) return headerBearer;
+  const fromHeaders = readHeaders(raw.headers, path);
+  if ("error" in fromHeaders) return fromHeaders;
+  const headers = fromHeaders.value;
   if (
     bearer.value !== null &&
-    headerBearer.value !== null &&
-    bearer.value !== headerBearer.value
+    headers.bearerEnv !== null &&
+    bearer.value !== headers.bearerEnv
   ) {
     return {
       error: issue(
@@ -497,7 +543,7 @@ function parseEntry(
       ),
     };
   }
-  const bearerEnvironment = bearer.value ?? headerBearer.value;
+  const bearerEnvironment = bearer.value ?? headers.bearerEnv;
   if (bearerEnvironment !== null) {
     const bearerError = validateEnvironmentNames(
       [bearerEnvironment],
@@ -505,6 +551,34 @@ function parseEntry(
     );
     if (bearerError !== null) return { error: bearerError };
   }
+  // A Tidebreak file marks a stored token without carrying it; a literal
+  // Authorization header carries one, which the credential store keeps.
+  const storedFlag = booleanField(raw, "bearer_token_stored", false, path);
+  if ("error" in storedFlag) return storedFlag;
+  const storedBearer =
+    storedFlag.value || headers.bearerValue !== null || headers.bearerToEnter;
+  if (bearerEnvironment !== null && storedBearer) {
+    return {
+      error: issue(
+        joinPath(path, "headers") || "headers",
+        "The bearer token comes from a variable and from a stored value.",
+        "Keep one: bearer_token_env or a literal Authorization header.",
+      ),
+    };
+  }
+  const oauth = booleanField(raw, "oauth", false, path);
+  if ("error" in oauth) return oauth;
+  if (oauth.value && (bearerEnvironment !== null || storedBearer)) {
+    return {
+      error: issue(
+        joinPath(path, "oauth") || "oauth",
+        "Set oauth or a bearer token, not both.",
+        "A server that signs in with OAuth gets its token from the sign-in.",
+      ),
+    };
+  }
+  const sendsHttpCredentials =
+    storedBearer || oauth.value || headers.names.length > 0;
 
   const enabled = booleanField(raw, "enabled", true, path);
   if ("error" in enabled) return enabled;
@@ -548,6 +622,15 @@ function parseEntry(
         ),
       };
     }
+    if (sendsHttpCredentials) {
+      return {
+        error: issue(
+          path,
+          "Headers, bearer tokens, and OAuth apply only to URL servers.",
+          "Remove them, or switch this server to HTTP.",
+        ),
+      };
+    }
   } else if (
     args.length > 0 ||
     env.length > 0 ||
@@ -567,7 +650,7 @@ function parseEntry(
     const urlError = validateUrl(
       joinPath(path, "url") || "url",
       url.value,
-      bearerEnvironment !== null,
+      bearerEnvironment !== null || sendsHttpCredentials,
     );
     if (urlError !== null) return { error: urlError };
   } else if (bearerEnvironment !== null) {
@@ -576,6 +659,14 @@ function parseEntry(
         joinPath(path, "bearer_token_env") || "bearer_token_env",
         "Bearer token variables apply only to URL servers.",
         "Remove the bearer variable or switch this server to HTTP.",
+      ),
+    };
+  } else if (sendsHttpCredentials) {
+    return {
+      error: issue(
+        path,
+        "Headers, bearer tokens, and OAuth apply only to URL servers.",
+        "Remove them, or switch this server to HTTP.",
       ),
     };
   }
@@ -607,6 +698,41 @@ function parseEntry(
     };
   }
 
+  const secrets: McpImportSecret[] = [
+    ...env.map((environmentName) => ({
+      server: name,
+      name: environmentName,
+    })),
+    ...headers.toEnter.map(
+      (header): McpImportSecret => ({
+        server: name,
+        name: header,
+        kind: "header",
+      }),
+    ),
+    ...(storedBearer && headers.bearerValue === null
+      ? [
+          {
+            server: name,
+            name: "bearer token",
+            kind: "bearer",
+          } satisfies McpImportSecret,
+        ]
+      : []),
+  ];
+  const stored: McpImportStored[] = [
+    ...(headers.bearerValue !== null
+      ? [{ server: name, kind: "bearer" } satisfies McpImportStored]
+      : []),
+    ...Object.keys(headers.values).map(
+      (header): McpImportStored => ({
+        server: name,
+        kind: "header",
+        name: header,
+      }),
+    ),
+  ];
+
   return {
     value: {
       server: {
@@ -618,20 +744,28 @@ function parseEntry(
         cwd: cwd.value,
         url: url.value,
         bearer_token_env: bearerEnvironment,
+        // The literal values ride the draft only until Save and verify writes
+        // them to the credential store; the server never sends them back.
+        ...(storedBearer ? { bearer_token_stored: true } : {}),
+        ...(headers.bearerValue !== null
+          ? { bearer_token_value: headers.bearerValue }
+          : {}),
+        ...(headers.names.length > 0 ? { headers: headers.names } : {}),
+        ...(Object.keys(headers.values).length > 0
+          ? { header_values: headers.values }
+          : {}),
         gateway_endpoint: gateway.value,
         request_timeout_ms: timeout.value,
         enabled: enabled.value,
         plugin: null,
-        oauth: false,
+        oauth: oauth.value,
         health: "initializing",
         tool_count: 0,
         diagnostic: null,
         curated: null,
       },
-      secrets: env.map((environmentName) => ({
-        server: name,
-        name: environmentName,
-      })),
+      secrets,
+      stored,
     },
   };
 }
@@ -783,57 +917,186 @@ function readEnvironment(
   return { value: { env, envFrom } };
 }
 
-function bearerEnvironmentFromHeaders(
-  value: unknown,
-  path: string,
-): FieldResult<string | null> {
+/** What a server's `headers` gave the import. */
+type HeaderImport = {
+  /** An Authorization header's bearer token variable, from `${env:NAME}`. */
+  bearerEnv: string | null;
+  /** A literal Authorization bearer token, kept for the credential store. */
+  bearerValue: string | null;
+  /** An Authorization bearer the file named but did not give, such as a
+   * VS Code `${input:...}`: the person enters it before saving. */
+  bearerToEnter: boolean;
+  /** Custom header names, in file order. */
+  names: string[];
+  /** Literal custom header values, kept for the credential store. */
+  values: Record<string, string>;
+  /** Custom headers whose value the file read from a placeholder: the
+   * person enters them before saving. */
+  toEnter: string[];
+};
+
+const VALID_HEADER =
+  'A valid value looks like { "X-Api-Key": "your key" } or { "Authorization": "Bearer ${env:TOKEN}" }.';
+
+/**
+ * Read a server's `headers`. An Authorization header becomes the server's
+ * bearer token: from a variable when it names one, and otherwise kept for
+ * the OS credential store, the way the editor stores a pasted token. Other
+ * headers become custom headers whose literal values are kept the same way.
+ * A Tidebreak file lists header names only, as an array. Errors name a
+ * header, never its value.
+ */
+function readHeaders(value: unknown, path: string): FieldResult<HeaderImport> {
   const field = joinPath(path, "headers") || "headers";
-  if (value === undefined || value === null) return { value: null };
+  const result: HeaderImport = {
+    bearerEnv: null,
+    bearerValue: null,
+    bearerToEnter: false,
+    names: [],
+    values: {},
+    toEnter: [],
+  };
+  if (value === undefined || value === null) return { value: result };
+  if (Array.isArray(value)) {
+    if (!value.every((item) => typeof item === "string")) {
+      return {
+        error: issue(field, "Header names are strings.", VALID_HEADER),
+      };
+    }
+    result.names = [...value];
+    result.toEnter = [...value];
+    const problem = headerNamesIssue(result.names, field);
+    return problem === null ? { value: result } : { error: problem };
+  }
   if (!isRecord(value)) {
     return {
-      error: issue(
-        field,
-        "HTTP headers must be a JSON object.",
-        'A valid value looks like { "Authorization": "Bearer ${env:TOKEN}" }.',
-      ),
+      error: issue(field, "HTTP headers must be a JSON object.", VALID_HEADER),
     };
   }
-  const entries = Object.entries(value);
-  if (entries.length === 0) return { value: null };
-  if (
-    entries.length !== 1 ||
-    entries[0]?.[0].toLowerCase() !== "authorization"
-  ) {
-    return {
-      error: issue(
-        field,
-        "Custom HTTP headers are not supported.",
-        "Add this server manually, or keep a single Authorization bearer header.",
-      ),
-    };
+  for (const [name, raw] of Object.entries(value)) {
+    const itemPath = joinPath(field, name);
+    if (typeof raw !== "string") {
+      return {
+        error: issue(itemPath, "Header values are strings.", VALID_HEADER),
+      };
+    }
+    if (name.toLowerCase() === "authorization") {
+      const token = bearerToken(raw);
+      if (token === null) {
+        return {
+          error: issue(
+            itemPath,
+            "Authorization carries a Bearer token here. Tidebreak cannot send another scheme.",
+            VALID_BEARER,
+          ),
+        };
+      }
+      const placeholder = parsePlaceholder(token);
+      if (placeholder?.kind === "env") {
+        result.bearerEnv = placeholder.name;
+      } else if (placeholder?.kind === "input") {
+        result.bearerToEnter = true;
+      } else if (headerSafe(token)) {
+        result.bearerValue = token;
+      } else {
+        return {
+          error: issue(
+            itemPath,
+            "The bearer token must be plain text of at most 8 KB.",
+            VALID_BEARER,
+          ),
+        };
+      }
+      continue;
+    }
+    result.names.push(name);
+    if (parsePlaceholder(raw.trim()) !== null) {
+      result.toEnter.push(name);
+    } else if (headerSafe(raw)) {
+      result.values[name] = raw;
+    } else {
+      return {
+        error: issue(
+          itemPath,
+          "Header values are plain text of at most 8 KB.",
+          VALID_HEADER,
+        ),
+      };
+    }
   }
-  const authorization = entries[0][1];
-  const authorizationPath = joinPath(field, "Authorization");
-  if (typeof authorization !== "string") {
-    return {
-      error: issue(
-        authorizationPath,
-        "The Authorization header must be a string.",
+  const problem = headerNamesIssue(result.names, field);
+  return problem === null ? { value: result } : { error: problem };
+}
+
+/** The token of an Authorization value: `Bearer TOKEN`, or a bare token.
+ * `null` for another scheme, such as `Basic`. */
+function bearerToken(value: string): string | null {
+  const trimmed = value.trim();
+  const scheme = trimmed.match(/^(\S+)\s+(.+)$/);
+  if (scheme === null) return trimmed.length > 0 ? trimmed : null;
+  return scheme[1]?.toLowerCase() === "bearer"
+    ? (scheme[2]?.trim() ?? null)
+    : null;
+}
+
+/** Whether a value can travel in a header: not blank, bounded, and visible
+ * ASCII, space, or tab, as the server requires. */
+function headerSafe(value: string): boolean {
+  return (
+    value.trim().length > 0 &&
+    value.length <= MAX_CREDENTIAL_VALUE_BYTES &&
+    /^[\t\x20-\x7e]*$/.test(value)
+  );
+}
+
+/** Why a server's custom header names cannot be saved, or `null`. */
+function headerNamesIssue(names: string[], field: string): string | null {
+  if (names.length > MAX_HEADERS) {
+    return issue(
+      field,
+      `Tidebreak sends at most ${MAX_HEADERS} custom headers.`,
+      "Remove extra headers.",
+    );
+  }
+  const seen = new Set<string>();
+  for (const name of names) {
+    const itemPath = joinPath(field, name);
+    const lower = name.toLowerCase();
+    if (
+      name.length === 0 ||
+      name.length > MAX_HEADER_NAME_BYTES ||
+      !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)
+    ) {
+      return issue(
+        itemPath,
+        `Header name ${JSON.stringify(clip(name))} is not a valid HTTP field name.`,
+        "A valid name looks like X-Api-Key.",
+      );
+    }
+    if (lower === "authorization") {
+      return issue(
+        itemPath,
+        "Authorization is the bearer token setting, not a custom header.",
         VALID_BEARER,
-      ),
-    };
+      );
+    }
+    if (REFUSED_HEADERS.has(lower)) {
+      return issue(
+        itemPath,
+        `The connection sets ${name} itself.`,
+        "Remove it from headers.",
+      );
+    }
+    if (seen.has(lower)) {
+      return issue(
+        itemPath,
+        `Header ${name} appears more than once.`,
+        "Keep one.",
+      );
+    }
+    seen.add(lower);
   }
-  const bearer = authorization.match(/^Bearer\s+(.+)$/i);
-  const token = (bearer?.[1] ?? authorization).trim();
-  const placeholder = parsePlaceholder(token);
-  if (placeholder !== null) return { value: placeholder.name };
-  return {
-    error: issue(
-      authorizationPath,
-      "Authorization uses a bearer environment variable, not a saved token value.",
-      VALID_BEARER,
-    ),
-  };
+  return null;
 }
 
 function parsePlaceholder(
