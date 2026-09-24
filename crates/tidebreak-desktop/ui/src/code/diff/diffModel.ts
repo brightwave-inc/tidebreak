@@ -33,7 +33,8 @@ export type DiffRow = {
   readonly hunk: number;
   /**
    * A context row that was a changed pair until whitespace was ignored
-   * keeps the old line here, so the side-by-side view can show both.
+   * keeps the old line here, even when the two texts are equal, so the
+   * old side of the view can show that line with its own syntax.
    */
   readonly old?: { readonly text: string; readonly source: number };
   /** Changed spans of `text`, when the row pairs with a similar line. */
@@ -127,8 +128,42 @@ export function changeBlocks(
   return blocks;
 }
 
-function withoutWhitespace(text: string): string {
-  return text.replace(/\s+/g, "");
+/**
+ * The line as `git diff -w` compares it. Git's whitespace is the space, the
+ * tab, the carriage return, and the newline; a no-break space, a byte-order
+ * mark, a vertical tab, and a form feed are content to git, so they are
+ * content here too.
+ */
+function withoutGitWhitespace(text: string): string {
+  return text.replace(/[ \t\r\n]+/g, "");
+}
+
+/** Git's "\ No newline at end of file", under the line it describes. */
+function isNoNewlineMarker(row: DiffRow): boolean {
+  return row.kind === "meta" && row.text.startsWith("\\");
+}
+
+/**
+ * The changes `git diff -w` compares, as `[start, end)` index pairs: runs of
+ * added and removed rows, each with the "\ No newline at end of file" marker
+ * of any line in it. The marker sits between a file's old last line and its
+ * new one, and to `-w` the newline it talks about is only whitespace.
+ */
+function whitespaceBlocks(
+  rows: readonly DiffRow[],
+): Array<readonly [number, number]> {
+  const blocks: Array<readonly [number, number]> = [];
+  let start = -1;
+  rows.forEach((row, index) => {
+    const changed = row.kind === "add" || row.kind === "del";
+    if (changed && start === -1) start = index;
+    if (!changed && start !== -1 && !isNoNewlineMarker(row)) {
+      blocks.push([start, index]);
+      start = -1;
+    }
+  });
+  if (start !== -1) blocks.push([start, rows.length]);
+  return blocks;
 }
 
 /** Beyond this many cells the alignment keeps only its common ends. */
@@ -207,10 +242,11 @@ export function alignSequences(
  *
  * Inside each change, a removed line and an added line that differ only in
  * whitespace become one context row: the new text, both line numbers, and
- * the old text kept for the side-by-side view. A hunk left with no change at
- * all goes, header and all. Working from the diff rather than asking git
- * again means the pull request's diff, which GitHub produced, gets the same
- * treatment as the worktree's.
+ * the old line kept for the side-by-side view and for its syntax. A file
+ * whose only change is a final newline has nothing left to show, as with
+ * `-w`. A hunk left with no change at all goes, header and all. Working from
+ * the diff rather than asking git again means the pull request's diff, which
+ * GitHub produced, gets the same treatment as the worktree's.
  */
 export function ignoreWhitespaceChanges(rows: readonly DiffRow[]): DiffRow[] {
   const merged: DiffRow[] = [];
@@ -220,38 +256,60 @@ export function ignoreWhitespaceChanges(rows: readonly DiffRow[]): DiffRow[] {
     for (let index = start; index < end; index += 1) merged.push(from[index]!);
   };
   let cursor = 0;
-  for (const [start, end] of changeBlocks(rows)) {
+  for (const [start, end] of whitespaceBlocks(rows)) {
     append(rows, cursor, start);
-    const block = rows.slice(start, end);
-    const removed = block.filter((row) => row.kind === "del");
-    const added = block.filter((row) => row.kind === "add");
+    const removed: DiffRow[] = [];
+    const added: DiffRow[] = [];
+    // The newline marker under a line, if git wrote one.
+    const marker = new Map<DiffRow, DiffRow>();
+    for (let index = start; index < end; index += 1) {
+      const row = rows[index]!;
+      if (row.kind === "del") removed.push(row);
+      else if (row.kind === "add") added.push(row);
+      else if (index > start) marker.set(rows[index - 1]!, row);
+    }
+    const emit = (row: DiffRow) => {
+      merged.push(row);
+      const note = marker.get(row);
+      if (note) merged.push(note);
+    };
+    const emitRange = (
+      from: readonly DiffRow[],
+      first: number,
+      last: number,
+    ) => {
+      for (let index = first; index < last; index += 1) emit(from[index]!);
+    };
     const pairs = alignSequences(
-      removed.map((row) => withoutWhitespace(row.text)),
-      added.map((row) => withoutWhitespace(row.text)),
+      removed.map((row) => withoutGitWhitespace(row.text)),
+      added.map((row) => withoutGitWhitespace(row.text)),
     );
     let nextRemoved = 0;
     let nextAdded = 0;
     for (const [removedIndex, addedIndex] of pairs) {
-      append(removed, nextRemoved, removedIndex);
-      append(added, nextAdded, addedIndex);
+      emitRange(removed, nextRemoved, removedIndex);
+      emitRange(added, nextAdded, addedIndex);
       const was = removed[removedIndex]!;
       const now = added[addedIndex]!;
-      merged.push({
+      // The pair reads as its new line, so only the new line's marker, if
+      // it has one, still says anything.
+      const paired: DiffRow = {
         kind: "context",
         oldNo: was.oldNo,
         newNo: now.newNo,
         text: now.text,
         source: now.source,
         hunk: now.hunk,
-        ...(was.text === now.text
-          ? {}
-          : { old: { text: was.text, source: was.source } }),
-      });
+        old: { text: was.text, source: was.source },
+      };
+      merged.push(paired);
+      const note = marker.get(now);
+      if (note) merged.push(note);
       nextRemoved = removedIndex + 1;
       nextAdded = addedIndex + 1;
     }
-    append(removed, nextRemoved, removed.length);
-    append(added, nextAdded, added.length);
+    emitRange(removed, nextRemoved, removed.length);
+    emitRange(added, nextAdded, added.length);
     cursor = end;
   }
   append(rows, cursor, rows.length);
@@ -358,7 +416,7 @@ function tokenize(text: string): Token[] {
 }
 
 function visibleLength(text: string): number {
-  return withoutWhitespace(text).length;
+  return text.replace(/\s+/g, "").length;
 }
 
 function rangesOf(tokens: readonly Token[], changed: readonly boolean[]) {
@@ -475,6 +533,34 @@ export function withWordEmphasis(rows: readonly DiffRow[]): DiffRow[] {
   return out;
 }
 
+/** One side of a row as the view draws it: the text, and where it came from. */
+export type RowSide = {
+  readonly text: string;
+  /** The line's position in the file group, which its syntax is keyed by. */
+  readonly source: number;
+  /** The side of the hunk the line was highlighted with. */
+  readonly side: "old" | "new";
+};
+
+/**
+ * What a row shows on one side of the diff. A removed line is always old and
+ * an added line always new. A context row shows its own text, except that the
+ * old side of a whitespace pair shows the old line. The view takes a line's
+ * text and its colors from this one answer, so the two cannot disagree.
+ */
+export function rowSide(row: DiffRow, side: "old" | "new"): RowSide {
+  if (row.kind === "del") {
+    return { text: row.text, source: row.source, side: "old" };
+  }
+  if (row.kind === "add") {
+    return { text: row.text, source: row.source, side: "new" };
+  }
+  if (side === "old" && row.old) {
+    return { text: row.old.text, source: row.old.source, side: "old" };
+  }
+  return { text: row.text, source: row.source, side };
+}
+
 /** Where a comment points: a line on one side of the diff. */
 export type RowAnchor = { readonly side: "old" | "new"; readonly line: number };
 
@@ -511,6 +597,11 @@ export type DiffFileModel = {
   readonly onlyWhitespace: boolean;
   /** Digits in the largest line number, which sizes both gutters. */
   readonly gutterDigits: number;
+  /**
+   * Per hunk, how many lines hiding whitespace drew as unchanged though
+   * their whitespace changed. Reverting the hunk puts them back too.
+   */
+  readonly hiddenWhitespace: ReadonlyMap<number, number>;
 };
 
 export function buildDiffFileModel(
@@ -524,8 +615,12 @@ export function buildDiffFileModel(
   const shaped = options.ignoreWhitespace ? ignoreWhitespaceChanges(all) : all;
   const rows = withWordEmphasis(shaped);
   let widest = 1;
+  const hiddenWhitespace = new Map<number, number>();
   for (const row of rows) {
     widest = Math.max(widest, row.oldNo ?? 0, row.newNo ?? 0);
+    if (row.old) {
+      hiddenWhitespace.set(row.hunk, (hiddenWhitespace.get(row.hunk) ?? 0) + 1);
+    }
   }
   return {
     rows,
@@ -536,5 +631,6 @@ export function buildDiffFileModel(
       hadChanges &&
       !rows.some((row) => row.kind === "add" || row.kind === "del"),
     gutterDigits: String(widest).length,
+    hiddenWhitespace,
   };
 }

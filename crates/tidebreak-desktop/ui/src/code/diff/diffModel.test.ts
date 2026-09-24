@@ -147,6 +147,98 @@ describe("ignoreWhitespaceChanges", () => {
       buildDiffFileModel(group, { ignoreWhitespace: false }).onlyWhitespace,
     ).toBe(false);
   });
+
+  it("treats only spaces, tabs, and carriage returns as whitespace, as git does", () => {
+    const rows = ignoreWhitespaceChanges(
+      rowsOf(
+        [
+          "diff --git a/a.ts b/a.ts",
+          "@@ -1,4 +1,4 @@",
+          "-const\u00a0a = 1;",
+          "-\ufeffconst b = 2;",
+          "-const c = 3;\r",
+          "-\tconst d = 4;",
+          "+const a = 1;",
+          "+const b = 2;",
+          "+const c = 3;",
+          "+  const d = 4;",
+        ].join("\n"),
+      ),
+    );
+    // A no-break space and a byte-order mark are content to `git diff -w`.
+    expect(
+      rows
+        .filter((row) => row.kind === "add" || row.kind === "del")
+        .map((row) => row.text),
+    ).toEqual([
+      "const\u00a0a = 1;",
+      "\ufeffconst b = 2;",
+      "const a = 1;",
+      "const b = 2;",
+    ]);
+    expect(
+      rows.filter((row) => row.kind === "context").map((row) => row.text),
+    ).toEqual(["const c = 3;", "  const d = 4;"]);
+  });
+
+  it("hides a change that only adds a final newline, as git diff -w does", () => {
+    const group = groupUnifiedDiff(
+      [
+        "diff --git a/a.ts b/a.ts",
+        "@@ -1,2 +1,2 @@",
+        " first();",
+        "-last();",
+        "\\ No newline at end of file",
+        "+last();",
+      ].join("\n"),
+    )[0]!;
+    const model = buildDiffFileModel(group, { ignoreWhitespace: true });
+    expect(model.onlyWhitespace).toBe(true);
+    expect(model.rows).toEqual([]);
+  });
+
+  it("keeps a real change beside a final newline, and drops the newline's note", () => {
+    const rows = ignoreWhitespaceChanges(
+      rowsOf(
+        [
+          "diff --git a/a.ts b/a.ts",
+          "@@ -1,3 +1,3 @@",
+          "-first();",
+          "+First();",
+          " middle();",
+          "-last();",
+          "\\ No newline at end of file",
+          "+last();",
+        ].join("\n"),
+      ),
+    );
+    expect(rows.map((row) => [row.kind, row.text])).toEqual([
+      ["hunk", "@@ -1,3 +1,3 @@"],
+      ["del", "first();"],
+      ["add", "First();"],
+      ["context", "middle();"],
+      ["context", "last();"],
+    ]);
+    // The pair keeps its old line even though the text is the same, so the
+    // old side of the view draws it from the old side's syntax.
+    expect(rows.at(-1)).toMatchObject({
+      oldNo: 3,
+      newNo: 3,
+      old: { text: "last();", source: 4 },
+      source: 6,
+    });
+  });
+
+  it("counts the lines a hunk hides because only their whitespace changed", () => {
+    const group = groupUnifiedDiff(REINDENT)[0]!;
+    expect([
+      ...buildDiffFileModel(group, { ignoreWhitespace: true }).hiddenWhitespace,
+    ]).toEqual([[0, 3]]);
+    expect(
+      buildDiffFileModel(group, { ignoreWhitespace: false }).hiddenWhitespace
+        .size,
+    ).toBe(0);
+  });
 });
 
 describe("splitRows", () => {

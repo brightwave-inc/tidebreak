@@ -459,6 +459,92 @@ describe("a long diff", () => {
   });
 });
 
+describe("syntax on each side of a whitespace pair", () => {
+  // The old side wraps the paired line in a block comment and the new side
+  // does not. A tab became one space, so the two lines are the same length
+  // and either side's colors would fit the other's text.
+  const PAIR = [
+    "diff --git a/src/pair.ts b/src/pair.ts",
+    "@@ -1,3 +1,3 @@",
+    "-/* start",
+    "-\tlet value = 1;",
+    "- end */",
+    "+// start",
+    "+ let value = 1;",
+    "+// end",
+  ].join("\n");
+
+  function pairedCells(container: HTMLElement) {
+    return [
+      ...container.querySelectorAll<HTMLElement>(
+        '[data-kind="context"] [data-diff-code]',
+      ),
+    ];
+  }
+
+  it("colors the unified line from the side its text comes from", () => {
+    const { container } = render(
+      <DiffView
+        group={groupUnifiedDiff(PAIR)[0]!}
+        layout="unified"
+        ignoreWhitespace
+      />,
+    );
+    const [line] = pairedCells(container);
+    expect(line?.textContent).toBe(" let value = 1;");
+    expect(line?.querySelector(".text-syntax-keyword")?.textContent).toBe(
+      "let",
+    );
+    expect(line?.querySelector(".text-syntax-comment")).toBeNull();
+  });
+
+  it("colors each side of the split line from its own side", () => {
+    const { container } = render(
+      <DiffView
+        group={groupUnifiedDiff(PAIR)[0]!}
+        layout="split"
+        ignoreWhitespace
+      />,
+    );
+    const [left, right] = pairedCells(container);
+    expect(left?.textContent).toBe("\tlet value = 1;");
+    expect(left?.querySelector(".text-syntax-comment")?.textContent).toBe(
+      "\tlet value = 1;",
+    );
+    expect(right?.textContent).toBe(" let value = 1;");
+    expect(right?.querySelector(".text-syntax-keyword")?.textContent).toBe(
+      "let",
+    );
+  });
+
+  it("colors both sides of a line whose only change was a final newline", () => {
+    const diff = [
+      "diff --git a/src/end.ts b/src/end.ts",
+      "@@ -1,2 +1,2 @@",
+      "-first();",
+      "-return last;",
+      "\\ No newline at end of file",
+      "+First();",
+      "+return last;",
+    ].join("\n");
+    const { container } = render(
+      <DiffView
+        group={groupUnifiedDiff(diff)[0]!}
+        layout="split"
+        ignoreWhitespace
+      />,
+    );
+    const [left, right] = pairedCells(container);
+    for (const cell of [left, right]) {
+      expect(cell?.textContent).toBe("return last;");
+      expect(cell?.querySelector(".text-syntax-keyword")?.textContent).toBe(
+        "return",
+      );
+    }
+    expect(container.textContent).not.toContain("No newline");
+  });
+});
+
 describe("syntax color through a refresh", () => {
   it("keeps colors on the render a refetch causes", async () => {
     const group = () => groupUnifiedDiff(QUEUE_DIFF)[0]!;

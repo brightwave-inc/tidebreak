@@ -23,9 +23,11 @@ import {
   buildDiffFileModel,
   isCodeRow,
   rowAnchor,
+  rowSide,
   type DiffFileModel,
   type DiffRow,
   type RowAnchor,
+  type RowSide,
   type TextRange,
 } from "./diffModel";
 import { SPLIT_MIN_WIDTH, type DiffLayout } from "./diffPreferences";
@@ -992,16 +994,16 @@ const KIND_MARK: Record<DiffRow["kind"], { mark: string; spoken?: string }> = {
   meta: { mark: "" },
 };
 
-function lineSyntax(
+/** The syntax of the text one side of a row shows, from the side it came from. */
+function sideSyntax(
   syntax: FileSyntax | null,
   row: DiffRow,
-  side: "old" | "new",
+  shown: RowSide,
 ): SyntaxLine | undefined {
   if (!syntax || row.hunk < 0) return undefined;
   const hunk = syntax.get(row.hunk);
   if (!hunk) return undefined;
-  if (side === "old") return hunk.old.get(row.old?.source ?? row.source);
-  return hunk.new.get(row.source);
+  return (shown.side === "old" ? hunk.old : hunk.new).get(shown.source);
 }
 
 function isSelected(
@@ -1235,6 +1237,7 @@ const UnifiedLine = memo(function UnifiedLine({
 }) {
   const row = model.rows[index]!;
   const picked = isSelected(selected, index);
+  const shown = rowSide(row, "new");
   if (row.kind === "hunk" || row.kind === "meta") {
     return (
       <div
@@ -1274,8 +1277,8 @@ const UnifiedLine = memo(function UnifiedLine({
       />
       <CodeCell
         row={row}
-        text={row.text}
-        runs={lineSyntax(syntax, row, row.kind === "del" ? "old" : "new")}
+        text={shown.text}
+        runs={sideSyntax(syntax, row, shown)}
         emphasis={row.emphasis}
         wrap={false}
       />
@@ -1334,8 +1337,8 @@ const SplitLine = memo(function SplitLine({
     }
     const row = model.rows[index]!;
     // A context row made from a whitespace-only pair shows each side's own
-    // text: the old indentation on the left, the new on the right.
-    const oldText = column === "left" ? row.old?.text : undefined;
+    // line: the old indentation on the left, the new on the right.
+    const shown = rowSide(row, column === "left" ? "old" : "new");
     return (
       <div
         className="diff-line flex min-h-5 min-w-0"
@@ -1359,9 +1362,9 @@ const SplitLine = memo(function SplitLine({
         />
         <CodeCell
           row={row}
-          text={oldText ?? row.text}
-          runs={lineSyntax(syntax, row, column === "left" ? "old" : "new")}
-          emphasis={oldText === undefined ? row.emphasis : undefined}
+          text={shown.text}
+          runs={sideSyntax(syntax, row, shown)}
+          emphasis={shown.source === row.source ? row.emphasis : undefined}
           wrap
         />
       </div>
