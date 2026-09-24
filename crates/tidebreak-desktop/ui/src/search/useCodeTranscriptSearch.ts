@@ -9,6 +9,7 @@ import {
   hydrateCodeTurns,
   initialCodeSessionState,
   itemForEvent,
+  mainAgentTranscriptItems,
   reduceCodeSessionEvent,
 } from "../code/CodeSessionReducer";
 import { friendlyErrorMessage } from "../lib/utils";
@@ -141,7 +142,9 @@ export function useCodeTranscriptSearch({
         return;
       }
       const shown = historyRef.current;
-      const stretch = shown ? itemForEvent(shown.items, target) : null;
+      const stretch = shown
+        ? itemForEvent(mainAgentTranscriptItems(shown.items), target)
+        : null;
       if (stretch) {
         setPending({ itemId: stretch.id, terms, nonce: token });
         return;
@@ -160,9 +163,18 @@ export function useCodeTranscriptSearch({
         ]);
         if (token !== latest.current) return;
         const view = historyFromJournal(frames, turns);
-        const found = itemForEvent(view.items, target);
+        // The pane draws the main agent's rows; a subagent's are read from
+        // its own view.
+        const found = itemForEvent(
+          mainAgentTranscriptItems(view.items),
+          target,
+        );
         if (!found) {
-          toast.message("That message is no longer in this session.");
+          toast.message(
+            itemForEvent(view.items, target)
+              ? "That message is in a subagent's work. Open the subagent to read it."
+              : "That message is no longer in this session.",
+          );
           return;
         }
         pauseFollow();

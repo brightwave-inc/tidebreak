@@ -133,10 +133,8 @@ describe("the palette's Messages section", () => {
     const status = screen.getByRole("status");
     expect(status).toHaveTextContent("3 messages match");
     expect(screen.getByRole("listbox")).not.toContainElement(status);
-    // Every row the list draws that is not a hit carries no role at all.
-    for (const node of screen
-      .getByRole("listbox")
-      .querySelectorAll("[role]")) {
+    // Inside, the list holds only options and the groups around them.
+    for (const node of screen.getByRole("listbox").querySelectorAll("[role]")) {
       expect(["option", "group", "presentation", "listbox"]).toContain(
         node.getAttribute("role"),
       );

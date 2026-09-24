@@ -19,8 +19,8 @@ import type { MessageSearchState } from "./useMessageSearch";
  * code sessions that matches the query, newest first.
  *
  * Every state is a row in the section rather than a replacement for the
- * list, so the commands above it never move while a search is out. The rows
- * that are only status are plain text; cmdk walks only the hits.
+ * list, so the commands above it never move while a search is out. The arrow
+ * keys walk the hits and pass over the status rows.
  */
 export function MessageSearchSection({
   state,
@@ -57,19 +57,20 @@ export function MessageSearchSection({
         />
       ))}
       {searching && state.hits.length === 0 && (
-        <StatusRow icon={<Spinner className="size-3.5" aria-hidden />}>
+        <StatusRow standsIn icon={<Spinner className="size-3.5" aria-hidden />}>
           Searching messages…
         </StatusRow>
       )}
       {state.status === "error" && (
         <StatusRow
+          standsIn
           icon={<CircleAlert className="size-3.5 text-critical" aria-hidden />}
         >
           {state.error ?? "Could not search messages."}
         </StatusRow>
       )}
       {state.status === "ready" && state.hits.length === 0 && (
-        <StatusRow>No messages match “{state.query}”.</StatusRow>
+        <StatusRow standsIn>No messages match “{state.query}”.</StatusRow>
       )}
       {pending > 0 && state.status !== "error" && (
         <StatusRow>
@@ -93,24 +94,42 @@ export function MessageSearchSection({
  * where the hits' titles do. The icon column is empty unless the status has
  * a mark of its own.
  *
- * Plain text rather than a live region: the list is a listbox, which may
- * only hold options and groups. `messageSearchAnnouncement` says the same
- * thing from a live region outside it.
+ * Not a live region: the list is a listbox, which may only hold options and
+ * groups. `messageSearchAnnouncement` says the same thing from a live region
+ * outside it. A line that stands in for the hits (searching, failed, nothing
+ * found) is a disabled option, so the listbox is never empty; the arrow keys
+ * pass over it.
  */
 function StatusRow({
   icon,
+  standsIn = false,
   children,
 }: {
   icon?: ReactNode;
+  standsIn?: boolean;
   children: ReactNode;
 }) {
-  return (
-    <div className="flex items-start gap-2.5 px-2.5 py-2 text-xs text-muted-foreground">
+  const body = (
+    <>
       <span className="flex h-4 w-4 shrink-0 items-center justify-center">
         {icon}
       </span>
       <span className="min-w-0 flex-1 pt-px">{children}</span>
-    </div>
+    </>
+  );
+  const layout =
+    "flex items-start gap-2.5 px-2.5 py-2 text-xs text-muted-foreground";
+  if (!standsIn) return <div className={layout}>{body}</div>;
+  return (
+    <CommandItem
+      disabled
+      value="message-search-status"
+      // A disabled option keeps full ink: it is the answer, not an option
+      // that is switched off.
+      className={cn(layout, "cursor-default data-[disabled=true]:opacity-100")}
+    >
+      {body}
+    </CommandItem>
   );
 }
 
