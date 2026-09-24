@@ -794,6 +794,13 @@ fn move_order(plan: &Plan) -> Vec<usize> {
     order
 }
 
+/// Move the paths before step `killed_at`, then stop the way a killed
+/// process stops: nothing rolls back.
+#[cfg(test)]
+pub(super) async fn apply_until_killed(worktree: &Path, plan: &Plan, killed_at: usize) {
+    let _ = apply_steps(worktree, plan, |step| step == killed_at).await;
+}
+
 /// Move each path in turn. `halt` is asked before each step and ends the run
 /// there, as a crash would, leaving what moved for the caller.
 async fn apply_steps(

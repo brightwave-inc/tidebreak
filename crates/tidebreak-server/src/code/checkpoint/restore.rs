@@ -159,9 +159,9 @@ pub struct PreparedRestore {
 /// Why a prepared restore did not land.
 #[derive(Debug)]
 pub enum RestoreApplyError {
-    /// A path could not move, every path already moved went back, and every
-    /// path was then verified to hold what it held before. Nothing changed.
-    /// `changed` says a path changed after the check.
+    /// A path could not move, every path already moved went back, and each
+    /// of them was then verified to hold what it held before. Nothing
+    /// changed. `changed` says a path changed after the check.
     NothingChanged { reason: String, changed: bool },
     /// Some paths could not go back, or did not verify. The saved state
     /// holds everything the restore replaced, so undoing the restore puts it
@@ -909,8 +909,9 @@ mod tests {
         assert_eq!(snapshot_tree(&tree).await.unwrap(), current);
     }
 
-    /// Git stops partway through the checkout: the file it already wrote goes
-    /// back, so the worktree is as it was and nothing is half-restored.
+    /// The restore stops partway, at a folder it cannot write in: the file it
+    /// already wrote goes back, so the worktree is as it was and nothing is
+    /// half-restored.
     #[tokio::test]
     async fn a_restore_that_stops_partway_is_rolled_back() {
         let (_dir, repo) = init_repo();
@@ -926,7 +927,8 @@ mod tests {
         let prepared = prepare_restore(&tree, &before, None, &saved_ref(), "state before restore")
             .await
             .unwrap();
-        // Git can rewrite README.md, but cannot create a file in `locked/`.
+        // The restore can rewrite README.md, but cannot create a file in
+        // `locked/`.
         std::fs::set_permissions(tree.join("locked"), std::fs::Permissions::from_mode(0o555))
             .unwrap();
         let err = prepared.apply(&tree).await.unwrap_err();
@@ -949,6 +951,62 @@ mod tests {
             ref_exists(&tree, &saved_ref()),
             "the saved state stays, so the restore can still be undone"
         );
+    }
+
+    /// A restore killed partway, the way a crash stops it, leaves every file
+    /// whole, in its version before or after. Its Undo still brings back
+    /// exactly the state it replaced, because that state was saved before
+    /// any file moved.
+    #[tokio::test]
+    async fn a_restore_killed_partway_can_still_be_undone_exactly() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "killed");
+        for n in 0..4 {
+            std::fs::write(tree.join(format!("f{n}.txt")), format!("checkpoint {n}\n")).unwrap();
+        }
+        let target = checkpoint(&tree, "target").await;
+        for n in 0..4 {
+            std::fs::write(tree.join(format!("f{n}.txt")), format!("current {n}\n")).unwrap();
+        }
+        std::fs::write(tree.join("new.txt"), "made after the checkpoint\n").unwrap();
+        let before = snapshot_tree(&tree).await.unwrap();
+
+        // Five paths move, so a kill at step 5 is a restore that finished.
+        for killed_at in 0..=5 {
+            let saved = format!("{REF_PREFIX}/test/saved-{killed_at}");
+            let prepared = prepare_restore(&tree, &target, None, &saved, "state before restore")
+                .await
+                .unwrap();
+            super::super::worktree::apply_until_killed(&tree, &prepared.plan, killed_at).await;
+
+            for n in 0..4 {
+                let now = read(&tree.join(format!("f{n}.txt")));
+                assert!(
+                    now == Some(format!("current {n}\n"))
+                        || now == Some(format!("checkpoint {n}\n")),
+                    "f{n}.txt is whole after a kill at step {killed_at}: {now:?}"
+                );
+            }
+            assert!(ref_exists(&tree, &saved), "the Undo outlives the kill");
+
+            // Undo, as the transcript's button runs it: restore the saved state.
+            let undo_saved = format!("{REF_PREFIX}/test/undo-{killed_at}");
+            match prepare_restore(&tree, &saved, None, &undo_saved, "state before undo").await {
+                Ok(undo) => {
+                    undo.apply(&tree).await.unwrap();
+                }
+                Err(CheckpointError::Conflict {
+                    kind: "nothing_to_restore",
+                    ..
+                }) => assert_eq!(killed_at, 0, "only a kill before any path moved"),
+                Err(err) => panic!("undo after a kill at step {killed_at}: {err:?}"),
+            }
+            assert_eq!(
+                snapshot_tree(&tree).await.unwrap(),
+                before,
+                "the state before comes back exactly after a kill at step {killed_at}"
+            );
+        }
     }
 
     #[tokio::test]
