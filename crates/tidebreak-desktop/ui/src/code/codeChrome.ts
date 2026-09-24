@@ -529,6 +529,48 @@ export function openCodeEditor(
   );
 }
 
+/**
+ * Show `next` in the tab that shows `current`, and bring it forward.
+ *
+ * Stepping from one file's diff to the next keeps one tab rather than
+ * opening a tab per file. When `next` is already open it is focused instead,
+ * and when `current` is not open it opens like any other tab.
+ */
+export function replaceCodeEditor(
+  layout: LayoutState,
+  current: CodeEditorPanel,
+  next: CodeEditorPanel,
+): LayoutState {
+  const nextKey = panelKey(next);
+  const open =
+    layout.tabs.some((tab) => panelKey(tab) === nextKey) ||
+    (layout.editorSplit?.tabs.some((tab) => panelKey(tab) === nextKey) ??
+      false);
+  if (open) return openCodeEditor(layout, next);
+  const currentKey = panelKey(current);
+  const primary = layout.tabs
+    .filter(isEditorTab)
+    .findIndex((tab) => panelKey(tab) === currentKey);
+  if (primary >= 0) {
+    const tabs = layout.tabs.slice();
+    tabs[editorUrlIndex(layout, primary)] = next;
+    return focusEditorTab({ ...layout, tabs }, primary, "primary");
+  }
+  const split =
+    layout.editorSplit?.tabs.findIndex((tab) => panelKey(tab) === currentKey) ??
+    -1;
+  if (split >= 0 && layout.editorSplit) {
+    const tabs = layout.editorSplit.tabs.slice();
+    tabs[split] = next;
+    return focusEditorTab(
+      { ...layout, editorSplit: { ...layout.editorSplit, tabs } },
+      split,
+      "secondary",
+    );
+  }
+  return openCodeEditor(layout, next);
+}
+
 /** Add an agent preview without selecting it or changing either editor group. */
 export function adoptAgentBrowser(
   layout: LayoutState,

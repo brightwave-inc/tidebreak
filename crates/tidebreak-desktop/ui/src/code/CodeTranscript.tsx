@@ -12,6 +12,7 @@ import {
   memo,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   type RefCallback,
@@ -35,6 +36,8 @@ import { ToolCardShell } from "@/ToolCardShell";
 import { ToolOutputPreview } from "@/ToolOutputPreview";
 import { TranscriptSkeleton } from "@/TranscriptSkeleton";
 import { UserMessage } from "@/UserMessage";
+import { ReviewCommentsBlock } from "./diff/ReviewCommentsBlock";
+import { splitReviewComments } from "./diff/reviewComments";
 import { useApp } from "@/AppContext";
 import { TranscriptImageAttachments } from "@/TranscriptImageAttachments";
 import { Loader } from "@/components/motion/loader";
@@ -676,22 +679,7 @@ const TranscriptItem = memo(function TranscriptItem({
       if (item.trigger) {
         return <TriggerEventCard context={item.trigger} message={item.text} />;
       }
-      return (
-        <UserMessage
-          text={item.text}
-          createdAt={item.createdAt}
-          anchorId={item.id}
-          author={item.actorLabel}
-          leading={
-            sessionId && item.attachments && item.attachments.length > 0 ? (
-              <CodeTurnImages
-                sessionId={sessionId}
-                attachments={item.attachments}
-              />
-            ) : undefined
-          }
-        />
-      );
+      return <CodeUserMessage item={item} sessionId={sessionId} />;
     case "steer":
       return (
         <UserMessage
@@ -1413,6 +1401,44 @@ function CodeTurnImages({
         width: 0,
         height: 0,
       }))}
+    />
+  );
+}
+
+/**
+ * A person's message in a code transcript. Diff comments that went with it
+ * come back out of the text and fold into one compact block under the prose.
+ */
+function CodeUserMessage({
+  item,
+  sessionId,
+}: {
+  item: Extract<CodeTranscriptItem, { kind: "user" }>;
+  sessionId?: string;
+}) {
+  const { prose, comments } = useMemo(
+    () => splitReviewComments(item.text),
+    [item.text],
+  );
+  return (
+    <UserMessage
+      text={prose}
+      createdAt={item.createdAt}
+      anchorId={item.id}
+      author={item.actorLabel}
+      leading={
+        sessionId && item.attachments && item.attachments.length > 0 ? (
+          <CodeTurnImages
+            sessionId={sessionId}
+            attachments={item.attachments}
+          />
+        ) : undefined
+      }
+      trailing={
+        comments.length > 0 ? (
+          <ReviewCommentsBlock comments={comments} />
+        ) : undefined
+      }
     />
   );
 }

@@ -58,6 +58,7 @@ import {
 } from "../labels";
 import { followScrollBehavior } from "@/ChatScroll";
 import { forkTranscriptFile } from "../fork";
+import { splitReviewComments } from "../diff/reviewComments";
 import { sendCodeTurn } from "../CodeSessionSend";
 import { toast } from "sonner";
 import { useCodeUpdatesStore, useSessionDigest } from "../CodeUpdatesStore";
@@ -406,12 +407,16 @@ export function CodeSessionPane({
     : ["plan", "ask", "auto", "allow"];
   const steeringSupported = doctorEntry?.caps.mid_turn_steering === "supported";
   const turnRunning = busy || lifecycle === "running";
+  // Recall brings back what the reader typed. Diff comments went with the
+  // message, but they were written on the diff and are not typed again.
   const composerHistory = useMemo(
     () =>
       items
-        .flatMap((item) =>
-          item.kind === "user" && item.text.trim() ? [item.text] : [],
-        )
+        .flatMap((item) => {
+          if (item.kind !== "user") return [];
+          const typed = splitReviewComments(item.text).prose;
+          return typed.trim() ? [typed] : [];
+        })
         .reverse(),
     [items],
   );
@@ -673,6 +678,7 @@ export function CodeSessionPane({
               }
               promptScope={workspaceId ?? session.id}
               sessionId={session.id}
+              reviewWorkspaceId={workspaceId}
               history={composerHistory}
               slashCommands={doctorEntry?.commands}
               searchPaths={

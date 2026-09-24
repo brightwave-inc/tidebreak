@@ -20,6 +20,11 @@ import {
 } from "../useImageAttachments";
 import { applyAcceptedTurn, type CodeSessionState } from "./CodeSessionReducer";
 import { peekCodeSession } from "./CodeSessionRegistry";
+import {
+  commentsReadyToSend,
+  usePendingReviewStore,
+} from "./diff/pendingReview";
+import { messageWithReviewComments } from "./diff/reviewComments";
 import { messageWithWorkspaceFiles } from "./fork";
 import type { CodeTurnSubmission } from "./parsers";
 
@@ -209,6 +214,10 @@ export function seedCodeComposer(
  * The text and chips stay on screen until the images are published, then
  * leave with the message. A refused send puts them back and says why.
  *
+ * The workspace's pending diff comments go too, in one block after the
+ * text, and a message may be only that block. They are marked as sending
+ * while the request is out and leave the review once the server accepts it.
+ *
  * Returns whether the server accepted the message.
  */
 export async function sendCodeComposer(input: {
@@ -217,6 +226,8 @@ export async function sendCodeComposer(input: {
   session: string | (() => Promise<string>);
   /** Files already in the worktree, named after the message. */
   workspaceFiles?: readonly ComposerWorkspaceFile[];
+  /** The workspace whose pending diff comments go with this message. */
+  reviewWorkspaceId?: string;
   send: (
     sessionId: string,
     message: string,
@@ -230,8 +241,14 @@ export async function sendCodeComposer(input: {
     drafts.drafts[key] ?? "",
     drafts.attachments[key]?.pastedTexts ?? [],
   );
-  if (!typed) return false;
-  const message = messageWithWorkspaceFiles(typed, input.workspaceFiles ?? []);
+  const review = input.reviewWorkspaceId
+    ? commentsReadyToSend(input.reviewWorkspaceId)
+    : [];
+  if (!typed && review.length === 0) return false;
+  const message = messageWithReviewComments(
+    messageWithWorkspaceFiles(typed, input.workspaceFiles ?? []),
+    review,
+  );
   const images = drafts.attachments[key]?.images ?? [];
   if (
     images.some(
@@ -308,6 +325,18 @@ export async function sendCodeComposer(input: {
   state.setDraft(key, "");
   state.setPastedTexts(key, []);
   state.setImages(key, []);
+  const reviewIds = review.map((comment) => comment.id);
+  const reviewWorkspace = input.reviewWorkspaceId;
+  if (reviewWorkspace && reviewIds.length > 0) {
+    usePendingReviewStore.getState().beginSend(reviewWorkspace, reviewIds);
+  }
+  const settleReview = (accepted: boolean) => {
+    if (reviewWorkspace && reviewIds.length > 0) {
+      usePendingReviewStore
+        .getState()
+        .finishSend(reviewWorkspace, reviewIds, accepted);
+    }
+  };
   try {
     await input.send(
       sessionId,
@@ -326,10 +355,12 @@ export async function sendCodeComposer(input: {
     ) {
       restoreComposer(key, sentDraft, sentPasted, sentImages);
       reattachImageBacking(key, backing);
+      settleReview(false);
       setSending(key, false, codeSendFailure(error));
       return false;
     }
   }
+  settleReview(true);
   releaseDetachedBacking(backing);
   setSending(key, false, null);
   return true;

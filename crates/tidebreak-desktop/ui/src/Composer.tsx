@@ -17,6 +17,7 @@ import {
   FileText,
   FolderOpen,
   Image as ImageIcon,
+  MessageSquareDiff,
   Mic,
   Square,
   Wand2,
@@ -262,6 +263,20 @@ export type ComposerWorkspaceFiles = {
   onRemove: (path: string) => void;
 };
 
+/**
+ * Line comments left on the diff, waiting to go with the next message.
+ *
+ * They are context like a pasted file: one chip says how many there are and
+ * across how many files, and a message may go with only the comments and no
+ * text of its own. Code mode passes these; chat has no diff to comment on.
+ */
+export type ComposerReviewComments = {
+  count: number;
+  files: number;
+  /** Take them off the next message; the surface asks first. */
+  onRemove: () => void;
+};
+
 export type ComposerFolders = {
   items: ChatFolderAccess[];
   /**
@@ -386,6 +401,8 @@ export type ComposerProps = {
   pastedTexts?: ComposerPastedTexts;
   /** Paths the agent can already read, shown as chips and named on send. */
   workspaceFiles?: ComposerWorkspaceFiles;
+  /** Diff comments that go with the next message. */
+  reviewComments?: ComposerReviewComments;
   folders?: ComposerFolders;
   /**
    * Workspace-relative paths `@` can insert as plain text. The parent fetches
@@ -465,6 +482,7 @@ function ComposerView({
   files,
   pastedTexts,
   workspaceFiles,
+  reviewComments,
   folders,
   pathMentions,
   voice,
@@ -533,14 +551,18 @@ function ComposerView({
   );
   const modEnter = command ? "⌘Enter" : "Ctrl+Enter";
   const submissionText = messageWithPastedText(draft, pastedTexts?.items ?? []);
-  const hasDraft = Boolean(submissionText.trim());
+  const reviewCount = reviewComments?.count ?? 0;
+  // Comments are a message on their own: the review is what the reader wrote.
+  const hasDraft = Boolean(submissionText.trim()) || reviewCount > 0;
   const steerHasUnsupportedCharacter = active && submissionText.includes("\0");
   const steerTooLong =
     active && [...submissionText.trim()].length > MAX_STEER_CHARACTERS;
   const imageBlocker = imageSendBlocker(images);
   const attachmentsBlockSteer =
     active &&
-    ((images?.items.length ?? 0) > 0 || (files?.items.length ?? 0) > 0);
+    ((images?.items.length ?? 0) > 0 ||
+      (files?.items.length ?? 0) > 0 ||
+      reviewCount > 0);
   const voiceWorking = voice?.state !== undefined && voice.state !== "idle";
   const canSubmit =
     !inputDisabled &&
@@ -576,6 +598,7 @@ function ComposerView({
     (files?.items.length ?? 0) +
     (pastedTexts?.items.length ?? 0) +
     (workspaceFiles?.items.length ?? 0) +
+    reviewCount +
     folderChips.length +
     invokedSkills.length;
   const contextSummary = [
@@ -583,6 +606,7 @@ function ComposerView({
     contextCountLabel(files?.items.length ?? 0, "file"),
     contextCountLabel(pastedTexts?.items.length ?? 0, "pasted text"),
     contextCountLabel(workspaceFiles?.items.length ?? 0, "workspace file"),
+    contextCountLabel(reviewCount, "review comment"),
     contextCountLabel(folderChips.length, "folder"),
     contextCountLabel(invokedSkills.length, "skill"),
   ]
@@ -1205,6 +1229,17 @@ function ComposerView({
                   ))}
                 </ul>
               )}
+              {reviewComments && reviewCount > 0 && (
+                <ul
+                  className="m-0 flex list-none flex-wrap gap-2 p-0"
+                  aria-label="Review comments"
+                >
+                  <ReviewCommentsChip
+                    review={reviewComments}
+                    onRemove={reviewComments.onRemove}
+                  />
+                </ul>
+              )}
               {folderChips.length > 0 && folders && (
                 <ul
                   className="m-0 flex list-none flex-wrap gap-2 p-0"
@@ -1792,6 +1827,45 @@ function WorkspaceFileChip({
         type="button"
         className="absolute right-0.5 top-0.5 inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
         aria-label={`Remove ${name}`}
+        onClick={onRemove}
+      >
+        <X size={14} aria-hidden="true" />
+      </button>
+    </li>
+  );
+}
+
+/**
+ * The diff comments that go with the next message: how many, and across
+ * how many files. Each comment lives on its lines in the diff; the chip is
+ * the reminder that they are about to go.
+ */
+function ReviewCommentsChip({
+  review,
+  onRemove,
+}: {
+  review: ComposerReviewComments;
+  onRemove: () => void;
+}) {
+  const comments = `${review.count} ${review.count === 1 ? "comment" : "comments"}`;
+  const files = `${review.files} ${review.files === 1 ? "file" : "files"}`;
+  return (
+    <li className="relative flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 py-1.5 pl-2 pr-7 text-muted-foreground">
+      <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-background">
+        <MessageSquareDiff className="size-4" aria-hidden="true" />
+      </span>
+      <span className="grid min-w-0 gap-px">
+        <strong className="text-xs font-semibold text-foreground">
+          Review comments
+        </strong>
+        <small className="max-w-[18rem] truncate text-2xs">
+          {comments} on {files}
+        </small>
+      </span>
+      <button
+        type="button"
+        className="absolute right-0.5 top-0.5 inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
+        aria-label="Remove review comments"
         onClick={onRemove}
       >
         <X size={14} aria-hidden="true" />

@@ -1,10 +1,25 @@
-import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
+import {
+  type KeyboardEvent,
+  useCallback,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { ChevronRight, FileCode2, Undo2 } from "lucide-react";
 
 import type { ApiClient } from "../api/client";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
+import { changedFileOrder } from "./DiffOverview";
+import { diffFileKey, stepDiffFile } from "./diff/diffKeys";
+import { useDiffPreferences } from "./diff/diffPreferences";
+import { DiffView, type DiffReview } from "./diff/DiffView";
+import { DiffViewOptions } from "./diff/DiffViewOptions";
+import { usePendingReviewStore } from "./diff/pendingReview";
+import { useWorkspaceDiffReview } from "./diff/useWorkspaceDiffReview";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
 import { OpenInEditorButton } from "./OpenInEditorButton";
@@ -39,10 +54,16 @@ export type DiffRevertActions = {
   unavailableReason?: string;
 };
 
+type DiffPanelClient = Pick<ApiClient, "getCodeWorkspaceDiff"> &
+  Partial<Pick<ApiClient, "listCodeWorkspaceFiles">>;
+
 /**
- * Server-produced unified diff, grouped per file and tinted with the
- * semantic status tokens. No client-side highlighting: fragments misparse,
- * fight the add/del tints, and cost a pass we do not need.
+ * A workspace's diff: the worktree against its base, one turn's changes, or
+ * one file of either, drawn by the shared `DiffView`.
+ *
+ * Line comments written here wait in the workspace's pending review and go
+ * to the agent with the next message. J and K move between files; on one
+ * file's diff they open the next or previous changed file in its place.
  */
 export function DiffPanel({
   client,
@@ -53,9 +74,11 @@ export function DiffPanel({
   contentRevision = 0,
   onOpenFile,
   onOpenInEditor,
+  onStepFile,
   revert,
+  comments = true,
 }: {
-  client: Pick<ApiClient, "getCodeWorkspaceDiff">;
+  client: DiffPanelClient;
   workspaceId: string;
   turnId?: string;
   /** Ordinal label for the scoped turn. Never a raw id. */
@@ -65,8 +88,15 @@ export function DiffPanel({
   onOpenFile?: (path: string) => void;
   /** Hand the scoped file to the reader's own editor. */
   onOpenInEditor?: (path: string) => void;
+  /**
+   * Show another changed file's diff in place of this one. With it, J and K
+   * on a one-file diff walk the changed files in the order Changes lists them.
+   */
+  onStepFile?: (path: string) => void;
   /** Revert a file or a hunk. Absent where the worktree is not ours to change. */
   revert?: DiffRevertActions;
+  /** Take line comments. Off where nobody here can send them to an agent. */
+  comments?: boolean;
 }) {
   const load = useCallback(
     () => client.getCodeWorkspaceDiff(workspaceId, { turn: turnId, file }),
@@ -88,6 +118,62 @@ export function DiffPanel({
     [payload],
   );
   const reverts = useRevertTracker(revert, turnId);
+  const layout = useDiffPreferences((state) => state.layout);
+  const [ignoreWhitespace, setIgnoreWhitespace] = useState(false);
+  const { confirm, dialog } = useConfirm();
+  const deleteComment = useCallback(
+    async (id: string) => {
+      const confirmed = await confirm({
+        title: "Delete this comment?",
+        description: "It will not go to the agent, and its text is lost.",
+        confirmLabel: "Delete",
+        destructive: true,
+      });
+      if (confirmed) usePendingReviewStore.getState().remove(workspaceId, id);
+    },
+    [confirm, workspaceId],
+  );
+  const onDeleteComment = useCallback(
+    (id: string) => void deleteComment(id),
+    [deleteComment],
+  );
+  const reviewFor = useWorkspaceDiffReview({
+    workspaceId: comments ? workspaceId : undefined,
+    turnId,
+    onDelete: onDeleteComment,
+  });
+
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const stepping = useRef(false);
+  async function stepToFile(direction: 1 | -1) {
+    if (!file || !onStepFile || !client.listCodeWorkspaceFiles) return;
+    if (stepping.current) return;
+    stepping.current = true;
+    try {
+      const listed = await client.listCodeWorkspaceFiles(workspaceId, turnId);
+      const order = changedFileOrder(listed.files);
+      const next = order[order.indexOf(file) + direction];
+      if (next) onStepFile(next);
+    } catch {
+      // The list is a convenience here; the diff on screen stays as it is.
+    } finally {
+      stepping.current = false;
+    }
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const action = diffFileKey(event.nativeEvent);
+    if (!action) return;
+    event.preventDefault();
+    if (action === "toggle-whitespace") {
+      setIgnoreWhitespace((current) => !current);
+      return;
+    }
+    const direction = action === "next-file" ? 1 : -1;
+    const scroller = scrollerRef.current;
+    if (scroller && stepDiffFile(scroller, direction)) return;
+    void stepToFile(direction);
+  }
 
   const scopeCaption = file
     ? file
@@ -95,8 +181,14 @@ export function DiffPanel({
       ? (turnLabel ?? "This turn")
       : "Workspace vs base";
 
+  const options = { layout, ignoreWhitespace, reviewFor, reverts };
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div
+      className="flex min-h-0 flex-1 flex-col overflow-hidden"
+      onKeyDown={onKeyDown}
+    >
+      {dialog}
       {/*
         The caption takes the row until it would drop below its basis; then
         the controls wrap under it instead of squeezing the path beside the
@@ -118,6 +210,10 @@ export function DiffPanel({
             savedAt={payload?.revision_saved_at}
           />
           {payload && <DiffstatBadge stat={payload.stat} />}
+          <DiffViewOptions
+            ignoreWhitespace={ignoreWhitespace}
+            onIgnoreWhitespaceChange={setIgnoreWhitespace}
+          />
           {file && reverts && groups.length > 0 && (
             <RevertFileButton
               group={groups[0]}
@@ -155,6 +251,7 @@ export function DiffPanel({
         </p>
       )}
       <div
+        ref={scrollerRef}
         className="min-h-0 flex-1 overflow-y-auto"
         tabIndex={0}
         aria-label="Diff"
@@ -167,14 +264,19 @@ export function DiffPanel({
           </div>
         )}
         {file && groups.length === 1 ? (
-          <DiffBody group={groups[0]} reverts={reverts} />
+          <FileDiff
+            group={groups[0]}
+            options={options}
+            onShowWhitespace={() => setIgnoreWhitespace(false)}
+          />
         ) : (
           groups.map((group) => (
             <FileDiffSection
               key={group.path}
               group={group}
               onOpenFile={onOpenFile}
-              reverts={reverts}
+              options={options}
+              onShowWhitespace={() => setIgnoreWhitespace(false)}
             />
           ))
         )}
@@ -187,6 +289,14 @@ export function DiffPanel({
     </div>
   );
 }
+
+/** What every file of one panel is drawn with. */
+type FileDiffOptions = {
+  layout: "unified" | "split";
+  ignoreWhitespace: boolean;
+  reviewFor: ((path: string) => DiffReview) | null;
+  reverts: RevertTracker | null;
+};
 
 /** A header action: a quiet icon and word, like "Open file". */
 const HEADER_ACTION =
@@ -223,8 +333,10 @@ function useRevertTracker(
       })
       .finally(() => setPending(null));
   }, []);
-  if (!actions) return null;
-  return { actions, turnId, reverted, pending, run };
+  return useMemo(
+    () => (actions ? { actions, turnId, reverted, pending, run } : null),
+    [actions, turnId, reverted, pending, run],
+  );
 }
 
 function revertKey(path: string, hunk?: number): string {
@@ -347,19 +459,22 @@ function emptyDiffText(
 function FileDiffSection({
   group,
   onOpenFile,
-  reverts,
+  options,
+  onShowWhitespace,
 }: {
   group: DiffFileGroup;
   onOpenFile?: (path: string) => void;
-  reverts: RevertTracker | null;
+  options: FileDiffOptions;
+  onShowWhitespace: () => void;
 }) {
   const large = group.lines.length > DIFF_COLLAPSE_LINE_THRESHOLD;
   const [expanded, setExpanded] = useState(!large);
   const bodyId = useId();
   const { insertions, deletions } = fileDiffstat(group.lines);
+  const reverts = options.reverts;
 
   return (
-    <section className="border-b last:border-b-0">
+    <section className="border-b last:border-b-0" data-diff-file="">
       {/*
         The disclosure and "Open" are two controls, not one nested in the
         other: a button inside a button is neither reachable nor announceable,
@@ -375,6 +490,7 @@ function FileDiffSection({
         <h3 className="min-w-0 flex-1">
           <button
             type="button"
+            data-diff-file-header=""
             className={cn(
               "hover:bg-muted/40 flex w-full min-w-0 cursor-pointer items-center gap-1.5 px-3 py-1.5 text-left",
               FOCUS_RING_TIGHT,
@@ -433,7 +549,12 @@ function FileDiffSection({
         </span>
       </header>
       {expanded ? (
-        <DiffBody group={group} id={bodyId} reverts={reverts} />
+        <FileDiff
+          group={group}
+          id={bodyId}
+          options={options}
+          onShowWhitespace={onShowWhitespace}
+        />
       ) : large ? (
         <button
           type="button"
@@ -452,54 +573,60 @@ function FileDiffSection({
   );
 }
 
-function DiffBody({
+/** One file's body: the shared view, with this panel's reverts and comments. */
+function FileDiff({
   group,
   id,
-  reverts,
+  options,
+  onShowWhitespace,
 }: {
   group: DiffFileGroup;
   id?: string;
-  reverts?: RevertTracker | null;
+  options: FileDiffOptions;
+  onShowWhitespace: () => void;
 }) {
+  const { reverts } = options;
   // Only a hunk shown whole can be reverted as shown; the last hunk of a
   // diff cut at its size cap is not.
-  const revertable = reverts !== null && reverts !== undefined;
   const hunks = useMemo(
     () =>
-      revertable
+      reverts
         ? new Map(
             diffHunks(group)
               .filter((hunk) => hunk.complete)
-              .map((hunk) => [hunk.line, hunk]),
+              .map((hunk) => [hunk.index, hunk]),
           )
         : null,
-    [group, revertable],
+    [group, reverts],
   );
   const fileReverted =
     reverts?.turnId !== undefined &&
     reverts.reverted.has(revertKey(group.path));
+  const hunkAction = useCallback(
+    (index: number) => {
+      const hunk = hunks?.get(index);
+      if (!hunk || !reverts) return null;
+      return (
+        <HunkRevert
+          group={group}
+          hunk={hunk}
+          reverts={reverts}
+          fileReverted={fileReverted}
+        />
+      );
+    },
+    [hunks, reverts, group, fileReverted],
+  );
   return (
-    <pre id={id} className="overflow-x-auto py-1 font-mono text-md leading-5">
-      {group.lines.map((line, index) => {
-        const hunk = hunks?.get(index);
-        return (
-          <DiffLineRow
-            key={`${group.path}:${index}`}
-            line={line}
-            action={
-              hunk && reverts ? (
-                <HunkRevert
-                  group={group}
-                  hunk={hunk}
-                  reverts={reverts}
-                  fileReverted={fileReverted}
-                />
-              ) : undefined
-            }
-          />
-        );
-      })}
-    </pre>
+    <DiffView
+      group={group}
+      id={id}
+      layout={options.layout}
+      ignoreWhitespace={options.ignoreWhitespace}
+      hunkAction={reverts ? hunkAction : undefined}
+      review={options.reviewFor?.(group.path)}
+      onShowWhitespace={onShowWhitespace}
+    />
   );
 }
 
@@ -538,74 +665,6 @@ function HunkRevert({
         )
       }
     />
-  );
-}
-
-function DiffLineRow({
-  line,
-  action,
-}: {
-  line: DiffLine;
-  /**
-   * A control that belongs to this line; only hunk headers carry one. It
-   * sits in the gutter, which a hunk header leaves empty, so a long header
-   * line never pushes it out of view.
-   */
-  action?: ReactNode;
-}) {
-  if (line.kind === "meta" && isNoisyDiffMeta(line.text)) return null;
-
-  return (
-    // The tint carries "added" or "removed"; the ink carries readability. Tinted
-    // ink on a tinted row is what made added lines a 3.2:1 pale green in the
-    // light theme while reading fine in the dark one.
-    <span
-      className={cn(
-        "flex min-h-5 min-w-max border-l-2 border-transparent",
-        line.kind === "add" &&
-          "border-success-border bg-success-background/55 text-success-foreground",
-        line.kind === "del" &&
-          "border-critical-border bg-critical-background/55 text-critical-foreground",
-        line.kind === "context" && "text-foreground/90",
-        line.kind === "hunk" &&
-          "border-info-border/60 bg-info-background/45 text-info-foreground my-1 items-center border-y border-l-0",
-        line.kind === "meta" &&
-          "text-muted-foreground bg-muted/20 border-l-0 text-xs",
-      )}
-    >
-      {action ? (
-        <span
-          className="bg-background/35 flex w-[10.5ch] shrink-0 select-none items-center justify-end self-stretch border-r text-xs"
-          data-diff-gutter="action"
-        >
-          {action}
-        </span>
-      ) : (
-        <>
-          <span
-            className="text-muted-foreground bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
-            data-diff-gutter="old"
-          >
-            {line.oldNo ?? ""}
-          </span>
-          <span
-            className="text-muted-foreground bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
-            data-diff-gutter="new"
-          >
-            {line.newNo ?? ""}
-          </span>
-        </>
-      )}
-      <span className="px-1 whitespace-pre">{line.text || " "}</span>
-    </span>
-  );
-}
-
-function isNoisyDiffMeta(text: string): boolean {
-  return (
-    text.startsWith("index ") ||
-    text.startsWith("--- ") ||
-    text.startsWith("+++ ")
   );
 }
 

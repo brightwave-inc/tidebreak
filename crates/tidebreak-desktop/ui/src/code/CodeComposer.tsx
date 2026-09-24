@@ -22,7 +22,12 @@ import type {
   ReasoningEffort,
 } from "../api/types";
 import { useApp } from "@/AppContext";
-import { Composer, type ComposerWorkspaceFiles } from "../Composer";
+import { useConfirm } from "@/components/ConfirmDialog";
+import {
+  Composer,
+  type ComposerReviewComments,
+  type ComposerWorkspaceFiles,
+} from "../Composer";
 import {
   useComposerAttachments,
   useComposerDraft,
@@ -62,6 +67,11 @@ import {
   type CodeTurnImage,
 } from "./CodeSessionSend";
 import { useCodeUiStore } from "./CodeUiStore";
+import {
+  reviewSummary,
+  usePendingReview,
+  usePendingReviewStore,
+} from "./diff/pendingReview";
 import {
   codeModelVendor,
   effortLadder,
@@ -681,6 +691,7 @@ export function CodeComposer({
   slashCommands,
   searchPaths,
   workspaceFiles,
+  reviewWorkspaceId,
   onSend,
   onSteer,
   onInterrupt,
@@ -742,6 +753,11 @@ export function CodeComposer({
    * message. A fork's transcript arrives this way.
    */
   workspaceFiles?: ComposerWorkspaceFiles;
+  /**
+   * The workspace whose diff comments go with the next message. The
+   * composer counts them, and the send carries them.
+   */
+  reviewWorkspaceId?: string;
   /**
    * Post one message to `sessionId`, adding what the session view knows: a
    * model or effort change, following the transcript. Absent, the message is
@@ -854,6 +870,32 @@ export function CodeComposer({
       : undefined;
 
   const pendingPrompt = useCodeUiStore((state) => state.pendingComposerPrompt);
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const pendingReview = usePendingReview(reviewWorkspaceId);
+  const summary = reviewSummary(pendingReview.comments, pendingReview.sending);
+  const reviewComments = useMemo<ComposerReviewComments | undefined>(() => {
+    if (!reviewWorkspaceId || summary.count === 0) return undefined;
+    return {
+      count: summary.count,
+      files: summary.files,
+      onRemove: () => {
+        void confirm({
+          title:
+            summary.count === 1
+              ? "Delete your review comment?"
+              : `Delete ${summary.count} review comments?`,
+          description:
+            "They come off the diff and do not go to the agent. Their text is lost.",
+          confirmLabel: "Delete",
+          destructive: true,
+        }).then((confirmed) => {
+          if (confirmed) {
+            usePendingReviewStore.getState().clear(reviewWorkspaceId);
+          }
+        });
+      },
+    };
+  }, [reviewWorkspaceId, summary.count, summary.files, confirm]);
 
   useEffect(() => {
     draftRef.current = draft;
@@ -915,6 +957,7 @@ export function CodeComposer({
       key: draftKey,
       session,
       workspaceFiles: workspaceFiles?.items,
+      reviewWorkspaceId,
       send: async (target, message, attachments) =>
         post(message, attachments, target),
     });
@@ -1022,6 +1065,7 @@ export function CodeComposer({
 
   return (
     <div className="relative shrink-0 px-[clamp(0.5rem,4%,5rem)] pb-2">
+      {confirmDialog}
       <Composer
         activeTurnId={running ? "running" : null}
         busy={running}
@@ -1119,6 +1163,7 @@ export function CodeComposer({
             ),
         }}
         workspaceFiles={workspaceFiles}
+        reviewComments={reviewComments}
         onDraftChange={(value) => {
           draftRef.current = value;
           setSteerError(null);

@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { DIFF_KEYS } from "./code/diff/diffKeys";
 import { shellShortcutMode } from "./code/routes";
 import { COMPOSER_KEYS } from "./ComposerKeys";
 import {
@@ -75,7 +76,9 @@ function GroupHeading({
  *
  * The composer's own keys close the list. The composer answers them itself
  * rather than through the shell table, and both halves of the app share them,
- * so they come from `COMPOSER_KEYS` and are listed in every mode.
+ * so they come from `COMPOSER_KEYS` and are listed in every mode. Code mode
+ * also lists the diff's keys, from `DIFF_KEYS`, which the diff answers while
+ * it has focus.
  *
  * Split from the dialog so a story can draw both modes without standing up a
  * router to answer which one the reader is in.
@@ -109,7 +112,21 @@ export function ShortcutsList({
           })}
         </Fragment>
       ))}
-      <GroupHeading first={groups.length === 0}>Composer</GroupHeading>
+      {mode === "code" && (
+        <>
+          <GroupHeading first={groups.length === 0}>Diff</GroupHeading>
+          {DIFF_KEYS.map((key) => (
+            <ShortcutRow
+              key={key.id}
+              description={key.description}
+              caps={key.keycaps(command)}
+            />
+          ))}
+        </>
+      )}
+      <GroupHeading first={groups.length === 0 && mode !== "code"}>
+        Composer
+      </GroupHeading>
       {COMPOSER_KEYS.map((key) => (
         <ShortcutRow
           key={key.id}

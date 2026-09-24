@@ -145,16 +145,6 @@ export function groupUnifiedDiff(diff: string): DiffFileGroup[] {
   );
 }
 
-/** Kind of a single patch line after grouping, for the pull-request viewer. */
-export function patchLineKind(
-  kind: DiffLineKind,
-): "add" | "remove" | "hunk" | "context" {
-  if (kind === "add") return "add";
-  if (kind === "del") return "remove";
-  if (kind === "hunk") return "hunk";
-  return "context";
-}
-
 /** One hunk of a file's diff, as the view shows it. */
 export type DiffHunk = {
   /** Zero-based position of the hunk in its file's diff. */

@@ -13,6 +13,23 @@ afterEach(() => {
   cleanup();
 });
 
+/** The code of one diff line, found by its whole text whatever colors it. */
+function findCode(text: string) {
+  return screen.findByText(
+    (_, element) =>
+      element?.hasAttribute("data-diff-code") === true &&
+      element.textContent === text,
+  );
+}
+
+function queryCode(text: string) {
+  return screen.queryByText(
+    (_, element) =>
+      element?.hasAttribute("data-diff-code") === true &&
+      element.textContent === text,
+  );
+}
+
 const DIFF = `diff --git a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs
 +++ b/src/lib.rs
@@ -77,7 +94,7 @@ describe("DiffPanel revision", () => {
       }),
     };
     render(<DiffPanel client={host} workspaceId="ws-1" file="src/lib.rs" />);
-    expect(await screen.findByText("+new")).toBeInTheDocument();
+    expect(await findCode("new")).toBeInTheDocument();
     expect(screen.queryByText("Saved checkpoint")).toBeNull();
     expect(screen.queryByText(/^Live/)).toBeNull();
   });
@@ -105,30 +122,31 @@ describe("DiffPanel", () => {
     );
     expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
     expect(screen.queryByText("Turn 4")).not.toBeInTheDocument();
-    expect(screen.getByText("+new")).toBeInTheDocument();
+    expect(await findCode("new")).toBeInTheDocument();
     expect(screen.queryByText("--- a/src/lib.rs")).not.toBeInTheDocument();
     expect(screen.queryByText("+++ b/src/lib.rs")).not.toBeInTheDocument();
 
-    const added = screen.getByText("+new").parentElement;
+    // The marker sits in its own column, so copying code leaves it behind.
+    const added = (await findCode("new")).closest("[data-kind]");
+    expect(added).toHaveAttribute("data-kind", "add");
     expect(added?.querySelector('[data-diff-gutter="old"]')?.textContent).toBe(
       "",
     );
     expect(added?.querySelector('[data-diff-gutter="new"]')?.textContent).toBe(
       "1",
     );
-    expect(added?.querySelector('[data-diff-gutter="new"]')).toHaveClass(
-      "select-none",
-    );
-    expect(added).toHaveClass("bg-success-background/55");
+    expect(
+      added?.querySelector('[data-diff-gutter="new"]')?.closest(".select-none"),
+    ).not.toBeNull();
 
-    const removed = screen.getByText("-old").parentElement;
+    const removed = (await findCode("old")).closest("[data-kind]");
+    expect(removed).toHaveAttribute("data-kind", "del");
     expect(
       removed?.querySelector('[data-diff-gutter="old"]')?.textContent,
     ).toBe("1");
     expect(
       removed?.querySelector('[data-diff-gutter="new"]')?.textContent,
     ).toBe("");
-    expect(removed).toHaveClass("bg-critical-background/55");
 
     expect(
       screen.getByText(
@@ -166,12 +184,12 @@ describe("DiffPanel", () => {
     expect(
       screen.getByRole("button", { name: "Show diff for big.ts" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText("+line 0")).not.toBeInTheDocument();
+    expect(queryCode("line 0")).not.toBeInTheDocument();
 
     await userEvent
       .setup()
       .click(screen.getByRole("button", { name: "Show diff for big.ts" }));
-    expect(screen.getByText("+line 0")).toBeInTheDocument();
+    expect(await findCode("line 0")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /^Show diff/ }),
     ).not.toBeInTheDocument();
