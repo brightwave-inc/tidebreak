@@ -9,15 +9,17 @@
 //!
 //! Read-only holds three ways at once:
 //!
-//! - The reviewer never touches the person's worktree. It works in a
+//! - The reviewer never works in the person's worktree. It works in a
 //!   disposable copy of the reviewed state ([`snapshot`]), its own git
-//!   repository with no remote that borrows the person's objects read-only,
-//!   deleted when the review ends. Whatever an engine lets through lands
-//!   there. This is the guarantee for every engine.
+//!   repository with no remote that reads the person's objects through
+//!   alternates, deleted when the review ends. Whatever an engine writes
+//!   where it works lands there. This holds for every engine.
 //! - The engine runs in its own read-only posture where it has one:
 //!   Claude Code's plan mode, Codex's read-only sandbox, opencode's plan
 //!   agent. An engine with no plan mode but a structured approval channel,
-//!   Grok, runs in Ask. An engine with neither is not offered.
+//!   Grok, runs in Ask. An engine with neither is not offered. The posture,
+//!   not the copy, is what stops a write aimed outside the copy; only
+//!   Codex enforces it with an OS sandbox.
 //! - Every approval the engine asks for is refused, with feedback telling it
 //!   to report the change as a finding instead. Claude Code gets no
 //!   permission-prompt tool at all, so print mode refuses what plan mode
