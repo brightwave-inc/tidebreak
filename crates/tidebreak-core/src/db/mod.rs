@@ -72,6 +72,7 @@ mod connection;
 mod ops;
 
 use connection::StoreConnection;
+pub use ops::deployment_secret::{DeploymentSecret, DeploymentSecretWrite};
 
 /// Map any SeaORM failure into an [`AgentError::Store`].
 fn store_err(err: impl std::fmt::Display) -> AgentError {
@@ -278,6 +279,42 @@ impl DbStore {
     /// a moment before that write commits.
     pub async fn message_search_backfill_woken() {
         ops::message_search::backfill_woken().await;
+    }
+
+    /// The encrypted secret stored under `name`, if any.
+    ///
+    /// Only the self-host profile's database custody reads and writes these
+    /// rows, and it alone holds the key that decrypts them (decision 102).
+    /// They sit outside the [`Store`] trait, so no request handler reaches
+    /// them except through that custody.
+    pub async fn deployment_secret(&self, name: &str) -> Result<Option<DeploymentSecret>> {
+        ops::deployment_secret::get(self, name).await
+    }
+
+    /// Store an encrypted secret. A row of the same name is replaced only
+    /// when it was written under the same key; a row written under another
+    /// key is left unchanged, and the answer says so.
+    pub async fn put_deployment_secret(
+        &self,
+        secret: &DeploymentSecret,
+    ) -> Result<DeploymentSecretWrite> {
+        ops::deployment_secret::put(self, secret).await
+    }
+
+    /// Remove the encrypted secret stored under `name` when it was written
+    /// under `key_id`. A row written under another key is left unchanged,
+    /// and the answer says so. Removing a name that holds nothing is done.
+    pub async fn delete_deployment_secret(
+        &self,
+        name: &str,
+        key_id: &str,
+    ) -> Result<DeploymentSecretWrite> {
+        ops::deployment_secret::delete(self, name, key_id).await
+    }
+
+    /// Every key id the stored secrets were written under, sorted, each once.
+    pub async fn deployment_secret_key_ids(&self) -> Result<Vec<String>> {
+        ops::deployment_secret::key_ids(self).await
     }
 
     fn from_connection(conn: StoreConnection) -> Self {

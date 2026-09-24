@@ -38,10 +38,12 @@ Selecting `TIDEBREAK_PROFILE=self_host` changes five things about the server:
   behind an API that cannot tell its callers apart. The token file may sit
   beside OIDC as the bootstrap administrator and the CLI credential; the
   gateway and OIDC may not sit together.
-- **Stored credentials use Vault KV v2.** The server never opens the desktop
-  OS keychain. When Vault is not configured, provider environment variables
-  remain available as read fallbacks, but deployment-plane credential writes
-  and deletes fail with setup guidance.
+- **Stored credentials are encrypted in PostgreSQL or kept in Vault KV v2.**
+  The server never opens the desktop OS keychain. With a key file, it keeps
+  them encrypted in its own database. With Vault configured, it keeps them in
+  Vault. When neither is configured, provider environment variables remain
+  available as read fallbacks, but deployment-plane credential writes and
+  deletes fail with setup guidance.
 
 The deployment posture is stated in
 [decision record 6](decisions/0006-self-host-deployment-plane-authorization.md):
@@ -64,8 +66,9 @@ and for what is still integration work.
 - Somewhere private to keep the database password, plus one way to name your
   users: a Model Gateway installation, an OpenID Connect provider, or a
   standalone tokens file.
-- A Vault KV v2 mount if administrators need to save shared credentials through
-  Tidebreak. Provider environment variables remain available without Vault.
+- A key file or a Vault KV v2 mount if administrators need to save shared
+  credentials through Tidebreak. Provider environment variables remain
+  available without either.
 
 ## Model Gateway identity (hosted default)
 
@@ -201,6 +204,66 @@ umask 077
 printf 'alice %s admin\n' "$(openssl rand -hex 32)" > deploy/self-host/tokens
 ```
 
+## Secrets in the database
+
+To save provider, web-search, code-execution, and connected-app credentials
+through Tidebreak without running Vault, give the server a key file. The
+server then encrypts each stored secret with AES-256-GCM and keeps it in the
+`deployment_secrets` table of its own PostgreSQL database
+([decision record 102](decisions/0102-self-host-secrets-in-the-database.md)).
+A dump or backup of the database alone reveals no secret. Anyone who holds
+both the key file and the database can read every secret, and if you lose the
+key file, you lose the secrets.
+
+Create the key once, beside `docker-compose.yml`, and restrict who can read
+it:
+
+```sh
+cd deploy/self-host
+umask 077
+openssl rand -base64 32 > secret.key
+chmod 400 secret.key
+```
+
+The file holds 32 random bytes as one line of base64. Mount it read-only into
+the server container and point `TIDEBREAK_SECRET_KEY_FILE` at it. With
+Compose, add the variable and the mount to the `server` service:
+
+```yaml
+    environment:
+      TIDEBREAK_SECRET_KEY_FILE: /run/tidebreak/secret.key
+    volumes:
+      - ./secret.key:/run/tidebreak/secret.key:ro
+```
+
+The image runs the server as uid 10001, and that uid must be able to read the
+file. On a Linux host, hand it over with `sudo chown 10001 secret.key`.
+
+Back up the key file separately from the database. A database backup without
+the key restores no secret, and you would have to enter each one again. Keep
+the two backups in different places, so one stolen backup never holds both.
+
+The server reads the key once at boot. It refuses to start when the file is
+missing, unreadable, or does not decode to exactly 32 bytes, and when the
+`TIDEBREAK_VAULT_*` variables are set as well. It also refuses to start when
+the database holds secrets written under a different key. In that case,
+restore the original key file and start the server again: it never overwrites
+or deletes secrets written under another key. Each stored secret records the
+id of its key, the first 8 bytes of the key's SHA-256 in hex, and the refusal
+names the ids it found. To find the id of a key file:
+
+```sh
+openssl base64 -d -in secret.key | openssl dgst -sha256 -r | cut -c1-16
+```
+
+The key cannot be rotated yet. To start over with a new key, delete the rows
+from `deployment_secrets` and enter the secrets again.
+
+Vault remains available. To use it instead, set the `TIDEBREAK_VAULT_*`
+variables from the next section and leave `TIDEBREAK_SECRET_KEY_FILE` unset.
+A deployment uses one or the other, and secrets saved in one do not move to
+the other.
+
 ## Vault credential custody
 
 To save provider, web-search, code-execution, and connected-app credentials
@@ -253,9 +316,10 @@ Deleting a credential through Tidebreak deletes the latest version. If your
 policy requires historical values to be destroyed, configure Vault retention
 or destroy those versions through an operator-controlled Vault workflow.
 
-If Vault is absent, stored-secret reads return unset so provider environment
-variables keep working. Attempts to save or remove a credential fail and name
-`TIDEBREAK_VAULT_ADDR` and `TIDEBREAK_VAULT_TOKEN_FILE` as the required setup.
+If neither a key file nor Vault is configured, stored-secret reads return
+unset so provider environment variables keep working. Attempts to save or
+remove a credential fail and name `TIDEBREAK_SECRET_KEY_FILE`, or
+`TIDEBREAK_VAULT_ADDR` and `TIDEBREAK_VAULT_TOKEN_FILE`, as the setup to add.
 
 ## Environment variables
 
@@ -284,6 +348,7 @@ aspirational.
 | `TIDEBREAK_VAULT_MOUNT` | no | `secret` | KV v2 mount path. |
 | `TIDEBREAK_VAULT_PATH` | no | `tidebreak` | Deployment-specific path below the mount. Tidebreak appends one encoded credential key. |
 | `TIDEBREAK_VAULT_NAMESPACE` | no | unset | Vault Enterprise or HCP namespace sent as `X-Vault-Namespace`. |
+| `TIDEBREAK_SECRET_KEY_FILE` | no | unset | Self-host only: file holding the 32-byte base64 key that encrypts stored credentials in the database. See [Secrets in the database](#secrets-in-the-database). Setting it together with the Vault variables refuses to start. |
 | `TIDEBREAK_DATA_DIR` | yes (the image sets it) | `/var/lib/tidebreak` in the image | Instance lock, logs, per-turn scratch. Durable state lives in PostgreSQL, not here. Nothing defaults to the current directory: a self-host server started without it refuses to start and names the variable. |
 | `HOME` | no | `/var/lib/tidebreak/home` in the image | Writable home for npm and the coding harnesses. The image keeps it on the data volume because a hosting plane may run the container as a uid with no passwd entry, which is otherwise handed `HOME=/`. The server creates it at boot. |
 | `TIDEBREAK_LOG` | no | built-in policy | `tracing` filter directives, e.g. `debug` or `warn,tidebreak_server=trace`. An invalid spec falls back to the default. |
@@ -299,7 +364,7 @@ aspirational.
 | `TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD` | no | `20000000` | Positive cumulative spend ceiling per remote session in micro-USD. Set `none` to remove Tidebreak's cumulative ceiling; the runtime profile still bounds each spawn. Restart Tidebreak after changing it. |
 | `TIDEBREAK_EXTERNAL_PERMISSION_MODE` | no | `ask` | The permission mode a Slack-bound session starts in when it runs on this machine's own engine and the channel names none: `plan`, `ask`, `auto`, or `allow`. Sandbox sessions are always `allow`. Restart Tidebreak after changing it. |
 | `TIDEBREAK_EXTERNAL_PERMISSION_CEILING` | no | the mode above | The most permissive mode a channel may ask for with `/tidebreak mode`. A request above it is refused by name. Must not be below `TIDEBREAK_EXTERNAL_PERMISSION_MODE`. Restart Tidebreak after changing it. |
-| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `FIREWORKS_API_KEY`, `TOGETHER_API_KEY` | no | unset | Fallback provider credentials, consulted when Vault holds no credential for that provider or Vault custody is not configured. |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `FIREWORKS_API_KEY`, `TOGETHER_API_KEY` | no | unset | Fallback provider credentials, consulted when no stored credential exists for that provider, including when neither a key file nor Vault is configured. |
 | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_COMPATIBLE_BASE_URL`, `OLLAMA_BASE_URL` | no | unset | Fallback provider endpoints, consulted when no base URL is stored for that provider. Point a provider at a compatible endpoint from your chart or compose file instead of setting it after first boot. Use HTTPS; Ollama also accepts HTTP on a loopback address. An unusable value is ignored, and the provider keeps its built-in endpoint. |
 | `TIDEBREAK_LISTEN_ADDR` | no | loopback, ephemeral port | Self-host only: the address and port the API binds, e.g. `0.0.0.0:8080`. The desktop profile refuses to boot with it set — that profile's loopback binding is what its per-launch token assumes. The image sets it to `0.0.0.0:8080` so the container is reachable at a known port. Engine children are still handed a loopback address on that port, and the engine relay and git-credential routes answer loopback peers only. |
 | `TIDEBREAK_UI_DIST` | no | unset | A built desktop renderer bundle to serve to browsers; see [Opening the machine in a browser](#opening-the-machine-in-a-browser). The image sets it to the bundle it carries. Unset, the server serves no pages and an unknown path answers `404`. The server refuses to start if the directory holds no `index.html`. |
@@ -805,6 +870,11 @@ Restore into a fresh, empty database before starting the server against it.
 The `.env` file is not in either volume. Back it up separately as a secret. In
 standalone compatibility mode, back up the tokens file too; Gateway-backed
 mode has no Tidebreak token file.
+
+If you keep secrets in the database, back up the key file too; it is in
+neither volume. Keep its backup apart from the database dump: the dump alone
+reveals no secret, but together with the key it reveals every one. See
+[Secrets in the database](#secrets-in-the-database).
 
 Grant `s3:ListBucket` for the configured prefix. Grant `s3:GetObject`,
 `s3:PutObject`, `s3:DeleteObject`, and `s3:AbortMultipartUpload` only for

@@ -22,6 +22,7 @@ mod code_channel_scope;
 mod connected_app;
 mod context_checkpoint;
 mod delegated_file_read;
+mod deployment_secret;
 mod document;
 mod event_journal;
 mod file_change_journal;

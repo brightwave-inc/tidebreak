@@ -110,3 +110,4 @@
 0099  0099-memory-is-agent-curated-and-automatic.md
 0100  0100-the-1-0-compatibility-surface.md
 0101  0101-work-chats-rerun-and-branch-turns.md
+0102  0102-self-host-secrets-in-the-database.md

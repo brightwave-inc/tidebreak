@@ -290,7 +290,7 @@ pub use computer_use::{
 };
 pub use config::{Config, Profile, VaultSecretConfig};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-pub use db::DbStore;
+pub use db::{DbStore, DeploymentSecret, DeploymentSecretWrite};
 pub use deliverable::{
     binary_media_type_for_extension, deliverable_media_type, media_type_is_editable_text,
     media_type_is_text, output_revision_relative_path, revision_byte_ceiling,

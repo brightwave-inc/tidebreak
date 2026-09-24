@@ -851,14 +851,18 @@ explicitly not claimed.
 
 **Credential custody follows the profile.** Desktop keeps one credential
 bundle in the OS keychain. Self-host never opens that keychain. When
-`TIDEBREAK_VAULT_ADDR` and `TIDEBREAK_VAULT_TOKEN_FILE` are configured, the
-server stores the same bundle in HashiCorp Vault KV v2 under the configured
+`TIDEBREAK_SECRET_KEY_FILE` names a key file, the server keeps the same bundle
+in its own database, encrypted with AES-256-GCM, and refuses to boot when the
+stored rows were written under another key
+([decision 102](decisions/0102-self-host-secrets-in-the-database.md)). When
+`TIDEBREAK_VAULT_ADDR` and `TIDEBREAK_VAULT_TOKEN_FILE` are configured instead,
+the server stores the bundle in HashiCorp Vault KV v2 under the configured
 mount and deployment path. It reads the mounted token file for every request,
 refuses redirects, bounds response bodies, and requires HTTPS except for a
-literal loopback development address. Without Vault, stored-secret reads
-return unset so provider environment variables remain fallbacks. Writes and
-deletes fail with setup guidance. The manual and boot-time keychain re-home
-paths run only for Desktop.
+literal loopback development address. Setting both is a boot error. With
+neither, stored-secret reads return unset so provider environment variables
+remain fallbacks. Writes and deletes fail with setup guidance. The manual and
+boot-time keychain re-home paths run only for Desktop.
 
 **Where it listens.** The server binds loopback on an ephemeral port by
 default; a self-host deployment that must be reachable from outside its machine

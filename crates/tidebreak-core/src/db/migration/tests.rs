@@ -118,6 +118,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260923_000005_conversation_list_state",
             "m20260924_000003_turn_versions_and_branches",
             "m20260924_000004_message_search",
+            "m20260924_000005_deployment_secrets",
         ]
     );
     assert!(db

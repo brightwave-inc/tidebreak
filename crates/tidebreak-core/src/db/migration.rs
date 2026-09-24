@@ -28,6 +28,7 @@ mod baseline;
 mod channel_repository_confirm;
 mod code_conversation_request;
 mod conversation_list_state;
+mod deployment_secrets;
 mod external_steer_admission;
 mod external_steer_recovery;
 mod external_thread_context;
@@ -141,6 +142,7 @@ impl MigratorTrait for Migrator {
             Box::new(conversation_list_state::ConversationListState),
             Box::new(turn_versions_and_branches::TurnVersionsAndBranches),
             Box::new(message_search::MessageSearch),
+            Box::new(deployment_secrets::DeploymentSecrets),
         ]
     }
 }

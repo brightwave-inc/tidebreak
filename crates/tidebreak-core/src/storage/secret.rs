@@ -3,8 +3,9 @@ use async_trait::async_trait;
 use crate::error::Result;
 
 /// Credential custody: secrets keyed by a stable reference string (e.g.
-/// `provider.anthropic.credential`). Backed by the OS keychain on desktop, a
-/// KMS/Vault on a server — never the [`Store`].
+/// `provider.anthropic.credential`). Backed by the OS keychain on desktop. On a
+/// self-host server, backed by Vault or by rows encrypted in the deployment's
+/// own database (decision 102). Never plaintext rows in the [`Store`].
 #[async_trait]
 pub trait SecretProvider: Send + Sync {
     /// Fetch a secret by key, or `None` if unset.

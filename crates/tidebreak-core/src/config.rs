@@ -28,7 +28,8 @@ pub enum Profile {
     /// Single-user desktop: SQLite, OS keychain, local filesystem. The default.
     #[default]
     Desktop,
-    /// Self-hosted server: Postgres, Vault or environment secrets, object storage.
+    /// Self-hosted server: Postgres, secrets encrypted in the database or kept
+    /// in Vault (environment variables otherwise), object storage.
     SelfHost,
 }
 
@@ -119,6 +120,11 @@ fn normalize_vault_path(name: &str, value: &str) -> Result<String> {
     }
     Ok(value.to_string())
 }
+
+/// The refusal for a deployment that names two places to keep its stored
+/// secrets. Shared with the server, which checks a programmatic config the
+/// same way.
+pub const SECRET_CUSTODY_CONFLICT: &str = "TIDEBREAK_SECRET_KEY_FILE and the TIDEBREAK_VAULT_* variables each choose where stored secrets live; set one or the other, not both";
 
 /// Boot configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,11 +239,20 @@ pub struct Config {
     pub public_url: Option<String>,
     /// Remote credential custody for the self-host profile.
     ///
-    /// When absent, provider environment variables remain readable, but
-    /// deployment-plane credential writes fail with an operator-facing setup
-    /// error instead of reaching the desktop OS keychain.
+    /// When neither this nor [`Config::secret_key_file`] is set, provider
+    /// environment variables remain readable, but deployment-plane credential
+    /// writes fail with an operator-facing setup error instead of reaching the
+    /// desktop OS keychain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault_secrets: Option<VaultSecretConfig>,
+    /// The file holding the key that encrypts the self-host profile's stored
+    /// secrets in its own database (decision 102).
+    ///
+    /// Mutually exclusive with [`Config::vault_secrets`]. The config carries
+    /// the path, never the key: the server reads the file once at boot and
+    /// refuses to start if it cannot use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_key_file: Option<PathBuf>,
     /// The address the API binds, for deployments that must be reachable from
     /// outside the machine (a container publishing a port, say). `None` — the
     /// default — keeps the loopback, ephemeral-port bind every profile has
@@ -419,6 +434,7 @@ impl Config {
             auth_oidc_claim: None,
             public_url: None,
             vault_secrets: None,
+            secret_key_file: None,
             listen_addr: None,
             runtime_endpoint: None,
             runtime_profile: None,
@@ -453,11 +469,13 @@ impl Config {
     /// `TIDEBREAK_PUBLIC_URL` for machine-bound Gateway credentials, optional
     /// `TIDEBREAK_VAULT_ADDR` and `TIDEBREAK_VAULT_TOKEN_FILE` for self-host
     /// credential custody, plus optional `TIDEBREAK_VAULT_MOUNT`,
-    /// `TIDEBREAK_VAULT_PATH`, and `TIDEBREAK_VAULT_NAMESPACE`,
-    /// `TIDEBREAK_LISTEN_ADDR` (self-host only; default loopback on an
-    /// ephemeral port), and optional `TIDEBREAK_RUNTIME_ENDPOINT` plus
-    /// `TIDEBREAK_RUNTIME_PROFILE` together to enable remote sessions. Remote
-    /// deployments can also set `TIDEBREAK_RUNTIME_CONCURRENCY_CAP`,
+    /// `TIDEBREAK_VAULT_PATH`, and `TIDEBREAK_VAULT_NAMESPACE`, or instead
+    /// `TIDEBREAK_SECRET_KEY_FILE` to keep those credentials encrypted in the
+    /// self-host database, `TIDEBREAK_LISTEN_ADDR` (self-host only; default
+    /// loopback on an ephemeral port), and optional
+    /// `TIDEBREAK_RUNTIME_ENDPOINT` plus `TIDEBREAK_RUNTIME_PROFILE` together
+    /// to enable remote sessions. Remote deployments can also set
+    /// `TIDEBREAK_RUNTIME_CONCURRENCY_CAP`,
     /// `TIDEBREAK_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD`, and
     /// `TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD`. Optional
     /// `TIDEBREAK_UI_DIST` names a built renderer bundle to serve to browsers.
@@ -538,6 +556,9 @@ impl Config {
                 std::env::var("TIDEBREAK_EXTERNAL_PERMISSION_MODE").ok(),
                 std::env::var("TIDEBREAK_EXTERNAL_PERMISSION_CEILING").ok(),
             )
+        })
+        .and_then(|config| {
+            config.with_secret_key_file_var(std::env::var_os("TIDEBREAK_SECRET_KEY_FILE"))
         })
         .map(|config| config.with_ui_dist_var(std::env::var_os("TIDEBREAK_UI_DIST")))
     }
@@ -670,6 +691,32 @@ impl Config {
         Ok(self)
     }
 
+    /// Apply `TIDEBREAK_SECRET_KEY_FILE`, the file holding the key that
+    /// encrypts stored secrets in the self-host database. Empty means unset.
+    ///
+    /// Split from [`Config::from_env`] like the runtime limits, so the rules
+    /// are testable without touching the process environment. A deployment
+    /// keeps its stored secrets in one place, so the variable is a boot error
+    /// beside the Vault variables, and on the desktop profile, whose secrets
+    /// live in the OS keychain. The file itself is read where the server
+    /// plans its credential storage, so that refusal can say what is wrong
+    /// with it.
+    pub fn with_secret_key_file_var(mut self, value: Option<OsString>) -> Result<Self> {
+        let Some(path) = value.filter(|value| !value.is_empty()).map(PathBuf::from) else {
+            return Ok(self);
+        };
+        if self.profile != Profile::SelfHost {
+            return Err(AgentError::config(
+                "TIDEBREAK_SECRET_KEY_FILE is available only with TIDEBREAK_PROFILE=self_host",
+            ));
+        }
+        if self.vault_secrets.is_some() {
+            return Err(AgentError::config(SECRET_CUSTODY_CONFLICT));
+        }
+        self.secret_key_file = Some(path);
+        Ok(self)
+    }
+
     /// Apply `TIDEBREAK_UI_DIST`. Split from [`Config::from_env`] like the
     /// runtime limits, so the empty-means-unset rule is testable without
     /// touching the process environment. Whether the directory actually holds
@@ -788,6 +835,7 @@ impl Config {
             auth_oidc_claim: None,
             public_url,
             vault_secrets,
+            secret_key_file: None,
             listen_addr,
             runtime_endpoint,
             runtime_profile,
@@ -1631,6 +1679,7 @@ mod tests {
             Some(20_000_000)
         );
         assert_eq!(config.vault_secrets, None);
+        assert_eq!(config.secret_key_file, None);
     }
 
     #[test]
@@ -1642,6 +1691,7 @@ mod tests {
         assert_eq!(json.get("runtime_concurrency_cap"), None);
         assert_eq!(json.get("runtime_spawn_spend_ceiling_microusd"), None);
         assert_eq!(json.get("runtime_session_spend_ceiling_microusd"), None);
+        assert_eq!(json.get("secret_key_file"), None);
     }
 
     #[test]
@@ -1831,6 +1881,79 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("TIDEBREAK_PROFILE=self_host"));
+    }
+
+    fn self_host_vars(vault: Option<VaultSecretConfig>) -> Result<Config> {
+        Config::from_vars(
+            Some("self_host".into()),
+            Some(OsString::from("/data")),
+            Some("s3://tidebreak/blobs".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            vault,
+        )
+    }
+
+    /// The key file selects database custody on self-host. Unset or empty,
+    /// self-host keeps the custody it had before the variable existed.
+    #[test]
+    fn a_secret_key_file_selects_database_custody_on_self_host() {
+        let path = OsString::from("/run/secrets/tidebreak-secret-key");
+        let config = self_host_vars(None)
+            .unwrap()
+            .with_secret_key_file_var(Some(path.clone()))
+            .unwrap();
+        assert_eq!(config.secret_key_file, Some(PathBuf::from(&path)));
+
+        for unset in [None, Some(OsString::new())] {
+            let config = self_host_vars(None)
+                .unwrap()
+                .with_secret_key_file_var(unset)
+                .unwrap();
+            assert_eq!(config.secret_key_file, None);
+            assert_eq!(config.vault_secrets, None);
+        }
+
+        let desktop = Config::desktop("/data")
+            .with_secret_key_file_var(Some(path))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            desktop.contains("TIDEBREAK_SECRET_KEY_FILE")
+                && desktop.contains("TIDEBREAK_PROFILE=self_host"),
+            "the desktop refusal must name the variable and the profile: {desktop}"
+        );
+    }
+
+    /// A deployment keeps its stored secrets in one place, so naming both the
+    /// key file and Vault is a boot error rather than a silent preference.
+    #[test]
+    fn a_secret_key_file_beside_vault_is_a_config_error() {
+        let vault = VaultSecretConfig::from_vars(
+            Some("https://vault.example.test".into()),
+            Some(OsString::from("/run/secrets/vault-token")),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let error = self_host_vars(vault)
+            .unwrap()
+            .with_secret_key_file_var(Some(OsString::from("/run/secrets/tidebreak-secret-key")))
+            .unwrap_err();
+        assert_eq!(error.kind(), "config");
+        let message = error.to_string();
+        assert!(
+            message.contains("TIDEBREAK_SECRET_KEY_FILE") && message.contains("TIDEBREAK_VAULT_"),
+            "the refusal must name both choices: {message}"
+        );
     }
 
     #[test]
