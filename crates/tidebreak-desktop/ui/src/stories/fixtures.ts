@@ -1354,9 +1354,9 @@ export const codeHomeQuietSessions: CodeSessionDigest[] = [
 ];
 
 /**
- * A busy morning: seven needs across approvals, failed turns, and pull
- * requests, live agents and a watch, two pull requests ready to merge, and
- * more recent work than one section shows.
+ * A busy morning: eight needs across approvals, failed turns, a failed
+ * setup, and pull requests, live agents and a watch, two pull requests ready
+ * to merge, and more recent work than one section shows.
  */
 export const codeHomeBusyWorkspaces: CodeWorkspaceSnapshot[] = [
   homeWorkspace(
@@ -1365,6 +1365,16 @@ export const codeHomeBusyWorkspaces: CodeWorkspaceSnapshot[] = [
     "Add retry to the gateway client",
     3,
   ),
+  {
+    ...homeWorkspace(
+      "ws-docs-scaffold",
+      "repo-design-system",
+      "Scaffold the docs site",
+      75,
+    ),
+    status: "setup_failed",
+    setup_error: "pnpm install exited with code 1",
+  },
   homeWorkspace(
     "ws-flaky-login",
     "repo-tidebreak",

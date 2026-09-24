@@ -78,9 +78,10 @@ function digest(
 }
 
 function pr(overrides: Partial<PullRequestDigest> = {}): PullRequestDigest {
+  const number = overrides.number ?? 41;
   return {
-    number: 41,
-    url: "https://github.com/acme/app/pull/41",
+    number,
+    url: `https://github.com/acme/app/pull/${number}`,
     state: "open",
     title: "Tighten the retry loop",
     ...overrides,
@@ -135,13 +136,21 @@ describe("codeHomeSections", () => {
       label: "An approval is waiting",
       tone: "critical",
     });
-    expect(sections.needs_you[1]!.status).toEqual({
-      label: "Checks failed",
-      tone: "critical",
+    expect(sections.needs_you[0]!.activity).toEqual({
+      at: "2026-09-20T10:00:00.000Z",
+      kind: "activity",
     });
-    expect(sections.needs_you[1]!.reference).toEqual({
-      kind: "pull_request",
-      number: 42,
+    // The pull request put this row here, so the row opens it in Delivery,
+    // under the rail's own lifecycle mark; the gate is said in words.
+    expect(sections.needs_you[1]).toMatchObject({
+      status: { label: "Checks failed", tone: "critical" },
+      reference: { kind: "pull_request", number: 42 },
+      glyph: { kind: "pull_request", lifecycle: "open" },
+      target: {
+        kind: "pull_request",
+        repository: { host: "github.com", owner: "acme", name: "app" },
+        number: 42,
+      },
     });
 
     expect(keys(sections.running)).toEqual(["workspace:busy"]);
@@ -151,10 +160,13 @@ describe("codeHomeSections", () => {
       target: { kind: "workspace", workspaceId: "busy" },
     });
 
-    expect(keys(sections.ready_to_merge)).toEqual(["pull_request:green:41"]);
+    expect(keys(sections.ready_to_merge)).toEqual(["workspace:green"]);
     expect(sections.ready_to_merge[0]).toMatchObject({
-      title: "Tighten the retry loop",
+      title: "Workspace green",
       status: { label: "6 checks passed", tone: "ready" },
+      glyph: { kind: "pull_request", lifecycle: "open" },
+      // Nothing has run here yet: the only timestamp is the creation.
+      activity: { at: "2026-09-01T00:00:00.000Z", kind: "created" },
       target: {
         kind: "pull_request",
         repository: { host: "github.com", owner: "acme", name: "app" },
@@ -214,7 +226,7 @@ describe("codeHomeSections", () => {
       },
     });
     expect(keys(sections.needs_you)).toEqual(["workspace:broke"]);
-    expect(keys(sections.ready_to_merge)).toEqual(["pull_request:unsure:44"]);
+    expect(keys(sections.ready_to_merge)).toEqual(["workspace:unsure"]);
     // No approval and no checks to name: the row falls back to the verdict.
     expect(sections.ready_to_merge[0]!.status?.label).toBe("Ready to merge");
     expect(keys(sections.recent)).toEqual(["workspace:landed"]);
@@ -228,6 +240,7 @@ describe("codeHomeSections", () => {
         workspace("green", {
           pr: pr({ ...READY, review_decision: "APPROVED", url: null }),
         }),
+        workspace("red", { pr: pr({ ...FAILING, url: null }) }),
       ],
       digests: {},
     });
@@ -238,6 +251,84 @@ describe("codeHomeSections", () => {
       kind: "workspace",
       workspaceId: "green",
     });
+    expect(sections.needs_you[0]!.target).toEqual({
+      kind: "workspace",
+      workspaceId: "red",
+    });
+  });
+
+  it("files a failed setup under Needs you, below an agent still working", () => {
+    const sections = codeHomeSections({
+      repos: REPOS,
+      workspaces: [
+        workspace("broken", { status: "setup_failed" }),
+        workspace("pressing-on", { status: "setup_failed" }),
+      ],
+      digests: {
+        "pressing-on": digest("pressing-on", {
+          lifecycle: "running",
+          attention: working,
+        }),
+      },
+    });
+    expect(sections.needs_you).toHaveLength(1);
+    expect(sections.needs_you[0]).toMatchObject({
+      key: "workspace:broken",
+      status: { label: "Setup failed", tone: "critical" },
+      target: { kind: "workspace", workspaceId: "broken" },
+    });
+    expect(keys(sections.running)).toEqual(["workspace:pressing-on"]);
+    expect(sections.recent).toEqual([]);
+  });
+
+  it("classifies a workspace-less conversation by the same rules as a workspace", () => {
+    const runningStall = {
+      lifecycle: "running" as const,
+      attention: stalled,
+      activity: "shell" as const,
+      activity_detail: "cargo test",
+    };
+    const sections = codeHomeSections({
+      repos: REPOS,
+      workspaces: [
+        workspace("quiet-shell"),
+        workspace("notice"),
+        workspace("stopped"),
+      ],
+      digests: {
+        "quiet-shell": digest("quiet-shell", runningStall),
+        notice: digest("notice", { attention: readyNotice }),
+        stopped: digest("stopped", { attention: stalled }),
+      },
+      conversations: [
+        digest(null, { session: "free-quiet-shell", ...runningStall }),
+        digest(null, { session: "free-notice", attention: readyNotice }),
+        digest(null, { session: "free-stopped", attention: stalled }),
+      ],
+    });
+    // A silent command in a turn that is still running is live work, in the
+    // warning tone; it becomes a need only once the turn stops.
+    expect(keys(sections.running).sort()).toEqual([
+      "session:free-quiet-shell",
+      "workspace:quiet-shell",
+    ]);
+    for (const item of sections.running) {
+      expect(item.status).toEqual({
+        label: "cargo test",
+        tone: "warning",
+        live: false,
+      });
+    }
+    // A ready notice with no pull request state to check it against is ready
+    // to merge, never a need.
+    expect(keys(sections.ready_to_merge).sort()).toEqual([
+      "session:free-notice",
+      "workspace:notice",
+    ]);
+    expect(keys(sections.needs_you).sort()).toEqual([
+      "session:free-stopped",
+      "workspace:stopped",
+    ]);
   });
 
   it("surfaces a stuck watch as a need and a fixing watch as live work", () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FolderGit2, GitBranch, Plus, Sparkles } from "lucide-react";
 
 import type { HarnessKind } from "../api/types";
@@ -56,6 +56,7 @@ function CodeHomeBody() {
     id: string;
     label: string;
   } | null>(null);
+  const settingsOrigin = useRef<HTMLElement | null>(null);
   const doctor = useCodeCatalogStore((state) => state.doctor);
   const doctorError = useCodeCatalogStore((state) => state.doctorError);
   const repos = useCodeCatalogStore((state) => state.repos);
@@ -244,9 +245,10 @@ function CodeHomeBody() {
             liveWorkspaceCounts={liveWorkspaceCounts}
             onAddRepo={() => setAddOpen(true)}
             onNewWorkspace={(repoId) => startNewWorkspace(repoId)}
-            onOpenSettings={(repo) =>
-              setSettingsRepo({ id: repo.id, label: repo.display_name })
-            }
+            onOpenSettings={(repo, origin) => {
+              settingsOrigin.current = origin;
+              setSettingsRepo({ id: repo.id, label: repo.display_name });
+            }}
           />
         </>
       )}
@@ -255,6 +257,15 @@ function CodeHomeBody() {
         open={settingsRepo !== null}
         onOpenChange={(open) => {
           if (!open) setSettingsRepo(null);
+        }}
+        // The dialog opens from a menu that is gone by the time it closes,
+        // so hand focus back to the repository row the reader came from.
+        onCloseAutoFocus={(event) => {
+          const origin = settingsOrigin.current;
+          settingsOrigin.current = null;
+          if (!origin?.isConnected) return;
+          event.preventDefault();
+          origin.focus();
         }}
         client={client}
         repoId={settingsRepo?.id ?? null}

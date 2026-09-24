@@ -22,6 +22,7 @@ import type {
 } from "../api/types";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeHome } from "./CodeHome";
+import { repositoryDetailSide } from "./CodeHomeOverview";
 import { useEngineSignInStore } from "./EngineSignIn";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 
@@ -444,6 +445,15 @@ describe("CodeHome for a returning reader", () => {
         check_counts: { passing: 3, pending: 0, failing: 0, skipped: 0 },
       },
     }),
+    workspace("ws-red", "Mend the parser", {
+      pr: {
+        number: 42,
+        url: "https://github.com/acme/app/pull/42",
+        state: "open",
+        title: "Mend the parser",
+        check_counts: { passing: 5, pending: 0, failing: 1, skipped: 0 },
+      },
+    }),
     workspace("ws-idea", "Parked idea"),
     workspace("ws-shelved", "Put away", { status: "archived" }),
   ];
@@ -478,19 +488,25 @@ describe("CodeHome for a returning reader", () => {
     await renderReturning();
     deliverSnapshot(SESSIONS);
 
-    const headings = screen
-      .getAllByRole("heading", { level: 2 })
-      .map((heading) => heading.textContent);
-    expect(headings).toEqual([
-      "Needs you2",
-      "Running1",
-      "Ready to merge1",
-      "Recent work1",
-      "Repositories1",
-    ]);
+    const headings = screen.getAllByRole("heading", { level: 2 });
+    expect(headings).toHaveLength(5);
+    [
+      "Needs you, 3",
+      "Running, 1",
+      "Ready to merge, 1",
+      "Recent work, 1",
+      "Repositories, 1",
+    ].forEach((name, index) =>
+      expect(headings[index]).toHaveAccessibleName(name),
+    );
     expect(
       section(/^Needs you/).getByRole("button", {
-        name: /^Answer the approval · An approval is waiting · app/,
+        name: /^Answer the approval · An approval is waiting · app · tidebreak\/ws-ask · last activity .+ ago$/,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      section(/^Needs you/).getByRole("button", {
+        name: /^Mend the parser · Checks failed · app · #42 · created .+ ago$/,
       }),
     ).toBeInTheDocument();
     expect(
@@ -501,7 +517,7 @@ describe("CodeHome for a returning reader", () => {
     ).toBeInTheDocument();
     expect(
       section(/^Ready to merge/).getByRole("button", {
-        name: /^Ship the fix · 3 checks passed · app · #41$/,
+        name: /^Ship the fix · 3 checks passed · app · #41 · created .+ ago$/,
       }),
     ).toBeInTheDocument();
     expect(
@@ -536,6 +552,48 @@ describe("CodeHome for a returning reader", () => {
       repoName: "app",
       pr: 41,
     });
+
+    // A pull request that needs you opens the pull request, not the
+    // workspace behind it.
+    await act(() => router.navigate({ to: "/code" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^Mend the parser/ }),
+    );
+    expect(router.state.location.pathname).toBe("/code/delivery/pull-requests");
+    expect(router.state.location.search).toEqual({
+      repoHost: "github.com",
+      repoOwner: "acme",
+      repoName: "app",
+      pr: 42,
+    });
+  });
+
+  it("never lets a busy sibling hide what one agent needs", async () => {
+    await renderReturning({
+      listCodeWorkspaces: vi.fn(async () => [
+        workspace("ws-idea", "Parked idea"),
+      ]),
+    });
+    // Two agents share the workspace: one finished, one stopped after its
+    // turn went quiet. The card and the home report the stopped one.
+    deliverSnapshot([
+      digest("ws-idea", { session: "sess-done" }),
+      digest("ws-idea", {
+        session: "sess-quiet",
+        attention: {
+          state: { type: "stalled", idle_secs: 600 },
+          source: "heuristic",
+        },
+      }),
+    ]);
+    expect(
+      section(/^Needs you/).getByRole("button", {
+        name: /^Parked idea · Stalled/,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Nothing needs you right now."),
+    ).not.toBeInTheDocument();
   });
 
   it("shows five items a section and the rest behind View all", async () => {
@@ -544,7 +602,13 @@ describe("CodeHome for a returning reader", () => {
     );
     await renderReturning({ listCodeWorkspaces: vi.fn(async () => many) });
     deliverSnapshot(
-      many.map((item) => digest(item.id, { attention: approval })),
+      many.map((item, index) =>
+        digest(item.id, {
+          attention: approval,
+          // Newest first: Need 1 leads, Need 6 is the first one revealed.
+          trigger_target_at: `2026-09-20T10:0${9 - index}:00.000Z`,
+        }),
+      ),
     );
 
     const needs = section(/^Needs you/);
@@ -555,12 +619,14 @@ describe("CodeHome for a returning reader", () => {
     expect(viewAll).toHaveAttribute("aria-expanded", "false");
     await userEvent.click(viewAll);
     expect(needs.getAllByRole("button", { name: /^Need \d/ })).toHaveLength(7);
+    // The keyboard carries on from the first row it revealed.
+    expect(needs.getByRole("button", { name: /^Need 6 / })).toHaveFocus();
     expect(
       needs.getByRole("button", { name: "Show fewer in Needs you" }),
     ).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("says nothing needs you only once the live snapshot has landed", async () => {
+  it("says nothing needs you only while the live snapshot vouches for it", async () => {
     await renderReturning({
       listCodeWorkspaces: vi.fn(async () => [
         workspace("ws-idea", "Parked idea"),
@@ -572,6 +638,18 @@ describe("CodeHome for a returning reader", () => {
 
     deliverSnapshot([]);
     expect(screen.getByText("Nothing needs you right now.")).toBeVisible();
+
+    // The socket dropped: the claim could be stale, so the page withdraws it
+    // and keeps the rest of the work on screen.
+    act(() => {
+      useCodeUpdatesStore.getState().apply({ type: "disconnected" });
+    });
+    expect(
+      screen.queryByText("Nothing needs you right now."),
+    ).not.toBeInTheDocument();
+    expect(
+      section(/^Recent work/).getByRole("button", { name: /^Parked idea/ }),
+    ).toBeInTheDocument();
   });
 
   it("invites a first workspace when repositories have none", async () => {
@@ -605,17 +683,46 @@ describe("CodeHome for a returning reader", () => {
     ).toBeInTheDocument();
   });
 
-  it("opens the same row menu from the keyboard", async () => {
+  it("opens the same row menu from the keyboard and says how", async () => {
     await renderReturning();
     const row = section(/^Repositories/).getByRole("button", {
       name: "New workspace on app",
     });
+    // Nothing on the row shows the menu, so the row tells assistive
+    // technology where it is.
+    expect(row).toHaveAttribute("aria-keyshortcuts", "Shift+F10");
+    expect(row).toHaveAccessibleDescription("More actions: Shift+F10");
+
     row.focus();
     fireEvent.keyDown(row, { key: "F10", shiftKey: true });
     expect(
       await screen.findByRole("menuitem", { name: "Repository settings…" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Copy path" })).toBeVisible();
+  });
+
+  it("returns focus to the repository row when its settings close", async () => {
+    await renderReturning({
+      getCodeRepo: vi.fn(() => new Promise<CodeRepoSnapshot>(() => {})),
+      getCodeRepoTrust: vi.fn(() => new Promise<never>(() => {})),
+    });
+    const row = section(/^Repositories/).getByRole("button", {
+      name: "New workspace on app",
+    });
+    row.focus();
+    fireEvent.keyDown(row, { key: "F10", shiftKey: true });
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: "Repository settings…" }),
+    );
+    await screen.findByRole("dialog", { name: "Repository settings" });
+
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Repository settings" }),
+      ).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(row).toHaveFocus());
   });
 
   it("keeps the whole repository path and its tail intact for middle truncation", async () => {
@@ -630,5 +737,24 @@ describe("CodeHome for a returning reader", () => {
     expect(shown.lastElementChild).toHaveTextContent(
       /design-system-components$/,
     );
+  });
+});
+
+describe("repositoryDetailSide", () => {
+  function rowEndingAt(right: number) {
+    return {
+      getBoundingClientRect: () => ({ right }) as DOMRect,
+    } as HTMLElement;
+  }
+
+  it("opens beside the row when the window has room, and below it otherwise", () => {
+    // jsdom's window is 1024 wide; the card needs 22rem at the 14px root
+    // plus its gap and edge.
+    expect(window.innerWidth).toBe(1024);
+    expect(repositoryDetailSide(rowEndingAt(600))).toBe("right");
+    // Not enough room beside the row: the card must not spill off the
+    // window or land on the list, so it hangs below the row's far end.
+    expect(repositoryDetailSide(rowEndingAt(900))).toBe("bottom");
+    expect(repositoryDetailSide(null)).toBe("bottom");
   });
 });

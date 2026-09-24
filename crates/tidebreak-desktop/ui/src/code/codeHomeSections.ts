@@ -16,14 +16,12 @@ import { digestStatusTone, type StatusTone } from "./statusTone";
 import {
   conversationSourceLabel,
   conversationTitle,
+  digestActivityState,
   isPutAway,
-  isReadyToMergeAttention,
   isSessionRowWorthy,
   readyToMergeNotice,
   sessionActivityLineLabel,
-  sessionStatusRank,
   watchRowLabel,
-  workspaceStatusRank,
 } from "./workspaceCards";
 
 /**
@@ -39,7 +37,8 @@ import {
  *
  * Every live workspace and conversation lands in exactly one section, the
  * strongest claim first: a need, then live work, then a pull request that is
- * ready to merge, then recent work.
+ * ready to merge, then recent work. Workspace rows and workspace-less
+ * conversation rows go through the same rules (`classify`).
  */
 
 export type CodeHomeSectionId =
@@ -79,11 +78,12 @@ export type CodeHomeTarget =
 
 /**
  * The one mark a row leads with. A digest draws the rail's own session glyph,
- * so the home and the rail never disagree about a conversation.
+ * and a pull request the rail's lifecycle mark, so the home and the rail
+ * never disagree about the same thing side by side.
  */
 export type CodeHomeGlyph =
   | { kind: "session"; digest: CodeSessionDigest }
-  | { kind: "pull_request"; lifecycle: PullRequestLifecycle; tone: StatusTone }
+  | { kind: "pull_request"; lifecycle: PullRequestLifecycle }
   | { kind: "alert"; tone: StatusTone }
   | { kind: "live" }
   | { kind: "idle" };
@@ -95,6 +95,12 @@ export type CodeHomeStatus = {
   /** A turn is moving right now: muted ink with the live shimmer. */
   live?: boolean;
 };
+
+/**
+ * When the item last moved. `created` marks a workspace nothing has run in
+ * yet, whose only timestamp is its creation.
+ */
+export type CodeHomeActivity = { at: string; kind: "activity" | "created" };
 
 export type CodeHomeItem = {
   key: string;
@@ -109,8 +115,7 @@ export type CodeHomeItem = {
     | { kind: "pull_request"; number: number }
     | null;
   glyph: CodeHomeGlyph;
-  /** Newest turn start, or creation before the first turn. */
-  activityAt: string | null;
+  activity: CodeHomeActivity | null;
   target: CodeHomeTarget;
 };
 
@@ -191,24 +196,80 @@ function workspaceItem(
   repoName: string | null,
 ): CodeHomeItem {
   const digest = rawDigest ? recoveryDigest(rawDigest) : undefined;
-  const pr = digest?.pr_state ?? workspace.pr;
-  const base = {
+  const target = { kind: "workspace" as const, workspaceId: workspace.id };
+  const classified = classify({
+    digest,
+    pr: digest?.pr_state ?? workspace.pr,
+    watches,
+    setupFailed: workspace.status === "setup_failed",
+    target,
+  });
+  return {
     key: `workspace:${workspace.id}`,
     title: digest?.title?.trim() || workspace.title,
     context: repoName,
     reference: workspace.branch_name
-      ? { kind: "branch" as const, name: workspace.branch_name }
+      ? { kind: "branch", name: workspace.branch_name }
       : null,
-    activityAt: digest?.trigger_target_at ?? workspace.created_at,
-    target: { kind: "workspace" as const, workspaceId: workspace.id },
+    activity: digest?.trigger_target_at
+      ? { at: digest.trigger_target_at, kind: "activity" }
+      : { at: workspace.created_at, kind: "created" },
+    target,
+    ...classified,
   };
-  const rank = workspaceStatusRank(workspace, digest);
+}
+
+function conversationItem(rawDigest: CodeSessionDigest): CodeHomeItem {
+  const digest = recoveryDigest(rawDigest);
+  const target = { kind: "session" as const, sessionId: digest.session };
+  return {
+    key: `session:${digest.session}`,
+    title: conversationTitle(digest),
+    context: conversationSourceLabel(digest) ?? null,
+    reference: null,
+    activity: digest.trigger_target_at
+      ? { at: digest.trigger_target_at, kind: "activity" }
+      : null,
+    target,
+    ...classify({
+      digest,
+      pr: digest.pr_state,
+      watches: [],
+      setupFailed: false,
+      target,
+    }),
+  };
+}
+
+type Classified = Pick<CodeHomeItem, "section" | "status" | "glyph"> &
+  Partial<Pick<CodeHomeItem, "reference" | "target">>;
+
+/**
+ * Which section an item belongs in, and why, strongest claim first. A
+ * workspace row and a workspace-less conversation row both come through
+ * here; only a workspace brings watches and a setup script.
+ */
+function classify({
+  digest,
+  pr,
+  watches,
+  setupFailed,
+  target,
+}: {
+  /** Already passed through `recoveryDigest`. */
+  digest: CodeSessionDigest | undefined;
+  pr: PullRequestDigest | undefined;
+  watches: readonly CodeSessionDigest[];
+  setupFailed: boolean;
+  target: Extract<CodeHomeTarget, { kind: "workspace" | "session" }>;
+}): Classified {
+  const activity = digestActivityState(digest);
 
   // The conversation is waiting on the reader: an approval, a question, a
-  // failed turn, or a turn that went quiet and stopped.
-  if (rank === "needs_you" && digest) {
+  // failed or interrupted turn, a lost connection, or a turn that went quiet
+  // and stopped.
+  if (activity === "needs_you" && digest) {
     return {
-      ...base,
       section: "needs_you",
       status: needStatus(digest),
       glyph: { kind: "session", digest },
@@ -221,26 +282,28 @@ function workspaceItem(
       watch.attention.state.type === "needs_you" ||
       watch.watch_state === "blocked",
   );
-  if (stuckWatch) {
+  if (stuckWatch && target.kind === "workspace") {
     const need = stuckWatch.attention.state;
     const status: CodeHomeStatus =
       need.type === "needs_you"
         ? { label: sentence(need.prompt || "Needs you"), tone: "critical" }
         : { label: "Watch is blocked", tone: "warning" };
     return {
-      ...base,
       section: "needs_you",
       status,
       glyph: { kind: "alert", tone: status.tone },
-      target: { ...base.target, task: stuckWatch.session },
+      target: { ...target, task: stuckWatch.session },
     };
   }
 
-  if (rank === "running" && digest) {
+  if (activity === "running" && digest) {
     return {
-      ...base,
       section: "running",
-      status: runningStatus(digest, sessionActivityLineLabel(digest, pr)),
+      status: runningStatus(
+        digest,
+        sessionTreeWaitLabel(digest.wait) ??
+          sessionActivityLineLabel(digest, pr),
+      ),
       glyph: { kind: "session", digest },
     };
   }
@@ -252,9 +315,8 @@ function workspaceItem(
       watch.watch_state === "fixing" ||
       (watch.watch_state === undefined && watch.lifecycle === "running"),
   );
-  if (fixingWatch) {
+  if (fixingWatch && target.kind === "workspace") {
     return {
-      ...base,
       section: "running",
       status: {
         label: `Watch: ${watchRowLabel(fixingWatch)}`,
@@ -262,70 +324,78 @@ function workspaceItem(
         live: true,
       },
       glyph: { kind: "live" },
-      target: { ...base.target, task: fixingWatch.session },
+      target: { ...target, task: fixingWatch.session },
     };
   }
 
+  // The checkout survived, but the setup script never finished: the reader
+  // retries it or fixes it from the workspace.
+  if (setupFailed) {
+    return {
+      section: "needs_you",
+      status: { label: "Setup failed", tone: "critical" },
+      glyph: { kind: "alert", tone: "critical" },
+    };
+  }
+
+  const notice = readyToMergeNotice(digest?.attention, pr);
   if (pr) {
     const status = prStatus(pr);
+    const reference = { kind: "pull_request" as const, number: pr.number };
     const glyph: CodeHomeGlyph = {
       kind: "pull_request",
       lifecycle: status.lifecycle,
-      tone: status.headline.tone,
     };
-    const reference = { kind: "pull_request" as const, number: pr.number };
+    // The row opens the pull request that put it here, in Delivery.
+    const pullRequest = deliveryPullRequestTarget(pr) ?? target;
     // Failed checks, requested changes, conflicts, and stale branches: the
     // same group Delivery files under "Needs your attention".
     if (status.group === "attention") {
       return {
-        ...base,
-        reference,
         section: "needs_you",
         status: status.headline,
         glyph,
+        reference,
+        target: pullRequest,
       };
     }
     // The classifier decides readiness. A watch's "ready to merge" notice
     // only fills in while the host has not yet said whether it can merge.
     if (
       status.gate === "ready" ||
-      (status.gate === "checking" &&
-        readyToMergeNotice(digest?.attention, pr) === "ready")
+      (status.gate === "checking" && notice === "ready")
     ) {
       return {
-        ...base,
-        key: `pull_request:${workspace.id}:${pr.number}`,
         section: "ready_to_merge",
-        title: pr.title?.trim() || base.title,
-        reference,
         status: readyStatus(pr),
-        glyph: { ...glyph, tone: "ready" },
-        target: deliveryPullRequestTarget(pr) ?? base.target,
+        glyph,
+        reference,
+        target: pullRequest,
       };
     }
     return {
-      ...base,
-      reference,
       section: "recent",
-      status:
-        workspace.status === "setup_failed"
-          ? SETUP_FAILED_STATUS
-          : status.headline,
+      status: status.headline,
       glyph,
+      reference,
     };
   }
 
-  if (workspace.status === "setup_failed") {
+  // A ready notice with no pull request state to check it against: the
+  // notice is the only word, and it opens where it was written.
+  if (notice === "ready" && digest?.attention.state.type === "needs_you") {
     return {
-      ...base,
-      section: "recent",
-      status: SETUP_FAILED_STATUS,
-      glyph: { kind: "alert", tone: "critical" },
+      section: "ready_to_merge",
+      status: {
+        label: sentence(digest.attention.state.prompt || "Ready to merge"),
+        tone: "ready",
+      },
+      glyph: { kind: "session", digest },
     };
   }
+
   const worthy = digest && isSessionRowWorthy(digest) ? digest : undefined;
   return {
-    ...base,
     section: "recent",
     status: worthy
       ? { label: sessionActivityLineLabel(worthy, pr), tone: "neutral" }
@@ -333,45 +403,6 @@ function workspaceItem(
     glyph: worthy ? { kind: "session", digest: worthy } : { kind: "idle" },
   };
 }
-
-function conversationItem(rawDigest: CodeSessionDigest): CodeHomeItem {
-  const digest = recoveryDigest(rawDigest);
-  const base = {
-    key: `session:${digest.session}`,
-    title: conversationTitle(digest),
-    context: conversationSourceLabel(digest) ?? null,
-    reference: null,
-    activityAt: digest.trigger_target_at ?? null,
-    target: { kind: "session" as const, sessionId: digest.session },
-    glyph: { kind: "session" as const, digest },
-  };
-  const rank = sessionStatusRank(digest);
-  if (rank === "needs_you" && !isReadyToMergeAttention(digest.attention)) {
-    return { ...base, section: "needs_you", status: needStatus(digest) };
-  }
-  if (rank === "running") {
-    return {
-      ...base,
-      section: "running",
-      status: runningStatus(
-        digest,
-        sessionTreeWaitLabel(digest.wait) ?? sessionActivityLineLabel(digest),
-      ),
-    };
-  }
-  return {
-    ...base,
-    section: "recent",
-    status: isSessionRowWorthy(digest)
-      ? { label: sessionActivityLineLabel(digest), tone: "neutral" }
-      : null,
-  };
-}
-
-const SETUP_FAILED_STATUS = {
-  label: "Setup failed",
-  tone: "critical",
-} as const satisfies CodeHomeStatus;
 
 function needStatus(digest: CodeSessionDigest): CodeHomeStatus {
   const attention = digest.attention.state;
@@ -464,7 +495,7 @@ function byUrgency(left: CodeHomeItem, right: CodeHomeItem): number {
 
 function byRecency(left: CodeHomeItem, right: CodeHomeItem): number {
   return (
-    (right.activityAt ?? "").localeCompare(left.activityAt ?? "") ||
+    (right.activity?.at ?? "").localeCompare(left.activity?.at ?? "") ||
     left.key.localeCompare(right.key)
   );
 }

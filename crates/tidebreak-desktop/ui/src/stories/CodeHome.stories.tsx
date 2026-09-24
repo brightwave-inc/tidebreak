@@ -310,7 +310,7 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /**
- * A returning reader with a lot going on. Needs you holds seven items, so it
+ * A returning reader with a lot going on. Needs you holds eight items, so it
  * shows five and offers View all; running work, ready pull requests, and
  * recent work follow, with the repositories last.
  */
@@ -321,12 +321,15 @@ export const Busy: Story = {
   },
 };
 
-/** The same page with Needs you opened to all seven items. */
+/**
+ * The same page with Needs you opened to all eight items. Focus lands on the
+ * first row View all revealed.
+ */
 export const BusyExpanded: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await userEvent.click(
-      await canvas.findByRole("button", { name: "View all 7 in Needs you" }),
+      await canvas.findByRole("button", { name: "View all 8 in Needs you" }),
     );
     await expect(
       canvas.getByRole("button", { name: "Show fewer in Needs you" }),
@@ -359,6 +362,7 @@ export const RepositoryMenu: Story = {
     const row = await within(canvasElement).findByRole("button", {
       name: "New workspace on tidebreak",
     });
+    row.scrollIntoView({ block: "center" });
     const bounds = row.getBoundingClientRect();
     fireEvent.contextMenu(row, {
       clientX: bounds.left + 120,
@@ -370,13 +374,20 @@ export const RepositoryMenu: Story = {
   },
 };
 
-/** The repository hover card: details and the two common actions. */
+/**
+ * The repository hover card: details and the two common actions. It opens
+ * beside the row when the window has room for it there, as the rail's card
+ * does, and otherwise hangs below the row's far end, clear of the names.
+ */
 export const RepositoryDetails: Story = {
   args: { scenario: "quiet" },
   play: async ({ canvasElement }) => {
     const row = await within(canvasElement).findByRole("button", {
       name: "New workspace on model-gateway",
     });
+    // A short window starts the list below the fold; hover it where a
+    // reader would, on screen.
+    row.scrollIntoView({ block: "center" });
     await userEvent.hover(row);
     await waitFor(
       () =>

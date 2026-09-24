@@ -21,6 +21,7 @@ export function RepositorySettingsDialog({
   repoId,
   repoLabel,
   onSaved,
+  onCloseAutoFocus,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -31,10 +32,12 @@ export function RepositorySettingsDialog({
   repoId: string | null;
   repoLabel: string;
   onSaved?: (repo: CodeRepoSnapshot) => void;
+  /** Where focus goes on close; call `preventDefault` to place it yourself. */
+  onCloseAutoFocus?: (event: Event) => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-2xl" onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>Repository settings</DialogTitle>
         </DialogHeader>

@@ -1,4 +1,12 @@
-import { useState, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+  type Ref,
+} from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { formatDistanceToNowStrict } from "date-fns";
 import {
@@ -45,6 +53,7 @@ import {
   CODE_HOME_SECTION_LABELS,
   CODE_HOME_SECTION_LIMIT,
   CODE_HOME_SECTION_ORDER,
+  type CodeHomeActivity,
   type CodeHomeGlyph,
   type CodeHomeItem,
   type CodeHomeSectionId,
@@ -53,6 +62,7 @@ import {
 } from "./codeHomeSections";
 import { FOCUS_RING_INSET, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
+import { PULL_REQUEST_LIFECYCLE_TONE } from "./prState";
 import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
 import { SessionStateGlyph } from "./WorkspaceCard";
 import { formatCompactAge, repoAccentClass } from "./workspaceCards";
@@ -144,10 +154,21 @@ function HomeSection({
   onOpen: (target: CodeHomeTarget) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const firstRevealed = useRef<HTMLButtonElement>(null);
+  const revealing = useRef(false);
   const capped = items.length > CODE_HOME_SECTION_LIMIT;
   const shown =
     capped && !expanded ? items.slice(0, CODE_HOME_SECTION_LIMIT) : items;
   const headingId = `code-home-${id}`;
+
+  // View all lands the keyboard on the first row it revealed, so the reader
+  // carries on down the list instead of starting over from the button.
+  useEffect(() => {
+    if (!expanded || !revealing.current) return;
+    revealing.current = false;
+    firstRevealed.current?.focus();
+  }, [expanded]);
+
   return (
     <section aria-labelledby={headingId} className="flex flex-col gap-2.5">
       <SectionHeading id={headingId} count={items.length}>
@@ -157,9 +178,15 @@ function HomeSection({
         className="divide-y divide-border-subtle overflow-hidden rounded-xl border border-border"
         data-code-home-section={id}
       >
-        {shown.map((item) => (
+        {shown.map((item, index) => (
           <li key={item.key}>
-            <HomeRow item={item} onOpen={() => onOpen(item.target)} />
+            <HomeRow
+              item={item}
+              buttonRef={
+                index === CODE_HOME_SECTION_LIMIT ? firstRevealed : undefined
+              }
+              onOpen={() => onOpen(item.target)}
+            />
           </li>
         ))}
         {capped && (
@@ -178,7 +205,10 @@ function HomeSection({
                 FOCUS_RING_INSET,
                 HOVER_TINT,
               )}
-              onClick={() => setExpanded((open) => !open)}
+              onClick={() => {
+                revealing.current = !expanded;
+                setExpanded((open) => !open);
+              }}
             >
               {expanded ? "Show fewer" : `View all ${items.length}`}
             </button>
@@ -205,9 +235,14 @@ function SectionHeading({
       <h2 id={id} className="flex items-baseline gap-2 text-sm font-semibold">
         {children}
         {count !== undefined && (
-          <span className="font-normal text-muted-foreground tabular-nums">
-            {count}
-          </span>
+          <>
+            {/* Read as "Needs you, 7", not "Needs you7". The space is its
+                own text node: flex layout drops it, the name keeps it. */}
+            <span className="sr-only">,</span>{" "}
+            <span className="font-normal text-muted-foreground tabular-nums">
+              {count}
+            </span>
+          </>
         )}
       </h2>
       {action}
@@ -216,24 +251,48 @@ function SectionHeading({
 }
 
 /**
+ * The row rhythm every list on the page shares: a glyph column, the title,
+ * and a trailing column. The quiet state and View all line up on it too.
+ */
+const ROW_GRID =
+  "grid grid-cols-[0.75rem_minmax(0,1fr)_auto] gap-x-3 px-3.5 py-2.5";
+
+/**
  * One item: a glyph and a title, then why it is here, its repository, and
  * the branch or pull request that tells it apart. The branch keeps its tail,
  * because the tail is what differs between two branches off one prefix.
  */
-function HomeRow({ item, onOpen }: { item: CodeHomeItem; onOpen: () => void }) {
-  const age = item.activityAt ? formatCompactAge(item.activityAt) : null;
+function HomeRow({
+  item,
+  buttonRef,
+  onOpen,
+}: {
+  item: CodeHomeItem;
+  buttonRef?: Ref<HTMLButtonElement>;
+  onOpen: () => void;
+}) {
+  const age = item.activity ? formatCompactAge(item.activity.at) : null;
+  const when = activityPhrase(item.activity);
   const reference =
     item.reference?.kind === "pull_request"
       ? `#${item.reference.number}`
       : (item.reference?.name ?? null);
   return (
     <button
+      ref={buttonRef}
       type="button"
-      aria-label={[item.title, item.status?.label, item.context, reference]
+      aria-label={[
+        item.title,
+        item.status?.label,
+        item.context,
+        reference,
+        when?.toLowerCase(),
+      ]
         .filter(Boolean)
         .join(" · ")}
       className={cn(
-        "grid w-full cursor-pointer grid-cols-[0.75rem_minmax(0,1fr)_auto] gap-x-3 px-3.5 py-2.5 text-left hover:bg-muted/50",
+        ROW_GRID,
+        "w-full cursor-pointer text-left hover:bg-muted/50",
         FOCUS_RING_INSET,
         HOVER_TINT,
       )}
@@ -247,7 +306,7 @@ function HomeRow({ item, onOpen }: { item: CodeHomeItem; onOpen: () => void }) {
       </span>
       <span
         className="text-xs leading-5 text-muted-foreground tabular-nums"
-        title={activityTitle(item.activityAt)}
+        title={when ?? undefined}
       >
         {age}
       </span>
@@ -296,12 +355,18 @@ function Separator() {
   );
 }
 
-/** The age is last activity, not creation; the tooltip says which. */
-function activityTitle(iso: string | null): string | undefined {
-  if (!iso) return undefined;
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return undefined;
-  return `Last activity ${formatDistanceToNowStrict(at, { addSuffix: true })}`;
+/**
+ * The age in words. A workspace nothing has run in yet has only its creation
+ * time, and says so rather than passing it off as activity.
+ */
+function activityPhrase(activity: CodeHomeActivity | null): string | null {
+  if (!activity) return null;
+  const at = new Date(activity.at);
+  if (Number.isNaN(at.getTime())) return null;
+  const ago = formatDistanceToNowStrict(at, { addSuffix: true });
+  return activity.kind === "created"
+    ? `Created ${ago}`
+    : `Last activity ${ago}`;
 }
 
 function HomeGlyph({ glyph }: { glyph: CodeHomeGlyph }) {
@@ -317,9 +382,14 @@ function HomeGlyph({ glyph }: { glyph: CodeHomeGlyph }) {
             : glyph.lifecycle === "draft"
               ? GitPullRequestDraft
               : GitPullRequest;
+      // The rail's own mark: the lifecycle paints it, and the row's text
+      // carries the gate (checks, review, conflicts).
       return (
         <Icon
-          className={cn("size-3 shrink-0", STATUS_MARK[glyph.tone])}
+          className={cn(
+            "size-3 shrink-0",
+            STATUS_MARK[PULL_REQUEST_LIFECYCLE_TONE[glyph.lifecycle]],
+          )}
           data-pr-state={glyph.lifecycle}
         />
       );
@@ -347,11 +417,11 @@ function NothingNeedsYou() {
       className="flex flex-col gap-2.5"
     >
       <SectionHeading id="code-home-needs_you">Needs you</SectionHeading>
-      <div className="flex items-start gap-3 rounded-xl border border-border px-3.5 py-3">
+      <div className={cn(ROW_GRID, "rounded-xl border border-border")}>
         <span className="flex h-5 items-center" aria-hidden>
-          <CircleCheck className="size-3.5 text-success" />
+          <CircleCheck className="size-3 shrink-0 text-success" />
         </span>
-        <p className="min-w-0 text-md leading-5">
+        <p className="col-span-2 min-w-0 text-md leading-5">
           Nothing needs you right now.
           <span className="mt-0.5 block text-xs text-muted-foreground">
             Approvals, questions, and failed checks show up here.
@@ -391,7 +461,8 @@ function NoWorkspaces({ onNewWorkspace }: { onNewWorkspace: () => void }) {
  * A row starts a workspace on its repository. Everything else lives where
  * the rail keeps it: a hover card for the details and the menu on
  * right-click, which Shift+F10 and the context-menu key also open, so the
- * keyboard reaches the same commands.
+ * keyboard reaches the same commands. Each row says so to assistive
+ * technology, since nothing on it shows the menu.
  */
 export function CodeHomeRepositories({
   repos,
@@ -404,8 +475,10 @@ export function CodeHomeRepositories({
   liveWorkspaceCounts: Readonly<Record<string, number>>;
   onAddRepo: () => void;
   onNewWorkspace: (repoId: string) => void;
-  onOpenSettings: (repo: CodeRepoSnapshot) => void;
+  /** `origin` is the row that asked, for focus to return to. */
+  onOpenSettings: (repo: CodeRepoSnapshot, origin: HTMLElement | null) => void;
 }) {
+  const menuHintId = useId();
   return (
     <section
       aria-labelledby="code-home-repositories"
@@ -428,18 +501,24 @@ export function CodeHomeRepositories({
           No repository is registered on this machine yet.
         </p>
       ) : (
-        <ul className="divide-y divide-border-subtle overflow-hidden rounded-xl border border-border">
-          {repos.map((repo) => (
-            <li key={repo.id}>
-              <RepositoryRow
-                repo={repo}
-                liveWorkspaces={liveWorkspaceCounts[repo.id] ?? 0}
-                onNewWorkspace={() => onNewWorkspace(repo.id)}
-                onOpenSettings={() => onOpenSettings(repo)}
-              />
-            </li>
-          ))}
-        </ul>
+        <>
+          <span id={menuHintId} className="sr-only">
+            More actions: Shift+F10
+          </span>
+          <ul className="divide-y divide-border-subtle overflow-hidden rounded-xl border border-border">
+            {repos.map((repo) => (
+              <li key={repo.id}>
+                <RepositoryRow
+                  repo={repo}
+                  liveWorkspaces={liveWorkspaceCounts[repo.id] ?? 0}
+                  menuHintId={menuHintId}
+                  onNewWorkspace={() => onNewWorkspace(repo.id)}
+                  onOpenSettings={(origin) => onOpenSettings(repo, origin)}
+                />
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </section>
   );
@@ -448,15 +527,19 @@ export function CodeHomeRepositories({
 function RepositoryRow({
   repo,
   liveWorkspaces,
+  menuHintId,
   onNewWorkspace,
   onOpenSettings,
 }: {
   repo: CodeRepoSnapshot;
   liveWorkspaces: number;
+  menuHintId: string;
   onNewWorkspace: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (origin: HTMLElement | null) => void;
 }) {
+  const rowRef = useRef<HTMLButtonElement>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [detailSide, setDetailSide] = useState<RepositoryDetailSide>("right");
   const copyPath = () => {
     void copyPlainText(repo.root_path)
       .then(() => toast.success("Repository path copied"))
@@ -470,18 +553,25 @@ function RepositoryRow({
     >
       <HoverCard
         open={detailOpen}
-        onOpenChange={setDetailOpen}
+        onOpenChange={(open) => {
+          if (open) setDetailSide(repositoryDetailSide(rowRef.current));
+          setDetailOpen(open);
+        }}
         openDelay={400}
         closeDelay={120}
       >
         <ContextMenuTrigger asChild>
           <HoverCardTrigger asChild>
             <button
+              ref={rowRef}
               type="button"
               aria-label={`New workspace on ${repo.display_name}`}
+              aria-describedby={menuHintId}
+              aria-keyshortcuts="Shift+F10"
               data-repository-row={repo.id}
               className={cn(
-                "grid w-full cursor-pointer grid-cols-[0.75rem_minmax(0,1fr)_auto] items-center gap-x-3 px-3.5 py-2.5 text-left hover:bg-muted/50",
+                ROW_GRID,
+                "w-full cursor-pointer items-center text-left hover:bg-muted/50",
                 FOCUS_RING_INSET,
                 HOVER_TINT,
               )}
@@ -512,10 +602,13 @@ function RepositoryRow({
           </HoverCardTrigger>
         </ContextMenuTrigger>
         <HoverCardContent
-          side="bottom"
-          align="start"
-          sideOffset={6}
-          className="w-[min(24rem,calc(100vw-24px))] overflow-hidden rounded-xl border-border bg-popover p-0"
+          side={detailSide}
+          // Beside the row, like the rail's card. Where the window leaves no
+          // room beside the list, it hangs from the row's far end, clear of
+          // the names the pointer runs down.
+          align={detailSide === "right" ? "start" : "end"}
+          sideOffset={detailSide === "right" ? DETAIL_GAP_PX : 6}
+          className="w-[min(22rem,calc(100vw-24px))] overflow-hidden rounded-xl border-border bg-popover p-0"
         >
           <RepositoryDetail
             repo={repo}
@@ -526,7 +619,7 @@ function RepositoryRow({
             }}
             onOpenSettings={() => {
               setDetailOpen(false);
-              onOpenSettings();
+              onOpenSettings(rowRef.current);
             }}
           />
         </HoverCardContent>
@@ -536,7 +629,7 @@ function RepositoryRow({
           <Plus aria-hidden="true" />
           New workspace
         </ContextMenuItem>
-        <ContextMenuItem onSelect={onOpenSettings}>
+        <ContextMenuItem onSelect={() => onOpenSettings(rowRef.current)}>
           <Settings2 aria-hidden="true" />
           Repository settings…
         </ContextMenuItem>
@@ -547,6 +640,32 @@ function RepositoryRow({
       </ContextMenuContent>
     </ContextMenu>
   );
+}
+
+type RepositoryDetailSide = "right" | "bottom";
+
+/** The card's width in rem, matching its `w-[min(22rem,…)]` class. */
+const DETAIL_WIDTH_REM = 22;
+const DETAIL_GAP_PX = 10;
+/** Room the card keeps from the window edge. */
+const DETAIL_EDGE_PX = 12;
+
+/**
+ * Right of the row when the window has room for the whole card there;
+ * otherwise below it. Measured when the card opens, because the room depends
+ * on the window, the rail, and where the list sits between them.
+ */
+export function repositoryDetailSide(
+  row: HTMLElement | null,
+): RepositoryDetailSide {
+  if (!row || typeof window === "undefined") return "bottom";
+  const rem =
+    Number.parseFloat(getComputedStyle(document.documentElement).fontSize) ||
+    14;
+  const room = window.innerWidth - row.getBoundingClientRect().right;
+  return room >= DETAIL_WIDTH_REM * rem + DETAIL_GAP_PX + DETAIL_EDGE_PX
+    ? "right"
+    : "bottom";
 }
 
 function RepositoryDetail({
