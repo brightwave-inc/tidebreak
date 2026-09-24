@@ -13,8 +13,10 @@ import { workspaceHarnesses } from "../labels";
  * A review runs read-only: in the engine's plan mode where it has one, or in
  * Ask with every request refused where it has approvals Tidebreak can refuse
  * instead. An engine with neither is listed but cannot be chosen. So is one
- * that is not installed or not signed in: a review never waits on a
- * download or a sign-in, and says why an engine is unavailable.
+ * the server says cannot review read-only, such as Grok CLI, which can't turn
+ * off network access, and one that is not installed or not signed in: a
+ * review never waits on a download or a sign-in, and says why an engine is
+ * unavailable.
  *
  * The first choice is an engine other than the one that wrote the changes: a
  * second opinion is the point. Only when no other engine is ready does the
@@ -34,6 +36,10 @@ export function reviewPermissionMode(
 export function reviewUnavailableReason(
   entry: HarnessDoctorEntry,
 ): string | null {
+  // The server's own reason comes first: installing or signing in to the
+  // engine would not change it. Grok CLI, which can't turn off network
+  // access, is the one today.
+  if (entry.review_blocked) return entry.review_blocked;
   if (!entry.found) return "Not installed";
   // A relay-covered or gateway-managed engine needs no local sign-in; only a
   // local one the probe saw signed out is refused, as the server refuses it.
@@ -44,9 +50,6 @@ export function reviewUnavailableReason(
     return "Needs a sign-in";
   }
   if (!reviewPermissionMode(entry.caps)) return "Can't review read-only";
-  // Something this machine lacks, such as the sandbox Grok CLI reviews
-  // under: the server refuses the review, so the form does not offer it.
-  if (entry.review_blocked) return "No read-only sandbox here";
   return null;
 }
 

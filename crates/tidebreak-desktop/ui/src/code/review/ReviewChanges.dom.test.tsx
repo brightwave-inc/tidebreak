@@ -90,6 +90,11 @@ describe("the Review changes form", () => {
         /Edits you make after you start aren't part of the review/,
       ),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /can't change your files or reach the network beyond its own\s+model/,
+      ),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/cannot edit your files/)).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Start review" }));
     expect(onStart).toHaveBeenCalledTimes(1);

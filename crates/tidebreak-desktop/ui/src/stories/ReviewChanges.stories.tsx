@@ -104,6 +104,24 @@ function reviewer(
   };
 }
 
+/** Why the server says Grok CLI does not review, installed or not. */
+const GROK_CANNOT_REVIEW =
+  "Grok CLI can't review read-only yet: it can't turn off network access.";
+
+/**
+ * The doctor entries as the server sends them to the review form: Grok CLI
+ * always carries the reason it cannot review.
+ */
+function asTheServerSends(
+  harnesses: readonly HarnessDoctorEntry[],
+): HarnessDoctorEntry[] {
+  return harnesses.map((entry) =>
+    entry.kind === "grok"
+      ? { ...entry, review_blocked: GROK_CANNOT_REVIEW }
+      : entry,
+  );
+}
+
 function ReviewStory({
   workspaceId,
   review,
@@ -127,7 +145,7 @@ function ReviewStory({
         turnId={turn?.id}
         turnLabel={turn?.label}
         onOpenFile={() => {}}
-        reviewer={reviewer(workspaceId, review, harnesses)}
+        reviewer={reviewer(workspaceId, review, asTheServerSends(harnesses))}
       />
     </div>
   );
@@ -264,7 +282,8 @@ async function waitUntilShown(find: () => HTMLElement) {
 /**
  * The form the diff's header opens: the engine starts on one that did not
  * write the changes, the model it will run on is in view, and nothing runs
- * until Start review.
+ * until Start review. Grok CLI is listed but never offered: it can't turn
+ * off network access, and its row says so.
  */
 export const ChoosingAnEngine: Story = {
   play: async ({ canvasElement }) => {
@@ -326,9 +345,8 @@ export const OnlyTheAuthorIsReady: Story = {
 
 /**
  * The engine list says why an engine cannot review, so the reason is in
- * view before anything runs: one is not installed, and Grok CLI, signed in,
- * has no read-only sandbox it can apply on this machine, so a review there
- * would not be read-only and is not offered.
+ * view before anything runs: opencode is not installed, and Grok CLI, even
+ * signed in, can't turn off network access, so it is not offered.
  */
 export const WhyAnEngineIsUnavailable: Story = {
   args: {
@@ -337,14 +355,7 @@ export const WhyAnEngineIsUnavailable: Story = {
       entry.kind === "opencode"
         ? { ...entry, found: false }
         : entry.kind === "grok"
-          ? {
-              ...entry,
-              authenticated: true,
-              // An ACP release: it could review in Ask, but not here.
-              caps: { ...entry.caps, structured_approvals: "supported" },
-              review_blocked:
-                "Grok CLI can't apply its read-only sandbox on this machine. Grok said: Landlock is not supported by this kernel",
-            }
+          ? { ...entry, authenticated: true }
           : entry,
     ),
   },
@@ -368,7 +379,7 @@ export const WhyAnEngineIsUnavailable: Story = {
     ).toHaveAttribute("aria-disabled", "true");
     await expect(
       body.getByRole("option", {
-        name: /Grok CLI\s*No read-only sandbox here/,
+        name: /Grok CLI\s*Grok CLI can't review read-only yet: it can't turn off network access\./,
       }),
     ).toHaveAttribute("aria-disabled", "true");
   },

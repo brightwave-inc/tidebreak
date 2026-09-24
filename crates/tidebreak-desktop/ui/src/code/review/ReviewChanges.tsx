@@ -157,9 +157,10 @@ export function ReviewChangesForm({
         <p className="text-muted-foreground text-xs">
           Another engine reviews a copy of the changes as they are now. It can
           read what your account can read, as coding engines can, but it
-          can&apos;t change your files, and anything it asks to run or change is
-          refused. Edits you make after you start aren&apos;t part of the
-          review. Its findings arrive in the diff for you to keep or dismiss.
+          can&apos;t change your files or reach the network beyond its own
+          model, and anything it asks to run or change is refused. Edits you
+          make after you start aren&apos;t part of the review. Its findings
+          arrive in the diff for you to keep or dismiss.
         </p>
       </div>
       <div className="flex flex-col gap-1.5">
@@ -181,7 +182,12 @@ export function ReviewChangesForm({
               )}
             </SelectValue>
           </SelectTrigger>
-          <SelectContent scrollButtons={false}>
+          {/* As wide as the field, so a long reason wraps under its engine
+              rather than widening the list past the form. */}
+          <SelectContent
+            scrollButtons={false}
+            className="max-w-(--radix-select-trigger-width)"
+          >
             {choices.map(({ entry, reason }) => {
               const RowIcon = HARNESS_ICONS[entry.kind];
               const note =
@@ -200,7 +206,9 @@ export function ReviewChangesForm({
                         {HARNESS_LABELS[entry.kind]}
                       </span>
                       {note && (
-                        <span className="text-muted-foreground truncate text-xs">
+                        // A reason can be a sentence; it wraps rather than
+                        // cutting off why the engine is unavailable.
+                        <span className="text-muted-foreground text-xs break-words whitespace-normal">
                           {note}
                         </span>
                       )}

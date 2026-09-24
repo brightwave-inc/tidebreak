@@ -64,24 +64,30 @@ describe("which engines can review", () => {
         }),
       ),
     ).toBe("Can't review read-only");
-    // Grok reviews under its OS sandbox; where the server found it cannot
-    // apply, Grok is listed but not offered, and never started on.
-    const sandboxless = entry({
-      kind: "grok",
-      caps: planless,
-      review_blocked:
-        "Grok CLI can't apply its read-only sandbox on this machine. Grok said: Landlock is not supported by this kernel",
-    });
-    expect(reviewUnavailableReason(sandboxless)).toBe(
-      "No read-only sandbox here",
-    );
-    expect(
-      defaultReviewEngine(
-        reviewEngineChoices([entry({ kind: "claude_code" }), sandboxless]),
-        "claude_code",
-        "grok",
-      ),
-    ).toEqual({ kind: "claude_code", sameAsAuthor: true });
+    // Grok CLI can't turn off network access: the server says so for it,
+    // installed or not, signed in or not, and the form says it in the
+    // server's words and never starts on Grok, not even remembered.
+    const GROK_REASON =
+      "Grok CLI can't review read-only yet: it can't turn off network access.";
+    for (const grok of [
+      entry({ kind: "grok", caps: planless, review_blocked: GROK_REASON }),
+      entry({
+        kind: "grok",
+        caps: planless,
+        found: false,
+        authenticated: false,
+        review_blocked: GROK_REASON,
+      }),
+    ]) {
+      expect(reviewUnavailableReason(grok)).toBe(GROK_REASON);
+      expect(
+        defaultReviewEngine(
+          reviewEngineChoices([entry({ kind: "claude_code" }), grok]),
+          "claude_code",
+          "grok",
+        ),
+      ).toEqual({ kind: "claude_code", sameAsAuthor: true });
+    }
     expect(
       reviewEngineChoices([
         entry({ kind: "internal" }),
@@ -95,7 +101,7 @@ describe("the engine a review starts on", () => {
   const ready = reviewEngineChoices([
     entry({ kind: "claude_code" }),
     entry({ kind: "codex" }),
-    entry({ kind: "grok", caps: planless }),
+    entry({ kind: "opencode" }),
   ]);
 
   it("is never the engine that wrote the changes while another is ready", () => {
@@ -110,11 +116,11 @@ describe("the engine a review starts on", () => {
   });
 
   it("is the one picked last time, unless that one wrote the changes", () => {
-    expect(defaultReviewEngine(ready, "claude_code", "grok")).toEqual({
-      kind: "grok",
+    expect(defaultReviewEngine(ready, "claude_code", "opencode")).toEqual({
+      kind: "opencode",
       sameAsAuthor: false,
     });
-    expect(defaultReviewEngine(ready, "grok", "grok")).toEqual({
+    expect(defaultReviewEngine(ready, "opencode", "opencode")).toEqual({
       kind: "claude_code",
       sameAsAuthor: false,
     });
@@ -124,7 +130,7 @@ describe("the engine a review starts on", () => {
     const alone = reviewEngineChoices([
       entry({ kind: "claude_code" }),
       entry({ kind: "codex", authenticated: false }),
-      entry({ kind: "grok", found: false }),
+      entry({ kind: "opencode", found: false }),
     ]);
     expect(defaultReviewEngine(alone, "claude_code")).toEqual({
       kind: "claude_code",
