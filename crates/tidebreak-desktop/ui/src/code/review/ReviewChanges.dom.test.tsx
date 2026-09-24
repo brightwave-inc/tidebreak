@@ -82,7 +82,7 @@ describe("the Review changes form", () => {
     // It says what it reviews, and that later edits are not part of it.
     expect(
       screen.getByText(
-        /reads a copy of the changes as they are when you start/,
+        /reviews a copy of the changes as they are now,\s+read-only/,
       ),
     ).toBeInTheDocument();
     expect(
@@ -164,6 +164,9 @@ describe("the review's status", () => {
     const onStop = vi.fn();
     render(
       <ReviewStatus review={running()} now={NOW} stopping onStop={onStop} />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Stopping Codex CLI's review",
     );
     const stop = screen.getByRole("button", { name: "Stopping…" });
     expect(stop).toBeDisabled();

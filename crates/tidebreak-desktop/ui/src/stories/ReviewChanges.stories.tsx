@@ -12,7 +12,11 @@ import { useDiffPreferences } from "@/code/diff/diffPreferences";
 import { usePendingReviewStore } from "@/code/diff/pendingReview";
 import { commentsFromReview } from "@/code/diff/reviewFindings";
 import type { DiffReviewerContext } from "@/code/review/ReviewChanges";
-import { useCodeReviewStore } from "@/code/review/reviewStore";
+import {
+  LOST_REVIEW_MESSAGE,
+  lostReview,
+  useCodeReviewStore,
+} from "@/code/review/reviewStore";
 import { groupUnifiedDiff } from "@/code/unifiedDiff";
 import { QUEUE_DIFF, QUEUE_PATH } from "./diffFixtures";
 import { harnessDoctor } from "./fixtures";
@@ -206,9 +210,14 @@ function completed(
 
 /**
  * Seed the stores the way a finished review leaves them: the review, and
- * its findings in the workspace's pending review.
+ * its findings in the workspace's pending review. `stopping` seeds a stop
+ * the server has not confirmed yet.
  */
-function seed(workspaceId: string, review: CodeReviewSnapshot | null) {
+function seed(
+  workspaceId: string,
+  review: CodeReviewSnapshot | null,
+  options: { stopping?: boolean } = {},
+) {
   return async () => {
     useDiffPreferences.getState().setLayout("unified");
     useCodeReviewStore.setState((state) => {
@@ -217,7 +226,10 @@ function seed(workspaceId: string, review: CodeReviewSnapshot | null) {
       else delete byWorkspace[workspaceId];
       const closed = { ...state.closed };
       delete closed[workspaceId];
-      return { byWorkspace, closed };
+      const stopping = { ...state.stopping };
+      if (review && options.stopping) stopping[workspaceId] = review.id;
+      else delete stopping[workspaceId];
+      return { byWorkspace, closed, stopping };
     });
     const findings = review ? commentsFromReview(review) : [];
     usePendingReviewStore.setState((state) => ({
@@ -312,6 +324,41 @@ export const OnlyTheAuthorIsReady: Story = {
   },
 };
 
+/**
+ * The engine list says why an engine cannot review, so the reason is in
+ * view before anything runs: one is not installed, one is not signed in.
+ */
+export const WhyAnEngineIsUnavailable: Story = {
+  args: {
+    workspaceId: "ws-review-unavailable",
+    harnesses: harnessDoctor.harnesses.map((entry) =>
+      entry.kind === "opencode" ? { ...entry, found: false } : entry,
+    ),
+  },
+  loaders: [seed("ws-review-unavailable", null)],
+  play: async ({ canvasElement }) => {
+    await userEvent.click(
+      await within(canvasElement).findByRole("button", {
+        name: "Review changes",
+      }),
+    );
+    const body = within(canvasElement.ownerDocument.body);
+    await waitUntilShown(() =>
+      body.getByRole("button", { name: "Start review" }),
+    );
+    await userEvent.click(body.getByRole("combobox"));
+    await waitUntilShown(() =>
+      body.getByRole("option", { name: /opencode\s*Not installed/ }),
+    );
+    await expect(
+      body.getByRole("option", { name: /opencode\s*Not installed/ }),
+    ).toHaveAttribute("aria-disabled", "true");
+    await expect(
+      body.getByRole("option", { name: /Grok CLI\s*Needs a sign-in/ }),
+    ).toHaveAttribute("aria-disabled", "true");
+  },
+};
+
 /** Running: what the reviewer is reading, for how long, and Stop review. */
 export const Running: Story = {
   args: {
@@ -320,9 +367,35 @@ export const Running: Story = {
   },
   loaders: [seed("ws-review-running", running("ws-review-running"))],
   play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
     await expect(
-      within(canvasElement).findByRole("button", { name: "Stop review" }),
+      canvas.findByRole("button", { name: "Stop review" }),
     ).resolves.toBeVisible();
+    // While it runs, the header says so in words, not only in a tooltip.
+    await expect(
+      canvas.findByRole("button", { name: "Review running" }),
+    ).resolves.toBeDisabled();
+  },
+};
+
+/**
+ * Asked to stop: the engine gets a few seconds to wind down, and the status
+ * says so until the server confirms the review ended.
+ */
+export const Stopping: Story = {
+  args: {
+    workspaceId: "ws-review-stopping",
+    review: running("ws-review-stopping"),
+  },
+  loaders: [
+    seed("ws-review-stopping", running("ws-review-stopping"), {
+      stopping: true,
+    }),
+  ],
+  play: async ({ canvasElement }) => {
+    await expect(
+      within(canvasElement).findByRole("button", { name: "Stopping…" }),
+    ).resolves.toBeDisabled();
   },
 };
 
@@ -422,4 +495,22 @@ const CANCELLED = running("ws-review-cancelled", {
 export const Cancelled: Story = {
   args: { workspaceId: "ws-review-cancelled", review: CANCELLED },
   loaders: [seed("ws-review-cancelled", CANCELLED)],
+};
+
+const LOST = lostReview(running("ws-review-lost"));
+
+/**
+ * Tidebreak restarted while the review ran: the server no longer knows it,
+ * so the status says it stopped, and Review changes is ready again.
+ */
+export const LostToARestart: Story = {
+  args: { workspaceId: "ws-review-lost", review: LOST },
+  loaders: [seed("ws-review-lost", LOST)],
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.findByText(LOST_REVIEW_MESSAGE)).resolves.toBeVisible();
+    await expect(
+      canvas.findByRole("button", { name: "Review changes" }),
+    ).resolves.toBeEnabled();
+  },
 };

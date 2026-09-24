@@ -615,7 +615,7 @@ GET/POST        /code/workspaces/{id}/checkpoints/restore   ?turn= | ?restore= p
                                                      {target, expected_tree?} restore
 POST            /code/workspaces/{id}/revert         {path, turn_id?, hunk?}  undo a file or a hunk
 POST            /code/workspaces/{id}/discard        {paths, expected_tree?}  back to the last commit
-GET/POST        /code/workspaces/{id}/reviews        list; {session_id, harness, model?, turn_id?, instructions?} starts a read-only review
+GET/POST        /code/workspaces/{id}/reviews        list, newest first, only the newest with its result; {session_id, harness, model?, turn_id?, instructions?} starts a read-only review
 GET             /code/workspaces/{id}/reviews/{review_id}   progress, then findings or why it failed
 POST            /code/workspaces/{id}/reviews/{review_id}/cancel
 GET             /code/workspaces/{id}/tree | /search | /blob   the file viewer; /blob carries a hash
@@ -805,9 +805,57 @@ turn, unless the reader adds them to that message. A queued message that
 carries comments shows them as a count in the queue tray; its edit box
 edits only the text, and deleting it puts the comments back in the review.
 
-Each comment records who wrote it. Today that is always the person; a
-second engine's review pass can later fill the same pending review with its
-own findings.
+Each comment records who wrote it: the person, or an engine that reviewed
+the changes.
+
+### Review changes
+
+Review changes, in the diff's header and the workflow actions, asks another
+engine to review the workspace's changes, or one turn's, read-only
+(`code/review/`, server `code/review/`). The form starts on an engine that
+did not write the changes, shows the model, and runs nothing until Start
+review. The review reviews the changes as they are when it starts; later
+edits are not part of it.
+
+A review is one hidden turn of an engine session Tidebreak starts and
+discards. It has no session row and never takes the workspace's turn lock,
+so the agents in the workspace keep working while it runs. It stops after
+20 minutes, and a stop takes a few seconds while the engine winds down.
+Reviews live in memory: after a restart the server no longer knows one that
+was running, and the desktop says it stopped.
+
+Read-only holds in layers:
+
+- The engine loses its tools for writing files and running commands, whatever
+  the person's own rules allow. Claude Code runs in plan mode with Bash,
+  Edit, Write, and NotebookEdit disallowed, leaving Read, Grep, and Glob.
+  Codex runs in its read-only OS sandbox. opencode runs its plan agent with
+  deny rules for `edit` and `bash`. Grok CLI has no plan mode, so it runs in
+  Ask under its `read-only` sandbox profile, which Grok applies with the OS
+  where it can. An engine with neither a plan mode nor approvals Tidebreak
+  can refuse is not offered.
+- Every approval the engine asks for is refused, with feedback to report the
+  change as a finding instead. The reviewer gets no connected apps, browser,
+  computer use, SSH agent, or forge credentials, and the repository's own
+  engine config stays unloaded.
+- The reviewer works in a disposable copy under the data folder, never in the
+  worktree: its own git repository with the reviewed files, uncommitted
+  changes included, and `HEAD` at the state before them. Links are copied as
+  plain files holding their target, so a write never follows one out. The
+  copy's git has no credential helper, hooks, or transport, and the
+  reviewer's git reads an empty global config and never prompts. A review
+  copies every file in the tree, including files a sparse checkout leaves
+  out, and a workspace over 200,000 files or 1 GB is refused before anything
+  runs.
+
+The reviewer answers with findings in JSON, read strictly. A finding on lines
+the diff shows becomes a proposed comment by the reviewer, anchored like a
+person's; one on other lines becomes a comment above the files naming its
+file and lines. Nothing goes with a message until the person keeps or edits
+it. A kept finding reaches the agent as a note from the named engine to
+check against the code, not as the person's words or an instruction; one the
+person rewrote is theirs. A result carries at most 1 MiB of diff, and the
+review list carries only the newest review's result.
 
 ## Editing files
 

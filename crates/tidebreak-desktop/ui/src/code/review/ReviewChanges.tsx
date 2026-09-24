@@ -155,10 +155,10 @@ export function ReviewChangesForm({
           Review changes
         </h2>
         <p className="text-muted-foreground text-xs">
-          Another engine reads a copy of the changes as they are when you start,
-          not your worktree. It runs read-only, and anything it asks to change
-          is refused. Edits you make after you start aren't part of the review.
-          Its findings arrive in the diff for you to keep or dismiss.
+          Another engine reviews a copy of the changes as they are now,
+          read-only: anything it asks to change is refused. Edits you make after
+          you start aren't part of the review. Its findings arrive in the diff
+          for you to keep or dismiss.
         </p>
       </div>
       <div className="flex flex-col gap-1.5">
@@ -312,7 +312,13 @@ export function ReviewChangesControl({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className={cn(HEADER_ACTION, FOCUS_RING_TIGHT, HOVER_TINT)}
+          className={cn(
+            HEADER_ACTION,
+            FOCUS_RING_TIGHT,
+            HOVER_TINT,
+            // Its words say why it is off, so they stay readable.
+            running && "disabled:opacity-100",
+          )}
           disabled={running}
         >
           <ScanSearch className="size-3" aria-hidden />
@@ -611,7 +617,10 @@ export function ReviewStatus({
   onClose?: () => void;
 }) {
   const running = review.status === "running";
-  const headline = reviewHeadline(review, turnLabel);
+  const headline =
+    stopping && running
+      ? `Stopping ${HARNESS_LABELS[review.harness]}'s review`
+      : reviewHeadline(review, turnLabel);
   const tone = reviewTone(review);
   const elapsed = formatElapsedDuration(
     now - new Date(review.started_at).getTime(),
@@ -623,6 +632,7 @@ export function ReviewStatus({
         ? "Nothing was added to the diff."
         : (review.failure?.message ?? null);
   const rejected = review.result?.rejected ?? 0;
+  const omitted = review.result?.omitted_diffs ?? 0;
   const credential =
     review.failure?.kind === "signed_out" ||
     review.failure?.kind === "not_installed";
@@ -740,6 +750,13 @@ export function ReviewStatus({
         <p className="text-muted-foreground pl-5.5 text-xs">
           {plural(rejected, "entry", "entries")} in the answer could not be read
           and {rejected === 1 ? "was" : "were"} left out.
+        </p>
+      )}
+      {review.status === "completed" && omitted > 0 && (
+        <p className="text-muted-foreground pl-5.5 text-xs">
+          The review found more than one message can carry, so the findings on{" "}
+          {plural(omitted, "file", "files")} are listed above the files instead
+          of on their lines.
         </p>
       )}
     </section>
