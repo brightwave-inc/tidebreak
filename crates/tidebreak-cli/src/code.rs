@@ -15,8 +15,9 @@ use std::str::FromStr;
 use futures::StreamExt as _;
 use tidebreak_core::{
     AgentError, ApprovalDecisionKind, ApprovalId, ApprovalKind, Attention, AttentionState,
-    CapLevel, Event, HarnessCaps, HarnessKind, PermissionMode, ReasoningEffort, RepoId, Result,
-    SessionAccessLevel, SessionId, SessionLifecycle, SessionVisibility, TurnId, WorkspaceId,
+    CapLevel, CheckpointRestoreTarget, CodeRestoreId, Event, HarnessCaps, HarnessKind,
+    PermissionMode, ReasoningEffort, RepoId, Result, SessionAccessLevel, SessionId,
+    SessionLifecycle, SessionVisibility, TurnId, WorkspaceId,
 };
 use tokio_tungstenite::tungstenite::Message;
 
@@ -55,6 +56,15 @@ pub enum OnApproval {
 pub enum TurnRef {
     Ordinal(i64),
     Id(TurnId),
+}
+
+/// Where `code restore` puts the worktree back to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreRef {
+    /// The state before a turn started.
+    BeforeTurn(TurnRef),
+    /// The state just before an earlier restore, which undoes it.
+    Undo(CodeRestoreId),
 }
 
 /// One parsed `tidebreak code` invocation.
@@ -181,6 +191,13 @@ pub enum Command {
         turn: Option<TurnRef>,
         format: OutputFormat,
     },
+    Restore {
+        workspace: WorkspaceId,
+        target: RestoreRef,
+        /// Print what the restore would undo and change nothing.
+        dry_run: bool,
+        format: OutputFormat,
+    },
     GitCommit {
         workspace: WorkspaceId,
         message: Option<String>,
@@ -233,6 +250,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> std::result::Result<Comm
         "turns" => parse_turns(&mut cursor),
         "diff" => parse_diff(&mut cursor),
         "files" => parse_files(&mut cursor),
+        "restore" => parse_restore(&mut cursor),
         "git" => parse_git(&mut cursor),
         "action" => parse_action(&mut cursor),
         "watch" => parse_watch(&mut cursor),
@@ -693,6 +711,69 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
                     files.stat.files, files.stat.insertions, files.stat.deletions
                 );
             }
+            Ok(0)
+        }
+        Command::Restore {
+            workspace,
+            target,
+            dry_run,
+            format,
+        } => {
+            let target = match target {
+                RestoreRef::BeforeTurn(turn) => CheckpointRestoreTarget::BeforeTurn {
+                    turn_id: resolve_turn(client, workspace, Some(turn))
+                        .await?
+                        .ok_or_else(|| AgentError::msg("restore requires a turn"))?,
+                },
+                RestoreRef::Undo(restore_id) => {
+                    CheckpointRestoreTarget::BeforeRestore { restore_id }
+                }
+            };
+            if dry_run {
+                let preview = client.checkpoint_restore_preview(workspace, target).await?;
+                if format == OutputFormat::Json {
+                    return emit_ok(&preview);
+                }
+                eprintln!(
+                    "tidebreak: restoring would undo {} files +{} -{}",
+                    preview.stat.files, preview.stat.insertions, preview.stat.deletions
+                );
+                print_file_changes(&preview.files, preview.truncated);
+                if !preview.affected_turns.is_empty() {
+                    eprintln!("tidebreak: it also undoes these turns of other agents:");
+                    for turn in &preview.affected_turns {
+                        eprintln!(
+                            "  {} turn {}  (session {})",
+                            turn.harness_kind.as_str(),
+                            turn.ordinal,
+                            turn.session_id
+                        );
+                    }
+                }
+                if !preview.blocked.is_empty() {
+                    eprintln!(
+                        "tidebreak: the restore would overwrite or remove files no undo can bring \
+                         back, so it refuses until they are moved:"
+                    );
+                    for path in &preview.blocked {
+                        eprintln!("  {path}");
+                    }
+                }
+                return Ok(0);
+            }
+            let restored = client.restore_checkpoint(workspace, target, None).await?;
+            if format == OutputFormat::Json {
+                return emit_ok(&restored);
+            }
+            println!(
+                "tidebreak: restored {workspace}  {} files +{} -{}",
+                restored.stat.files, restored.stat.insertions, restored.stat.deletions
+            );
+            print_file_changes(&restored.files, restored.truncated);
+            eprintln!(
+                "tidebreak: undo with tidebreak code restore --ws {workspace} --undo {}",
+                restored.restore_id
+            );
             Ok(0)
         }
         Command::GitCommit {
@@ -1529,6 +1610,21 @@ fn print_session(session: &SessionSnapshot) {
         "attention            {}",
         attention_label(&session.attention)
     );
+}
+
+fn print_file_changes(files: &[tidebreak_server::wire::CodeFileChange], truncated: bool) {
+    for file in files {
+        println!(
+            "{}\t{}\t+{}\t-{}",
+            file.kind.as_str_display(),
+            file.path,
+            file.insertions,
+            file.deletions
+        );
+    }
+    if truncated {
+        eprintln!("tidebreak: file list truncated");
+    }
 }
 
 fn print_turn_line(turn: &TurnSnapshot) {
@@ -2456,6 +2552,44 @@ fn parse_diff(cursor: &mut Cursor) -> std::result::Result<Command, String> {
     })
 }
 
+fn parse_restore(cursor: &mut Cursor) -> std::result::Result<Command, String> {
+    let mut workspace = None;
+    let mut target = None;
+    let mut dry_run = false;
+    let mut flags = SharedFlags {
+        format: OutputFormat::Text,
+    };
+    while let Some(arg) = cursor.next() {
+        match arg.as_str() {
+            "--ws" => workspace = Some(parse_workspace_id(&cursor.value("--ws")?)?),
+            "--turn" | "--undo" if target.is_some() => {
+                return Err("restore takes one of --turn or --undo".to_owned())
+            }
+            "--turn" => {
+                target = Some(RestoreRef::BeforeTurn(parse_turn_ref(
+                    &cursor.value("--turn")?,
+                )?))
+            }
+            "--undo" => {
+                let value = cursor.value("--undo")?;
+                let restore_id = CodeRestoreId::from_str(&value)
+                    .map_err(|_| format!("--undo takes a restore id, not {value:?}"))?;
+                target = Some(RestoreRef::Undo(restore_id));
+            }
+            "--dry-run" => dry_run = true,
+            other => take_format(&mut flags, cursor, other)?,
+        }
+    }
+    let workspace = workspace.ok_or_else(|| "restore requires --ws <id>".to_owned())?;
+    let target = target.ok_or_else(|| "restore requires --turn N or --undo <id>".to_owned())?;
+    Ok(Command::Restore {
+        workspace,
+        target,
+        dry_run,
+        format: flags.format,
+    })
+}
+
 fn parse_files(cursor: &mut Cursor) -> std::result::Result<Command, String> {
     let mut workspace = None;
     let mut turn = None;
@@ -2937,6 +3071,22 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(
+            parse(args(&["restore", "--ws", &ws, "--turn", "3", "--dry-run"])).unwrap(),
+            Command::Restore {
+                target: RestoreRef::BeforeTurn(TurnRef::Ordinal(3)),
+                dry_run: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(args(&["restore", "--ws", &ws, "--undo", &id()])).unwrap(),
+            Command::Restore {
+                target: RestoreRef::Undo(_),
+                dry_run: false,
+                ..
+            }
+        ));
+        assert!(matches!(
             parse(args(&["git", "commit", "--ws", &ws, "-m", "wip"])).unwrap(),
             Command::GitCommit { .. }
         ));
@@ -2980,6 +3130,20 @@ mod tests {
         .is_err());
         assert!(parse(args(&["interrupt"])).is_err());
         assert!(parse(args(&["diff"])).is_err());
+        // A restore names exactly one target, and a restore id is a UUID.
+        assert!(parse(args(&["restore", "--turn", "1"])).is_err());
+        assert!(parse(args(&["restore", "--ws", &id()])).is_err());
+        assert!(parse(args(&["restore", "--ws", &id(), "--undo", "nope"])).is_err());
+        assert!(parse(args(&[
+            "restore",
+            "--ws",
+            &id(),
+            "--turn",
+            "1",
+            "--undo",
+            &id()
+        ]))
+        .is_err());
         assert!(parse(args(&["git", "push"])).is_err());
         assert!(parse(args(&["action", "lint"])).is_err());
         assert!(parse(args(&["doctor", "--wat"])).is_err());

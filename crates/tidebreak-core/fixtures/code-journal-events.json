@@ -178,5 +178,21 @@
       "type": "assistant_message",
       "text": "The background job finished."
     }
+  },
+  {
+    "type": "checkpoint_restored",
+    "restore_id": "00000000-0000-0000-0000-000000000007",
+    "target": {
+      "kind": "before_turn",
+      "turn_id": "00000000-0000-0000-0000-000000000001"
+    },
+    "diffstat": {
+      "files": 3,
+      "insertions": 4,
+      "deletions": 40,
+      "truncated": false
+    },
+    "status": "partial",
+    "error": "git stopped partway"
   }
 ]

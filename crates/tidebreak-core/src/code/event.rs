@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{
-    ApprovalId, ApprovalKind, ExecutionLocation, HarnessKind, SessionId, TurnId, WorkspaceId,
+    ApprovalId, ApprovalKind, CodeRestoreId, ExecutionLocation, HarnessKind, SessionId, TurnId,
+    WorkspaceId,
 };
 use crate::approval::{GrantScope, ToolApprovalKind};
 use crate::error::AgentErrorInfo;
@@ -135,6 +136,45 @@ pub struct Diffstat {
     /// True when the underlying diff was truncated.
     #[serde(default)]
     pub truncated: bool,
+}
+
+/// The earlier state a checkpoint restore puts a workspace's worktree back to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckpointRestoreTarget {
+    /// The worktree as it stood before a turn started: the checkpoint the
+    /// turn's own diff starts from.
+    BeforeTurn {
+        /// The turn whose changes, and everything after them, are undone.
+        turn_id: TurnId,
+    },
+    /// The worktree as it stood just before an earlier restore. Restoring it
+    /// undoes that restore.
+    BeforeRestore {
+        /// The restore being undone.
+        restore_id: CodeRestoreId,
+    },
+}
+
+/// How far a checkpoint restore got.
+///
+/// A restore is journaled twice: `started` before any file moves, so its
+/// Undo is reachable even if the machine stops mid-restore, and once more
+/// with how it ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointRestoreStatus {
+    /// The state it replaces is saved, and no file has moved yet.
+    Started,
+    /// Every file went back.
+    #[default]
+    Completed,
+    /// It did not run, or it stopped and every file it wrote went back.
+    /// Nothing changed.
+    Failed,
+    /// It stopped partway, and some files it wrote could not go back.
+    /// Undoing the restore puts back everything it replaced.
+    Partial,
 }
 
 /// Token accounting for one turn.
@@ -841,6 +881,30 @@ pub enum Event {
         /// Bounded diffstat.
         diffstat: Diffstat,
     },
+    /// The workspace's worktree was put back to an earlier state between
+    /// turns. The state it replaced is saved under `restore_id`, so restoring
+    /// that undoes this. Journaled by the restore route, never by an engine:
+    /// once as `started` before any file moves, then with how it ended.
+    CheckpointRestored {
+        /// Names this restore and the state saved just before it.
+        restore_id: CodeRestoreId,
+        /// The state the worktree went back to.
+        target: CheckpointRestoreTarget,
+        /// What the restore changes in the worktree, from the state it
+        /// replaces to the state it restores.
+        diffstat: Diffstat,
+        /// Who restored, when it was not the session's owner.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        actor: Option<super::TurnActor>,
+        /// How far the restore got.
+        #[serde(default)]
+        status: CheckpointRestoreStatus,
+        /// Why a `failed` or `partial` restore stopped, bounded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        error: Option<String>,
+    },
     /// Visible degradation or an engine-native notice.
     HarnessNotice {
         /// Severity.
@@ -1150,6 +1214,7 @@ mod tests {
             Event::ModelReported { .. } => 25,
             Event::SessionTree { .. } => 26,
             Event::BackgroundActivity { .. } => 27,
+            Event::CheckpointRestored { .. } => 28,
         }
     }
 
@@ -1307,6 +1372,21 @@ mod tests {
                     text: "The background job finished.".into(),
                     parent_call_id: None,
                 }),
+            },
+            Event::CheckpointRestored {
+                restore_id: CodeRestoreId(id(7)),
+                target: CheckpointRestoreTarget::BeforeTurn {
+                    turn_id: TurnId(id(1)),
+                },
+                diffstat: Diffstat {
+                    files: 3,
+                    insertions: 4,
+                    deletions: 40,
+                    truncated: false,
+                },
+                actor: None,
+                status: CheckpointRestoreStatus::Partial,
+                error: Some("git stopped partway".into()),
             },
         ]
     }

@@ -330,7 +330,7 @@ async fn remote_workspace_inspects_and_restores_from_a_retained_checkpoint() {
         .unwrap_err();
     assert_eq!(escaped.kind(), "path");
 
-    let (files, _, _, _, _) = runtime
+    let (files, _, _, _, _, _) = runtime
         .workspace_files(&workspace.owner, workspace.id, None)
         .await
         .unwrap();

@@ -540,6 +540,22 @@ mod tests {
         generate::collect_from::<crate::routes::code::SaveWorkspaceFileBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceFileSaved>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceDiff>(&cfg, &mut out);
+        // Undo in the worktree: the restore preview and result, the revert
+        // and discard bodies, and what either one changed.
+        generate::collect_from::<crate::routes::code::types::CodeCheckpointRestorePreview>(
+            &cfg, &mut out,
+        );
+        generate::collect_from::<crate::routes::code::types::RestoreCheckpointBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::types::CodeCheckpointRestoreResult>(
+            &cfg, &mut out,
+        );
+        generate::collect_from::<crate::routes::code::types::RevertWorkspaceChangeBody>(
+            &cfg, &mut out,
+        );
+        generate::collect_from::<crate::routes::code::types::DiscardWorkspaceChangesBody>(
+            &cfg, &mut out,
+        );
+        generate::collect_from::<crate::routes::code::types::CodeWorktreeChange>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalRead>(&cfg, &mut out);
         // An engine's sign-in terminal: the same cursor-pull reads, outside

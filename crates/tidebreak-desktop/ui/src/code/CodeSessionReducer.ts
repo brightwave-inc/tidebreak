@@ -1,5 +1,10 @@
-import type { ApprovalDecisionKind, TurnActor } from "../generated/wire";
 import type {
+  ApprovalDecisionKind,
+  CheckpointRestoreStatus,
+  TurnActor,
+} from "../generated/wire";
+import type {
+  CheckpointRestoreTarget,
   CodeApprovalState,
   CodeEvent,
   CodeSessionLifecycle,
@@ -141,6 +146,27 @@ export type CodeTranscriptItem =
       id: string;
       turnId: string | null;
       files: Record<string, { kind: FileChangeKind; diffstat: Diffstat }>;
+    }
+  | {
+      /**
+       * The worktree went back to an earlier state between turns. The id
+       * names the state the restore replaced, which is what undoing it puts
+       * back.
+       */
+      kind: "restore";
+      id: string;
+      restoreId: string;
+      target: CheckpointRestoreTarget;
+      /** The restored turn's ordinal, when the transcript knows it. */
+      turnOrdinal: number | null;
+      diffstat: Diffstat;
+      /**
+       * How far the restore got. The row lands as `started` before any file
+       * moves and changes in place when the restore ends.
+       */
+      status: CheckpointRestoreStatus;
+      /** Why a failed or partial restore stopped. */
+      error: string | null;
     };
 
 export type CodeSessionState = {
@@ -1196,6 +1222,53 @@ export function reduceCodeSessionEvent(
         state: {
           ...state,
           items: applyDiffstat(state.items, event.turn_id, event.diffstat),
+          contentRevision: state.contentRevision + 1,
+        },
+        effects,
+      };
+    }
+
+    case "checkpoint_restored": {
+      // A restore runs between turns and belongs to none of them, so it
+      // lands where the engine's own between-turn activity does: after the
+      // turn the journal last ended, before any prompt already placed for a
+      // later turn. Its second row, how it ended, updates the first in place.
+      const id = `restore:${event.restore_id}`;
+      const row = {
+        kind: "restore" as const,
+        id,
+        restoreId: event.restore_id,
+        target: event.target,
+        turnOrdinal:
+          event.target.kind === "before_turn"
+            ? (state.turnOrdinals.get(event.target.turn_id) ?? null)
+            : null,
+        diffstat: event.diffstat,
+        status: event.status,
+        error: event.error ?? null,
+      };
+      const existing = state.items.find((item) => item.id === id);
+      if (existing) {
+        if (
+          existing.kind === "restore" &&
+          existing.status === row.status &&
+          existing.error === row.error
+        ) {
+          return { state, effects };
+        }
+        return {
+          state: {
+            ...state,
+            items: state.items.map((item) => (item.id === id ? row : item)),
+            contentRevision: state.contentRevision + 1,
+          },
+          effects,
+        };
+      }
+      return {
+        state: {
+          ...state,
+          items: insertBackgroundItem(state, framed, row),
           contentRevision: state.contentRevision + 1,
         },
         effects,

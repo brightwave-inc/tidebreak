@@ -444,6 +444,106 @@
     }
   },
   {
+    "kind": "workspace_files",
+    "name": "uncommitted workspace files",
+    "value": {
+      "files": [
+        {
+          "deletions": 3,
+          "insertions": 12,
+          "kind": "modified",
+          "path": "crates/tidebreak-cli/src/api/code.rs",
+          "uncommitted": true
+        },
+        {
+          "deletions": 0,
+          "insertions": 4,
+          "kind": "modified",
+          "path": "docs/code-mode.md"
+        }
+      ],
+      "stat": {
+        "deletions": 3,
+        "files": 2,
+        "insertions": 14,
+        "truncated": false
+      },
+      "truncated": false,
+      "worktree_tree": "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    }
+  },
+  {
+    "kind": "checkpoint_restore_preview",
+    "name": "checkpoint restore preview",
+    "value": {
+      "affected_turns": [
+        {
+          "harness_kind": "codex",
+          "ordinal": 4,
+          "session_id": "00000000-0000-0000-0000-000000000032",
+          "turn_id": "00000000-0000-0000-0000-000000000033"
+        }
+      ],
+      "blocked": [
+        ".env"
+      ],
+      "current_tree": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      "files": [
+        {
+          "deletions": 4,
+          "insertions": 18,
+          "kind": "modified",
+          "path": "src/parser.rs"
+        },
+        {
+          "deletions": 0,
+          "insertions": 3,
+          "kind": "added",
+          "path": "notes/scratch.md"
+        }
+      ],
+      "session_id": "00000000-0000-0000-0000-000000000003",
+      "stat": {
+        "deletions": 3,
+        "files": 2,
+        "insertions": 14,
+        "truncated": false
+      },
+      "target": {
+        "kind": "before_turn",
+        "turn_id": "00000000-0000-0000-0000-000000000004"
+      },
+      "truncated": false
+    }
+  },
+  {
+    "kind": "checkpoint_restore",
+    "name": "checkpoint restore",
+    "value": {
+      "files": [
+        {
+          "deletions": 18,
+          "insertions": 4,
+          "kind": "modified",
+          "path": "src/parser.rs"
+        }
+      ],
+      "restore_id": "00000000-0000-0000-0000-000000000030",
+      "session_id": "00000000-0000-0000-0000-000000000003",
+      "stat": {
+        "deletions": 3,
+        "files": 2,
+        "insertions": 14,
+        "truncated": false
+      },
+      "target": {
+        "kind": "before_restore",
+        "restore_id": "00000000-0000-0000-0000-000000000031"
+      },
+      "truncated": false
+    }
+  },
+  {
     "kind": "workspace_diff",
     "name": "workspace diff",
     "value": {
@@ -1233,6 +1333,28 @@
         "type": "checkpoint_recorded"
       },
       "seq": 53
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: checkpoint_restored",
+    "value": {
+      "event": {
+        "diffstat": {
+          "deletions": 3,
+          "files": 2,
+          "insertions": 14,
+          "truncated": false
+        },
+        "restore_id": "00000000-0000-0000-0000-000000000030",
+        "status": "completed",
+        "target": {
+          "kind": "before_turn",
+          "turn_id": "00000000-0000-0000-0000-000000000004"
+        },
+        "type": "checkpoint_restored"
+      },
+      "seq": 68
     }
   },
   {

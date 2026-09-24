@@ -8,9 +8,9 @@
 //!
 //! A failed or interrupted turn is checkpointed for the same reason a
 //! completed one is: the engine may have rewritten files before it died, and
-//! edits outside the chain are edits the per-turn diff and any future restore
-//! cannot see. They would otherwise land in the next turn's checkpoint, under
-//! the wrong turn.
+//! edits outside the chain are edits the per-turn diff and a restore cannot
+//! see. They would otherwise land in the next turn's checkpoint, under the
+//! wrong turn.
 //!
 //! The session segment is load-bearing. A workspace holds several sessions
 //! (decision 0055) and `next_turn_ordinal` counts per session, so every
@@ -24,6 +24,27 @@
 //!
 //! Diffs are produced here, bounded in bytes and file count, with truncation
 //! marked on the payload. The renderer never runs git.
+//!
+//! [`restore`] puts the worktree back to an earlier checkpoint, and
+//! [`revert`] undoes one file's change, one hunk of it, or a file's
+//! uncommitted edits. Both change files only through git, never by writing
+//! text a client sent, and only through [`worktree`], which refuses to
+//! overwrite or remove anything the snapshot it starts from does not hold.
+
+mod restore;
+mod revert;
+#[cfg(all(test, unix))]
+mod testing;
+mod worktree;
+
+pub use restore::{
+    chain_commit_message, chain_resume_ref, commit_time, continue_chains_after_restore,
+    continue_chains_to, find_restore_point, prepare_restore, preview_restore, restore_note,
+    restore_point_ref, restore_worktree, AppliedRestore, PreparedRestore, RestoreApplyError,
+    RestorePreview, RestoredTo,
+};
+pub use revert::{discard_paths, revert_change, uncommitted_paths, HunkSelector, RevertedChange};
+pub(crate) use worktree::clear_staging_folder;
 
 use std::ffi::OsString;
 use std::future::Future;
@@ -139,6 +160,43 @@ impl GitPath {
                 .map_err(|_| "Git returned a path that this platform cannot represent".to_owned())
         }
     }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// The folders that lead to this path, outermost first: `a` and `a/b`
+    /// for `a/b/c`.
+    fn ancestors(&self) -> Vec<GitPath> {
+        self.0
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte == b'/')
+            .map(|(at, _)| Self(self.0[..at].to_vec()))
+            .collect()
+    }
+
+    /// This path as a folder prefix, with its trailing slash.
+    fn child_prefix(&self) -> Vec<u8> {
+        let mut prefix = self.0.clone();
+        prefix.push(b'/');
+        prefix
+    }
+
+    /// The entry `name` inside this folder.
+    fn join_name(&self, name: &std::ffi::OsStr) -> GitPath {
+        let mut path = self.child_prefix();
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            path.extend_from_slice(name.as_bytes());
+        }
+        #[cfg(not(unix))]
+        {
+            path.extend_from_slice(name.to_string_lossy().as_bytes());
+        }
+        Self(path)
+    }
 }
 
 /// One file in a bounded workspace or turn file list.
@@ -149,6 +207,10 @@ pub struct ChangedFile {
     pub insertions: u32,
     pub deletions: u32,
     pub previous_path: Option<GitPath>,
+    /// The file also differs from the last commit, so Discard has something
+    /// to throw away. Set on the workspace list only; a turn's list leaves it
+    /// false.
+    pub uncommitted: bool,
 }
 
 /// Bounded file list for `GET /code/workspaces/{id}/files`.
@@ -179,6 +241,12 @@ pub struct RecordedCheckpoint {
 pub enum CheckpointError {
     #[error("{0}")]
     User(String),
+    /// The worktree or the chain is not in a state the operation can act on.
+    /// `kind` is the stable name a client branches on.
+    #[error("{message}")]
+    Conflict { kind: &'static str, message: String },
+    #[error("{0}")]
+    NotFound(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -186,6 +254,17 @@ pub enum CheckpointError {
 impl CheckpointError {
     fn user(message: impl Into<String>) -> Self {
         Self::User(message.into())
+    }
+
+    fn conflict(kind: &'static str, message: impl Into<String>) -> Self {
+        Self::Conflict {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound(message.into())
     }
 
     fn internal(message: impl Into<String>) -> Self {
@@ -536,7 +615,16 @@ pub async fn produce_diff(
 ) -> Result<BoundedDiff, CheckpointError> {
     if let Some(path) = file {
         let path = GitPath::from_wire(path)?;
-        let paths = std::slice::from_ref(&path);
+        // A renamed file is diffed with its old path too, so git pairs the
+        // two instead of reading the new one as added.
+        let mut paths = vec![path.clone()];
+        if let Some(previous) = revert::find_change(worktree, from, to, &path)
+            .await?
+            .and_then(|change| change.previous_path)
+        {
+            paths.push(previous);
+        }
+        let paths = paths.as_slice();
         let (raw, read_truncated) = git_bytes_with_literal_paths_bounded(
             worktree,
             &review_diff_args(from, to),
@@ -582,7 +670,7 @@ pub async fn produce_diff(
     let paths: Vec<_> = listed
         .files
         .iter()
-        .map(|entry| entry.path.clone())
+        .flat_map(|entry| std::iter::once(entry.path.clone()).chain(entry.previous_path.clone()))
         .collect();
     let (raw, read_truncated) = git_bytes_with_literal_paths_bounded(
         worktree,
@@ -846,13 +934,18 @@ async fn snapshot_tree_with_index_before(
         deadline,
     )
     .await?;
-    git_text_env_before(
+    let tree = git_text_env_before(
         worktree,
         &["write-tree"],
         &[("GIT_INDEX_FILE", index.as_ref())],
         deadline.min(Instant::now() + GIT_TIMEOUT),
     )
-    .await
+    .await?;
+    // A committed case-only rename must not leave the old spelling in the
+    // index, where every list built from the snapshot would still show it.
+    Ok(self::worktree::respell_to_head(worktree, index_path, &tree)
+        .await
+        .unwrap_or(tree))
 }
 
 /// Resolve `merge-base(base_ref, HEAD)`, falling back to `base_ref`.
@@ -1034,6 +1127,13 @@ async fn previous_checkpoint_oid(
     if turn.ordinal <= BASELINE_ORDINAL {
         return Ok(None);
     }
+    // A restore after turn `n - 1` moved the worktree before this turn began,
+    // and wrote where the chain continues. Diffing from turn `n - 1`'s own
+    // checkpoint would credit this turn with undoing what the restore undid.
+    let resumed = chain_resume_ref(workspace.id, turn.session_id, turn.ordinal - 1);
+    if let Some(oid) = resolve_checkpoint_oid(worktree, &resumed).await {
+        return Ok(Some(oid));
+    }
     let previous_ref = checkpoint_ref(workspace.id, turn.session_id, turn.ordinal - 1);
     if let Some(oid) = resolve_checkpoint_oid(worktree, &previous_ref).await {
         return Ok(Some(oid));
@@ -1047,6 +1147,10 @@ async fn previous_checkpoint_oid(
         if candidate.ordinal >= turn.ordinal {
             continue;
         }
+        let resumed = chain_resume_ref(workspace.id, turn.session_id, candidate.ordinal);
+        if let Some(oid) = resolve_checkpoint_oid(worktree, &resumed).await {
+            return Ok(Some(oid));
+        }
         let Some(r#ref) = candidate.checkpoint_ref else {
             continue;
         };
@@ -1054,8 +1158,38 @@ async fn previous_checkpoint_oid(
             return Ok(Some(oid));
         }
     }
+    let resumed = chain_resume_ref(workspace.id, turn.session_id, BASELINE_ORDINAL);
+    if let Some(oid) = resolve_checkpoint_oid(worktree, &resumed).await {
+        return Ok(Some(oid));
+    }
     let baseline = session_baseline_ref(workspace.id, turn.session_id);
     Ok(resolve_checkpoint_oid(worktree, &baseline).await)
+}
+
+/// The state a workspace's worktree held just before `turn` began: where a
+/// restore to before that turn goes.
+///
+/// That is exactly where the turn's diff starts: the chain's resume point
+/// after the previous turn, the previous turn's own checkpoint, or the
+/// session's start for its first turn. Unlike the diff, it never falls back
+/// to an older checkpoint when that one is gone: a restore that silently went
+/// further back would undo turns the person did not pick. `None` then, and
+/// the caller refuses.
+pub async fn state_before_turn(
+    workspace: &CodeWorkspace,
+    turn: &Turn,
+) -> Result<Option<String>, CheckpointError> {
+    let worktree = PathBuf::from(&workspace.worktree_path);
+    if turn.ordinal <= BASELINE_ORDINAL {
+        return Ok(None);
+    }
+    let previous = turn.ordinal - 1;
+    let resumed = chain_resume_ref(workspace.id, turn.session_id, previous);
+    if let Some(oid) = resolve_checkpoint_oid(&worktree, &resumed).await {
+        return Ok(Some(oid));
+    }
+    let exact = checkpoint_ref(workspace.id, turn.session_id, previous);
+    Ok(resolve_checkpoint_oid(&worktree, &exact).await)
 }
 
 async fn resolve_checkpoint_oid(worktree: &Path, r#ref: &str) -> Option<String> {
@@ -1228,6 +1362,7 @@ fn parse_name_status(raw: &[u8]) -> Vec<ChangedFile> {
                     insertions: 0,
                     deletions: 0,
                     previous_path: (!previous.is_empty()).then(|| GitPath::from_bytes(previous)),
+                    uncommitted: false,
                 });
             }
             other => {
@@ -1246,6 +1381,7 @@ fn parse_name_status(raw: &[u8]) -> Vec<ChangedFile> {
                     insertions: 0,
                     deletions: 0,
                     previous_path: None,
+                    uncommitted: false,
                 });
             }
         }
@@ -3070,6 +3206,126 @@ mod tests {
             oid_of(&tree, &format!("{first_ref}^")).await,
             oid_of(&tree, &baseline).await,
             "turn 1 parents off the baseline"
+        );
+    }
+
+    /// A restore between turns moves the worktree outside any turn. The next
+    /// turn has to diff from the restored state: from its own previous
+    /// checkpoint, it would claim to have deleted everything the restore took
+    /// back. A restore to before that next turn has to land there too.
+    #[tokio::test]
+    async fn a_turn_after_a_restore_diffs_from_the_restored_state() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "chain-after-restore");
+        let (db, bus, session) = seed_session(&repo, &tree).await;
+        let workspace_id = session.workspace_id.expect("workspace");
+        let workspace = get_workspace(&db, &session.owner, workspace_id)
+            .await
+            .unwrap()
+            .expect("the seeded workspace");
+        record_session_baseline(&tree, workspace_id, session.id)
+            .await
+            .unwrap();
+        std::fs::write(tree.join("one.txt"), "one\n").unwrap();
+        let mut first = seed_turn(&db, &session, 1, TurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &session, &mut first).await;
+        std::fs::write(tree.join("two.txt"), "two\n").unwrap();
+        std::fs::write(tree.join("three.txt"), "three\n").unwrap();
+        let mut second = seed_turn(&db, &session, 2, TurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &session, &mut second).await;
+
+        let before_second = state_before_turn(&workspace, &second)
+            .await
+            .unwrap()
+            .expect("turn 2 chains from turn 1");
+        let restore = tidebreak_core::CodeRestoreId::new();
+        let applied = restore_worktree(
+            &tree,
+            &before_second,
+            None,
+            &restore_point_ref(workspace_id, session.id, restore),
+            "state before restore",
+        )
+        .await
+        .unwrap();
+        continue_chains_after_restore(
+            &tree,
+            &applied,
+            "restore",
+            &[chain_resume_ref(workspace_id, session.id, 2)],
+        )
+        .await
+        .unwrap();
+        assert!(!tree.join("two.txt").exists());
+
+        std::fs::write(tree.join("four.txt"), "four\n").unwrap();
+        let mut third = seed_turn(&db, &session, 3, TurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &session, &mut third).await;
+
+        assert_eq!(
+            third.diffstat.as_ref().map(|stat| stat.files),
+            Some(1),
+            "turn 3 changed one file; the restore is not its work"
+        );
+        let third_ref = third.checkpoint_ref.clone().unwrap();
+        let before_third = state_before_turn(&workspace, &third)
+            .await
+            .unwrap()
+            .expect("turn 3 chains from the restore");
+        let diff = produce_diff(
+            &tree,
+            &before_third,
+            &third_ref,
+            None,
+            DiffBounds::default(),
+        )
+        .await
+        .unwrap();
+        assert!(diff.diff.contains("four.txt"), "{}", diff.diff);
+        assert!(!diff.diff.contains("two.txt"), "{}", diff.diff);
+        assert_eq!(
+            oid_of(&tree, &format!("{before_third}^{{tree}}")).await,
+            applied.restored_tree,
+            "restoring to before turn 3 lands on the restored state, not on turn 2"
+        );
+    }
+
+    /// With turn 2's checkpoint gone, "before turn 3" has no exact state.
+    /// Going back to turn 1's checkpoint instead would also undo turn 2,
+    /// which nobody picked, so there is no target at all.
+    #[tokio::test]
+    async fn a_restore_target_never_falls_back_to_an_older_checkpoint() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "restore-no-fallback");
+        let (db, bus, session) = seed_session(&repo, &tree).await;
+        let workspace_id = session.workspace_id.expect("workspace");
+        let workspace = get_workspace(&db, &session.owner, workspace_id)
+            .await
+            .unwrap()
+            .expect("the seeded workspace");
+        record_session_baseline(&tree, workspace_id, session.id)
+            .await
+            .unwrap();
+        let mut turns = Vec::new();
+        for (ordinal, name) in [(1, "one.txt"), (2, "two.txt"), (3, "three.txt")] {
+            std::fs::write(tree.join(name), format!("{name}\n")).unwrap();
+            let mut turn = seed_turn(&db, &session, ordinal, TurnStatus::Completed).await;
+            after_turn_ended(&db, &bus, &session, &mut turn).await;
+            turns.push(turn);
+        }
+        assert!(state_before_turn(&workspace, &turns[2])
+            .await
+            .unwrap()
+            .is_some());
+
+        delete_ref(&tree, &checkpoint_ref(workspace_id, session.id, 2))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state_before_turn(&workspace, &turns[2]).await.unwrap(),
+            None,
+            "no silent step back to turn 1"
         );
     }
 

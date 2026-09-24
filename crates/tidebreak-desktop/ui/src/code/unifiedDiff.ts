@@ -1,3 +1,5 @@
+import type { FileChangeKind } from "../api/types";
+
 export type DiffLineKind = "add" | "del" | "context" | "hunk" | "meta";
 
 export type DiffLine = {
@@ -151,6 +153,107 @@ export function patchLineKind(
   if (kind === "del") return "remove";
   if (kind === "hunk") return "hunk";
   return "context";
+}
+
+/** One hunk of a file's diff, as the view shows it. */
+export type DiffHunk = {
+  /** Zero-based position of the hunk in its file's diff. */
+  index: number;
+  /** Position of the hunk's `@@` line in the file group's lines. */
+  line: number;
+  /** The hunk as shown: its `@@` line through its last line, newline-joined. */
+  text: string;
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  /**
+   * Every line the header promised is here. A diff cut at its size cap can
+   * end partway through a hunk, and that hunk cannot be reverted as shown.
+   */
+  complete: boolean;
+};
+
+/**
+ * What kind of change one file's section is, read from git's own header
+ * lines, so a revert can say what reverting it does: an added file is
+ * deleted, a renamed one goes back to its old name.
+ */
+export function fileChangeOf(group: DiffFileGroup): {
+  kind: FileChangeKind;
+  previousPath?: string;
+} {
+  let kind: FileChangeKind = "modified";
+  let previousPath: string | undefined;
+  for (const line of group.lines) {
+    if (line.kind === "hunk") break;
+    if (line.kind !== "meta") continue;
+    if (line.text.startsWith("new file mode")) kind = "added";
+    else if (line.text.startsWith("deleted file mode")) kind = "deleted";
+    else if (line.text.startsWith("rename from ")) {
+      kind = "renamed";
+      previousPath = line.text.slice("rename from ".length);
+    }
+  }
+  return previousPath === undefined ? { kind } : { kind, previousPath };
+}
+
+/**
+ * Split one file's lines into its hunks.
+ *
+ * A hunk runs from its `@@` line to the line before the next one, which is
+ * how the server splits the same file when it rebuilds a hunk to revert.
+ */
+export function diffHunks(group: DiffFileGroup): DiffHunk[] {
+  const hunks: DiffHunk[] = [];
+  let current: {
+    line: number;
+    texts: string[];
+    oldStart: number;
+    oldCount: number;
+    newStart: number;
+    newCount: number;
+    oldSeen: number;
+    newSeen: number;
+  } | null = null;
+  const finish = () => {
+    if (!current) return;
+    hunks.push({
+      index: hunks.length,
+      line: current.line,
+      text: current.texts.join("\n"),
+      oldStart: current.oldStart,
+      oldCount: current.oldCount,
+      newStart: current.newStart,
+      newCount: current.newCount,
+      complete:
+        current.oldSeen === current.oldCount &&
+        current.newSeen === current.newCount,
+    });
+  };
+  group.lines.forEach((line, index) => {
+    if (line.kind === "hunk") {
+      finish();
+      const header = HUNK_HEADER.exec(line.text);
+      current = {
+        line: index,
+        texts: [line.text],
+        oldStart: Number(header?.[1] ?? 0),
+        oldCount: header?.[2] === undefined ? 1 : Number(header[2]),
+        newStart: Number(header?.[3] ?? 0),
+        newCount: header?.[4] === undefined ? 1 : Number(header[4]),
+        oldSeen: 0,
+        newSeen: 0,
+      };
+      return;
+    }
+    if (!current) return;
+    current.texts.push(line.text);
+    if (line.kind === "add" || line.kind === "context") current.newSeen += 1;
+    if (line.kind === "del" || line.kind === "context") current.oldSeen += 1;
+  });
+  finish();
+  return hunks;
 }
 
 export function parseDiffGitLine(line: string): string | null {

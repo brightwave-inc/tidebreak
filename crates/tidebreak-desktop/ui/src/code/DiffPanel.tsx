@@ -1,5 +1,5 @@
-import { useCallback, useId, useMemo, useState } from "react";
-import { ChevronRight, FileCode2 } from "lucide-react";
+import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
+import { ChevronRight, FileCode2, Undo2 } from "lucide-react";
 
 import type { ApiClient } from "../api/client";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -11,8 +11,9 @@ import { OpenInEditorButton } from "./OpenInEditorButton";
 import { DiffstatBadge } from "./TurnReviewCard";
 import { useLiveResource } from "./useLiveContent";
 import { HEADER_CAPTION, WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
-import type { DiffFileGroup, DiffLine } from "./unifiedDiff";
-import { groupUnifiedDiff } from "./unifiedDiff";
+import type { DiffFileGroup, DiffHunk, DiffLine } from "./unifiedDiff";
+import { diffHunks, fileChangeOf, groupUnifiedDiff } from "./unifiedDiff";
+import type { RevertRequest } from "./worktreeUndo";
 
 /** Files longer than this start collapsed behind "Show diff". */
 export const DIFF_COLLAPSE_LINE_THRESHOLD = 400;
@@ -23,6 +24,20 @@ export type {
   DiffLineKind,
 } from "./unifiedDiff";
 export { groupUnifiedDiff } from "./unifiedDiff";
+
+/**
+ * Reverting from the diff: the whole file, or one hunk. The host asks first
+ * and has the server apply it; a handler resolves `true` once it landed.
+ */
+export type DiffRevertActions = {
+  onRevertFile: (request: RevertRequest) => Promise<boolean>;
+  onRevertHunk: (request: RevertRequest, hunk: DiffHunk) => Promise<boolean>;
+  /**
+   * Why nothing can be reverted right now, such as a turn running. The
+   * controls stay in place, turned off, with this sentence as their title.
+   */
+  unavailableReason?: string;
+};
 
 /**
  * Server-produced unified diff, grouped per file and tinted with the
@@ -38,6 +53,7 @@ export function DiffPanel({
   contentRevision = 0,
   onOpenFile,
   onOpenInEditor,
+  revert,
 }: {
   client: Pick<ApiClient, "getCodeWorkspaceDiff">;
   workspaceId: string;
@@ -49,6 +65,8 @@ export function DiffPanel({
   onOpenFile?: (path: string) => void;
   /** Hand the scoped file to the reader's own editor. */
   onOpenInEditor?: (path: string) => void;
+  /** Revert a file or a hunk. Absent where the worktree is not ours to change. */
+  revert?: DiffRevertActions;
 }) {
   const load = useCallback(
     () => client.getCodeWorkspaceDiff(workspaceId, { turn: turnId, file }),
@@ -69,6 +87,7 @@ export function DiffPanel({
     () => (payload ? groupUnifiedDiff(payload.diff) : []),
     [payload],
   );
+  const reverts = useRevertTracker(revert, turnId);
 
   const scopeCaption = file
     ? file
@@ -99,14 +118,18 @@ export function DiffPanel({
             savedAt={payload?.revision_saved_at}
           />
           {payload && <DiffstatBadge stat={payload.stat} />}
+          {file && reverts && groups.length > 0 && (
+            <RevertFileButton
+              group={groups[0]}
+              path={file}
+              reverts={reverts}
+              placement="header"
+            />
+          )}
           {file && onOpenFile && (
             <button
               type="button"
-              className={cn(
-                "text-muted-foreground hover:bg-muted hover:text-foreground flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-xs",
-                FOCUS_RING_TIGHT,
-                HOVER_TINT,
-              )}
+              className={cn(HEADER_ACTION, FOCUS_RING_TIGHT, HOVER_TINT)}
               onClick={() => onOpenFile(file)}
             >
               <FileCode2 className="size-3" aria-hidden />
@@ -144,13 +167,14 @@ export function DiffPanel({
           </div>
         )}
         {file && groups.length === 1 ? (
-          <DiffBody group={groups[0]} />
+          <DiffBody group={groups[0]} reverts={reverts} />
         ) : (
           groups.map((group) => (
             <FileDiffSection
               key={group.path}
               group={group}
               onOpenFile={onOpenFile}
+              reverts={reverts}
             />
           ))
         )}
@@ -161,6 +185,144 @@ export function DiffPanel({
         )}
       </div>
     </div>
+  );
+}
+
+/** A header action: a quiet icon and word, like "Open file". */
+const HEADER_ACTION =
+  "text-muted-foreground hover:bg-muted hover:text-foreground flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-xs whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60";
+
+/**
+ * The revert controls' shared state for one open diff.
+ *
+ * A turn's diff is history: reverting its hunk changes the worktree, not the
+ * checkpoints the diff compares, so the hunk stays on screen. It is marked
+ * reverted instead, so the reader sees their action landed and is not
+ * offered a second revert that can only fail. The workspace diff re-reads
+ * the worktree, and a reverted hunk simply leaves it.
+ */
+type RevertTracker = {
+  actions: DiffRevertActions;
+  turnId?: string;
+  reverted: ReadonlySet<string>;
+  pending: string | null;
+  run: (key: string, action: () => Promise<boolean>) => void;
+};
+
+function useRevertTracker(
+  actions: DiffRevertActions | undefined,
+  turnId: string | undefined,
+): RevertTracker | null {
+  const [reverted, setReverted] = useState<ReadonlySet<string>>(new Set());
+  const [pending, setPending] = useState<string | null>(null);
+  const run = useCallback((key: string, action: () => Promise<boolean>) => {
+    setPending(key);
+    void action()
+      .then((landed) => {
+        if (landed) setReverted((current) => new Set(current).add(key));
+      })
+      .finally(() => setPending(null));
+  }, []);
+  if (!actions) return null;
+  return { actions, turnId, reverted, pending, run };
+}
+
+function revertKey(path: string, hunk?: number): string {
+  return hunk === undefined ? path : `${path}#${hunk}`;
+}
+
+/**
+ * Revert one whole file. In the panel header it reads like "Open file"
+ * beside it; in a file's own row it is one quiet word, like "Open".
+ */
+function RevertFileButton({
+  group,
+  path,
+  reverts,
+  placement,
+}: {
+  /** The file's section of the diff, which says what kind of change it is. */
+  group: DiffFileGroup;
+  path: string;
+  reverts: RevertTracker;
+  placement: "header" | "row";
+}) {
+  const key = revertKey(path);
+  if (reverts.turnId && reverts.reverted.has(key)) {
+    return <RevertedLabel />;
+  }
+  const busy = reverts.pending === key;
+  const unavailableReason = reverts.actions.unavailableReason;
+  const onClick = () =>
+    reverts.run(key, () =>
+      reverts.actions.onRevertFile({
+        path,
+        turnId: reverts.turnId,
+        ...fileChangeOf(group),
+      }),
+    );
+  if (placement === "header") {
+    return (
+      <button
+        type="button"
+        aria-label={`Revert ${path}`}
+        title={unavailableReason}
+        disabled={busy || unavailableReason !== undefined}
+        className={cn(HEADER_ACTION, FOCUS_RING_TIGHT, HOVER_TINT)}
+        onClick={onClick}
+      >
+        <Undo2 className="size-3" aria-hidden />
+        {busy ? "Reverting…" : "Revert file"}
+      </button>
+    );
+  }
+  return (
+    <RevertButton
+      label="Revert"
+      ariaLabel={`Revert ${path}`}
+      busy={busy}
+      unavailableReason={unavailableReason}
+      onClick={onClick}
+    />
+  );
+}
+
+function RevertButton({
+  label,
+  ariaLabel,
+  busy,
+  unavailableReason,
+  onClick,
+}: {
+  label: string;
+  ariaLabel: string;
+  busy: boolean;
+  unavailableReason?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={ariaLabel}
+      title={unavailableReason}
+      disabled={busy || unavailableReason !== undefined}
+      className={cn(
+        "text-muted-foreground hover:text-foreground shrink-0 cursor-pointer rounded-sm px-1 font-sans text-xs whitespace-nowrap underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:no-underline",
+        FOCUS_RING_TIGHT,
+        HOVER_TINT,
+      )}
+      onClick={onClick}
+    >
+      {busy ? "Reverting…" : label}
+    </button>
+  );
+}
+
+function RevertedLabel() {
+  return (
+    <span className="text-success-foreground shrink-0 px-1 font-sans text-xs whitespace-nowrap">
+      Reverted
+    </span>
   );
 }
 
@@ -185,9 +347,11 @@ function emptyDiffText(
 function FileDiffSection({
   group,
   onOpenFile,
+  reverts,
 }: {
   group: DiffFileGroup;
   onOpenFile?: (path: string) => void;
+  reverts: RevertTracker | null;
 }) {
   const large = group.lines.length > DIFF_COLLAPSE_LINE_THRESHOLD;
   const [expanded, setExpanded] = useState(!large);
@@ -233,6 +397,14 @@ function FileDiffSection({
             />
           </button>
         </h3>
+        {reverts && (
+          <RevertFileButton
+            group={group}
+            path={group.path}
+            reverts={reverts}
+            placement="row"
+          />
+        )}
         {onOpenFile && (
           <button
             type="button"
@@ -261,7 +433,7 @@ function FileDiffSection({
         </span>
       </header>
       {expanded ? (
-        <DiffBody group={group} id={bodyId} />
+        <DiffBody group={group} id={bodyId} reverts={reverts} />
       ) : large ? (
         <button
           type="button"
@@ -280,17 +452,107 @@ function FileDiffSection({
   );
 }
 
-function DiffBody({ group, id }: { group: DiffFileGroup; id?: string }) {
+function DiffBody({
+  group,
+  id,
+  reverts,
+}: {
+  group: DiffFileGroup;
+  id?: string;
+  reverts?: RevertTracker | null;
+}) {
+  // Only a hunk shown whole can be reverted as shown; the last hunk of a
+  // diff cut at its size cap is not.
+  const revertable = reverts !== null && reverts !== undefined;
+  const hunks = useMemo(
+    () =>
+      revertable
+        ? new Map(
+            diffHunks(group)
+              .filter((hunk) => hunk.complete)
+              .map((hunk) => [hunk.line, hunk]),
+          )
+        : null,
+    [group, revertable],
+  );
+  const fileReverted =
+    reverts?.turnId !== undefined &&
+    reverts.reverted.has(revertKey(group.path));
   return (
     <pre id={id} className="overflow-x-auto py-1 font-mono text-md leading-5">
-      {group.lines.map((line, index) => (
-        <DiffLineRow key={`${group.path}:${index}`} line={line} />
-      ))}
+      {group.lines.map((line, index) => {
+        const hunk = hunks?.get(index);
+        return (
+          <DiffLineRow
+            key={`${group.path}:${index}`}
+            line={line}
+            action={
+              hunk && reverts ? (
+                <HunkRevert
+                  group={group}
+                  hunk={hunk}
+                  reverts={reverts}
+                  fileReverted={fileReverted}
+                />
+              ) : undefined
+            }
+          />
+        );
+      })}
     </pre>
   );
 }
 
-function DiffLineRow({ line }: { line: DiffLine }) {
+function HunkRevert({
+  group,
+  hunk,
+  reverts,
+  fileReverted,
+}: {
+  group: DiffFileGroup;
+  hunk: DiffHunk;
+  reverts: RevertTracker;
+  fileReverted: boolean;
+}) {
+  const path = group.path;
+  const key = revertKey(path, hunk.index);
+  if (reverts.turnId && (fileReverted || reverts.reverted.has(key))) {
+    return <RevertedLabel />;
+  }
+  const lines =
+    hunk.newCount > 1
+      ? `lines ${hunk.newStart} to ${hunk.newStart + hunk.newCount - 1}`
+      : `line ${Math.max(hunk.newStart, 1)}`;
+  return (
+    <RevertButton
+      label="Revert"
+      ariaLabel={`Revert the change at ${lines} of ${path}`}
+      busy={reverts.pending === key}
+      unavailableReason={reverts.actions.unavailableReason}
+      onClick={() =>
+        reverts.run(key, () =>
+          reverts.actions.onRevertHunk(
+            { path, turnId: reverts.turnId, ...fileChangeOf(group) },
+            hunk,
+          ),
+        )
+      }
+    />
+  );
+}
+
+function DiffLineRow({
+  line,
+  action,
+}: {
+  line: DiffLine;
+  /**
+   * A control that belongs to this line; only hunk headers carry one. It
+   * sits in the gutter, which a hunk header leaves empty, so a long header
+   * line never pushes it out of view.
+   */
+  action?: ReactNode;
+}) {
   if (line.kind === "meta" && isNoisyDiffMeta(line.text)) return null;
 
   return (
@@ -306,23 +568,34 @@ function DiffLineRow({ line }: { line: DiffLine }) {
           "border-critical-border bg-critical-background/55 text-critical-foreground",
         line.kind === "context" && "text-foreground/90",
         line.kind === "hunk" &&
-          "border-info-border/60 bg-info-background/45 text-info-foreground my-1 border-y border-l-0",
+          "border-info-border/60 bg-info-background/45 text-info-foreground my-1 items-center border-y border-l-0",
         line.kind === "meta" &&
           "text-muted-foreground bg-muted/20 border-l-0 text-xs",
       )}
     >
-      <span
-        className="text-muted-foreground bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
-        data-diff-gutter="old"
-      >
-        {line.oldNo ?? ""}
-      </span>
-      <span
-        className="text-muted-foreground bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
-        data-diff-gutter="new"
-      >
-        {line.newNo ?? ""}
-      </span>
+      {action ? (
+        <span
+          className="bg-background/35 flex w-[10.5ch] shrink-0 select-none items-center justify-end self-stretch border-r text-xs"
+          data-diff-gutter="action"
+        >
+          {action}
+        </span>
+      ) : (
+        <>
+          <span
+            className="text-muted-foreground bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
+            data-diff-gutter="old"
+          >
+            {line.oldNo ?? ""}
+          </span>
+          <span
+            className="text-muted-foreground bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
+            data-diff-gutter="new"
+          >
+            {line.newNo ?? ""}
+          </span>
+        </>
+      )}
       <span className="px-1 whitespace-pre">{line.text || " "}</span>
     </span>
   );

@@ -77,6 +77,8 @@ mod code_titling;
 mod code_trigger_facts;
 mod code_triggers;
 mod code_turns;
+#[cfg(unix)]
+mod code_undo;
 mod code_workspace;
 mod code_ws;
 mod compaction;

@@ -169,6 +169,7 @@ tidebreak code interrupt --session <id>
 tidebreak code turns --session <id>
 tidebreak code diff --ws <id> [--turn N] [--file PATH]
 tidebreak code files --ws <id> [--turn N]
+tidebreak code restore --ws <id> (--turn N | --undo <restore-id>) [--dry-run]
 tidebreak code git commit --ws <id> [-m MSG]
 tidebreak code git push --ws <id>
 tidebreak code git pr --ws <id> [--title <title>] [--body <body>]
@@ -189,6 +190,19 @@ Every `tidebreak code` command also accepts `--json` (one object, or NDJSON
 for `run` and `watch`). `code session start` takes `--reasoning <level>` and
 `--fast` on the CLI; they are not HTTP-only.
 
+`code restore` puts a workspace's files back to how they stood before a turn,
+and undoes every change made since, including your own and other agents'.
+`--turn N` names the turn the way `code diff` does. Run it with `--dry-run`
+first to list what it would undo, including other agents' turns. It refuses
+while a turn runs; while an ignored file, a nested repository, or anything
+else no checkpoint holds is in the way, and the refusal names those files;
+and when the checkpoint from just before that turn is gone. A restore prints
+its id, and a restore that stops partway names it in its error; pass it to
+`--undo` to put back what the restore replaced.
+
+`code git commit` refuses at once while a turn runs or a message waits in the
+workspace's queue, so it never commits a turn's work under your message.
+
 The code family is a thin client of the server API, not a second product
 surface. These server capabilities stay HTTP-only on purpose — they are
 interactive desktop or agent-MCP workflows, and a CLI verb would either
@@ -203,7 +217,9 @@ duplicate the desktop or invent a gate the interactive CLI does not have:
 - Pull-request comments, merge, ready, and check-log download
 - Delivery center
 - Analytics and subscription usage
-- Checkpoint restore and retry-setup
+- Retry-setup
+- Reverting one file or hunk from a diff, and discarding a file's uncommitted
+  changes (review actions in the desktop's diff and source-control views)
 - Worktree search, tree, and blob
 - Worktree-root configuration
 - Clone

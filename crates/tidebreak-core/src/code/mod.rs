@@ -18,8 +18,9 @@ pub use remote_task::RemoteWorkspaceTask;
 
 pub use caps::{CapLevel, HarnessCaps, HarnessCommand, HarnessTier};
 pub use event::{
-    ApprovalDecisionKind, BoundedError, CheckpointHint, CredentialRefusalReason, Diffstat, Event,
-    FileChangeKind, HarnessNoticeLevel, InternalApprovalRequest, SequencedEvent, SessionTreeChild,
+    ApprovalDecisionKind, BoundedError, CheckpointHint, CheckpointRestoreStatus,
+    CheckpointRestoreTarget, CredentialRefusalReason, Diffstat, Event, FileChangeKind,
+    HarnessNoticeLevel, InternalApprovalRequest, SequencedEvent, SessionTreeChild,
     SessionTreeChildStatus, SessionTreeWait, ToolDetail, ToolOutcome, TurnUsage,
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
@@ -134,6 +135,11 @@ code_id_type!(
 code_id_type!(
     /// Identifies one observed GitHub Actions workflow run.
     CodeWorkflowRunId
+);
+code_id_type!(
+    /// Identifies one checkpoint restore, and the worktree state saved just
+    /// before it so that the restore can be undone.
+    CodeRestoreId
 );
 
 /// Which release of an external engine Tidebreak installs and drives.

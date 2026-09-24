@@ -284,6 +284,7 @@ usage: tidebreak code doctor [--refresh]
        tidebreak code turns --session <id>
        tidebreak code diff --ws <id> [--turn N] [--file PATH]
        tidebreak code files --ws <id> [--turn N]
+       tidebreak code restore --ws <id> (--turn N | --undo <restore-id>) [--dry-run]
        tidebreak code git commit --ws <id> [-m MSG]
        tidebreak code git push --ws <id>
        tidebreak code git pr --ws <id> [--title <title>] [--body <body>]

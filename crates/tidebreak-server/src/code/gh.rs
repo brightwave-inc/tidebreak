@@ -110,6 +110,14 @@ impl CachedGhObservation {
 pub enum GhError {
     #[error("nothing to commit")]
     NothingToCommit,
+    /// `git commit` itself refused, most often a hook. Carries what git and
+    /// the hook printed, bounded, so the person can fix what it named.
+    #[error("git refused the commit: {0}")]
+    CommitRejected(String),
+    /// `git commit` was still running at its limit, most often a hook or a
+    /// signing prompt waiting for input, and was stopped.
+    #[error("the commit timed out after {} seconds", .0.as_secs())]
+    CommitTimedOut(Duration),
     #[error("{0}")]
     AuthFailed(String),
     #[error("{0}")]
@@ -304,11 +312,26 @@ pub struct GhObservation {
     pub remediation: String,
 }
 
+/// How long `git commit` may run. Commit hooks run test suites and formatters,
+/// and a signing prompt waits for the person, so this is far longer than a
+/// plain git command gets.
+pub const COMMIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 /// Stage every change in `worktree` and create one commit.
 pub async fn commit_all(
     worktree: &Path,
     title: &str,
     message: Option<&str>,
+) -> Result<CommitOutcome, GhError> {
+    commit_all_within(worktree, title, message, COMMIT_TIMEOUT).await
+}
+
+/// [`commit_all`], with `git commit` stopped at `limit`.
+pub async fn commit_all_within(
+    worktree: &Path,
+    title: &str,
+    message: Option<&str>,
+    limit: Duration,
 ) -> Result<CommitOutcome, GhError> {
     if !has_uncommitted_work(worktree).await? {
         return Err(GhError::NothingToCommit);
@@ -322,9 +345,24 @@ pub async fn commit_all(
         Some(value) => value.to_owned(),
         None => generate_commit_message(title, &stat),
     };
-    git(worktree, &["commit", "-m", &message], GIT_TIMEOUT)
-        .await
-        .map_err(|err| classify_git(err, "commit"))?;
+    let mut command = git_runner::git_command(Some(worktree));
+    command.args(["commit", "-m", &message]);
+    let output = git_runner::wait_command_bounded(
+        &mut command,
+        limit,
+        git_runner::default_stdout_budget(),
+        git_runner::default_stderr_budget(),
+        "git commit",
+    )
+    .await
+    .map_err(|err| match err {
+        git_runner::BoundedCommandError::TimedOut => GhError::CommitTimedOut(limit),
+        git_runner::BoundedCommandError::Failed(message) => {
+            GhError::CommitRejected(bound_text(&message))
+        }
+    })?;
+    finish_bounded_command(output, false)
+        .map_err(|err| GhError::CommitRejected(bound_text(&err)))?;
     let sha = git(worktree, &["rev-parse", "HEAD"], GIT_TIMEOUT).await?;
     Ok(CommitOutcome { sha, message, stat })
 }
@@ -2751,6 +2789,77 @@ mod tests {
 
         let again = commit_all(&work, "first change", None).await.unwrap_err();
         assert!(matches!(again, GhError::NothingToCommit));
+    }
+
+    /// A pre-commit hook is how a repository says no. The refusal has to reach
+    /// the commit box as the hook's own words, not as an authentication
+    /// failure because the hook happened to print "permission denied".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_that_refuses_the_commit_reports_what_it_printed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, work, _bare) = init_paired_repos();
+        let hooks = work.join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\necho 'lint: permission denied on src/main.rs' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["config", "core.hooksPath", hooks.to_str().unwrap()])
+            .current_dir(&work)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::write(work.join("extra.txt"), "line\n").unwrap();
+
+        let err = commit_all(&work, "first change", Some("add a line"))
+            .await
+            .unwrap_err();
+
+        let GhError::CommitRejected(output) = err else {
+            panic!("expected a refused commit, got {err:?}");
+        };
+        assert!(
+            output.contains("lint: permission denied on src/main.rs"),
+            "{output}"
+        );
+    }
+
+    /// A hook that outlives the commit's limit is stopped and reported as a
+    /// time-out, not as git refusing the commit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_that_runs_past_the_limit_reports_a_time_out() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, work, _bare) = init_paired_repos();
+        let hooks = work.join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["config", "core.hooksPath", hooks.to_str().unwrap()])
+            .current_dir(&work)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::write(work.join("extra.txt"), "line\n").unwrap();
+
+        let limit = Duration::from_millis(500);
+        let err = commit_all_within(&work, "first change", Some("add a line"), limit)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, GhError::CommitTimedOut(stopped) if stopped == limit),
+            "{err:?}"
+        );
     }
 
     #[test]

@@ -23,7 +23,9 @@ pub async fn commit_workspace(
     Path(id): Path<WorkspaceId>,
     Json(body): Json<CommitWorkspaceBody>,
 ) -> Result<Json<CodeCommitSnapshot>, ServerError> {
-    let outcome = code.commit_workspace(id, body.message).await?;
+    let outcome = code
+        .commit_workspace(id, body.message, body.expected_tree)
+        .await?;
     Ok(Json(commit_snapshot(outcome)))
 }
 

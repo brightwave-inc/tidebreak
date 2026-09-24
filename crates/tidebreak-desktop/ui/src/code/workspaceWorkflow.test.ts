@@ -160,8 +160,8 @@ describe("workspaceWorkflowModel", () => {
       pr: existing,
     });
     expect(dirty.summary).toBe("#41 · Uncommitted changes");
-    // With a pull request open there is nothing to create: new local changes
-    // go through the commit box to update it.
+    // With a pull request open there is nothing to create: the agent commits
+    // and pushes the new local changes to update it.
     expect(dirty.primary).toBe("update_pr");
 
     const unpushed = workspaceWorkflowModel({
@@ -274,7 +274,7 @@ describe("resolveWorkflowShortcut", () => {
     // Cmd+Shift+P names an intent, not an action: the reader means "get this in
     // front of reviewers" at every stage, and the action that serves it changes
     // under them. Uncommitted work with no pull request gets the drafted
-    // commit-and-open request; with one open, it goes to the commit box.
+    // commit-and-open request; with one open, the agent updates it.
     expect(chord("pull_request", { ...CLEAN, dirty: true })).toBe("compose_pr");
     expect(chord("pull_request", { ...CLEAN, dirty: true, pr: pr({}) })).toBe(
       "update_pr",
@@ -327,7 +327,7 @@ describe("resolveWorkflowShortcut", () => {
     // Rebasing over uncommitted work is how it gets lost, and the snapshot
     // already knows the worktree is dirty.
     expect(chord("update_branch", { ...CLEAN, dirty: true, pr: pr({}) })).toBe(
-      "blocked: Commit or discard your changes before rebasing",
+      "blocked: Commit or discard your changes in Source control before rebasing",
     );
     expect(chord("update_branch", CLEAN)).toBe("blocked: No pull request yet");
   });
@@ -403,7 +403,7 @@ describe("resolveWorkflowShortcut", () => {
     // Local state blocks too: work that is not in the pull request would be
     // left behind by a merge the reader thought was landing all of it.
     expect(chord("merge", { ...green, dirty: true })).toBe(
-      "blocked: Commit or discard your changes before merging",
+      "blocked: Commit or discard your changes in Source control before merging",
     );
     expect(chord("merge", { ...green, unpushed: true })).toBe(
       "blocked: Push your local commits before merging",

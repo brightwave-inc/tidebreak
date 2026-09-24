@@ -1092,6 +1092,11 @@ impl CodeRuntime {
         .map_err(map_worktree)
     }
 
+    /// The changed files, in the workspace against its base or in one turn.
+    ///
+    /// The last element is the snapshot tree the workspace list was read
+    /// from. A commit or a discard that names it refuses to run over a
+    /// worktree that changed after the person reviewed the list.
     pub async fn workspace_files(
         &self,
         owner: &OwnerId,
@@ -1104,6 +1109,7 @@ impl CodeRuntime {
             Diffstat,
             Option<TurnId>,
             Option<crate::code::sandbox_checkout::WorkspaceContentSource>,
+            Option<String>,
         ),
         ServerError,
     > {
@@ -1115,15 +1121,43 @@ impl CodeRuntime {
             let checkout = self.remote_checkout(owner, &workspace).await?;
             let (files, truncated, stat) =
                 crate::code::sandbox_checkout::list_checkout_files(&checkout).await?;
-            return Ok((files, truncated, stat, None, Some(checkout.source)));
+            return Ok((files, truncated, stat, None, Some(checkout.source), None));
         }
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
             .map_err(map_checkpoint)?;
-        let listed = list_changed_files(&worktree, &from, &to, DiffBounds::default())
+        let mut listed = list_changed_files(&worktree, &from, &to, DiffBounds::default())
             .await
             .map_err(map_checkpoint)?;
-        Ok((listed.files, listed.truncated, listed.stat, turn, None))
+        // The workspace list says which files a commit would carry, so the
+        // source-control view offers Discard only where there is something
+        // uncommitted to lose. A turn's list is history and says nothing.
+        if turn.is_none() {
+            match crate::code::checkpoint::uncommitted_paths(&worktree, &to).await {
+                Ok(uncommitted) => {
+                    for file in &mut listed.files {
+                        file.uncommitted = uncommitted.contains(&file.path)
+                            || file
+                                .previous_path
+                                .as_ref()
+                                .is_some_and(|previous| uncommitted.contains(previous));
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    workspace = %workspace_id,
+                    %error,
+                    "could not tell which changes are uncommitted"
+                ),
+            }
+        }
+        Ok((
+            listed.files,
+            listed.truncated,
+            listed.stat,
+            turn,
+            None,
+            turn.is_none().then_some(to),
+        ))
     }
 
     pub async fn workspace_blob(

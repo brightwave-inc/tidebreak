@@ -3310,6 +3310,13 @@ fn start_turn<'b, 'w: 'b>(
             ),
             _ => engine_text,
         };
+        // A restore since this session's last turn moved files the engine
+        // still remembers writing. It hears which, before the person's
+        // message.
+        let engine_text = match Box::pin(restore_note_for_turn(db, session, ordinal)).await {
+            Some(note) => format!("{note}\n\n{engine_text}"),
+            None => engine_text,
+        };
         let input = TurnInput {
             turn_id: Some(turn.id),
             text: engine_text,
@@ -3903,6 +3910,42 @@ async fn write_turn_attachments(
 ///
 /// The engine reads them from disk, so the prompt carries paths and nothing
 /// else. An empty list leaves the message exactly as the reader wrote it.
+/// What the engine must hear before turn `ordinal`: which files a checkpoint
+/// restore moved since its last turn. `None` when nothing moved, or when this
+/// session has no local worktree.
+async fn restore_note_for_turn(
+    db: &tidebreak_core::DbStore,
+    session: &Session,
+    ordinal: i64,
+) -> Option<String> {
+    let workspace_id = session.workspace_id?;
+    let workspace = get_workspace(db, &session.owner, workspace_id)
+        .await
+        .ok()
+        .flatten()?;
+    if workspace.is_remote() {
+        return None;
+    }
+    match super::checkpoint::restore_note(
+        std::path::Path::new(&workspace.worktree_path),
+        workspace_id,
+        session.id,
+        ordinal,
+    )
+    .await
+    {
+        Ok(note) => note,
+        Err(err) => {
+            warn!(
+                session = %session.id,
+                error = %err,
+                "could not tell the engine what a restore moved"
+            );
+            None
+        }
+    }
+}
+
 fn message_naming_attachments(message: &str, paths: &[String]) -> String {
     if paths.is_empty() {
         return message.to_owned();

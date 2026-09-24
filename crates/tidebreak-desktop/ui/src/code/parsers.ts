@@ -158,6 +158,12 @@ import type {
   CodeCommitSnapshot as WireCodeCommitSnapshot,
   CodePushSnapshot as WireCodePushSnapshot,
   CodeFileChange as WireCodeFileChange,
+  CheckpointRestoreTarget as WireCheckpointRestoreTarget,
+  CheckpointRestoreStatus,
+  CodeCheckpointRestorePreview as WireCodeCheckpointRestorePreview,
+  CodeCheckpointRestoreResult as WireCodeCheckpointRestoreResult,
+  CodeRestoreAffectedTurn,
+  CodeWorktreeChange as WireCodeWorktreeChange,
   Diffstat as WireDiffstat,
   PullRequestDigest as WirePullRequestDigest,
   PullRequestCheckCounts as WirePullRequestCheckCounts,
@@ -319,6 +325,12 @@ const HARNESS_KINDS = new Set<HarnessKind>([
   "opencode",
   "grok",
   "internal",
+]);
+const RESTORE_STATUSES = new Set<CheckpointRestoreStatus>([
+  "started",
+  "completed",
+  "failed",
+  "partial",
 ]);
 const HARNESS_TIERS = new Set<HarnessTier>([
   "reference",
@@ -3570,6 +3582,7 @@ export function parseCodeWorkspaceFiles(
       "revision",
       "revision_ref",
       "revision_saved_at",
+      "worktree_tree",
     ]) ||
     !Array.isArray(value.files) ||
     typeof value.truncated !== "boolean"
@@ -3585,6 +3598,9 @@ export function parseCodeWorkspaceFiles(
   const stat = parseDiffstat(value.stat);
   if (!stat) return null;
   if (value.turn_id !== undefined && !wireId(value.turn_id)) return null;
+  if (value.worktree_tree !== undefined && !wireId(value.worktree_tree)) {
+    return null;
+  }
   const source = parseWorkspaceContentSource(value);
   if (!source) return null;
   return {
@@ -3593,6 +3609,9 @@ export function parseCodeWorkspaceFiles(
     stat,
     ...(value.turn_id !== undefined ? { turn_id: value.turn_id } : {}),
     ...source,
+    ...(value.worktree_tree !== undefined
+      ? { worktree_tree: value.worktree_tree }
+      : {}),
   };
 }
 
@@ -3697,12 +3716,14 @@ function parseCodeFileChange(value: unknown): CodeFileChange | null {
       "insertions",
       "deletions",
       "previous_path",
+      "uncommitted",
     ]) ||
     !lineText(value.path) ||
     !isMember(value.kind, FILE_CHANGE_KINDS) ||
     !isFiniteNumber(value.insertions) ||
     !isFiniteNumber(value.deletions) ||
-    !optionalLine(value.previous_path)
+    !optionalLine(value.previous_path) ||
+    (value.uncommitted !== undefined && typeof value.uncommitted !== "boolean")
   ) {
     return null;
   }
@@ -3714,7 +3735,166 @@ function parseCodeFileChange(value: unknown): CodeFileChange | null {
     ...(value.previous_path !== undefined
       ? { previous_path: value.previous_path }
       : {}),
+    ...(value.uncommitted !== undefined
+      ? { uncommitted: value.uncommitted }
+      : {}),
   };
+}
+
+function parseCodeFileChanges(value: unknown): CodeFileChange[] | null {
+  if (!Array.isArray(value)) return null;
+  const files: CodeFileChange[] = [];
+  for (const item of value) {
+    const parsed = parseCodeFileChange(item);
+    if (!parsed) return null;
+    files.push(parsed);
+  }
+  return files;
+}
+
+/** Where a checkpoint restore puts the worktree back to. */
+export function parseCheckpointRestoreTarget(
+  value: unknown,
+): WireCheckpointRestoreTarget | null {
+  if (!isRecord(value)) return null;
+  if (value.kind === "before_turn") {
+    if (
+      !onlyKeys<Extract<WireCheckpointRestoreTarget, { kind: "before_turn" }>>(
+        value,
+        ["kind", "turn_id"],
+      ) ||
+      !wireId(value.turn_id)
+    ) {
+      return null;
+    }
+    return { kind: "before_turn", turn_id: value.turn_id };
+  }
+  if (value.kind === "before_restore") {
+    if (
+      !onlyKeys<
+        Extract<WireCheckpointRestoreTarget, { kind: "before_restore" }>
+      >(value, ["kind", "restore_id"]) ||
+      !wireId(value.restore_id)
+    ) {
+      return null;
+    }
+    return { kind: "before_restore", restore_id: value.restore_id };
+  }
+  return null;
+}
+
+/** What a checkpoint restore would undo, read before anything moves. */
+export function parseCodeCheckpointRestorePreview(
+  value: unknown,
+): WireCodeCheckpointRestorePreview | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeCheckpointRestorePreview>(value, [
+      "target",
+      "session_id",
+      "files",
+      "truncated",
+      "stat",
+      "current_tree",
+      "blocked",
+      "affected_turns",
+    ]) ||
+    !wireId(value.session_id) ||
+    typeof value.truncated !== "boolean" ||
+    !wireId(value.current_tree) ||
+    !Array.isArray(value.blocked) ||
+    !value.blocked.every(wireId) ||
+    !Array.isArray(value.affected_turns)
+  ) {
+    return null;
+  }
+  const target = parseCheckpointRestoreTarget(value.target);
+  const files = parseCodeFileChanges(value.files);
+  const stat = parseDiffstat(value.stat);
+  if (!target || !files || !stat) return null;
+  const affectedTurns: CodeRestoreAffectedTurn[] = [];
+  for (const turn of value.affected_turns) {
+    if (
+      !isRecord(turn) ||
+      !onlyKeys<CodeRestoreAffectedTurn>(turn, [
+        "session_id",
+        "turn_id",
+        "ordinal",
+        "harness_kind",
+      ]) ||
+      !wireId(turn.session_id) ||
+      !wireId(turn.turn_id) ||
+      !isFiniteNumber(turn.ordinal) ||
+      !isMember(turn.harness_kind, HARNESS_KINDS)
+    ) {
+      return null;
+    }
+    affectedTurns.push({
+      session_id: turn.session_id,
+      turn_id: turn.turn_id,
+      ordinal: turn.ordinal,
+      harness_kind: turn.harness_kind,
+    });
+  }
+  return {
+    target,
+    session_id: value.session_id,
+    files,
+    truncated: value.truncated,
+    stat,
+    current_tree: value.current_tree,
+    blocked: value.blocked,
+    affected_turns: affectedTurns,
+  };
+}
+
+/** A checkpoint restore that landed. */
+export function parseCodeCheckpointRestoreResult(
+  value: unknown,
+): WireCodeCheckpointRestoreResult | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeCheckpointRestoreResult>(value, [
+      "restore_id",
+      "target",
+      "session_id",
+      "files",
+      "truncated",
+      "stat",
+    ]) ||
+    !wireId(value.restore_id) ||
+    !wireId(value.session_id) ||
+    typeof value.truncated !== "boolean"
+  ) {
+    return null;
+  }
+  const target = parseCheckpointRestoreTarget(value.target);
+  const files = parseCodeFileChanges(value.files);
+  const stat = parseDiffstat(value.stat);
+  if (!target || !files || !stat) return null;
+  return {
+    restore_id: value.restore_id,
+    target,
+    session_id: value.session_id,
+    files,
+    truncated: value.truncated,
+    stat,
+  };
+}
+
+/** The files a revert or a discard changed. */
+export function parseCodeWorktreeChange(
+  value: unknown,
+): WireCodeWorktreeChange | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWorktreeChange>(value, ["paths"]) ||
+    !Array.isArray(value.paths) ||
+    !value.paths.every((path) => lineText(path))
+  ) {
+    return null;
+  }
+  return { paths: value.paths as string[] };
 }
 
 export function parseDiffstat(value: unknown): Diffstat | null {
@@ -4528,6 +4708,45 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         type: "checkpoint_recorded",
         turn_id: value.turn_id,
         diffstat,
+      };
+    }
+    case "checkpoint_restored": {
+      // A restore between turns: the id names the state it replaced, so the
+      // transcript can offer to put that state back. It is journaled as
+      // started before any file moves, then again with how it ended.
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "checkpoint_restored" }>>(
+          value,
+          [
+            "type",
+            "restore_id",
+            "target",
+            "diffstat",
+            "actor",
+            "status",
+            "error",
+          ],
+        ) ||
+        !wireId(value.restore_id) ||
+        (value.status !== undefined &&
+          !isMember(value.status, RESTORE_STATUSES)) ||
+        (value.error !== undefined && !blockText(value.error))
+      ) {
+        return null;
+      }
+      const target = parseCheckpointRestoreTarget(value.target);
+      const diffstat = parseDiffstat(value.diffstat);
+      if (!target || !diffstat) return null;
+      const actor = parseTurnActor(value.actor);
+      if (value.actor !== undefined && !actor) return null;
+      return {
+        type: "checkpoint_restored",
+        restore_id: value.restore_id,
+        target,
+        diffstat,
+        ...(actor ? { actor } : {}),
+        status: value.status ?? "completed",
+        ...(value.error !== undefined ? { error: value.error } : {}),
       };
     }
     case "turn_interrupted": {

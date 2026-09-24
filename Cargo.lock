@@ -7626,10 +7626,12 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "ts-rs",
+ "unicode-normalization",
  "url",
  "uuid",
  "windows-sys 0.61.2",
  "winreg 0.56.0",
+ "xattr",
  "zip 8.6.0",
 ]
 

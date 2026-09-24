@@ -2058,6 +2058,93 @@ describe("code trigger writes", () => {
 });
 
 describe("code workspace git flow", () => {
+  it("previews and restores a checkpoint, then reverts and discards by name", async () => {
+    const preview = {
+      target: { kind: "before_turn", turn_id: "turn-2" },
+      session_id: "session-1",
+      files: [
+        { path: "src/lib.rs", kind: "modified", insertions: 3, deletions: 1 },
+      ],
+      truncated: false,
+      stat: { files: 1, insertions: 3, deletions: 1, truncated: false },
+      current_tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      blocked: [".env"],
+      affected_turns: [
+        {
+          session_id: "session-2",
+          turn_id: "turn-9",
+          ordinal: 4,
+          harness_kind: "codex",
+        },
+      ],
+    };
+    const restored = {
+      restore_id: "restore-1",
+      target: preview.target,
+      session_id: "session-1",
+      files: preview.files,
+      truncated: false,
+      stat: preview.stat,
+    };
+    const changed = { paths: ["src/lib.rs"] };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(preview), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(restored), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(changed), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(changed), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+    const target = { kind: "before_turn" as const, turn_id: "turn-2" };
+
+    await expect(
+      client.previewCodeCheckpointRestore("ws-1", target),
+    ).resolves.toEqual(preview);
+    await expect(
+      client.restoreCodeCheckpoint("ws-1", target, preview.current_tree),
+    ).resolves.toEqual(restored);
+    await expect(
+      client.revertCodeWorkspaceChange("ws-1", {
+        path: "src/lib.rs",
+        turn_id: "turn-2",
+        hunk: { index: 1, text: "@@ -9 +9 @@\n-nine\n+9" },
+      }),
+    ).resolves.toEqual(changed);
+    await expect(
+      client.discardCodeWorkspaceChanges(
+        "ws-1",
+        ["src/lib.rs"],
+        preview.current_tree,
+      ),
+    ).resolves.toEqual(changed);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1/code/workspaces/ws-1/checkpoints/restore?turn=turn-2",
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "http://127.0.0.1/code/workspaces/ws-1/checkpoints/restore",
+    );
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string)).toEqual({
+      target,
+      expected_tree: preview.current_tree,
+    });
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      "http://127.0.0.1/code/workspaces/ws-1/revert",
+    );
+    expect(JSON.parse(fetchMock.mock.calls[3]?.[1]?.body as string)).toEqual({
+      paths: ["src/lib.rs"],
+      expected_tree: preview.current_tree,
+    });
+  });
+
   it("commits, pushes, and loads the PR digest", async () => {
     const commit = {
       sha: "abc123",
@@ -2089,13 +2176,22 @@ describe("code workspace git flow", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
     await expect(
-      client.commitCodeWorkspace("ws-1", "first change"),
+      client.commitCodeWorkspace(
+        "ws-1",
+        "first change",
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      ),
     ).resolves.toEqual(commit);
     await expect(client.pushCodeWorkspace("ws-1")).resolves.toEqual(push);
     await expect(client.getCodeWorkspacePr("ws-1")).resolves.toEqual(digest);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "http://127.0.0.1/code/workspaces/ws-1/git/commit",
     );
+    // The commit carries the tree the person reviewed.
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({
+      message: "first change",
+      expected_tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    });
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       "http://127.0.0.1/code/workspaces/ws-1/git/push",
     );

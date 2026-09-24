@@ -11,21 +11,23 @@
 //! same switch that rewrites `wire.ts`.
 
 use crate::wire::{
-    ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodeFileChange,
-    CodeProjectConfigEffect, CodeProjectConfigEffectKind, CodeProjectConfigFile, CodePushSnapshot,
-    CodeRepoSnapshot, CodeRepoTrust, CodeRepoTrustSnapshot, CodeWatchSnapshot, CodeWorkspaceDiff,
-    CodeWorkspaceFiles, CodeWorkspaceGitState, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot,
-    HarnessAuthMode, HarnessDoctorEntry, HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot,
-    SequencedEventFrame, SessionDigest, SessionExternalOrigin, SessionSnapshot, TurnRewriteState,
-    TurnSnapshot, UpdateNotice,
+    ApprovalSnapshot, CodeActionSnapshot, CodeCheckpointRestorePreview,
+    CodeCheckpointRestoreResult, CodeCommitSnapshot, CodeFileChange, CodeProjectConfigEffect,
+    CodeProjectConfigEffectKind, CodeProjectConfigFile, CodePushSnapshot, CodeRepoSnapshot,
+    CodeRepoTrust, CodeRepoTrustSnapshot, CodeRestoreAffectedTurn, CodeWatchSnapshot,
+    CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspaceGitState, CodeWorkspacePrSnapshot,
+    CodeWorkspaceSnapshot, HarnessAuthMode, HarnessDoctorEntry, HarnessDoctorReport, QueuedTurn,
+    QueuedTurnsSnapshot, SequencedEventFrame, SessionDigest, SessionExternalOrigin,
+    SessionSnapshot, TurnRewriteState, TurnSnapshot, UpdateNotice,
 };
 use crate::wire_types::generate;
 use tidebreak_core::{
     ApprovalClass, ApprovalDecisionKind, ApprovalId, ApprovalKind, ApprovalState, Attention,
-    AttentionSource, AttentionState, BoundedError, CapLevel, CheckpointHint, CodeSubagentStatus,
-    CodeSubagentSummary, CodeTerminalId, CodeWatchId, CodeWatchState, CodeWorkspaceStatus,
-    CredentialRefusalReason, Diffstat, Event, FenceReason, FileChangeKind, GrantScope, HarnessCaps,
-    HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier, ImageMediaType, ImageRef,
+    AttentionSource, AttentionState, BoundedError, CapLevel, CheckpointHint,
+    CheckpointRestoreTarget, CodeRestoreId, CodeSubagentStatus, CodeSubagentSummary,
+    CodeTerminalId, CodeWatchId, CodeWatchState, CodeWorkspaceStatus, CredentialRefusalReason,
+    Diffstat, Event, FenceReason, FileChangeKind, GrantScope, HarnessCaps, HarnessCommand,
+    HarnessKind, HarnessNoticeLevel, HarnessTier, ImageMediaType, ImageRef,
     InternalApprovalRequest, PermissionMode, PullRequestCheckCounts, PullRequestDigest,
     QuickAction, ReasoningEffort, RefusalOutcome, RepoId, SessionActivity, SessionId, SessionKind,
     SessionLifecycle, ToolApprovalKind, ToolDetail, ToolOutcome, TurnId, TurnStatus, TurnUsage,
@@ -79,6 +81,10 @@ fn turn_id() -> TurnId {
 
 fn approval_id() -> ApprovalId {
     ApprovalId(id(0x05))
+}
+
+fn restore_id() -> CodeRestoreId {
+    CodeRestoreId(id(0x30))
 }
 
 fn diffstat() -> Diffstat {
@@ -556,6 +562,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                         insertions: 12,
                         deletions: 3,
                         previous_path: None,
+                        uncommitted: false,
                     },
                     CodeFileChange {
                         path: "crates/tidebreak-server-api/fixtures/code-frames.json".to_owned(),
@@ -565,6 +572,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                         previous_path: Some(
                             "crates/tidebreak-server-api/fixtures/code.json".to_owned(),
                         ),
+                        uncommitted: false,
                     },
                 ],
                 truncated: false,
@@ -573,6 +581,95 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                 revision: None,
                 revision_ref: None,
                 revision_saved_at: None,
+                worktree_tree: None,
+            },
+        ),
+        fixture(
+            "uncommitted workspace files",
+            "workspace_files",
+            &CodeWorkspaceFiles {
+                files: vec![
+                    CodeFileChange {
+                        path: "crates/tidebreak-cli/src/api/code.rs".to_owned(),
+                        kind: FileChangeKind::Modified,
+                        insertions: 12,
+                        deletions: 3,
+                        previous_path: None,
+                        uncommitted: true,
+                    },
+                    CodeFileChange {
+                        path: "docs/code-mode.md".to_owned(),
+                        kind: FileChangeKind::Modified,
+                        insertions: 4,
+                        deletions: 0,
+                        previous_path: None,
+                        uncommitted: false,
+                    },
+                ],
+                truncated: false,
+                stat: diffstat(),
+                turn_id: None,
+                revision: None,
+                revision_ref: None,
+                revision_saved_at: None,
+                worktree_tree: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned()),
+            },
+        ),
+        fixture(
+            "checkpoint restore preview",
+            "checkpoint_restore_preview",
+            &CodeCheckpointRestorePreview {
+                target: CheckpointRestoreTarget::BeforeTurn { turn_id: turn_id() },
+                session_id: session_id(),
+                files: vec![
+                    CodeFileChange {
+                        path: "src/parser.rs".to_owned(),
+                        kind: FileChangeKind::Modified,
+                        insertions: 18,
+                        deletions: 4,
+                        previous_path: None,
+                        uncommitted: false,
+                    },
+                    CodeFileChange {
+                        path: "notes/scratch.md".to_owned(),
+                        kind: FileChangeKind::Added,
+                        insertions: 3,
+                        deletions: 0,
+                        previous_path: None,
+                        uncommitted: false,
+                    },
+                ],
+                truncated: false,
+                stat: diffstat(),
+                current_tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned(),
+                blocked: vec![".env".to_owned()],
+                affected_turns: vec![CodeRestoreAffectedTurn {
+                    session_id: SessionId(id(0x32)),
+                    turn_id: TurnId(id(0x33)),
+                    ordinal: 4,
+                    harness_kind: HarnessKind::Codex,
+                }],
+            },
+        ),
+        fixture(
+            "checkpoint restore",
+            "checkpoint_restore",
+            &CodeCheckpointRestoreResult {
+                restore_id: restore_id(),
+                target: CheckpointRestoreTarget::BeforeRestore {
+                    restore_id: CodeRestoreId(id(0x31)),
+                },
+                session_id: session_id(),
+                files: vec![CodeFileChange {
+                    path: "src/parser.rs".to_owned(),
+                    kind: FileChangeKind::Modified,
+                    insertions: 4,
+                    deletions: 18,
+                    previous_path: None,
+                    uncommitted: false,
+                }],
+                truncated: false,
+                stat: diffstat(),
             },
         ),
         fixture(
@@ -1019,6 +1116,20 @@ fn event_frames() -> Vec<Fixture> {
             ),
         ),
         (
+            "event: checkpoint_restored",
+            frame(
+                68,
+                Event::CheckpointRestored {
+                    restore_id: restore_id(),
+                    target: CheckpointRestoreTarget::BeforeTurn { turn_id: turn_id() },
+                    diffstat: diffstat(),
+                    actor: None,
+                    status: tidebreak_core::CheckpointRestoreStatus::Completed,
+                    error: None,
+                },
+            ),
+        ),
+        (
             "event: model_reported",
             frame(
                 67,
@@ -1316,6 +1427,8 @@ fn every_code_frame_fixture_round_trips() {
             "harness_doctor" => round_trip::<HarnessDoctorReport>(entry),
             "workspace_files" => round_trip::<CodeWorkspaceFiles>(entry),
             "workspace_diff" => round_trip::<CodeWorkspaceDiff>(entry),
+            "checkpoint_restore_preview" => round_trip::<CodeCheckpointRestorePreview>(entry),
+            "checkpoint_restore" => round_trip::<CodeCheckpointRestoreResult>(entry),
             "approval" => round_trip::<ApprovalSnapshot>(entry),
             "commit" => round_trip::<CodeCommitSnapshot>(entry),
             "push" => round_trip::<CodePushSnapshot>(entry),
@@ -1375,6 +1488,8 @@ fn code_values_ignore_unknown_keys() {
             "harness_doctor" => ignores::<HarnessDoctorReport>(&entry, value),
             "workspace_files" => ignores::<CodeWorkspaceFiles>(&entry, value),
             "workspace_diff" => ignores::<CodeWorkspaceDiff>(&entry, value),
+            "checkpoint_restore_preview" => ignores::<CodeCheckpointRestorePreview>(&entry, value),
+            "checkpoint_restore" => ignores::<CodeCheckpointRestoreResult>(&entry, value),
             "approval" => ignores::<ApprovalSnapshot>(&entry, value),
             "commit" => ignores::<CodeCommitSnapshot>(&entry, value),
             "push" => ignores::<CodePushSnapshot>(&entry, value),

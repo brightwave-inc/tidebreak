@@ -403,6 +403,31 @@ export function useWorkspaceFileRevision(workspaceId: string): number {
 }
 
 /**
+ * Whether any agent in the workspace, a watch task included, is running a
+ * turn. A turn holds the worktree, so undo, revert, discard, and commit wait
+ * for it; the server refuses them anyway, and this lets the controls say so
+ * before the reader tries.
+ */
+export function workspaceTurnRunning(
+  state: Pick<
+    CodeUpdatesState,
+    "conversationsByWorkspace" | "childrenByWorkspace"
+  >,
+  workspaceId: string,
+): boolean {
+  return [
+    ...Object.values(state.conversationsByWorkspace[workspaceId] ?? {}),
+    ...Object.values(state.childrenByWorkspace[workspaceId] ?? {}),
+  ].some((digest) => digest.lifecycle === "running");
+}
+
+export function useWorkspaceTurnRunning(workspaceId: string): boolean {
+  return useCodeUpdatesStore((state) =>
+    workspaceTurnRunning(state, workspaceId),
+  );
+}
+
+/**
  * Tell this window's views that a file in the workspace was saved, without
  * waiting for the server's notice to come back round.
  */

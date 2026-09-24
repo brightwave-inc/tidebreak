@@ -581,6 +581,79 @@ const SNAPSHOT_TURN = {
 };
 
 describe("hydrate then replay", () => {
+  it("puts a replayed restore after the turn before it, not after later prompts", () => {
+    // Hydration lays down every prompt and boundary before the journal
+    // replays, so a restore that ran between turns 1 and 2 must land ahead
+    // of turn 2's prompt rather than at the end of the transcript.
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      SNAPSHOT_TURN,
+      { ...SNAPSHOT_TURN, id: "t2", ordinal: 2, user_input: "try again" },
+    ]);
+    const restore: CodeEvent = {
+      type: "checkpoint_restored",
+      restore_id: "r-1",
+      target: { kind: "before_turn", turn_id: "t1" },
+      diffstat: { files: 2, insertions: 1, deletions: 9, truncated: false },
+      status: "completed",
+    };
+    let state = hydrated;
+    const replay: CodeEvent[] = [
+      { type: "turn_started", turn_id: "t1" },
+      { type: "turn_completed", usage: NO_USAGE },
+      restore,
+      { type: "turn_started", turn_id: "t2" },
+      { type: "turn_completed", usage: NO_USAGE },
+    ];
+    replay.forEach((event, index) => {
+      state = reduceCodeSessionEvent(
+        state,
+        framed(index + 1, event, true),
+        deps(),
+      ).state;
+    });
+
+    expect(state.items.map((item) => item.kind)).toEqual([
+      "user",
+      "turn_boundary",
+      "restore",
+      "user",
+      "turn_boundary",
+    ]);
+    expect(state.items[2]).toMatchObject({
+      kind: "restore",
+      restoreId: "r-1",
+      turnOrdinal: 1,
+    });
+
+    // The same restore arriving again, on a reconnect, adds nothing.
+    const again = reduceCodeSessionEvent(state, framed(9, restore), deps());
+    expect(
+      again.state.items.filter((item) => item.kind === "restore"),
+    ).toHaveLength(1);
+    expect(again.state.contentRevision).toBe(state.contentRevision);
+  });
+
+  it("updates a restore row in place when the restore ends", () => {
+    const started: CodeEvent = {
+      type: "checkpoint_restored",
+      restore_id: "r-2",
+      target: { kind: "before_turn", turn_id: "t1" },
+      diffstat: { files: 1, insertions: 0, deletions: 3, truncated: false },
+      status: "started",
+    };
+    let state = hydrateCodeTurns(initialCodeSessionState(), [SNAPSHOT_TURN]);
+    state = reduceCodeSessionEvent(state, framed(1, started), deps()).state;
+    state = reduceCodeSessionEvent(
+      state,
+      framed(2, { ...started, status: "partial", error: "disk full" }),
+      deps(),
+    ).state;
+
+    const rows = state.items.filter((item) => item.kind === "restore");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "partial", error: "disk full" });
+  });
+
   it("carries a trigger's structured event onto the user item", () => {
     const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
       {

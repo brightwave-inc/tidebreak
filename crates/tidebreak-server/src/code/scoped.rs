@@ -710,6 +710,7 @@ impl ScopedCode {
             Diffstat,
             Option<TurnId>,
             Option<crate::code::sandbox_checkout::WorkspaceContentSource>,
+            Option<String>,
         ),
         ServerError,
     > {
@@ -737,6 +738,91 @@ impl ScopedCode {
     }
 
     // ------------------------------------------------------------------
+    // Undo in the worktree. The gate commit and push use: a principal who may
+    // only view a shared session's workspace gets the answer a stranger gets.
+    // ------------------------------------------------------------------
+
+    /// What restoring `target` would undo, read before anything moves.
+    pub async fn preview_checkpoint_restore(
+        &self,
+        id: WorkspaceId,
+        target: tidebreak_core::CheckpointRestoreTarget,
+    ) -> Result<super::runtime::CheckpointRestorePreview, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime
+            .preview_checkpoint_restore(&owner, id, target)
+            .await
+    }
+
+    /// Put the worktree back to `target`, keeping what it replaces.
+    ///
+    /// The restore runs on a task of its own: a client that disconnects
+    /// mid-request drops only its wait, never git halfway through the files.
+    pub async fn restore_checkpoint(
+        &self,
+        id: WorkspaceId,
+        target: tidebreak_core::CheckpointRestoreTarget,
+        expected_tree: Option<String>,
+    ) -> Result<super::runtime::CheckpointRestoreOutcome, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
+        let runtime = Arc::clone(&self.runtime);
+        let caller = self.owner.clone();
+        tokio::spawn(async move {
+            runtime
+                .restore_checkpoint(&owner, &caller, id, target, expected_tree.as_deref())
+                .await
+        })
+        .await
+        .map_err(|_| ServerError::internal("the restore ended before it could answer"))?
+    }
+
+    /// Undo one file's change, or one hunk of it (`(index, text)`), on a task
+    /// of its own.
+    pub async fn revert_workspace_change(
+        &self,
+        id: WorkspaceId,
+        turn_id: Option<TurnId>,
+        path: String,
+        hunk: Option<(usize, String)>,
+    ) -> Result<super::checkpoint::RevertedChange, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
+        let runtime = Arc::clone(&self.runtime);
+        let caller = self.owner.clone();
+        tokio::spawn(async move {
+            let hunk = hunk
+                .as_ref()
+                .map(|(index, text)| super::checkpoint::HunkSelector {
+                    index: *index,
+                    text,
+                });
+            runtime
+                .revert_workspace_change(&owner, &caller, id, turn_id, &path, hunk)
+                .await
+        })
+        .await
+        .map_err(|_| ServerError::internal("the revert ended before it could answer"))?
+    }
+
+    /// Put files back to the last commit, on a task of its own.
+    pub async fn discard_workspace_changes(
+        &self,
+        id: WorkspaceId,
+        paths: Vec<String>,
+        expected_tree: Option<String>,
+    ) -> Result<super::checkpoint::RevertedChange, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
+        let runtime = Arc::clone(&self.runtime);
+        let caller = self.owner.clone();
+        tokio::spawn(async move {
+            runtime
+                .discard_workspace_changes(&owner, &caller, id, &paths, expected_tree.as_deref())
+                .await
+        })
+        .await
+        .map_err(|_| ServerError::internal("the discard ended before it could answer"))?
+    }
+
+    // ------------------------------------------------------------------
     // Git surfaces on a workspace.
     // ------------------------------------------------------------------
 
@@ -744,9 +830,12 @@ impl ScopedCode {
         &self,
         id: WorkspaceId,
         message: Option<String>,
+        expected_tree: Option<String>,
     ) -> Result<CommitOutcome, ServerError> {
         let owner = self.require_workspace_management(id).await?.owner;
-        self.runtime.commit_workspace(&owner, id, message).await
+        self.runtime
+            .commit_workspace(&owner, id, message, expected_tree.as_deref())
+            .await
     }
 
     pub async fn push_workspace(&self, id: WorkspaceId) -> Result<PushOutcome, ServerError> {
