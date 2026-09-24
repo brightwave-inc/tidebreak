@@ -96,7 +96,7 @@ function stubHost(options?: {
       bytes: 1_048_576,
       count: 4,
     }),
-    deleteAllData: () => new Promise(() => {}),
+    deleteAllData: () => new Promise<boolean>(() => {}),
   };
 }
 

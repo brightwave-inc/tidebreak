@@ -80,7 +80,7 @@ function renderPanel({
       bytes: 2_048,
       count: 1,
     })),
-    deleteAllData: vi.fn(async () => undefined),
+    deleteAllData: vi.fn(async () => false),
   };
   const onReload = vi.fn();
   const onOpenSection = vi.fn();
@@ -132,7 +132,7 @@ describe("DataPrivacyPanel", () => {
     expect(host.reveal).toHaveBeenCalledOnce();
   });
 
-  it("deletes all data only after the phrase is typed, and clears this window's storage", async () => {
+  it("asks the app to delete all data only after the phrase is typed, and keeps this window's storage when it is cancelled", async () => {
     window.localStorage.setItem(THEME_KEY, "dark");
     const { host } = renderPanel();
     await userEvent.click(
@@ -156,7 +156,15 @@ describe("DataPrivacyPanel", () => {
     await waitFor(() =>
       expect(host.deleteAllData).toHaveBeenCalledWith(DELETE_ALL_DATA_PHRASE),
     );
-    expect(window.localStorage.getItem(THEME_KEY)).toBeNull();
+    // The app's own dialog was cancelled, so nothing is gone: not even this
+    // window's preferences, which the app clears itself when it deletes.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Delete all data…" }),
+      ).toBeEnabled(),
+    );
+    expect(window.localStorage.getItem(THEME_KEY)).toBe("dark");
+    expect(screen.queryByText(/went wrong/)).not.toBeInTheDocument();
   });
 
   it("resets settings after saying exactly what resets, then reloads", async () => {

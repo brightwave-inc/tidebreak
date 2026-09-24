@@ -62,16 +62,23 @@ export const OUTBOUND_TRAFFIC: readonly OutboundTraffic[] = [
   {
     id: "background",
     title: "Background work",
-    what: "Titles, workspace names, turn recaps, memory, and approval checks in Auto mode send parts of a conversation to the background model.",
-    off: "Choose a local background model in Models. Turn off recaps in Agents and memory in Memory.",
+    what: "Titles, workspace names, turn recaps, closing-message rewrites, memory, and approval checks in Auto mode send parts of a conversation to the background model.",
+    off: "Choose a local background model in Models. Turn off recaps in Agents, closing-message rewrites in Coding engines, and memory in Memory.",
     section: { path: "models", label: "Models" },
   },
   {
     id: "web",
     title: "Web search and pages",
-    what: "Searches go to your search provider, or to your model provider's own search. Pages the agent reads are fetched from this computer.",
+    what: "Searches go to your search provider, or to your model provider's own search. When the agent reads a page, Exa or Tavily fetches it if you use one of them; otherwise this computer does.",
     off: "Set Search mode to Off to stop searches. The agent still reads pages; set a conversation to Offline to stop both.",
     section: { path: "web-search", label: "Web search" },
+  },
+  {
+    id: "models",
+    title: "Model lists",
+    what: "Find models asks a provider which models your saved key can use.",
+    off: "It runs only when you choose Find models.",
+    section: { path: "providers", label: "Providers" },
   },
   {
     id: "updates",
@@ -93,6 +100,12 @@ export const OUTBOUND_TRAFFIC: readonly OutboundTraffic[] = [
     what: "For a repository with a GitHub remote, Tidebreak reads pull request state about once a minute with gh, fetches the base branch when you create a workspace, and loads avatars from GitHub.",
     off: "Remove the repository, or sign out of gh. Turn off Keep local main up to date to stop the fetch.",
     section: { path: "git-source-control", label: "Git & source control" },
+  },
+  {
+    id: "plugins",
+    title: "Plugins from Git",
+    what: "Adding a plugin from Git downloads it from the repository's host, such as GitHub.",
+    off: "It happens only when you add one.",
   },
   {
     id: "gateway",

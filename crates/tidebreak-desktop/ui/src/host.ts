@@ -434,9 +434,10 @@ export const DELETE_ALL_DATA_PHRASE = "delete all data";
 
 /**
  * Delete this computer's Tidebreak data and its keychain items, then quit.
- * On success the app exits and this never resolves; it rejects with the
- * reason when nothing was deleted.
+ * The app asks once more in a native dialog first. Resolves `false` when the
+ * person cancels there; on success the app exits and this never resolves. It
+ * rejects with the reason when nothing was deleted.
  */
-export function deleteAllData(confirmation: string): Promise<void> {
+export function deleteAllData(confirmation: string): Promise<boolean> {
   return invoke("delete_all_data", { confirmation });
 }

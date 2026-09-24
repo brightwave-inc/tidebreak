@@ -142,7 +142,7 @@ export function MemoryPanel({
     const ok = await confirm({
       title: "Delete this memory?",
       description:
-        "Tidebreak removes it and its history, and stops using it. It can learn it again if the topic comes up.",
+        "Tidebreak removes it and its history, and stops using it. It can learn it again if the topic comes up. Backups you made, and the copies Tidebreak saves before updates, still hold it.",
       confirmLabel: "Delete",
       destructive: true,
     });
@@ -157,7 +157,7 @@ export function MemoryPanel({
   async function deleteEverything(count: number) {
     const ok = await confirm({
       title: "Delete every memory?",
-      description: `Tidebreak deletes all ${count} ${count === 1 ? "record" : "records"}, forgotten ones included, with their history. This cannot be undone.`,
+      description: `Tidebreak deletes all ${count} ${count === 1 ? "record" : "records"}, forgotten ones included, with their history. Backups you made, and the copies Tidebreak saves before updates, still hold them. This cannot be undone.`,
       confirmLabel: "Delete everything",
       destructive: true,
     });

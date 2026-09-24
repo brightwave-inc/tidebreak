@@ -52,7 +52,8 @@ export type DataPrivacyHost = {
   reveal: () => Promise<void>;
   saveBackup: () => Promise<SavedFile | null>;
   saveExport: (request: ConversationExportRequest) => Promise<SavedFile | null>;
-  deleteAllData: (confirmation: string) => Promise<void>;
+  /** `false` when the person cancels the native confirmation. */
+  deleteAllData: (confirmation: string) => Promise<boolean>;
 };
 
 export function nativeDataPrivacyHost(): DataPrivacyHost {
@@ -222,15 +223,16 @@ export function DataPrivacyPanel({
     const ok = await confirm({
       title: "Delete all data?",
       description:
-        "Tidebreak deletes every conversation, memory, setting, attachment, output, log, and backup on this computer, and removes your keys from the keychain. Then it quits. Code worktrees and your repositories stay. This cannot be undone.",
+        "Tidebreak stops every agent and deletes every conversation, memory, setting, attachment, output, log, and backup on this computer. It removes your keys from the keychain, then quits. Code worktrees in ~/Tidebreak and your repositories stay. This cannot be undone.",
       confirmLabel: "Delete all data",
       destructive: true,
       requireText: DELETE_ALL_DATA_PHRASE,
     });
     if (!ok) return;
+    // The app asks once more in its own dialog. On success it quits, so
+    // this only returns when the person cancels there or nothing was
+    // deleted. The app clears this window's own storage itself.
     void run("delete", async () => {
-      // This window's own preferences live outside the data folder.
-      clearAllStorage();
       await host.deleteAllData(DELETE_ALL_DATA_PHRASE);
     });
   }
@@ -358,7 +360,7 @@ export function DataPrivacyPanel({
               title="Back up"
               description={
                 reasonNoBackup ??
-                "The database with your conversations and memory, the files you attached, and the files Tidebreak made, as one .tar.gz. Your keys are not in it."
+                "Your conversations, memory, settings, attachments, outputs, skills, and plugins, as one .tar.gz. Keys, logs, engine tools, and working files are not in it."
               }
             >
               <Button
@@ -378,7 +380,7 @@ export function DataPrivacyPanel({
           )}
           <ActionRow
             title="Export conversations"
-            description="Your conversations as Markdown files or one JSON file, all of them or the ones you choose."
+            description="Your chats as Markdown files or one JSON file, all of them or the ones you choose: the messages and the names of attached files. Coding sessions, tool activity, and attachment contents are not in it."
           >
             <Button
               type="button"
@@ -547,7 +549,8 @@ function ExportDialog({
           <DialogTitle>Export conversations</DialogTitle>
           <DialogDescription>
             Markdown writes one file per conversation in a .zip. JSON writes one
-            file you can read with other tools.
+            file you can read with other tools. Each holds the messages and the
+            names of attached files.
           </DialogDescription>
         </DialogHeader>
         <div className="flex min-w-0 flex-col gap-4">
@@ -663,16 +666,6 @@ function safeStorage(): Storage | undefined {
     return window.localStorage;
   } catch {
     return undefined;
-  }
-}
-
-function clearAllStorage() {
-  for (const read of [() => window.localStorage, () => window.sessionStorage]) {
-    try {
-      read().clear();
-    } catch {
-      // Blocked storage holds nothing to clear.
-    }
   }
 }
 
