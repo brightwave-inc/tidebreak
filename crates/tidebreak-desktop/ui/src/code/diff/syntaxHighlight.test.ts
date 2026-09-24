@@ -5,11 +5,13 @@ import {
   FileSyntax,
   MAX_HIGHLIGHT_HUNK_LINES,
   MAX_HIGHLIGHT_LINE_CHARS,
+  RECENT_HIGHLIGHT_CHARS,
   diffLanguage,
   highlightLines,
   hunkSpans,
   isLanguageReady,
   loadLanguage,
+  recentHighlightChars,
   syntaxLinesFromMarkup,
   type SyntaxLine,
 } from "./syntaxHighlight";
@@ -130,6 +132,42 @@ describe("highlighting a hunk", () => {
       groupUnifiedDiff(DIFF.replace("in send order", "in arrival order"))[0]!,
     )!;
     expect(changed.recall(0)).toBe(false);
+  });
+
+  /** One hunk of `removed` and `added` lines, each line `width` long. */
+  function bigHunk(removed: number, added: number, width = 20, seed = "") {
+    const line = (sign: string, index: number) =>
+      `${sign}${`let v${seed}${index} = ${index};`.padEnd(width, " ")}`;
+    return [
+      "diff --git a/big.ts b/big.ts",
+      `@@ -1,${removed} +1,${added} @@`,
+      ...Array.from({ length: removed }, (_, index) => line("-", index)),
+      ...Array.from({ length: added }, (_, index) => line("+", index)),
+    ].join("\n");
+  }
+
+  it("leaves a hunk plain when its sides together pass the line cap", () => {
+    const half = Math.ceil(MAX_HIGHLIGHT_HUNK_LINES / 2) + 1;
+    const group = groupUnifiedDiff(bigHunk(half, half))[0]!;
+    const before = recentHighlightChars();
+    expect(FileSyntax.for(group)!.compute(0)).toBeNull();
+    // Nothing of it is kept.
+    expect(recentHighlightChars()).toBe(before);
+  });
+
+  it("keeps what it remembers under a size budget, however many versions arrive", () => {
+    for (let version = 0; version < 40; version += 1) {
+      const group = groupUnifiedDiff(bigHunk(600, 600, 60, `x${version}`))[0]!;
+      expect(FileSyntax.for(group)!.compute(0)).not.toBeNull();
+      expect(recentHighlightChars()).toBeLessThanOrEqual(
+        RECENT_HIGHLIGHT_CHARS,
+      );
+    }
+    // The newest version is still there to recall.
+    const latest = FileSyntax.for(
+      groupUnifiedDiff(bigHunk(600, 600, 60, "x39"))[0]!,
+    )!;
+    expect(latest.recall(0)).toBe(true);
   });
 
   it("finds each hunk's lines, and computes each hunk once", () => {

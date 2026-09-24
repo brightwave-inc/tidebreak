@@ -30,7 +30,10 @@ import type { DiffFileGroup } from "../unifiedDiff";
 
 /** A diff longer than this, in lines, stays plain. */
 export const MAX_HIGHLIGHT_FILE_LINES = 10_000;
-/** A hunk longer than this, in lines, stays plain. */
+/**
+ * A hunk longer than this, in lines, stays plain: its removed, added, and
+ * unchanged lines together, not each side on its own.
+ */
 export const MAX_HIGHLIGHT_HUNK_LINES = 2_500;
 /** A hunk with a line longer than this, generated or minified, stays plain. */
 export const MAX_HIGHLIGHT_LINE_CHARS = 1_000;
@@ -326,10 +329,6 @@ export function hunkSpans(group: DiffFileGroup): HunkSpan[] {
   return spans;
 }
 
-/**
- * Highlight one hunk, each side as its own continuous run. Null when the
- * hunk is over a cap or its grammar is missing.
- */
 /** Each side of a hunk: where its lines sit in the file group, and their text. */
 function hunkSides(group: DiffFileGroup, span: HunkSpan) {
   const oldSources: number[] = [];
@@ -348,34 +347,112 @@ function hunkSides(group: DiffFileGroup, span: HunkSpan) {
   };
 }
 
-type SideRuns = { old: SyntaxLine[]; new: SyntaxLine[] } | null;
-
 /**
- * Hunks highlighted lately, by language and text. A diff that refreshes
- * while an agent works, or a file opened again, recalls every hunk that did
- * not change instead of highlighting it again, so its colors never blink.
+ * Whether a hunk is too big to color: too many lines in all, or a line long
+ * enough to be generated or minified. Checked before anything is read or
+ * kept, so a hunk over a cap costs nothing past this.
  */
-const recent = new Map<string, SideRuns>();
-const RECENT_HUNKS = 600;
-
-function recentKey(language: string, oldText: string[], newText: string[]) {
-  return `${language}\u0000${oldText.join("\n")}\u0001${newText.join("\n")}`;
+function overCaps(group: DiffFileGroup, span: HunkSpan): boolean {
+  if (span.end - span.start - 1 > MAX_HIGHLIGHT_HUNK_LINES) return true;
+  for (let index = span.start + 1; index < span.end; index += 1) {
+    if (group.lines[index]!.text.length > MAX_HIGHLIGHT_LINE_CHARS + 1) {
+      return true;
+    }
+  }
+  return false;
 }
 
-function remember(key: string, runs: SideRuns) {
-  recent.delete(key);
-  recent.set(key, runs);
-  if (recent.size > RECENT_HUNKS) {
-    const oldest = recent.keys().next().value;
-    if (oldest !== undefined) recent.delete(oldest);
+type SideRuns = { old: SyntaxLine[]; new: SyntaxLine[] };
+
+/**
+ * Hunks highlighted lately, so a diff that refreshes while an agent works,
+ * or a file opened again, recalls every hunk that did not change instead of
+ * highlighting it again, and its colors never blink.
+ *
+ * Kept by a hash of the hunk's text, not the text itself, and bounded by the
+ * text the entries hold rather than by their number, so a run of versions of
+ * one long hunk cannot pile up. The oldest entries go first.
+ */
+type RecentEntry = {
+  readonly runs: SideRuns;
+  /** Line counts and length, checked on recall so a hash collision misses. */
+  readonly shape: string;
+  /** The characters the runs hold, which is what the entry costs. */
+  readonly chars: number;
+};
+
+const recent = new Map<string, RecentEntry>();
+let recentChars = 0;
+/** The characters the recent hunks may hold together: a few megabytes. */
+export const RECENT_HIGHLIGHT_CHARS = 2_000_000;
+
+/** Characters the recent hunks hold now, for tests. */
+export function recentHighlightChars(): number {
+  return recentChars;
+}
+
+/**
+ * Two independent 32-bit FNV-1a hashes of the hunk's language and text,
+ * read in one pass. Sixty-four bits, with the shape check on top, leaves a
+ * wrong recall out of reach for a cache this size.
+ */
+function hunkKey(language: string, sides: ReturnType<typeof hunkSides>) {
+  let a = 0x811c9dc5;
+  let b = 0x01000193 ^ 0x5bd1e995;
+  const feed = (text: string) => {
+    for (let index = 0; index < text.length; index += 1) {
+      const code = text.charCodeAt(index);
+      a = Math.imul(a ^ code, 0x01000193);
+      b = Math.imul(b ^ code, 0x5bd1e995) ^ (b >>> 15);
+    }
+    // A separator no line holds, so "ab" + "c" never hashes as "a" + "bc".
+    a = Math.imul(a ^ 0xffff, 0x01000193);
+    b = Math.imul(b ^ 0xffff, 0x5bd1e995) ^ (b >>> 15);
+  };
+  feed(language);
+  let chars = 0;
+  for (const line of sides.oldText) {
+    feed(line);
+    chars += line.length;
   }
+  feed("\u0001");
+  for (const line of sides.newText) {
+    feed(line);
+    chars += line.length;
+  }
+  return {
+    key: `${(a >>> 0).toString(36)}.${(b >>> 0).toString(36)}`,
+    shape: `${sides.oldText.length}:${sides.newText.length}:${chars}`,
+  };
+}
+
+function remember(key: string, entry: RecentEntry) {
+  const known = recent.get(key);
+  if (known) {
+    recent.delete(key);
+    recentChars -= known.chars;
+  }
+  recent.set(key, entry);
+  recentChars += entry.chars;
+  for (const [oldest, dropped] of recent) {
+    if (recentChars <= RECENT_HIGHLIGHT_CHARS || oldest === key) break;
+    recent.delete(oldest);
+    recentChars -= dropped.chars;
+  }
+}
+
+function runChars(lines: readonly SyntaxLine[]): number {
+  let chars = 0;
+  for (const line of lines) {
+    for (const run of line) chars += run.text.length;
+  }
+  return chars;
 }
 
 function placed(
   runs: SideRuns,
   sides: ReturnType<typeof hunkSides>,
-): HunkSyntax | null {
-  if (!runs) return null;
+): HunkSyntax {
   return {
     old: new Map(
       sides.oldSources.map((source, index) => [source, runs.old[index]!]),
@@ -386,33 +463,51 @@ function placed(
   };
 }
 
+/**
+ * Highlight one hunk, each side as its own continuous run. Null when the
+ * hunk is over a cap or its grammar is missing.
+ */
 export function highlightHunk(
   group: DiffFileGroup,
   span: HunkSpan,
   language: string,
 ): HunkSyntax | null {
+  if (overCaps(group, span)) return null;
   const sides = hunkSides(group, span);
-  const key = recentKey(language, sides.oldText, sides.newText);
-  if (recent.has(key)) return placed(recent.get(key) ?? null, sides);
+  const { key, shape } = hunkKey(language, sides);
+  const known = recent.get(key);
+  if (known && known.shape === shape) {
+    remember(key, known);
+    return placed(known.runs, sides);
+  }
   const oldLines = highlightLines(sides.oldText, language);
   const newLines = highlightLines(sides.newText, language);
-  const runs = oldLines && newLines ? { old: oldLines, new: newLines } : null;
-  remember(key, runs);
+  if (!oldLines || !newLines) return null;
+  const runs = { old: oldLines, new: newLines };
+  remember(key, {
+    runs,
+    shape,
+    chars: runChars(oldLines) + runChars(newLines),
+  });
   return placed(runs, sides);
 }
 
-/** The hunk's syntax when an earlier diff already highlighted the same text. */
+/**
+ * The hunk's syntax when an earlier diff already highlighted the same text,
+ * or, for a hunk over a cap, the plain text it will always be.
+ */
 function recallHunk(
   group: DiffFileGroup,
   span: HunkSpan,
   language: string,
 ): { found: boolean; syntax: HunkSyntax | null } {
+  if (overCaps(group, span)) return { found: true, syntax: null };
   const sides = hunkSides(group, span);
-  const key = recentKey(language, sides.oldText, sides.newText);
-  if (!recent.has(key)) return { found: false, syntax: null };
-  const runs = recent.get(key) ?? null;
-  remember(key, runs);
-  return { found: true, syntax: placed(runs, sides) };
+  const { key, shape } = hunkKey(language, sides);
+  const known = recent.get(key);
+  if (!known || known.shape !== shape) return { found: false, syntax: null };
+  remember(key, known);
+  return { found: true, syntax: placed(known.runs, sides) };
 }
 
 /**
