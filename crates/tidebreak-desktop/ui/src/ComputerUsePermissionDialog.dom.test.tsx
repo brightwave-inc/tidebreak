@@ -60,7 +60,7 @@ beforeEach(() => {
   window.localStorage.clear();
   useComputerUsePermissionAsk.setState({
     ask: null,
-    need: null,
+    needs: [],
     screenRecordingRequested: false,
   });
 });
@@ -91,6 +91,23 @@ describe("ComputerUsePermissionDialog", () => {
     expect(
       screen.getByText("Lets Tidebreak take screenshots of apps and displays."),
     ).toBeInTheDocument();
+  });
+
+  it("names only the permission still missing", async () => {
+    renderDialog(
+      host({
+        status: vi
+          .fn()
+          .mockResolvedValue({ ...missing, screenRecording: true }),
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        "A task needs the Accessibility permission to use your other apps.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/two macOS permissions/)).toBeNull();
   });
 
   it("words browser control for the browser window", async () => {

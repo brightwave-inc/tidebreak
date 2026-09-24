@@ -1,8 +1,16 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useChatListStore } from "./ChatListStore";
 import {
   ComputerUsePermissionAskHost,
   ComputerUsePermissionNoticeHost,
@@ -92,9 +100,10 @@ beforeEach(() => {
   native.handlers.clear();
   useComputerUsePermissionAsk.setState({
     ask: null,
-    need: null,
+    needs: [],
     screenRecordingRequested: false,
   });
+  useChatListStore.setState({ chats: [] });
 });
 afterEach(cleanup);
 
@@ -194,7 +203,7 @@ describe("the macOS permission ask", () => {
       await screen.findByRole("button", { name: "Not now" }),
     );
     cleanup();
-    useComputerUsePermissionAsk.setState({ ask: null, need: null });
+    useComputerUsePermissionAsk.setState({ ask: null, needs: [] });
 
     const { permissionHost } = renderShell();
     await taskNeeds(needsScreenRecording);
@@ -206,6 +215,51 @@ describe("the macOS permission ask", () => {
         name: "Computer use needs Screen Recording",
       }),
     ).toBeInTheDocument();
+  });
+
+  it("leaves one notice per task, named for the task", async () => {
+    useChatListStore.setState({
+      chats: [
+        {
+          id: needsScreenRecording.taskId,
+          title: "Tidy the Notes sidebar",
+        } as never,
+      ],
+    });
+    window.localStorage.setItem(
+      "tidebreak.computer-use-permissions-not-now",
+      "yes",
+    );
+    const { onOpenSettings } = renderShell();
+    const other = "7b0c7f1e-51a4-4f0e-bb4c-8f2d9a1c3e55";
+
+    await taskNeeds(needsScreenRecording);
+    await taskNeeds({ ...needsScreenRecording, taskId: other });
+    // The first task tries again: its notice is replaced, not doubled.
+    await taskNeeds({ ...needsScreenRecording, permission: "accessibility" });
+
+    const notices = screen.getAllByRole("complementary");
+    expect(notices).toHaveLength(2);
+    expect(notices[0]).toHaveTextContent(
+      "A task stopped because macOS has not allowed Tidebreak to take screenshots",
+    );
+    expect(notices[1]).toHaveAccessibleName("Computer use needs Accessibility");
+    expect(notices[1]).toHaveTextContent(
+      "“Tidy the Notes sidebar” stopped because macOS has not allowed Tidebreak to click and type",
+    );
+
+    // Each notice goes its own way.
+    await userEvent.click(
+      within(notices[1]).getByRole("button", {
+        name: "Open Settings → Permissions",
+      }),
+    );
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByRole("complementary")).toHaveLength(1);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Dismiss notice" }),
+    );
+    expect(screen.queryByRole("complementary")).toBeNull();
   });
 
   it("ignores reports it cannot read and windows attached elsewhere", async () => {

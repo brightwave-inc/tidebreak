@@ -41,9 +41,10 @@ Accessibility permission, and Screen Recording permission where applicable.
 Tidebreak asks for Accessibility and Screen Recording the first time a task
 needs them, not when the app opens. The ask names each permission and what it
 lets Tidebreak do, and **Not now** is the default. If you choose **Not now**,
-the task leaves a notice that says which permission is missing and how to
-allow it. Tidebreak does not ask again on its own until you act again: choose
-**Allow** on that notice, or allow a task to use an app.
+each task that stopped leaves its own notice, which names the task and the
+missing permission and says how to allow it. Tidebreak does not ask again on
+its own until you act again: choose **Allow** on a notice, or allow a task to
+use an app.
 **Settings → Permissions → Computer use on this Mac** still shows each
 permission for the running app, requests them, and opens their System
 Settings panes.

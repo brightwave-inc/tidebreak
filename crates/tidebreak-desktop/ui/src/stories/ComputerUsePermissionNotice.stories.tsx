@@ -13,12 +13,26 @@ const need: PermissionRequired = {
   afterConsent: false,
 };
 
+type Notice = { need: PermissionRequired; taskName?: string | null };
+
 /**
- * The notice a task leaves when it stopped for a missing macOS permission,
- * in the corner where it floats over the work.
+ * The notices tasks leave when they stopped for a missing macOS permission,
+ * one per task, in the corner where they float over the work.
  */
-function PermissionNoticeStory({ need }: { need: PermissionRequired }) {
-  const [visible, setVisible] = useState(true);
+function PermissionNoticeStory({
+  need,
+  taskName = null,
+  others = [],
+}: {
+  need: PermissionRequired;
+  taskName?: string | null;
+  /** Notices from other tasks, stacked above this one. */
+  others?: Notice[];
+}) {
+  const [dismissed, setDismissed] = useState<string[]>([]);
+  const notices = [...others, { need, taskName }].filter(
+    (notice) => !dismissed.includes(notice.need.taskId),
+  );
   return (
     <div className="h-screen bg-page-background p-8">
       <div className="mx-auto max-w-2xl rounded-xl border border-border-subtle bg-background p-8">
@@ -34,14 +48,18 @@ function PermissionNoticeStory({ need }: { need: PermissionRequired }) {
         </p>
       </div>
       <FloatingNotices>
-        {visible && (
+        {notices.map((notice) => (
           <ComputerUsePermissionNotice
-            need={need}
+            key={notice.need.taskId}
+            need={notice.need}
+            taskName={notice.taskName}
             onAllow={fn()}
             onOpenSettings={fn()}
-            onDismiss={() => setVisible(false)}
+            onDismiss={() =>
+              setDismissed((current) => [...current, notice.need.taskId])
+            }
           />
-        )}
+        ))}
       </FloatingNotices>
     </div>
   );
@@ -84,4 +102,37 @@ export const BrowserAccessibility: Story = {
 /** An older helper did not say which permission was missing. */
 export const UnnamedPermission: Story = {
   args: { need: { ...need, permission: null } },
+};
+
+/** The window knows the task's title, so the notice names it. */
+export const NamedTask: Story = {
+  args: { taskName: "Tidy the Notes sidebar" },
+  play: async ({ canvasElement }) => {
+    await expect(
+      within(canvasElement).getByText(/“Tidy the Notes sidebar” stopped/),
+    ).toBeVisible();
+  },
+};
+
+/** Two tasks stopped: each leaves its own notice, named for it. */
+export const TwoTasks: Story = {
+  args: {
+    taskName: "Tidy the Notes sidebar",
+    others: [
+      {
+        need: {
+          ...need,
+          taskId: "7b0c7f1e-51a4-4f0e-bb4c-8f2d9a1c3e55",
+          permission: "accessibility",
+          browser: true,
+        },
+        taskName: "Check the release dashboard",
+      },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    await expect(
+      within(canvasElement).getAllByRole("complementary"),
+    ).toHaveLength(2);
+  },
 };

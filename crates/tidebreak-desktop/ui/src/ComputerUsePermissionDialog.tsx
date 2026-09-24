@@ -13,30 +13,66 @@ import type { PermissionAsk } from "./computerUsePermissionAsk";
 import {
   computerUsePermissionHost,
   type ComputerUsePermissionHost,
+  type ComputerUsePermissionPane,
+  type ComputerUsePermissionStatus,
 } from "./computerUsePermissions";
-import { ComputerUsePermissionRows } from "./settings/ComputerUsePermissionRows";
+import {
+  ComputerUsePermissionRows,
+  PERMISSION_LABELS,
+} from "./settings/ComputerUsePermissionRows";
 import { ComputerUseRestartOffer } from "./settings/ComputerUseRestartOffer";
 import { SettingsError } from "./settings/primitives";
 import { useComputerUsePermissions } from "./settings/useComputerUsePermissions";
 
-/** The ask's title and lead, by what it is for and who started it. */
-export function permissionAskCopy(ask: PermissionAsk): {
+/** The permissions still missing, or `null` before the first read. */
+function missingPanes(
+  permissions: Extract<
+    ComputerUsePermissionStatus,
+    { status: "available" }
+  > | null,
+): ComputerUsePermissionPane[] | null {
+  if (!permissions) return null;
+  const missing: ComputerUsePermissionPane[] = [];
+  if (!permissions.accessibility) missing.push("accessibility");
+  if (!permissions.screenRecording) missing.push("screen_recording");
+  return missing;
+}
+
+/**
+ * The ask's title and lead, by what it is for, who started it, and which
+ * permissions are still missing. Before the first read it assumes both.
+ */
+export function permissionAskCopy(
+  ask: PermissionAsk,
+  missing: readonly ComputerUsePermissionPane[] | null = null,
+): {
   title: string;
   description: string;
 } {
-  if (ask.subject === "browser") {
+  const browser = ask.subject === "browser";
+  const title = browser
+    ? "Allow Tidebreak to control your browser"
+    : "Allow Tidebreak to use apps on this Mac";
+  const target = browser ? "your browser window" : "your other apps";
+  const who = ask.forTask ? "A task needs" : "Tidebreak needs";
+  if (missing?.length === 0) {
     return {
-      title: "Allow Tidebreak to control your browser",
-      description: ask.forTask
-        ? "A task needs two macOS permissions to see and use your browser window."
-        : "Tidebreak needs two macOS permissions to see and use your browser window.",
+      title,
+      description: `Tidebreak has the macOS permissions it needs to see and use ${target}.`,
+    };
+  }
+  if (missing?.length === 1) {
+    const [pane] = missing;
+    // Accessibility is what clicks and types; Screen Recording, what sees.
+    const verb = pane === "accessibility" ? "use" : "see";
+    return {
+      title,
+      description: `${who} the ${PERMISSION_LABELS[pane]} permission to ${verb} ${target}.`,
     };
   }
   return {
-    title: "Allow Tidebreak to use apps on this Mac",
-    description: ask.forTask
-      ? "A task needs two macOS permissions to see and use your other apps."
-      : "Tidebreak needs two macOS permissions to see and use your other apps.",
+    title,
+    description: `${who} two macOS permissions to see and use ${target}.`,
   };
 }
 
@@ -84,7 +120,7 @@ export function ComputerUsePermissionDialog({
   const ready = permissions !== null && !missing;
   const notNow = useRef<HTMLButtonElement>(null);
   const done = useRef<HTMLButtonElement>(null);
-  const copy = permissionAskCopy(ask);
+  const copy = permissionAskCopy(ask, missingPanes(permissions));
 
   // Not now leaves once both permissions arrive, so focus moves to Done
   // rather than falling back to the page behind the dialog.

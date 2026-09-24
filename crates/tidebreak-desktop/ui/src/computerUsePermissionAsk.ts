@@ -92,8 +92,11 @@ export function asksForTask(
 type ComputerUsePermissionAskStore = {
   /** The open ask, or `null` while nothing is asking. */
   ask: PermissionAsk | null;
-  /** The latest task that stopped for a missing permission, for the notice. */
-  need: PermissionRequired | null;
+  /**
+   * The tasks that stopped for a missing permission, one entry per task and
+   * the latest report from each, oldest first. Each gets its own notice.
+   */
+  needs: PermissionRequired[];
   /**
    * macOS was asked for Screen Recording during this run of the app, by a
    * task or by the person. A grant made after launch applies only once
@@ -106,19 +109,26 @@ type ComputerUsePermissionAskStore = {
   openAsk: (subject: PermissionAskSubject) => void;
   /** The ask closed: Not now (or Escape), or with both permissions ready. */
   closeAsk: (outcome: "not_now" | "ready") => void;
-  dismissNeed: () => void;
+  /** Put away one task's notice. */
+  dismissNeed: (taskId: string) => void;
   noteScreenRecordingRequested: () => void;
 };
 
 export const useComputerUsePermissionAsk =
   create<ComputerUsePermissionAskStore>()((set, get) => ({
     ask: null,
-    need: null,
+    needs: [],
     screenRecordingRequested: false,
     taskNeedsPermission: (need) => {
       // The helper asks macOS for both permissions before it refuses, so a
       // missing Screen Recording has now been requested in this run.
-      set({ need, screenRecordingRequested: true });
+      set({
+        needs: [
+          ...get().needs.filter((other) => other.taskId !== need.taskId),
+          need,
+        ],
+        screenRecordingRequested: true,
+      });
       if (get().ask !== null) return;
       if (!asksForTask(need, permissionAskDeclined())) return;
       if (need.afterConsent) rememberNotNow(false);
@@ -128,18 +138,20 @@ export const useComputerUsePermissionAsk =
     },
     openAsk: (subject) => {
       rememberNotNow(false);
-      set({ ask: { subject, forTask: get().need !== null } });
+      set({ ask: { subject, forTask: get().needs.length > 0 } });
     },
     closeAsk: (outcome) => {
       if (outcome === "ready") {
+        // Both permissions are in place, so every task can try again.
         rememberNotNow(false);
-        set({ ask: null, need: null });
+        set({ ask: null, needs: [] });
       } else {
         rememberNotNow(true);
         set({ ask: null });
       }
     },
-    dismissNeed: () => set({ need: null }),
+    dismissNeed: (taskId) =>
+      set({ needs: get().needs.filter((need) => need.taskId !== taskId) }),
     noteScreenRecordingRequested: () => {
       if (!get().screenRecordingRequested) {
         set({ screenRecordingRequested: true });

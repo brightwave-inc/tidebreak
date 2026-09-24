@@ -1,14 +1,22 @@
 import { ShieldAlert, X } from "lucide-react";
+import { useId } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { PermissionRequired } from "./computerUsePermissionAsk";
 import { PERMISSION_LABELS } from "./settings/ComputerUsePermissionRows";
 
-/** The notice's words for what a task was missing. */
-export function permissionNoticeCopy(need: PermissionRequired): {
+/**
+ * The notice's words for what a task was missing. `taskName` is the task's
+ * title where the window knows it.
+ */
+export function permissionNoticeCopy(
+  need: PermissionRequired,
+  taskName: string | null = null,
+): {
   title: string;
   body: string;
 } {
+  const task = taskName ? `“${taskName}”` : "A task";
   const feature = need.browser ? "Browser control" : "Computer use";
   const control = need.browser
     ? "click and type in your browser"
@@ -20,44 +28,50 @@ export function permissionNoticeCopy(need: PermissionRequired): {
     case "accessibility":
       return {
         title: `${feature} needs ${PERMISSION_LABELS.accessibility}`,
-        body: `A task stopped because macOS has not allowed Tidebreak to ${control}. Allow ${PERMISSION_LABELS.accessibility}, then ask the task to try again.`,
+        body: `${task} stopped because macOS has not allowed Tidebreak to ${control}. Allow ${PERMISSION_LABELS.accessibility}, then ask the task to try again.`,
       };
     case "screen_recording":
       return {
         title: `${feature} needs ${PERMISSION_LABELS.screen_recording}`,
-        body: `A task stopped because macOS has not allowed Tidebreak to ${capture}. Allow ${PERMISSION_LABELS.screen_recording}, then ask the task to try again.`,
+        body: `${task} stopped because macOS has not allowed Tidebreak to ${capture}. Allow ${PERMISSION_LABELS.screen_recording}, then ask the task to try again.`,
       };
     case null:
       return {
         title: `${feature} needs a macOS permission`,
-        body: `A task stopped because macOS has not allowed Tidebreak a permission it needs. Check ${PERMISSION_LABELS.accessibility} and ${PERMISSION_LABELS.screen_recording}, then ask the task to try again.`,
+        body: `${task} stopped because macOS has not allowed Tidebreak a permission it needs. Check ${PERMISSION_LABELS.accessibility} and ${PERMISSION_LABELS.screen_recording}, then ask the task to try again.`,
       };
   }
 }
 
 /**
  * What a task that stopped for a missing macOS permission says, so it never
- * fails silently: which permission, what it enables, and the two ways to
- * allow it. It stays after Not now, because it is the way back that does not
- * interrupt.
+ * fails silently: which task, which permission, what it enables, and the two
+ * ways to allow it. Each task leaves its own. It stays after Not now, because
+ * it is the way back that does not interrupt.
  */
 export function ComputerUsePermissionNotice({
   need,
+  taskName = null,
   onAllow,
   onOpenSettings,
   onDismiss,
 }: {
   need: PermissionRequired;
+  /** The task's title, when the window knows it. */
+  taskName?: string | null;
   onAllow: () => void;
+  /** Go to Tidebreak's Settings → Permissions. */
   onOpenSettings: () => void;
   onDismiss: () => void;
 }) {
-  const copy = permissionNoticeCopy(need);
+  const copy = permissionNoticeCopy(need, taskName);
+  const bodyId = useId();
   // Shaped like the other notices it stacks with; the icon carries the tone.
   return (
     <aside
       className="relative rounded-xl border border-border bg-popover p-4 text-popover-foreground shadow-lg"
       aria-label={copy.title}
+      aria-describedby={bodyId}
     >
       <button
         type="button"
@@ -75,7 +89,9 @@ export function ComputerUsePermissionNotice({
         />
         <div className="min-w-0">
           <p className="text-md font-semibold">{copy.title}</p>
-          <p className="mt-1 text-sm text-muted-foreground">{copy.body}</p>
+          <p id={bodyId} className="mt-1 text-sm text-muted-foreground">
+            {copy.body}
+          </p>
         </div>
       </div>
 
@@ -89,7 +105,7 @@ export function ComputerUsePermissionNotice({
           variant="outline"
           onClick={onOpenSettings}
         >
-          Open Settings
+          Open Settings → Permissions
         </Button>
       </div>
     </aside>

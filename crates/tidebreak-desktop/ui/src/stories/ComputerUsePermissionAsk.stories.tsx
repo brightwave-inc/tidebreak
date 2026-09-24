@@ -44,7 +44,7 @@ const meta = {
   beforeEach: () => {
     useComputerUsePermissionAsk.setState({
       ask: null,
-      need: null,
+      needs: [],
       screenRecordingRequested: false,
     });
   },
@@ -120,6 +120,19 @@ export const RequestFailure: Story = {
     await userEvent.click(await canvas.findByRole("button", { name: "Allow" }));
     await expect(canvas.findByRole("alert")).resolves.toHaveTextContent(
       "permissions could not be requested",
+    );
+  },
+};
+
+/**
+ * Screen Recording is already allowed, so the ask names only the permission
+ * still missing.
+ */
+export const OnePermissionMissing: Story = {
+  args: { host: localHost({ ...missing, screenRecording: true }) },
+  play: async ({ canvasElement }) => {
+    await body(canvasElement).findByText(
+      "A task needs the Accessibility permission to use your other apps.",
     );
   },
 };

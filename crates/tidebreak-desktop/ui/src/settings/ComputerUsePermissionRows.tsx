@@ -80,14 +80,15 @@ export function ComputerUsePermissionRows({
               <Badge variant={granted ? "success" : "warning"}>
                 {granted ? "Allowed" : "Not allowed"}
               </Badge>
+              {/* System Settings, not Tidebreak's: the grant lives there. */}
               <Button
                 variant="outline"
                 size="sm"
                 disabled={disabled}
-                aria-label={`Open ${label} settings`}
+                aria-label={`Open ${label} in System Settings`}
                 onClick={() => onOpenSettings(pane)}
               >
-                {opening === pane ? "Opening…" : "Open settings"}
+                {opening === pane ? "Opening…" : "Open System Settings"}
               </Button>
             </div>
           </div>
