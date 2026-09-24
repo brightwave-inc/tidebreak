@@ -29,15 +29,33 @@ export const LOCAL_BIN_PATH_LINE = 'export PATH="$HOME/.local/bin:$PATH"';
 type Available = Extract<CliCommandStatus, { status: "available" }>;
 
 /**
- * A path with the home folder written as `~`, the way a terminal shows it.
- * The home folder is read off the account's own link, which always sits at
+ * The home folder, read off the account's own link, which always sits at
  * `<home>/.local/bin/tidebreak`.
  */
-function homeRelative(path: string, status: Available): string {
+function homeOf(status: Available): string | null {
   const home = status.user.path.replace(/\/\.local\/bin\/tidebreak$/, "");
-  return home && home !== status.user.path && path.startsWith(`${home}/`)
+  return home && home !== status.user.path ? home : null;
+}
+
+/** A path with the home folder written as `~`, the way a terminal shows it. */
+function homeRelative(path: string, status: Available): string {
+  const home = homeOf(status);
+  return home && path.startsWith(`${home}/`)
     ? `~${path.slice(home.length)}`
     : path;
+}
+
+/** The folder a link sits in. */
+function folderOf(path: string): string {
+  return path.replace(/\/[^/]*$/, "");
+}
+
+/** The line that puts a link's folder on the PATH, for a shell profile. */
+function pathLine(link: CliLink, status: Available): string {
+  const folder = folderOf(link.path);
+  return folder === folderOf(status.user.path)
+    ? LOCAL_BIN_PATH_LINE
+    : `export PATH="${folder}:$PATH"`;
 }
 
 /**
@@ -52,9 +70,18 @@ type Verdict = {
   tone: SettingsStatusTone;
   label: string;
   description: ReactNode;
+  /** The line to add to a shell profile, when a terminal would not look. */
+  pathLine?: string;
 };
 
-/** The verdict the page leads with. */
+/**
+ * The verdict the page leads with.
+ *
+ * What a new terminal runs is judged by where it leads, not by its path:
+ * Tidebreak's link in either folder runs this app, so a PATH that finds the
+ * link for all users first still reads as installed. The link for all users
+ * gets the same checks as the one for this account.
+ */
 export function commandLineVerdict(
   status: CliCommandStatus | null,
   native: boolean,
@@ -95,90 +122,95 @@ export function commandLineVerdict(
   }
   const { user, system, resolved } = status;
   const userPath = <Path>{homeRelative(user.path, status)}</Path>;
-  switch (user.state) {
-    case "foreign":
-      return {
-        tone: "warning",
-        label: "Another tidebreak is in the way",
-        description: (
-          <>
-            Tidebreak did not make {userPath}, so it will not replace it. Move
-            or delete it, then install the command.
-          </>
-        ),
-      };
-    case "stale":
-      return {
-        tone: "warning",
-        label: "Points to another copy of Tidebreak",
-        description: (
-          <>
-            {userPath} opens <Path>{homeRelative(user.target, status)}</Path>,
-            which is not this app. Repair the command to point it here.
-          </>
-        ),
-      };
-    case "installed":
-      if (user.onPath === false) {
-        return {
-          tone: "warning",
-          label: "Installed, but not on your PATH",
-          description: (
-            <>
-              The command is at {userPath}, but a new terminal does not look in
-              that folder. Add the line below to your shell profile, such as{" "}
-              <Path>~/.zshrc</Path>, then open a new terminal.
-            </>
-          ),
-        };
-      }
-      if (resolved && resolved !== user.path) {
-        return {
-          tone: "warning",
-          label: "Another tidebreak runs first",
-          description: (
-            <>
-              A new terminal runs <Path>{homeRelative(resolved, status)}</Path>{" "}
-              before {userPath}. Remove it, or put <Path>~/.local/bin</Path>{" "}
-              earlier in your PATH.
-            </>
-          ),
-        };
-      }
-      return {
-        tone: "ready",
-        label: "Installed",
-        description: (
-          <>
-            Run <Path>tidebreak</Path> in a new terminal. It links to this app,
-            so updates keep it current.
-          </>
-        ),
-      };
-    case "missing":
-      if (system.state === "installed") {
-        return {
-          tone: "ready",
-          label: "Installed for all users",
-          description: (
-            <>
-              Run <Path>tidebreak</Path> in a new terminal. It links to this app
-              from <Path>{system.path}</Path>.
-            </>
-          ),
-        };
-      }
-      return {
-        tone: "neutral",
-        label: "Not installed",
-        description: (
-          <>
-            Install the command to run Tidebreak from a terminal. It links{" "}
-            {userPath} to this app and creates the folder if needed.
-          </>
-        ),
-      };
+  if (user.state === "foreign") {
+    return {
+      tone: "warning",
+      label: "Another tidebreak is in the way",
+      description: (
+        <>
+          Tidebreak did not make {userPath}, so it will not replace it. Move or
+          delete it, then install the command.
+        </>
+      ),
+    };
   }
+  if (user.state === "stale") {
+    return {
+      tone: "warning",
+      label: "Points to another copy of Tidebreak",
+      description: (
+        <>
+          {userPath} opens <Path>{homeRelative(user.target, status)}</Path>,
+          which is not this app. Repair the command to point it here.
+        </>
+      ),
+    };
+  }
+
+  // The link a new terminal should find: this account's, or else the one
+  // for all users.
+  const forAll = user.state !== "installed";
+  const link = forAll ? system : user;
+  if (link.state !== "installed") {
+    return {
+      tone: "neutral",
+      label: "Not installed",
+      description: (
+        <>
+          Install the command to run Tidebreak from a terminal. It links{" "}
+          {userPath} to this app and creates the folder if needed.
+        </>
+      ),
+    };
+  }
+  const linkPath = <Path>{homeRelative(link.path, status)}</Path>;
+  const folder = <Path>{homeRelative(folderOf(link.path), status)}</Path>;
+  const ready: Verdict = {
+    tone: "ready",
+    label: forAll ? "Installed for all users" : "Installed",
+    description: forAll ? (
+      <>
+        Run <Path>tidebreak</Path> in a new terminal. It links to this app from{" "}
+        {linkPath}.
+      </>
+    ) : (
+      <>
+        Run <Path>tidebreak</Path> in a new terminal. It links to this app, so
+        updates keep it current.
+      </>
+    ),
+  };
+  if (resolved?.thisApp) return ready;
+  if (link.onPath === false) {
+    return {
+      tone: "warning",
+      label: forAll
+        ? "Installed for all users, but not on your PATH"
+        : "Installed, but not on your PATH",
+      description: (
+        <>
+          The command is at {linkPath}, but a new terminal does not look in that
+          folder. Add the line below to your shell profile, such as{" "}
+          <Path>~/.zshrc</Path>, then open a new terminal.
+        </>
+      ),
+      pathLine: pathLine(link, status),
+    };
+  }
+  if (resolved) {
+    return {
+      tone: "warning",
+      label: "Another tidebreak runs first",
+      description: (
+        <>
+          A new terminal runs <Path>{homeRelative(resolved.path, status)}</Path>{" "}
+          before {linkPath}. Remove it, or put {folder} earlier in your PATH.
+        </>
+      ),
+    };
+  }
+  // The PATH could not be read, so there is nothing to say against it.
+  return ready;
 }
 
 /** What an install or uninstall did, in one sentence. */
@@ -190,7 +222,7 @@ export function changeSummary(change: CliCommandChange): string | null {
   switch (change.outcome) {
     case "created":
       return change.folderCreated
-        ? `Created ${path.replace(/\/tidebreak$/, "")} and linked the command there.`
+        ? `Created ${folderOf(path)} and linked the command there.`
         : `Linked ${path} to this app.`;
     case "updated":
       return `Pointed ${path} at this app.`;
@@ -200,10 +232,22 @@ export function changeSummary(change: CliCommandChange): string | null {
       return `Removed ${path}.`;
     case "absent":
       return `${path} was already gone.`;
+    case "cancelled":
+      return "You cancelled the administrator prompt, so nothing changed.";
   }
 }
 
 type Work = `${"install" | "uninstall"}:${CliLocation}` | "check";
+
+/**
+ * What the last action said, shown beside the action: a change under the
+ * section that made it, and a failed status read under the verdict.
+ */
+type Outcome = {
+  location: CliLocation | null;
+  text: string;
+  failed: boolean;
+};
 
 /**
  * Settings → Command line: installs the `tidebreak` command that ships inside
@@ -215,93 +259,121 @@ type Work = `${"install" | "uninstall"}:${CliLocation}` | "check";
  * make, repairs a link to another copy of the app, and uninstalls only its
  * own link.
  *
- * The app menu's Install the tidebreak Command lands here with `autoInstall`
- * set, so the install runs once and its result is on the page that explains
- * it.
+ * The app menu's Install the tidebreak Command sets `installRequested`. Each
+ * time it turns on, the page runs the install once and calls
+ * `onInstallRequestTaken`, which clears it, so the next choice of the menu
+ * item turns it on again. That works whether the page just opened or was
+ * already open, and the result lands on the page that explains it.
  */
 export function CommandLinePanel({
   host = cliCommandHost,
-  autoInstall = false,
-  onAutoInstallHandled,
+  installRequested = false,
+  onInstallRequestTaken,
 }: {
   host?: CliCommandHost;
-  autoInstall?: boolean;
-  onAutoInstallHandled?: () => void;
+  installRequested?: boolean;
+  onInstallRequestTaken?: () => void;
 }) {
   const native = host.available();
   const [status, setStatus] = useState<CliCommandStatus | null>(null);
   const [work, setWork] = useState<Work | null>(native ? "check" : null);
-  const [summary, setSummary] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
+  const [installPending, setInstallPending] = useState(false);
   const mounted = useRef(true);
+  // Each read or change takes a ticket, and only the latest one's answer
+  // lands, so a status read that started before a change never overwrites
+  // what the change reported.
+  const latest = useRef(0);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
     };
   }, []);
+  const current = useCallback(
+    (ticket: number) => mounted.current && ticket === latest.current,
+    [],
+  );
 
   const check = useCallback(async () => {
     if (!native) return;
+    const ticket = ++latest.current;
     setWork("check");
+    setOutcome(null);
     try {
       const next = await host.status();
-      if (!mounted.current) return;
-      setStatus(next);
-      setError(null);
+      if (current(ticket)) setStatus(next);
     } catch (err) {
-      if (mounted.current) setError(String(err));
+      if (current(ticket)) {
+        setOutcome({ location: null, text: String(err), failed: true });
+      }
     } finally {
-      if (mounted.current) setWork(null);
+      if (current(ticket)) setWork(null);
     }
-  }, [host, native]);
+  }, [current, host, native]);
 
   const change = useCallback(
     async (action: "install" | "uninstall", location: CliLocation) => {
+      const ticket = ++latest.current;
       setWork(`${action}:${location}`);
-      setSummary(null);
-      setError(null);
+      setOutcome(null);
       try {
         const result = await host[action](location);
-        if (!mounted.current) return;
+        if (!current(ticket)) return;
         setStatus(result.status);
-        setSummary(changeSummary(result));
+        const text = changeSummary(result);
+        setOutcome(text ? { location, text, failed: false } : null);
       } catch (err) {
-        if (!mounted.current) return;
-        setError(String(err));
+        if (!current(ticket)) return;
+        setOutcome({ location, text: String(err), failed: true });
         // A refusal says why; the state behind it is worth reading afresh.
         void host
           .status()
-          .then((next) => mounted.current && setStatus(next))
+          .then((next) => current(ticket) && setStatus(next))
           .catch(() => undefined);
       } finally {
-        if (mounted.current) setWork(null);
+        if (current(ticket)) setWork(null);
       }
     },
-    [host],
+    [current, host],
   );
 
-  // One pass on mount: run the install the menu asked for, or read the
-  // status. The first props decide, and the ref keeps a second run of the
-  // effect from installing twice.
-  const firstPass = useRef({ autoInstall, onAutoInstallHandled, ran: false });
+  // The menu's request: taken once each time it turns on, and handed back so
+  // the page that sent it can clear it.
+  const takenRequest = useRef(false);
   useEffect(() => {
-    const pass = firstPass.current;
-    if (pass.ran) return;
-    pass.ran = true;
-    if (pass.autoInstall && native) {
-      pass.onAutoInstallHandled?.();
-      void change("install", "user");
-    } else {
-      void check();
+    if (!installRequested) {
+      takenRequest.current = false;
+      return;
     }
-  }, [change, check, native]);
+    if (takenRequest.current) return;
+    takenRequest.current = true;
+    onInstallRequestTaken?.();
+    if (native) setInstallPending(true);
+  }, [installRequested, native, onInstallRequestTaken]);
+
+  // Read the status on open, unless the menu's install is about to report it.
+  const opened = useRef(false);
+  useEffect(() => {
+    if (opened.current) return;
+    opened.current = true;
+    if (!(installRequested && native)) void check();
+  }, [check, installRequested, native]);
+
+  // Run the requested install once no other change is under way. It takes
+  // over from a status read, whose answer it replaces.
+  const changing = work !== null && work !== "check";
+  useEffect(() => {
+    if (!installPending || changing) return;
+    setInstallPending(false);
+    void change("install", "user");
+  }, [installPending, changing, change]);
 
   const verdict = commandLineVerdict(status, native);
   const available = status?.status === "available" ? status : null;
-  const busy = work !== null;
-  const needsPathLine =
-    available?.user.state === "installed" && available.user.onPath === false;
+  const busy = work !== null || installPending;
+  const outcomeFor = (location: CliLocation | null) =>
+    outcome?.location === location ? <OutcomeLine outcome={outcome} /> : null;
 
   return (
     <SettingsPanel
@@ -324,26 +396,22 @@ export function CommandLinePanel({
             Checking the tidebreak command…
           </p>
         )}
-        {needsPathLine && (
+        {verdict?.pathLine && (
           // Its own line, so one click selects exactly what to paste.
           <code
             aria-label="Line to add to your shell profile"
             className="block rounded-md bg-muted px-3 py-2 font-mono text-xs select-all wrap-anywhere"
           >
-            {LOCAL_BIN_PATH_LINE}
+            {verdict.pathLine}
           </code>
         )}
-        {summary && (
-          <p role="status" className="text-sm text-muted-foreground">
-            {summary}
-          </p>
-        )}
-        {error && <SettingsError>{error}</SettingsError>}
+        {outcomeFor(null)}
         {available && (
           <div className="flex flex-wrap gap-2">
             <UserActions
               link={available.user}
               work={work}
+              busy={busy}
               onInstall={() => void change("install", "user")}
               onUninstall={() => void change("uninstall", "user")}
             />
@@ -357,6 +425,7 @@ export function CommandLinePanel({
             </Button>
           </div>
         )}
+        {outcomeFor("user")}
       </SettingsSection>
       {available && (
         <SettingsSection
@@ -367,27 +436,43 @@ export function CommandLinePanel({
             link={available.system}
             status={available}
             work={work}
+            busy={busy}
             onInstall={() => void change("install", "system")}
             onUninstall={() => void change("uninstall", "system")}
           />
+          {outcomeFor("system")}
         </SettingsSection>
       )}
     </SettingsPanel>
   );
 }
 
+/**
+ * The line an action leaves beside itself. A failure is an error; anything
+ * else, a cancelled administrator prompt included, is a quiet note.
+ */
+function OutcomeLine({ outcome }: { outcome: Outcome }) {
+  if (outcome.failed) return <SettingsError>{outcome.text}</SettingsError>;
+  return (
+    <p role="status" className="text-sm text-muted-foreground">
+      {outcome.text}
+    </p>
+  );
+}
+
 function UserActions({
   link,
   work,
+  busy,
   onInstall,
   onUninstall,
 }: {
   link: CliLink;
   work: Work | null;
+  busy: boolean;
   onInstall: () => void;
   onUninstall: () => void;
 }) {
-  const busy = work !== null;
   switch (link.state) {
     case "foreign":
       return null;
@@ -437,16 +522,17 @@ function SystemRow({
   link,
   status,
   work,
+  busy,
   onInstall,
   onUninstall,
 }: {
   link: CliLink;
   status: Available;
   work: Work | null;
+  busy: boolean;
   onInstall: () => void;
   onUninstall: () => void;
 }) {
-  const busy = work !== null;
   const path = <Path>{link.path}</Path>;
   const state =
     link.state === "installed" ? (
@@ -459,33 +545,37 @@ function SystemRow({
     ) : link.state === "foreign" ? (
       <>Tidebreak did not make {path}, so it will not replace it.</>
     ) : (
-      <>Not installed in {path}.</>
+      <>Not installed. Installing links {path} to this app.</>
     );
+  const install =
+    link.state === "missing" || link.state === "stale" ? (
+      <Button variant="outline" size="sm" disabled={busy} onClick={onInstall}>
+        {work === "install:system"
+          ? "Waiting for macOS…"
+          : link.state === "stale"
+            ? "Repair for all users…"
+            : "Install for all users…"}
+      </Button>
+    ) : null;
+  const uninstall =
+    link.state === "installed" || link.state === "stale" ? (
+      <Button variant="outline" size="sm" disabled={busy} onClick={onUninstall}>
+        {work === "uninstall:system"
+          ? "Waiting for macOS…"
+          : "Uninstall for all users…"}
+      </Button>
+    ) : null;
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
       <p className="min-w-0 flex-1 basis-56 text-sm text-muted-foreground">
         {state}
       </p>
-      {link.state === "missing" || link.state === "stale" ? (
-        <Button variant="outline" size="sm" disabled={busy} onClick={onInstall}>
-          {work === "install:system"
-            ? "Waiting for macOS…"
-            : link.state === "stale"
-              ? "Repair for all users…"
-              : "Install for all users…"}
-        </Button>
-      ) : link.state === "installed" ? (
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy}
-          onClick={onUninstall}
-        >
-          {work === "uninstall:system"
-            ? "Waiting for macOS…"
-            : "Uninstall for all users…"}
-        </Button>
-      ) : null}
+      {(install || uninstall) && (
+        <div className="flex flex-wrap gap-2">
+          {install}
+          {uninstall}
+        </div>
+      )}
     </div>
   );
 }

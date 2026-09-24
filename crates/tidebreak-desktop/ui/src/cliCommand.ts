@@ -19,6 +19,17 @@ export type CliLink = CliLinkState & {
   onPath: boolean | null;
 };
 
+/** The `tidebreak` a new terminal runs. */
+export type CliResolvedCommand = {
+  /** Where the terminal finds it. */
+  path: string;
+  /**
+   * It runs this app's command. Judged by where the path leads, not by its
+   * name, so Tidebreak's link in either folder counts.
+   */
+  thisApp: boolean;
+};
+
 export type CliCommandStatus =
   | {
       status: "unavailable";
@@ -31,12 +42,22 @@ export type CliCommandStatus =
       user: CliLink;
       system: CliLink;
       /** What `tidebreak` runs in a new terminal, when anything. */
-      resolved: string | null;
+      resolved: CliResolvedCommand | null;
     };
 
 export type CliCommandChange = {
   location: CliLocation;
-  outcome: "created" | "updated" | "unchanged" | "removed" | "absent";
+  /**
+   * What changed. `cancelled` means the person cancelled the administrator
+   * prompt, so nothing did.
+   */
+  outcome:
+    | "created"
+    | "updated"
+    | "unchanged"
+    | "removed"
+    | "absent"
+    | "cancelled";
   /** The install created the link's folder. */
   folderCreated: boolean;
   status: CliCommandStatus;

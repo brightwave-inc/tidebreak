@@ -1,4 +1,4 @@
-import type { ComponentType, FunctionComponent } from "react";
+import { useCallback, type ComponentType, type FunctionComponent } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   Bell,
@@ -261,22 +261,26 @@ function GitSourceControlSection() {
 }
 
 /**
- * The menu's Install the tidebreak Command arrives with `?install=user`. The
- * panel runs that install once, and the parameter is dropped so a reload or a
- * trip back through history does not install again.
+ * The menu's Install the tidebreak Command arrives with `?install=user`, on a
+ * fresh page or on this one already open. The panel runs that install once
+ * per arrival and hands the request back, and the parameter is dropped by
+ * replacing the history entry that carried it, so Back, Forward, or a reload
+ * never installs again.
  */
 function CommandLineSection() {
   const navigate = useNavigate();
-  const search = useRouterState({
-    select: (state) => state.location.search,
-  }) as Record<string, unknown>;
-  const path: string = "/settings/command-line";
+  const installRequested = useRouterState({
+    select: (state) =>
+      (state.location.search as Record<string, unknown>).install === "user",
+  });
+  const onInstallRequestTaken = useCallback(() => {
+    const path: string = "/settings/command-line";
+    void navigate({ to: path, search: {}, replace: true });
+  }, [navigate]);
   return (
     <CommandLinePanel
-      autoInstall={search.install === "user"}
-      onAutoInstallHandled={() =>
-        void navigate({ to: path, search: {}, replace: true })
-      }
+      installRequested={installRequested}
+      onInstallRequestTaken={onInstallRequestTaken}
     />
   );
 }
