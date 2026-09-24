@@ -93,6 +93,32 @@ export function diffRows(group: DiffFileGroup): DiffRow[] {
   return rows;
 }
 
+/**
+ * A short key for what one file's diff shows: equal diffs, drawn the same
+ * way, get equal keys, whichever objects hold them. Two 32-bit FNV-1a
+ * hashes of every line, read in one pass.
+ */
+export function diffFingerprint(
+  group: DiffFileGroup,
+  ignoreWhitespace: boolean,
+): string {
+  let a = 0x811c9dc5;
+  let b = 0x01000193 ^ 0x5bd1e995;
+  const feed = (text: string) => {
+    for (let index = 0; index < text.length; index += 1) {
+      const code = text.charCodeAt(index);
+      a = Math.imul(a ^ code, 0x01000193);
+      b = Math.imul(b ^ code, 0x5bd1e995) ^ (b >>> 15);
+    }
+    // A separator no line holds, so "ab" + "c" never hashes as "a" + "bc".
+    a = Math.imul(a ^ 0xffff, 0x01000193);
+    b = Math.imul(b ^ 0xffff, 0x5bd1e995) ^ (b >>> 15);
+  };
+  feed(group.path);
+  for (const line of group.lines) feed(line.text);
+  return `${ignoreWhitespace ? "w" : "s"}${group.lines.length}.${(a >>> 0).toString(36)}.${(b >>> 0).toString(36)}`;
+}
+
 /** Counts of added and removed lines among `rows`. */
 export function diffStatOf(rows: readonly DiffRow[]): {
   insertions: number;

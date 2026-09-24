@@ -29,6 +29,7 @@ import {
 import { CommentCard, CommentComposer } from "./DiffComments";
 import {
   buildDiffFileModel,
+  diffFingerprint,
   diffRows,
   isCodeRow,
   rowAnchor,
@@ -425,23 +426,32 @@ export function DiffView({
   }, [review?.comments, placements, displayOf]);
 
   // Tell the review where each comment's lines are now, so the message that
-  // carries it names them as they are, or says they changed. Each view says
-  // so once per answer: two views that briefly disagree, one showing a diff
-  // a refresh has not reached yet, must not overwrite each other in a loop.
+  // carries it names them as they are, or says they changed. A view says so
+  // once for each diff it shows. Views that disagree, such as one showing a
+  // diff a refresh has not reached yet, then write at most once each rather
+  // than answering one another's writes, however many of them there are;
+  // the next diff each one shows gets its own say.
   const onRelocate = review?.onRelocate;
   const reviewComments = review?.comments;
+  const shownDiff = useMemo(
+    () => diffFingerprint(group, ignoreWhitespace),
+    [group, ignoreWhitespace],
+  );
+  /** The diff each comment's place was last recorded from. */
   const reported = useRef(new Map<string, string>());
   useEffect(() => {
     if (!onRelocate || !reviewComments) return;
+    // A comment that left the review, sent or deleted, starts afresh if it
+    // comes back.
+    const present = new Set(reviewComments.map((comment) => comment.id));
+    for (const id of reported.current.keys()) {
+      if (!present.has(id)) reported.current.delete(id);
+    }
     for (const comment of reviewComments) {
+      if (reported.current.get(comment.id) === shownDiff) continue;
       const placement = placements.get(comment.id);
       if (!placement) continue;
-      const answer =
-        placement.kind === "outdated"
-          ? "outdated"
-          : `${placement.lines.map((line) => `${line.oldNo}/${line.newNo}`).join(",")}|${placement.span.lines}/${placement.span.oldLines}`;
-      if (reported.current.get(comment.id) === answer) continue;
-      reported.current.set(comment.id, answer);
+      reported.current.set(comment.id, shownDiff);
       if (placement.kind === "outdated") {
         if (!comment.outdated) onRelocate(comment.id, { outdated: true });
         continue;
@@ -463,7 +473,7 @@ export function DiffView({
         });
       }
     }
-  }, [placements, onRelocate, reviewComments]);
+  }, [placements, onRelocate, reviewComments, shownDiff]);
 
   const editorSlot = useMemo<EditorSlot | null>(() => {
     if (!editor || editor.kind !== "new") return null;

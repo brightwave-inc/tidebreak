@@ -409,6 +409,78 @@ describe("comments follow their code through a refresh", () => {
     await waitFor(() => expect(comments()[0]?.lines[0]?.newNo).toBe(11));
   });
 
+  it("settles however many views disagree, each recording once per diff it shows", async () => {
+    const PATH = "src/loop.ts";
+    /** A new 40-line file with `X();` on the lines `at`, `f();` elsewhere. */
+    const newFile = (at: readonly number[]) =>
+      [
+        `diff --git a/${PATH} b/${PATH}`,
+        "new file mode 100644",
+        "--- /dev/null",
+        `+++ b/${PATH}`,
+        "@@ -0,0 +1,40 @@",
+        ...Array.from({ length: 40 }, (_, index) =>
+          at.includes(index + 1) ? "+X();" : "+f();",
+        ),
+      ].join("\n");
+    let writes = 0;
+    function View({ diff }: { diff: string }) {
+      const reviewFor = useWorkspaceDiffReview({
+        workspaceId: "ws-1",
+        turnId: undefined,
+        onDelete: () => {},
+      });
+      const review = reviewFor?.(PATH);
+      // A fresh group every render, as a caller that does not keep one would
+      // pass: what a view records hangs on the diff, not on the object.
+      const group = groupUnifiedDiff(diff)[0]!;
+      return (
+        <DiffView
+          group={group}
+          layout="unified"
+          ignoreWhitespace={false}
+          review={
+            review && {
+              ...review,
+              onRelocate: (id, change) => {
+                writes += 1;
+                // Past a loop's worth, stop passing writes on, so a loop
+                // fails the count below instead of hanging the runner.
+                if (writes <= 50) review.onRelocate?.(id, change);
+              },
+            }
+          }
+        />
+      );
+    }
+    usePendingReviewStore.getState().add("ws-1", {
+      id: "c-x",
+      author: { kind: "person" },
+      path: PATH,
+      lines: [{ kind: "add", oldNo: null, newNo: 16, text: "X();" }],
+      context: {
+        before: ["f();", "f();", "f();"],
+        after: ["f();", "f();", "f();"],
+      },
+      body: "Why X here?",
+      createdAt: "2026-09-24T10:00:00.000Z",
+    });
+    // Three diffs, each with two copies of the line in the same code, as
+    // three panels a refresh reaches at different times would show.
+    render(
+      <>
+        <View diff={newFile([16, 32])} />
+        <View diff={newFile([8, 28])} />
+        <View diff={newFile([20, 24])} />
+      </>,
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(writes).toBeLessThanOrEqual(3);
+    expect(screen.getAllByRole("article", { name: /Line/ })).toHaveLength(3);
+  });
+
   it("says a comment's lines are hidden, not outdated, when whitespace hides them", async () => {
     const user = userEvent.setup();
     const diff = fileDiff("src/limits.ts", [
