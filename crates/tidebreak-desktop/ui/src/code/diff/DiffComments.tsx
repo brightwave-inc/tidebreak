@@ -139,6 +139,7 @@ export function CommentCard({
   comment,
   label,
   sending,
+  showQuote = false,
   outdated = false,
   onEdit,
   onDelete,
@@ -147,6 +148,8 @@ export function CommentCard({
   /** The lines it covers where it is shown, such as "Line 12". */
   label: string;
   sending: boolean;
+  /** Show the quoted lines, for a comment away from its lines. */
+  showQuote?: boolean;
   outdated?: boolean;
   onEdit?: () => void;
   onDelete?: () => void;
@@ -210,7 +213,7 @@ export function CommentCard({
             </span>
           )}
         </header>
-        {outdated && <CommentQuote lines={comment.lines} />}
+        {(showQuote || outdated) && <CommentQuote lines={comment.lines} />}
         {unquoted > 0 && (
           <p className="text-muted-foreground text-xs">
             The agent sees the first {comment.lines.length} of{" "}

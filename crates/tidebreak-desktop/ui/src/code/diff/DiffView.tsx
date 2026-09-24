@@ -28,6 +28,7 @@ import {
 import { CommentCard, CommentComposer } from "./DiffComments";
 import {
   buildDiffFileModel,
+  diffRows,
   isCodeRow,
   rowAnchor,
   rowSide,
@@ -171,6 +172,19 @@ type Interaction = {
 
 /** A saved comment under its lines, with the span it covers there now. */
 type PlacedComment = { comment: ReviewComment; span: CommentLineSpans };
+
+/**
+ * Where a comment sits in this view. Its lines can be under it, hidden
+ * because only their whitespace changed and whitespace is hidden, or gone.
+ * A hidden comment is not outdated: showing whitespace brings its lines back.
+ */
+type ViewPlacement =
+  | Extract<CommentPlacement, { kind: "placed" }>
+  | (Omit<Extract<CommentPlacement, { kind: "placed" }>, "kind"> & {
+      /** `start` and `end` are rows of the diff with whitespace shown. */
+      kind: "hidden";
+    })
+  | { kind: "outdated" };
 
 let editorCount = 0;
 
@@ -334,12 +348,28 @@ export function DiffView({
   const drafts = useRef(new Map<string, string>());
 
   const rowIndex = useMemo(() => indexRows(model.rows), [model.rows]);
-  const editorPlacement = useMemo<CommentPlacement | null>(
-    () =>
-      editor?.kind === "new"
-        ? placeComment(model.rows, editor.anchor, rowIndex)
-        : null,
-    [editor, model.rows, rowIndex],
+  // With whitespace hidden, the rows it leaves out, to tell a comment whose
+  // lines are only hidden from one whose lines are gone.
+  const shownRows = useMemo(
+    () => (ignoreWhitespace ? diffRows(group) : null),
+    [group, ignoreWhitespace],
+  );
+  const shownIndex = useMemo(
+    () => (shownRows ? indexRows(shownRows) : null),
+    [shownRows],
+  );
+  const locate = useCallback(
+    (anchor: CommentAnchor): ViewPlacement => {
+      const here = placeComment(model.rows, anchor, rowIndex);
+      if (here.kind === "placed" || !shownRows || !shownIndex) return here;
+      const shown = placeComment(shownRows, anchor, shownIndex);
+      return shown.kind === "placed" ? { ...shown, kind: "hidden" } : here;
+    },
+    [model.rows, rowIndex, shownRows, shownIndex],
+  );
+  const editorPlacement = useMemo<ViewPlacement | null>(
+    () => (editor?.kind === "new" ? locate(editor.anchor) : null),
+    [editor, locate],
   );
 
   const selected = useMemo(() => {
@@ -372,20 +402,25 @@ export function DiffView({
   // Each comment finds its lines by their code, so a line the agent added
   // above one never slides it onto the wrong line.
   const placements = useMemo(() => {
-    const found = new Map<string, CommentPlacement>();
+    const found = new Map<string, ViewPlacement>();
     for (const comment of review?.comments ?? []) {
-      found.set(comment.id, placeComment(model.rows, comment, rowIndex));
+      found.set(comment.id, locate(comment));
     }
     return found;
-  }, [review?.comments, model.rows, rowIndex]);
+  }, [review?.comments, locate]);
 
   const commentPlacement = useMemo(() => {
     const at = new Map<number, PlacedComment[]>();
+    const hidden: PlacedComment[] = [];
     const outdated: ReviewComment[] = [];
     for (const comment of review?.comments ?? []) {
       const placement = placements.get(comment.id);
       if (!placement || placement.kind === "outdated") {
         outdated.push(comment);
+        continue;
+      }
+      if (placement.kind === "hidden") {
+        hidden.push({ comment, span: placement.span });
         continue;
       }
       const display = displayOf(placement.end);
@@ -394,7 +429,7 @@ export function DiffView({
         { comment, span: placement.span },
       ]);
     }
-    return { at, outdated };
+    return { at, hidden, outdated };
   }, [review?.comments, placements, displayOf]);
 
   // Tell the review where each comment's lines are now, so the message that
@@ -447,15 +482,23 @@ export function DiffView({
       span: editorPlacement.span,
     };
   }, [editor, editorPlacement, displayOf]);
-  // The lines an open editor was about changed under it: it moves to the top
-  // with the lines as they were, and keeps what was typed.
-  const editorOutdated =
-    editor?.kind === "new" && editorPlacement?.kind === "outdated";
+  // The lines an open editor was about changed under it, or hiding
+  // whitespace left them out: it moves to the top with the lines as they
+  // were, and keeps what was typed.
+  const editorAway =
+    editor?.kind === "new" &&
+    (editorPlacement?.kind === "outdated" || editorPlacement?.kind === "hidden")
+      ? editorPlacement.kind
+      : null;
 
   const reviewRef = useRef(review);
   reviewRef.current = review;
   const rowsRef = useRef(model.rows);
   rowsRef.current = model.rows;
+  const shownRowsRef = useRef(shownRows);
+  shownRowsRef.current = shownRows;
+  const locateRef = useRef(locate);
+  locateRef.current = locate;
   const editorRef = useRef(editor);
   editorRef.current = editor;
   const editorPlacementRef = useRef(editorPlacement);
@@ -510,9 +553,12 @@ export function DiffView({
         if (!current || current.kind !== "new" || !target) return;
         // Where the lines are at the moment of saving, not where they were
         // when the editor opened.
-        const rows = rowsRef.current;
-        const placement = placeComment(rows, current.anchor);
-        if (placement.kind === "placed") {
+        const placement = locateRef.current(current.anchor);
+        const rows =
+          placement.kind === "hidden"
+            ? (shownRowsRef.current ?? rowsRef.current)
+            : rowsRef.current;
+        if (placement.kind !== "outdated") {
           const { span, ...anchor } = anchorRows(
             rows,
             placement.start,
@@ -522,7 +568,7 @@ export function DiffView({
             { ...anchor, ...(anchor.unquoted ? { span } : {}) },
             body,
           );
-          focusRow(placement.end);
+          if (placement.kind === "placed") focusRow(placement.end);
         } else {
           const { span, ...anchor } = current.anchor;
           target.onAdd(
@@ -805,7 +851,36 @@ export function DiffView({
             )}
           </p>
         )}
-        {(commentPlacement.outdated.length > 0 || editorOutdated) && (
+        {(commentPlacement.hidden.length > 0 || editorAway === "hidden") && (
+          <div
+            className="border-border-subtle border-b py-1 font-sans"
+            data-diff-hidden-comments=""
+          >
+            <p className="text-muted-foreground px-3 pt-1 text-xs">
+              Hiding whitespace leaves out the lines these comments are on.
+            </p>
+            {editorAway === "hidden" && editor?.kind === "new" && (
+              <NewCommentSlot
+                key={`editor:${editor.id}`}
+                editorId={editor.id}
+                span={editor.anchor.span}
+                awayQuote={editor.anchor.lines}
+              />
+            )}
+            {commentPlacement.hidden.map(({ comment, span }) => (
+              <CommentSlot
+                key={comment.id}
+                comment={comment}
+                span={span}
+                editing={editor?.kind === "edit" && editor.id === comment.id}
+                sending={review?.sending.has(comment.id) ?? false}
+                away="hidden"
+              />
+            ))}
+          </div>
+        )}
+        {(commentPlacement.outdated.length > 0 ||
+          editorAway === "outdated") && (
           <div
             className="border-border-subtle border-b py-1 font-sans"
             data-diff-outdated=""
@@ -813,12 +888,13 @@ export function DiffView({
             <p className="text-muted-foreground px-3 pt-1 text-xs">
               The code these comments quote has changed since they were written.
             </p>
-            {editorOutdated && editor?.kind === "new" && (
+            {editorAway === "outdated" && editor?.kind === "new" && (
               <NewCommentSlot
                 key={`editor:${editor.id}`}
                 editorId={editor.id}
                 span={editor.anchor.span}
-                outdatedQuote={editor.anchor.lines}
+                awayQuote={editor.anchor.lines}
+                note="These lines changed while you wrote. The comment keeps them as they were."
               />
             )}
             {commentPlacement.outdated.map((comment) => (
@@ -828,7 +904,7 @@ export function DiffView({
                 span={spansOf(comment)}
                 editing={editor?.kind === "edit" && editor.id === comment.id}
                 sending={review?.sending.has(comment.id) ?? false}
-                outdated
+                away="outdated"
               />
             ))}
           </div>
@@ -1094,24 +1170,22 @@ function displayRows(
 function NewCommentSlot({
   editorId,
   span,
-  outdatedQuote,
+  awayQuote,
+  note,
 }: {
   editorId: string;
   span: CommentLineSpans;
-  /** The lines as they were, when they changed while the editor was open. */
-  outdatedQuote?: CommentAnchor["lines"];
+  /** The lines as they were, when the diff no longer shows them. */
+  awayQuote?: CommentAnchor["lines"];
+  note?: string;
 }) {
   const interaction = useContext(InteractionContext);
   if (!interaction) return null;
   return (
     <CommentComposer
       label={commentLinesLabel(span)}
-      quote={outdatedQuote}
-      note={
-        outdatedQuote
-          ? "These lines changed while you wrote. The comment keeps them as they were."
-          : undefined
-      }
+      quote={awayQuote}
+      note={note}
       initial={interaction.draft(editorId) ?? ""}
       onDraftChange={(text) => interaction.keepDraft(editorId, text)}
       submitLabel="Add comment"
@@ -1126,15 +1200,18 @@ function CommentSlot({
   span,
   editing = false,
   sending = false,
-  outdated = false,
+  away,
 }: {
   comment: ReviewComment;
-  /** The lines it covers where the diff shows it now. */
+  /** The lines it covers where the diff has them now. */
   span: CommentLineSpans;
   editing?: boolean;
   sending?: boolean;
-  /** Its code changed: it shows its quote, and says so. */
-  outdated?: boolean;
+  /**
+   * Why it is not under its lines: they are hidden with whitespace, or its
+   * code changed. Either way it shows its quote.
+   */
+  away?: "hidden" | "outdated";
 }) {
   const interaction = useContext(InteractionContext);
   const review = interaction?.review;
@@ -1144,7 +1221,7 @@ function CommentSlot({
     return (
       <CommentComposer
         label={commentLinesLabel(span)}
-        quote={outdated ? comment.lines : undefined}
+        quote={away ? comment.lines : undefined}
         initial={interaction.draft(key) ?? comment.body}
         onDraftChange={(text) => interaction.keepDraft(key, text)}
         submitLabel="Save"
@@ -1158,7 +1235,8 @@ function CommentSlot({
       comment={comment}
       label={commentLinesLabel(span)}
       sending={sending || review.sending.has(comment.id)}
-      outdated={outdated}
+      showQuote={away !== undefined}
+      outdated={away === "outdated"}
       onEdit={() => interaction.startEdit(comment.id)}
       onDelete={() => review.onDelete(comment.id)}
     />

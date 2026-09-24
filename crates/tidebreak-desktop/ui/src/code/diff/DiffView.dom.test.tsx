@@ -284,7 +284,13 @@ describe("comments follow their code through a refresh", () => {
     " const m = 5;",
   ]);
 
-  function ReviewedDiff({ diff }: { diff: string }) {
+  function ReviewedDiff({
+    diff,
+    ignoreWhitespace = false,
+  }: {
+    diff: string;
+    ignoreWhitespace?: boolean;
+  }) {
     const reviewFor = useWorkspaceDiffReview({
       workspaceId: "ws-1",
       turnId: undefined,
@@ -295,7 +301,7 @@ describe("comments follow their code through a refresh", () => {
       <DiffView
         group={group}
         layout="unified"
-        ignoreWhitespace={false}
+        ignoreWhitespace={ignoreWhitespace}
         review={reviewFor?.(group.path)}
       />
     );
@@ -401,6 +407,36 @@ describe("comments follow their code through a refresh", () => {
       await screen.findByRole("article", { name: "Line 11" }),
     ).toBeVisible();
     await waitFor(() => expect(comments()[0]?.lines[0]?.newNo).toBe(11));
+  });
+
+  it("says a comment's lines are hidden, not outdated, when whitespace hides them", async () => {
+    const user = userEvent.setup();
+    const diff = fileDiff("src/limits.ts", [
+      { oldStart: 1, newStart: 1, lines: ["-const a = 1;", "+const a = 2;"] },
+      {
+        oldStart: 40,
+        newStart: 40,
+        lines: [" open();", "-\tlayout();", "+  layout();", " close();"],
+      },
+    ]);
+    const { rerender } = render(<ReviewedDiff diff={diff} />);
+    await user.click(
+      screen.getByRole("button", { name: "Comment on line 41" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "Comment on line 41" }),
+      "Tabs here, please.",
+    );
+    await user.click(screen.getByRole("button", { name: "Add comment" }));
+
+    // The second hunk only changed whitespace, so hiding it drops the hunk.
+    rerender(<ReviewedDiff diff={diff} ignoreWhitespace />);
+    const card = await screen.findByRole("article", { name: "Line 41" });
+    expect(card.closest("[data-diff-hidden-comments]")).not.toBeNull();
+    expect(within(card).queryByText("Outdated")).toBeNull();
+    expect(card).toHaveTextContent("layout();");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(comments()[0]?.outdated).toBeUndefined();
   });
 
   it("keeps what was typed when the lines change while the editor is open", async () => {
