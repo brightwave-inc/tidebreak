@@ -21,9 +21,10 @@ import type { DiffFileGroup } from "../unifiedDiff";
 import {
   anchorRows,
   indexRows,
-  placeComment,
+  placeInView,
+  rowsBySource,
   type CommentAnchor,
-  type CommentPlacement,
+  type ViewPlacement,
 } from "./commentAnchor";
 import { CommentCard, CommentComposer } from "./DiffComments";
 import {
@@ -172,19 +173,6 @@ type Interaction = {
 
 /** A saved comment under its lines, with the span it covers there now. */
 type PlacedComment = { comment: ReviewComment; span: CommentLineSpans };
-
-/**
- * Where a comment sits in this view. Its lines can be under it, hidden
- * because only their whitespace changed and whitespace is hidden, or gone.
- * A hidden comment is not outdated: showing whitespace brings its lines back.
- */
-type ViewPlacement =
-  | Extract<CommentPlacement, { kind: "placed" }>
-  | (Omit<Extract<CommentPlacement, { kind: "placed" }>, "kind"> & {
-      /** `start` and `end` are rows of the diff with whitespace shown. */
-      kind: "hidden";
-    })
-  | { kind: "outdated" };
 
 let editorCount = 0;
 
@@ -348,24 +336,28 @@ export function DiffView({
   const drafts = useRef(new Map<string, string>());
 
   const rowIndex = useMemo(() => indexRows(model.rows), [model.rows]);
-  // With whitespace hidden, the rows it leaves out, to tell a comment whose
-  // lines are only hidden from one whose lines are gone.
+  // With whitespace hidden, the diff with it shown: a comment quoted from
+  // there finds the rows that draw its lines here, and one whose lines
+  // hiding whitespace left out says so rather than going outdated.
   const shownRows = useMemo(
     () => (ignoreWhitespace ? diffRows(group) : null),
     [group, ignoreWhitespace],
   );
-  const shownIndex = useMemo(
-    () => (shownRows ? indexRows(shownRows) : null),
-    [shownRows],
+  const hiding = useMemo(
+    () =>
+      shownRows
+        ? {
+            rows: shownRows,
+            index: indexRows(shownRows),
+            bySource: rowsBySource(model.rows),
+          }
+        : null,
+    [shownRows, model.rows],
   );
   const locate = useCallback(
-    (anchor: CommentAnchor): ViewPlacement => {
-      const here = placeComment(model.rows, anchor, rowIndex);
-      if (here.kind === "placed" || !shownRows || !shownIndex) return here;
-      const shown = placeComment(shownRows, anchor, shownIndex);
-      return shown.kind === "placed" ? { ...shown, kind: "hidden" } : here;
-    },
-    [model.rows, rowIndex, shownRows, shownIndex],
+    (anchor: CommentAnchor): ViewPlacement =>
+      placeInView(model.rows, anchor, rowIndex, hiding),
+    [model.rows, rowIndex, hiding],
   );
   const editorPlacement = useMemo<ViewPlacement | null>(
     () => (editor?.kind === "new" ? locate(editor.anchor) : null),

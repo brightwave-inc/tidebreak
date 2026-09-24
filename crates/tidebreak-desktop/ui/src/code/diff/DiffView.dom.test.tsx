@@ -439,6 +439,33 @@ describe("comments follow their code through a refresh", () => {
     expect(comments()[0]?.outdated).toBeUndefined();
   });
 
+  it("keeps a comment on both lines of a whitespace pair under the one row they make with whitespace hidden", async () => {
+    const diff = fileDiff("src/limits.ts", [
+      {
+        oldStart: 1,
+        newStart: 1,
+        lines: ["-open();", "+Open();", "-\tlayout();", "+  layout();"],
+      },
+    ]);
+    usePendingReviewStore.getState().add("ws-1", {
+      id: "c-pair",
+      author: { kind: "person" },
+      path: "src/limits.ts",
+      lines: [
+        { kind: "del", oldNo: 2, newNo: null, text: "\tlayout();" },
+        { kind: "add", oldNo: null, newNo: 2, text: "  layout();" },
+      ],
+      body: "Tabs here, please.",
+      createdAt: "2026-09-24T10:00:00.000Z",
+    });
+    render(<ReviewedDiff diff={diff} ignoreWhitespace />);
+    const card = await screen.findByRole("article", {
+      name: "Line 2 and deleted line 2",
+    });
+    expect(card.closest("[data-diff-hidden-comments]")).toBeNull();
+    expect(rowAbove(card)).toBe("  layout();");
+  });
+
   it("keeps what was typed when the lines change while the editor is open", async () => {
     const user = userEvent.setup();
     const { rerender } = render(<ReviewedDiff diff={WRITTEN} />);

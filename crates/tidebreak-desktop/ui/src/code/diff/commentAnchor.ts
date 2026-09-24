@@ -18,6 +18,9 @@ import {
  * when the comment was written picks the place. Where they no longer appear,
  * or nothing tells the places apart, the comment is outdated: it keeps its
  * quote and says so, rather than settling on a line it was never about.
+ *
+ * With whitespace hidden, a line whose only change is whitespace reads as
+ * unchanged, and a comment finds its lines as the reader sees them there.
  */
 
 /** Lines of code kept on each side of a comment's lines. */
@@ -42,6 +45,21 @@ export type CommentPlacement =
       /** The spans of every line the comment covers now. */
       readonly span: CommentLineSpans;
     }
+  | { readonly kind: "outdated" };
+
+type Placed = Extract<CommentPlacement, { kind: "placed" }>;
+
+/**
+ * Where a comment sits in a view. Its lines can be under it, hidden because
+ * only their whitespace changed and whitespace is hidden, or gone. A hidden
+ * comment is not outdated: showing whitespace brings its lines back.
+ */
+export type ViewPlacement =
+  | Placed
+  | (Omit<Placed, "kind"> & {
+      /** `start` and `end` are rows of the diff with whitespace shown. */
+      readonly kind: "hidden";
+    })
   | { readonly kind: "outdated" };
 
 const OUTDATED: CommentPlacement = { kind: "outdated" };
@@ -146,10 +164,11 @@ export function rowShowsLine(row: DiffRow, line: ReviewCommentLine): boolean {
           (row.kind === "add" && row.text === line.text)
         );
       }
+      // An unchanged line. With whitespace hidden, a line re-indented since
+      // still reads as unchanged, so either of its texts is the quoted one.
       return (
         row.kind === "context" &&
-        row.text === line.text &&
-        (!paired || row.old!.text === row.text)
+        (row.text === line.text || (paired && row.old!.text === line.text))
       );
     default:
       return false;
@@ -242,23 +261,67 @@ function contextScore(
   return score;
 }
 
-/** The number a line goes by: its new number, or its old one if removed. */
-function lineNumber(line: {
-  kind: string;
-  oldNo: number | null;
-  newNo: number | null;
-}): number | null {
-  return line.kind === "del" ? line.oldNo : line.newNo;
+/** A quoted line numbered where `row` puts it. */
+function renumbered(
+  line: ReviewCommentLine,
+  row: DiffRow,
+): { oldNo: number | null; newNo: number | null } {
+  // The quote keeps its own kind and text; only the numbers move.
+  return {
+    oldNo: line.kind === "add" ? null : (row.oldNo ?? line.oldNo),
+    newNo: line.kind === "del" ? null : (row.newNo ?? line.newNo),
+  };
+}
+
+type Candidate = {
+  readonly matched: readonly number[];
+  readonly end: number;
+  readonly score: number;
+};
+
+/** Whether the rows `matched` put every quoted line where it already is. */
+function unmoved(
+  rows: readonly DiffRow[],
+  lines: readonly ReviewCommentLine[],
+  matched: readonly number[],
+): boolean {
+  return lines.every((line, at) => {
+    const now = renumbered(line, rows[matched[at]!]!);
+    return now.oldNo === line.oldNo && now.newNo === line.newNo;
+  });
+}
+
+/**
+ * The place among several: the one with the most of the remembered code
+ * around it. Places that tie on that read the same all around, so only one
+ * sitting exactly where the comment already is can be told from the rest,
+ * such as a comment just written on one of two identical blocks. Anything
+ * else would be a guess, and the comment is outdated instead.
+ */
+function choose(
+  rows: readonly DiffRow[],
+  candidates: readonly Candidate[],
+  lines: readonly ReviewCommentLine[],
+): Candidate | null {
+  if (candidates.length === 1) return candidates[0]!;
+  let best = 0;
+  for (const candidate of candidates) best = Math.max(best, candidate.score);
+  // Nothing around the lines is left to tell the places apart.
+  if (best === 0) return null;
+  const leaders = candidates.filter((candidate) => candidate.score === best);
+  if (leaders.length === 1) return leaders[0]!;
+  const still = leaders.filter((candidate) =>
+    unmoved(rows, lines, candidate.matched),
+  );
+  return still.length === 1 ? still[0]! : null;
 }
 
 /**
  * Where a comment's lines are in `rows`, or that they are gone.
  *
  * Every place the quoted lines appear, in order and inside one hunk, is a
- * candidate. One candidate is the place. Among several, the one with the
- * most of the remembered code around it wins, and a tie goes to the one
- * nearest the line the comment last sat on. Several with none of that code
- * around them are indistinguishable, so the comment is outdated.
+ * candidate. One candidate is the place. Among several, `choose` picks one,
+ * or none, and the comment is outdated.
  */
 export function placeComment(
   rows: readonly DiffRow[],
@@ -266,54 +329,84 @@ export function placeComment(
   index: RowIndex = indexRows(rows),
 ): CommentPlacement {
   const first = anchor.lines[0];
-  const last = anchor.lines.at(-1);
-  if (!first || !last) return OUTDATED;
-  const was = lineNumber(last);
-  const candidates: Array<{
-    matched: number[];
-    end: number;
-    score: number;
-    distance: number;
-  }> = [];
+  if (!first) return OUTDATED;
+  const candidates: Candidate[] = [];
   for (const start of index.get(first.text) ?? []) {
     const matched = matchFrom(rows, start, anchor.lines);
     if (!matched) continue;
     const end = extendPast(rows, matched.at(-1)!, anchor.unquoted ?? 0);
-    const lastRow = rows[matched.at(-1)!]!;
-    const now = last.kind === "del" ? lastRow.oldNo : lastRow.newNo;
     candidates.push({
       matched,
       end,
       score: contextScore(rows, start, end, anchor.context),
-      distance: was === null || now === null ? Infinity : Math.abs(now - was),
     });
   }
   if (candidates.length === 0) return OUTDATED;
-  let chosen = candidates[0]!;
-  if (candidates.length > 1) {
-    const best = Math.max(...candidates.map((candidate) => candidate.score));
-    if (best === 0) return OUTDATED;
-    chosen = candidates
-      .filter((candidate) => candidate.score === best)
-      .reduce((nearest, candidate) =>
-        candidate.distance < nearest.distance ? candidate : nearest,
-      );
-  }
+  const chosen = choose(rows, candidates, anchor.lines);
+  if (!chosen) return OUTDATED;
   const start = chosen.matched[0]!;
-  const lines = anchor.lines.map((line, at) => {
-    const row = rows[chosen.matched[at]!]!;
-    // The quote keeps its own kind and text; only the numbers move.
-    return {
-      ...line,
-      oldNo: line.kind === "add" ? null : (row.oldNo ?? line.oldNo),
-      newNo: line.kind === "del" ? null : (row.newNo ?? line.newNo),
-    };
-  });
   return {
     kind: "placed",
     start,
     end: chosen.end,
-    lines,
+    lines: anchor.lines.map((line, at) => ({
+      ...line,
+      ...renumbered(line, rows[chosen.matched[at]!]!),
+    })),
     span: commentLineSpans(quoteRows(rows, start, chosen.end)),
   };
+}
+
+/** Row by the line it draws, for finding shown rows among hidden ones. */
+export type RowsBySource = ReadonlyMap<number, number>;
+
+/**
+ * Each line of the file group, by the row that draws it. With whitespace
+ * hidden, a pair's old line and new line both land on the pair's row.
+ */
+export function rowsBySource(rows: readonly DiffRow[]): RowsBySource {
+  const bySource = new Map<number, number>();
+  rows.forEach((row, at) => {
+    if (!isCodeRow(row)) return;
+    bySource.set(row.source, at);
+    if (row.old) bySource.set(row.old.source, at);
+  });
+  return bySource;
+}
+
+/** The diff with whitespace shown, to place a comment in a view hiding it. */
+export type ShownRows = {
+  readonly rows: readonly DiffRow[];
+  readonly index: RowIndex;
+};
+
+/**
+ * Where a comment sits in a view. With whitespace hidden, lines the hidden
+ * rows do not show as quoted can still be there: a removed line and the
+ * added line it pairs with read as one unchanged row. So a comment not found
+ * as it is quoted is looked for with whitespace shown and, found there, sits
+ * under the rows that draw its lines. Only when hiding whitespace leaves one
+ * of those lines out, with a hunk that changed nothing else, is it hidden.
+ */
+export function placeInView(
+  rows: readonly DiffRow[],
+  anchor: CommentAnchor,
+  index: RowIndex,
+  hiding: (ShownRows & { bySource: RowsBySource }) | null,
+): ViewPlacement {
+  const here = placeComment(rows, anchor, index);
+  if (here.kind === "placed" || !hiding) return here;
+  const shown = placeComment(hiding.rows, anchor, hiding.index);
+  if (shown.kind !== "placed") return here;
+  let first = Number.POSITIVE_INFINITY;
+  let last = Number.NEGATIVE_INFINITY;
+  for (let at = shown.start; at <= shown.end; at += 1) {
+    const row = hiding.rows[at]!;
+    if (!isCodeRow(row)) continue;
+    const drawn = hiding.bySource.get(row.source);
+    if (drawn === undefined) return { ...shown, kind: "hidden" };
+    first = Math.min(first, drawn);
+    last = Math.max(last, drawn);
+  }
+  return { ...shown, start: first, end: last };
 }
