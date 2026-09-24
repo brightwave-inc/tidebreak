@@ -144,14 +144,39 @@ async fn seeded_session_at(
         .await
         .unwrap(),
     );
+    let session_id = seed_session(
+        &store,
+        directory.path(),
+        harness_kind,
+        harness_version,
+        location,
+    )
+    .await;
+    (
+        directory,
+        store,
+        Arc::new(CodeEventBus::default()),
+        session_id,
+    )
+}
+
+/// Insert a repository, a workspace, and a running session into `store`,
+/// with their paths under `directory`.
+async fn seed_session(
+    store: &DbStore,
+    directory: &std::path::Path,
+    harness_kind: HarnessKind,
+    harness_version: Option<&str>,
+    location: tidebreak_core::ExecutionLocation,
+) -> SessionId {
     let owner = OwnerId::local();
     let repo_id = RepoId::new();
     insert_repo(
-        &store,
+        store,
         &CodeRepo {
             id: repo_id,
             owner: owner.clone(),
-            root_path: directory.path().join("repo").display().to_string(),
+            root_path: directory.join("repo").display().to_string(),
             display_name: "example".into(),
             default_base_ref: "main".into(),
             branch_prefix: "tidebreak/".into(),
@@ -170,13 +195,13 @@ async fn seeded_session_at(
     .unwrap();
     let workspace_id = WorkspaceId::new();
     insert_workspace(
-        &store,
+        store,
         &CodeWorkspace {
             id: workspace_id,
             owner: owner.clone(),
             repo_id,
             title: "first".into(),
-            worktree_path: directory.path().join("wt").display().to_string(),
+            worktree_path: directory.join("wt").display().to_string(),
             branch_name: "tidebreak/first".into(),
             base_ref: "main".into(),
             status: CodeWorkspaceStatus::Active,
@@ -193,7 +218,7 @@ async fn seeded_session_at(
     .unwrap();
     let session_id = SessionId::new();
     insert_session(
-        &store,
+        store,
         &Session {
             visibility: tidebreak_core::SessionVisibility::Private,
             id: session_id,
@@ -223,12 +248,7 @@ async fn seeded_session_at(
     )
     .await
     .unwrap();
-    (
-        directory,
-        store,
-        Arc::new(CodeEventBus::default()),
-        session_id,
-    )
+    session_id
 }
 
 async fn seeded_sink() -> (tempfile::TempDir, Arc<DbStore>, Arc<LiveSink>, SessionId) {
@@ -472,6 +492,194 @@ async fn an_engine_observed_decision_settles_its_own_approval_row() {
         )),
         "the journal records the engine's own decision"
     );
+    let _ = handle.commands.send(WorkerCommand::Shutdown).await;
+}
+
+/// A pid no process on the machine can have, so recording it touches nothing.
+const UNUSED_PID: i64 = i32::MAX as i64;
+
+/// An engine that reports its child the moment a turn starts, then writes to
+/// the store while the worker records that child.
+///
+/// A per-turn engine does exactly this: its child appears as its first
+/// events are journaled. The write is in flight, holding the store's only
+/// writer connection, when the worker sees the pid.
+struct WritesAsItsChildAppears {
+    inner: Box<dyn HarnessSession>,
+    db: Arc<DbStore>,
+    pid: watch::Sender<Option<i64>>,
+}
+
+#[async_trait]
+impl HarnessSession for WritesAsItsChildAppears {
+    async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
+        self.pid.send_replace(Some(UNUSED_PID));
+        self.db
+            .set_setting("test.engine_write", &serde_json::json!(true))
+            .await
+            .map_err(|error| HarnessError::Other(error.to_string()))?;
+        self.inner.run_turn(input).await
+    }
+
+    async fn decide(
+        &self,
+        approval: HarnessApprovalRef,
+        decision: ApprovalDecision,
+    ) -> Result<(), HarnessError> {
+        self.inner.decide(approval, decision).await
+    }
+
+    async fn interrupt(&self) -> Result<(), HarnessError> {
+        self.inner.interrupt().await
+    }
+
+    fn resume_ref(&self) -> Option<String> {
+        self.inner.resume_ref()
+    }
+
+    fn child_pid(&self) -> Option<i64> {
+        *self.pid.borrow()
+    }
+
+    fn child_pid_changes(&self) -> Option<watch::Receiver<Option<i64>>> {
+        Some(self.pid.subscribe())
+    }
+
+    fn unrecognized_events(&self) -> u64 {
+        self.inner.unrecognized_events()
+    }
+
+    async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
+        self.inner.shutdown().await
+    }
+}
+
+/// The worker records a child the engine reports mid-turn without waiting
+/// on the engine.
+///
+/// The store has one writer connection, as the desktop's does. The engine's
+/// write holds it when the pid arrives, and only finishes once the turn loop
+/// polls the engine again. A worker that awaited its own write inside that
+/// loop stopped polling the engine, so each waited on the other until the
+/// pool timed out, 30 seconds later.
+#[tokio::test]
+async fn a_child_recorded_mid_turn_does_not_wait_on_the_engines_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("t.db").display()
+    );
+    let store = Arc::new(
+        DbStore::connect_with_options(crate::host_connect_options(&url))
+            .await
+            .unwrap(),
+    );
+    let session_id = seed_session(
+        &store,
+        directory.path(),
+        HarnessKind::ClaudeCode,
+        Some("2.1.237"),
+        tidebreak_core::ExecutionLocation::Machine,
+    )
+    .await;
+    let owner = OwnerId::local();
+    let sink = sink_for(
+        store.clone(),
+        Arc::new(CodeEventBus::default()),
+        owner.clone(),
+        session_id,
+        1,
+        HarnessKind::ClaudeCode,
+        false,
+        None,
+        Vec::new(),
+        None,
+        None,
+        None,
+        None,
+        crate::code::pr_refresh::HotPullRequests::default(),
+    );
+    let mut session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    session.lifecycle = SessionLifecycle::Idle;
+    assert!(save_session(&store, &session).await.unwrap());
+
+    let worktree = directory.path().join("wt");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let private = directory.path().join("private");
+    std::fs::create_dir(&private).unwrap();
+    let private_root =
+        super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+    let inner = ScriptedAdapter::new(plain_text_script())
+        .launch(SessionSpec {
+            owner: owner.clone(),
+            session_id,
+            worktree,
+            allowed_read_roots: Vec::new(),
+            permission_mode: session.permission_mode,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            resume_ref: None,
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            relay_key_env: None,
+            env: Vec::new(),
+            approval: None,
+            binary: Some(std::path::PathBuf::from("/scripted/engine")),
+            sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+            browser: None,
+            native: None,
+            tool_bridge: None,
+            apps: None,
+            project_config: tidebreak_harness::ProjectConfig::Skip,
+        })
+        .await
+        .unwrap();
+    let engine = Box::new(WritesAsItsChildAppears {
+        inner,
+        db: store.clone(),
+        pid: watch::channel(None).0,
+    });
+    let handle = spawn_session_worker(
+        session.clone(),
+        engine,
+        sink,
+        AttachmentStore {
+            blobs: None,
+            private_root,
+            engine_reads_images: false,
+        },
+        Arc::new(tokio::sync::Mutex::new(())),
+        tokio::sync::watch::channel(false).1,
+    );
+
+    let (turn_reply, turn_response) = oneshot::channel();
+    handle
+        .commands
+        .send(WorkerCommand::RunTurn {
+            actor: None,
+            message: "start the child".into(),
+            attachments: Vec::new(),
+            trigger_delivery: None,
+            reply: turn_reply,
+        })
+        .await
+        .unwrap();
+    let accepted = tokio::time::timeout(Duration::from_secs(5), turn_response)
+        .await
+        .expect("the turn is accepted")
+        .unwrap()
+        .unwrap();
+    let turn = ended_turn(&store, &owner, session_id, &accepted).await;
+    assert_eq!(turn.status, TurnStatus::Completed);
+    let stored = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.child_pid, Some(UNUSED_PID), "the child was recorded");
     let _ = handle.commands.send(WorkerCommand::Shutdown).await;
 }
 

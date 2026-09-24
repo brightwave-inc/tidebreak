@@ -1252,6 +1252,42 @@ pub async fn set_session_subagents(
     Ok(result.rows_affected == 1)
 }
 
+/// Record the engine child a running turn spawned, and nothing else.
+///
+/// The session worker records a per-turn child while the turn runs, beside
+/// the engine rather than in front of it, so the write can land after other
+/// writes to the row. Writing only the child's two columns, fenced by the
+/// epoch and a running lifecycle, keeps a late write from restoring anything
+/// else the row held when the child appeared.
+pub async fn set_session_child_process(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    spawn_epoch: i64,
+    child_pid: Option<i64>,
+    child_process_identity: Option<String>,
+) -> Result<bool> {
+    let result = entities::session::Entity::update_many()
+        .col_expr(
+            entities::session::Column::ChildPid,
+            sea_orm::sea_query::Expr::value(child_pid),
+        )
+        .col_expr(
+            entities::session::Column::ChildProcessIdentity,
+            sea_orm::sea_query::Expr::value(child_process_identity),
+        )
+        .filter(entities::session::Column::Id.eq(session_id.0))
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::SpawnEpoch.eq(spawn_epoch))
+        .filter(
+            entities::session::Column::Lifecycle.eq(SessionLifecycle::Running.as_str().to_owned()),
+        )
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 /// Record the engine-native resume ref once a running turn proves it is safe.
 ///
 /// The event sink learns this value while the turn is still running. A

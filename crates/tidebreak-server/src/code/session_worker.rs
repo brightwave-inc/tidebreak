@@ -30,8 +30,8 @@ use tidebreak_core::db::code::{
     get_session_all_owners, get_workspace, insert_approval_for_worker, insert_turn, list_approvals,
     next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head,
     rebind_pending_approvals_to_worker, save_session, save_turn, set_queue_paused,
-    set_session_harness_resume_ref, set_session_subagents, settle_engine_observed_approval,
-    store_turn_park, JournalError, SessionExecutionSettings,
+    set_session_child_process, set_session_harness_resume_ref, set_session_subagents,
+    settle_engine_observed_approval, store_turn_park, JournalError, SessionExecutionSettings,
 };
 use tidebreak_core::{
     bound_subagents, Approval, ApprovalId, ApprovalKind, ApprovalState, Attention, AttentionSource,
@@ -1330,6 +1330,86 @@ async fn next_child_pid(changes: Option<&mut watch::Receiver<Option<i64>>>) -> O
     *changes.borrow()
 }
 
+/// How often a running internal turn's lease is extended. The turn takes a
+/// one-minute lease as it starts, so the first extension waits one period.
+const TURN_LEASE_HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// Store writes the turn loop makes while a leg runs, on tasks beside the
+/// engine rather than in front of it.
+///
+/// The loop never awaits the store inside its `select!`. The engine may hold
+/// the store's only writer connection there, or be first in line for it, and
+/// its write only finishes once the loop polls the engine again. A write the
+/// loop awaited would wait on the engine, and the engine on the loop, until
+/// the pool gave up 30 seconds later, and every other write in the process
+/// would wait behind them.
+#[derive(Default)]
+struct SideWrites {
+    /// The newest child-process write. Each waits for the one before it, so
+    /// the row ends on the newest pid.
+    child_process: Option<tokio::task::JoinHandle<()>>,
+    /// The lease extension in flight. One still waiting for the writer
+    /// covers the next tick too.
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl SideWrites {
+    /// Record `session`'s current child process on its row.
+    fn child_process(&mut self, db: &Arc<DbStore>, session: &Session) {
+        let previous = self.child_process.take();
+        let db = db.clone();
+        let owner = session.owner.clone();
+        let session_id = session.id;
+        let spawn_epoch = session.spawn_epoch;
+        let pid = session.child_pid;
+        let identity = session.child_process_identity.clone();
+        self.child_process = Some(tokio::spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            let _ = set_session_child_process(&db, &owner, session_id, spawn_epoch, pid, identity)
+                .await;
+        }));
+    }
+
+    /// Extend a running internal turn's lease by another minute.
+    fn heartbeat(&mut self, db: &Arc<DbStore>, turn_id: TurnId, lease_token: uuid::Uuid) {
+        if self
+            .heartbeat
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
+        let db = db.clone();
+        self.heartbeat = Some(tokio::spawn(async move {
+            let now = Utc::now();
+            let _ = db
+                .heartbeat_turn_lease(
+                    tidebreak_core::TurnId(turn_id.0),
+                    lease_token,
+                    now,
+                    now + chrono::Duration::seconds(60),
+                )
+                .await;
+        }));
+    }
+
+    /// Wait for every write to land.
+    ///
+    /// Call it once the legs and the control calls have finished. The tasks
+    /// run on their own, but they queue for the same writer, so a future on
+    /// this task that still held it would keep them waiting.
+    async fn settle(&mut self) {
+        for task in [self.child_process.take(), self.heartbeat.take()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = task.await;
+        }
+    }
+}
+
 /// How a wait for the workspace's turn lock ended.
 ///
 /// The wait keeps answering control commands: a queued turn can sit on a
@@ -2380,6 +2460,7 @@ async fn continue_parked_turn(
 
     let mut next_resume: Option<(String, tidebreak_harness::ResumeInput)>;
     let mut pid_changes = engine.child_pid_changes();
+    let mut side_writes = SideWrites::default();
     let mut controls: FuturesUnordered<BoxFuture<'_, ControlFlow>> = FuturesUnordered::new();
     let mut interrupted = false;
     let mut commands_closed = false;
@@ -2465,7 +2546,7 @@ async fn continue_parked_turn(
                 pid = next_child_pid(pid_changes.as_mut()) => {
                     if session.child_pid != pid {
                         record_child_process(session, pid);
-                        let _ = save_session(db, session).await;
+                        side_writes.child_process(db, session);
                     }
                 }
             }
@@ -2519,6 +2600,7 @@ async fn continue_parked_turn(
         }
     };
     while controls.next().await.is_some() {}
+    side_writes.settle().await;
     close_open_turn(session, engine, sink, turn, run, interrupted, None).await
 }
 
@@ -2960,7 +3042,10 @@ fn start_turn<'b, 'w: 'b>(
         if *worktree.quiesce.borrow() {
             return Err(WorkerError::UpdateQuiesced);
         }
-        if let Some(workspace_id) = session.workspace_id {
+        // The repository this read names is also the one the turn's memory
+        // comes from. Nothing after the sender hears the turn is accepted may
+        // fail, so the memory step below reuses it rather than reading again.
+        let repo_id = if let Some(workspace_id) = session.workspace_id {
             let workspace = get_workspace(&sink.db, &session.owner, workspace_id)
                 .await
                 .map_err(|error| WorkerError::Failed(error.to_string()))?
@@ -2976,7 +3061,10 @@ fn start_turn<'b, 'w: 'b>(
                     workspace.status.as_str()
                 )));
             }
-        }
+            Some(workspace.repo_id)
+        } else {
+            None
+        };
 
         // An internal turn that parked for a client or an agent run hands its
         // lease back and leaves the session idle, but the turn is still open. A
@@ -3161,6 +3249,11 @@ fn start_turn<'b, 'w: 'b>(
         // is in the journal. The sender hears that now and follows the rest on
         // the event bus; holding its request until the engine finished kept a
         // client's socket and draft waiting on a reply it did not need.
+        //
+        // Nothing below may fail. An error returned from here on would reach
+        // no sender and journal no end, leaving a running turn that nothing
+        // finishes. Memory degrades to none instead, and its repository came
+        // from the workspace read above.
         if let Some(reply) = accepted.and_then(Option::take) {
             let _ = reply.send(Ok(turn.clone()));
         }
@@ -3173,13 +3266,6 @@ fn start_turn<'b, 'w: 'b>(
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
         let memory_dir = if memory_enabled {
-            let repo_id = match session.workspace_id {
-                Some(workspace_id) => get_workspace(db, &session.owner, workspace_id)
-                    .await
-                    .map_err(|err| WorkerError::Failed(err.to_string()))?
-                    .map(|workspace| workspace.repo_id),
-                None => None,
-            };
             // Memory is an aid, not a precondition. A store or filesystem fault
             // stays in diagnostics and does not interrupt the turn or transcript.
             match super::memory::materialize_session_memory(
@@ -3270,8 +3356,12 @@ async fn drive_turn_inner(
     // "the engine is gone" — which would re-attach a worker to a worktree a
     // live child is still writing to.
     let mut pid_changes = engine.child_pid_changes();
-    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + TURN_LEASE_HEARTBEAT,
+        TURN_LEASE_HEARTBEAT,
+    );
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut side_writes = SideWrites::default();
     // Control commands run concurrently with the turn. Awaiting one inline
     // would stop draining the child's stdout — during an interrupt's grace
     // period that is what turns a clean abort into a kill.
@@ -3329,20 +3419,12 @@ async fn drive_turn_inner(
                 pid = next_child_pid(pid_changes.as_mut()) => {
                     if session.child_pid != pid {
                         record_child_process(session, pid);
-                        let _ = save_session(db, session).await;
+                        side_writes.child_process(db, session);
                     }
                 }
                 _ = heartbeat.tick() => {
                     if let Some(lease_token) = lease_token {
-                        let now = Utc::now();
-                        let _ = db
-                            .heartbeat_turn_lease(
-                                tidebreak_core::TurnId(turn.id.0),
-                                lease_token,
-                                now,
-                                now + chrono::Duration::seconds(60),
-                            )
-                            .await;
+                        side_writes.heartbeat(db, turn.id, lease_token);
                     }
                 }
             }
@@ -3409,6 +3491,9 @@ async fn drive_turn_inner(
     // A control command still in flight has a caller waiting on its reply.
     // Dropping it here would answer them with a dead channel.
     while controls.next().await.is_some() {}
+    // Nothing on this task holds the writer now, so the side writes can land
+    // before the turn closes and a late one cannot reach the next turn.
+    side_writes.settle().await;
     finish_turn(
         session,
         engine,
