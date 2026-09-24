@@ -4432,11 +4432,13 @@ export function parseHarnessDoctorEntry(
       "latest_version",
       "update_available",
       "sign_in_command",
+      "review_blocked",
     ]) ||
     !isMember(value.kind, HARNESS_KINDS) ||
     typeof value.found !== "boolean" ||
     !optionalLine(value.path) ||
     !optionalLine(value.sign_in_command) ||
+    !optionalBlock(value.review_blocked) ||
     !optionalLine(value.version) ||
     !optionalLine(value.pinned_version) ||
     !optionalLine(value.managed_version) ||
@@ -4498,6 +4500,9 @@ export function parseHarnessDoctorEntry(
     // A server that predates the Sign in action offers none.
     ...(value.sign_in_command
       ? { sign_in_command: value.sign_in_command }
+      : {}),
+    ...(value.review_blocked !== undefined
+      ? { review_blocked: value.review_blocked }
       : {}),
   };
 }

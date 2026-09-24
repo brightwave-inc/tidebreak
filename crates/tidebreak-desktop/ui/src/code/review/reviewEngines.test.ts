@@ -64,6 +64,24 @@ describe("which engines can review", () => {
         }),
       ),
     ).toBe("Can't review read-only");
+    // Grok reviews under its OS sandbox; where the server found it cannot
+    // apply, Grok is listed but not offered, and never started on.
+    const sandboxless = entry({
+      kind: "grok",
+      caps: planless,
+      review_blocked:
+        "Grok CLI can't apply its read-only sandbox on this machine. Grok said: Landlock is not supported by this kernel",
+    });
+    expect(reviewUnavailableReason(sandboxless)).toBe(
+      "No read-only sandbox here",
+    );
+    expect(
+      defaultReviewEngine(
+        reviewEngineChoices([entry({ kind: "claude_code" }), sandboxless]),
+        "claude_code",
+        "grok",
+      ),
+    ).toEqual({ kind: "claude_code", sameAsAuthor: true });
     expect(
       reviewEngineChoices([
         entry({ kind: "internal" }),

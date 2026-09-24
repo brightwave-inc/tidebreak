@@ -827,13 +827,18 @@ was running, and the desktop says it stopped.
 Read-only holds in layers:
 
 - The engine loses its tools for writing files and running commands, whatever
-  the person's own rules allow. Claude Code runs in plan mode with Bash,
-  Edit, Write, and NotebookEdit disallowed, leaving Read, Grep, and Glob.
-  Codex runs in its read-only OS sandbox. opencode runs its plan agent with
-  deny rules for `edit` and `bash`. Grok CLI has no plan mode, so it runs in
-  Ask under its `read-only` sandbox profile, which Grok applies with the OS
-  where it can. An engine with neither a plan mode nor approvals Tidebreak
-  can refuse is not offered.
+  the person's own rules or MCP servers allow. Claude Code runs in plan mode
+  with Bash, Edit, Write, and NotebookEdit disallowed and no MCP servers,
+  leaving Read, Grep, and Glob. Codex runs in its read-only OS sandbox.
+  opencode runs its plan agent with session rules that deny every tool but
+  reading, the tools of the person's own MCP servers included, since
+  opencode has no switch that keeps a configured MCP server from loading.
+  Grok CLI has no plan mode, so it runs in Ask under its `read-only` sandbox
+  profile, with `sandbox.auto_allow_bash` off. Before a Grok review starts,
+  Tidebreak checks that Grok can apply the profile on this machine; where it
+  cannot, the review is refused with Grok's reason and Review changes lists
+  Grok as unavailable. An engine with neither a plan mode nor approvals
+  Tidebreak can refuse is not offered.
 - Every approval the engine asks for is refused, with feedback to report the
   change as a finding instead. The reviewer gets no connected apps, browser,
   computer use, SSH agent, or forge credentials, and the repository's own

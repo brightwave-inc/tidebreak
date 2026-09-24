@@ -3654,7 +3654,14 @@ update_available: boolean,
  * (`claude auth login`). Absent for an engine with nothing to sign in
  * to. The Sign in action runs it with the pinned binary.
  */
-sign_in_command?: string, };
+sign_in_command?: string,
+/**
+ * Why this engine cannot review a workspace's changes read-only on this
+ * machine, when it cannot, in the person's terms: Grok CLI with no
+ * sandbox it can apply here, for one. Absent when nothing stands in
+ * the way. Review changes lists the engine but does not offer it.
+ */
+review_blocked?: string, };
 
 /**
  * Doctor report for every registered engine adapter.

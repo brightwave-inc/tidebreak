@@ -326,13 +326,26 @@ export const OnlyTheAuthorIsReady: Story = {
 
 /**
  * The engine list says why an engine cannot review, so the reason is in
- * view before anything runs: one is not installed, one is not signed in.
+ * view before anything runs: one is not installed, and Grok CLI, signed in,
+ * has no read-only sandbox it can apply on this machine, so a review there
+ * would not be read-only and is not offered.
  */
 export const WhyAnEngineIsUnavailable: Story = {
   args: {
     workspaceId: "ws-review-unavailable",
     harnesses: harnessDoctor.harnesses.map((entry) =>
-      entry.kind === "opencode" ? { ...entry, found: false } : entry,
+      entry.kind === "opencode"
+        ? { ...entry, found: false }
+        : entry.kind === "grok"
+          ? {
+              ...entry,
+              authenticated: true,
+              // An ACP release: it could review in Ask, but not here.
+              caps: { ...entry.caps, structured_approvals: "supported" },
+              review_blocked:
+                "Grok CLI can't apply its read-only sandbox on this machine. Grok said: Landlock is not supported by this kernel",
+            }
+          : entry,
     ),
   },
   loaders: [seed("ws-review-unavailable", null)],
@@ -354,7 +367,9 @@ export const WhyAnEngineIsUnavailable: Story = {
       body.getByRole("option", { name: /opencode\s*Not installed/ }),
     ).toHaveAttribute("aria-disabled", "true");
     await expect(
-      body.getByRole("option", { name: /Grok CLI\s*Needs a sign-in/ }),
+      body.getByRole("option", {
+        name: /Grok CLI\s*No read-only sandbox here/,
+      }),
     ).toHaveAttribute("aria-disabled", "true");
   },
 };

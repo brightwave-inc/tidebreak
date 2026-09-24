@@ -44,6 +44,9 @@ export function reviewUnavailableReason(
     return "Needs a sign-in";
   }
   if (!reviewPermissionMode(entry.caps)) return "Can't review read-only";
+  // Something this machine lacks, such as the sandbox Grok CLI reviews
+  // under: the server refuses the review, so the form does not offer it.
+  if (entry.review_blocked) return "No read-only sandbox here";
   return null;
 }
 
