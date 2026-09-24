@@ -42,15 +42,15 @@ const E2B_SANDBOX_BASE: &str = "https://sandbox.e2b.app";
 ///
 /// The ID is what the published, version-suffixed alias — kept on its own
 /// line so the publish workflow can rewrite both together —
-/// `tidebreak-documents-v0-26-0`
+/// `tidebreak-documents-main-20260924-3253a4d-r1518`
 /// resolves to. It is currently built from
-/// `ghcr.io/brightwave-inc/tidebreak-sandbox-agent-documents:v0.26.0`
-/// (`sha256:dd22da7a3c5b1f315e888da902e7a46ae034585e2ab5c09c0ae4588a69f158a2`),
+/// `ghcr.io/brightwave-inc/tidebreak-sandbox-agent-documents:main-20260924-3253a4d-r1518`
+/// (`sha256:c657e5599ac734856c2e912e74b94227d3e196ce8765ce800056713fbe236c62`),
 /// the same ref recorded in `crates/tidebreak-sandbox-agent/e2b/e2b.Dockerfile`.
 /// Publishing a new image version publishes a new alias with a new ID, and the
 /// publish workflow's pin PR moves this constant with it — that directory's
 /// README has the procedure.
-const E2B_TEMPLATE: &str = "yarxjy39quzg6wm78u1a";
+const E2B_TEMPLATE: &str = "aix1bq97e266dpdjh1sz";
 
 /// E2B's own public code-interpreter template, used only when the Tidebreak
 /// template cannot be resolved. Degraded but working: document skills fall back
