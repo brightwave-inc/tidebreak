@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { type ReactNode, useEffect, useMemo } from "react";
-import { expect, fn, userEvent, within } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 
 import { HttpError } from "@/api/client";
 import type { CodeCheckpointRestorePreview } from "@/api/types";
@@ -71,10 +71,23 @@ function TranscriptFrame({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * Menus, dialogs, and toasts render in a portal on the document body, not in
+ * the story root, so a play function looks for them there.
+ */
+function page(canvasElement: HTMLElement) {
+  return within(canvasElement.ownerDocument.body);
+}
+
+/** Wait until `find` returns an element that has finished opening. */
+async function waitUntilShown(find: () => HTMLElement) {
+  await waitFor(() => expect(find()).toBeVisible());
+}
+
 async function openTurnMenu(canvasElement: HTMLElement) {
   const canvas = within(canvasElement);
   await userEvent.click(canvas.getByRole("button", { name: "Turn actions" }));
-  await within(document.body).findByRole("menu");
+  await page(canvasElement).findByRole("menu");
 }
 
 /** The restore sits in the turn's own menu, beside forking. */
@@ -90,11 +103,11 @@ export const RestoreOffered: Story = {
   ),
   play: async ({ canvasElement }) => {
     await openTurnMenu(canvasElement);
-    await expect(
-      within(document.body).getByRole("menuitem", {
+    await waitUntilShown(() =>
+      page(canvasElement).getByRole("menuitem", {
         name: "Restore to before this turn",
       }),
-    ).toBeVisible();
+    );
   },
 };
 
@@ -113,9 +126,9 @@ export const RestoreRefusedWhileATurnRuns: Story = {
   ),
   play: async ({ canvasElement }) => {
     await openTurnMenu(canvasElement);
-    await expect(
-      within(document.body).getByText(TURN_RUNNING_REASON),
-    ).toBeVisible();
+    await waitUntilShown(() =>
+      page(canvasElement).getByText(TURN_RUNNING_REASON),
+    );
   },
 };
 
@@ -189,10 +202,9 @@ export const RestoreConfirm: Story = {
       options={restoreConfirmation(RESTORE_PREVIEW, { turnOrdinal: 2 })}
     />
   ),
-  play: async () => {
-    await expect(
-      await within(document.body).findByRole("alertdialog"),
-    ).toBeVisible();
+  play: async ({ canvasElement }) => {
+    await page(canvasElement).findByRole("alertdialog");
+    await waitUntilShown(() => page(canvasElement).getByRole("alertdialog"));
   },
 };
 
@@ -370,10 +382,9 @@ export const DiscardConfirm: Story = {
       })}
     />
   ),
-  play: async () => {
-    await expect(
-      await within(document.body).findByRole("alertdialog"),
-    ).toBeVisible();
+  play: async ({ canvasElement }) => {
+    await page(canvasElement).findByRole("alertdialog");
+    await waitUntilShown(() => page(canvasElement).getByRole("alertdialog"));
   },
 };
 
@@ -386,11 +397,11 @@ export const FileActionsMenu: Story = {
         name: "Actions for src/parser.rs",
       }),
     );
-    await expect(
-      await within(document.body).findByRole("menuitem", {
-        name: "Discard uncommitted changes",
-      }),
-    ).toBeVisible();
+    const discard = { name: "Discard uncommitted changes" };
+    await page(canvasElement).findByRole("menuitem", discard);
+    await waitUntilShown(() =>
+      page(canvasElement).getByRole("menuitem", discard),
+    );
   },
 };
 
@@ -462,10 +473,9 @@ export const RevertHunkConfirm: Story = {
       )}
     />
   ),
-  play: async () => {
-    await expect(
-      await within(document.body).findByRole("alertdialog"),
-    ).toBeVisible();
+  play: async ({ canvasElement }) => {
+    await page(canvasElement).findByRole("alertdialog");
+    await waitUntilShown(() => page(canvasElement).getByRole("alertdialog"));
   },
 };
 
@@ -495,10 +505,9 @@ export const RestoreConfirmOtherAgents: Story = {
       )}
     />
   ),
-  play: async () => {
-    await expect(
-      await within(document.body).findByRole("alertdialog"),
-    ).toBeVisible();
+  play: async ({ canvasElement }) => {
+    await page(canvasElement).findByRole("alertdialog");
+    await waitUntilShown(() => page(canvasElement).getByRole("alertdialog"));
   },
 };
 
@@ -514,10 +523,9 @@ export const RestoreBlocked: Story = {
       })}
     />
   ),
-  play: async () => {
-    await expect(
-      await within(document.body).findByRole("alertdialog"),
-    ).toBeVisible();
+  play: async ({ canvasElement }) => {
+    await page(canvasElement).findByRole("alertdialog");
+    await waitUntilShown(() => page(canvasElement).getByRole("alertdialog"));
   },
 };
 
@@ -626,7 +634,8 @@ async function revertTheSecondHunk(canvasElement: HTMLElement) {
       name: "Revert the change at lines 41 to 44 of src/parser.rs",
     }),
   );
-  const dialog = await within(document.body).findByRole("alertdialog");
+  const dialog = await page(canvasElement).findByRole("alertdialog");
+  await waitUntilShown(() => dialog);
   await userEvent.click(
     within(dialog).getByRole("button", { name: "Revert change" }),
   );
@@ -643,9 +652,10 @@ export const RevertConflict: Story = {
   render: () => <RevertFlow refusal={REVERT_CONFLICT} />,
   play: async ({ canvasElement }) => {
     await revertTheSecondHunk(canvasElement);
-    await expect(
-      await within(document.body).findByText(/nothing was reverted/),
-    ).toBeVisible();
+    await page(canvasElement).findByText(/nothing was reverted/);
+    await waitUntilShown(() =>
+      page(canvasElement).getByText(/nothing was reverted/),
+    );
   },
 };
 
@@ -660,9 +670,10 @@ export const DiffChanged: Story = {
   render: () => <RevertFlow refusal={DIFF_CHANGED} />,
   play: async ({ canvasElement }) => {
     await revertTheSecondHunk(canvasElement);
-    await expect(
-      await within(document.body).findByText(/The diff changed since/),
-    ).toBeVisible();
+    await page(canvasElement).findByText(/The diff changed since/);
+    await waitUntilShown(() =>
+      page(canvasElement).getByText(/The diff changed since/),
+    );
   },
 };
 
@@ -700,19 +711,19 @@ export const WorktreeChanged: Story = {
   render: () => <RestoreFlow />,
   play: async ({ canvasElement }) => {
     await openTurnMenu(canvasElement);
-    await userEvent.click(
-      within(document.body).getByRole("menuitem", {
-        name: "Restore to before this turn",
-      }),
+    const restore = { name: "Restore to before this turn" };
+    await waitUntilShown(() =>
+      page(canvasElement).getByRole("menuitem", restore),
     );
-    const dialog = await within(document.body).findByRole("alertdialog");
+    await userEvent.click(page(canvasElement).getByRole("menuitem", restore));
+    const dialog = await page(canvasElement).findByRole("alertdialog");
+    await waitUntilShown(() => dialog);
     await userEvent.click(
       within(dialog).getByRole("button", { name: "Restore" }),
     );
-    await expect(
-      await within(document.body).findByText(
-        "The workspace changed while you were reviewing the restore.",
-      ),
-    ).toBeVisible();
+    const refused =
+      "The workspace changed while you were reviewing the restore.";
+    await page(canvasElement).findByText(refused);
+    await waitUntilShown(() => page(canvasElement).getByText(refused));
   },
 };

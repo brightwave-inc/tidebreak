@@ -318,6 +318,21 @@ export const allowlist = [
     reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",
   },
   {
+    story: "code-undo-and-source-control--file-actions-menu",
+    rule: "aria-hidden-focus",
+    reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",
+  },
+  {
+    story: "code-undo-and-source-control--restore-offered",
+    rule: "aria-hidden-focus",
+    reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",
+  },
+  {
+    story: "code-undo-and-source-control--restore-refused-while-a-turn-runs",
+    rule: "aria-hidden-focus",
+    reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",
+  },
+  {
     story: "foundations-primitives--*",
     rule: "aria-hidden-focus",
     reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",
