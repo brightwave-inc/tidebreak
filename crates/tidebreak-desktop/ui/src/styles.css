@@ -17,6 +17,8 @@
 @source inline("bg-icon-{blue,cyan,violet,amber,rose,green}");
 
 @custom-variant dark (&:where(.dark, .dark *));
+/* Short windows (the 720x480 minimum), where the home starters become compact rows. */
+@custom-variant short (@media (max-height: 560px));
 
 :root {
   /* --- Gateway design system (oklch, light mode) --- */
@@ -786,17 +788,6 @@ body {
     .welcome-prompt {
       min-height: 2.25rem;
       height: 2.25rem;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0 0.75rem;
-    }
-
-    .welcome-prompt-icon {
-      width: 1rem;
-      height: 1rem;
-      background: transparent;
-      box-shadow: none;
-      border-radius: 0;
     }
 
     .welcome-prompt-icon svg {
