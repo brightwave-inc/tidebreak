@@ -1,4 +1,10 @@
-import { useId, useState, type KeyboardEvent } from "react";
+import {
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { Pencil, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -7,11 +13,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { usesCommandModifier } from "@/ShellShortcuts";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "../interactive";
-import {
-  commentLinesLabel,
-  type ReviewComment,
-  type ReviewCommentLine,
-} from "./reviewComments";
+import { STATUS_CHIP } from "../statusTone";
+import type { ReviewComment, ReviewCommentLine } from "./reviewComments";
 
 const SUBMIT_CHORD =
   typeof navigator !== "undefined" && usesCommandModifier(navigator.userAgent)
@@ -26,16 +29,29 @@ const SUBMIT_CHORD =
 const COMMENT_FRAME =
   "sticky left-0 box-border w-[var(--diff-viewport,100%)] max-w-full px-2 py-1.5 font-sans";
 
-/** Writing a new comment on the picked lines, or rewriting one. */
+/**
+ * Writing a new comment on the picked lines, or rewriting one. What is typed
+ * goes to `onDraftChange` as well, so an editor that remounts, because a
+ * refresh moved its lines into another stretch of the diff, starts from it.
+ */
 export function CommentComposer({
-  lines,
+  label,
+  quote,
+  note,
   initial = "",
+  onDraftChange,
   submitLabel,
   onSubmit,
   onCancel,
 }: {
-  lines: readonly ReviewCommentLine[];
+  /** The lines it is on, such as "Line 12". */
+  label: string;
+  /** The lines as they were, shown when they are not in the diff to see. */
+  quote?: readonly ReviewCommentLine[];
+  /** A sentence under the quote, such as why it is shown. */
+  note?: string;
   initial?: string;
+  onDraftChange?: (text: string) => void;
   submitLabel: string;
   onSubmit: (body: string) => void;
   onCancel: () => void;
@@ -44,6 +60,16 @@ export function CommentComposer({
   const id = useId();
   const hintId = `${id}-hint`;
   const ready = body.trim().length > 0;
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Back after a remount with text in it: the caret goes after the text.
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (textarea && initial) {
+      textarea.setSelectionRange(initial.length, initial.length);
+    }
+    // Only on mount: later text is the reader's own.
+  }, []);
 
   function submit() {
     if (ready) onSubmit(body.trim());
@@ -67,9 +93,12 @@ export function CommentComposer({
     <div className={COMMENT_FRAME} data-diff-comment="editor">
       <div className="bg-background border-border flex flex-col gap-2 rounded-lg border p-2.5">
         <label htmlFor={id} className="text-foreground text-xs font-medium">
-          Comment on {commentLinesLabel(lines).toLowerCase()}
+          Comment on {label.toLowerCase()}
         </label>
+        {quote && <CommentQuote lines={quote} />}
+        {note && <p className="text-muted-foreground text-xs">{note}</p>}
         <Textarea
+          ref={textareaRef}
           id={id}
           autoFocus
           rows={3}
@@ -77,7 +106,10 @@ export function CommentComposer({
           aria-describedby={hintId}
           placeholder="What should change here?"
           className="min-h-18 resize-y text-sm"
-          onChange={(event) => setBody(event.target.value)}
+          onChange={(event) => {
+            setBody(event.target.value);
+            onDraftChange?.(event.target.value);
+          }}
           onKeyDown={onKeyDown}
         />
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -99,24 +131,28 @@ export function CommentComposer({
 }
 
 /**
- * One pending comment under the lines it is about. A comment whose lines
- * the diff no longer shows carries its own quote, so it still reads.
+ * One pending comment under the lines it is about. An outdated comment, whose
+ * code changed after it was written, sits at the top of the file instead,
+ * with its quote, so it still reads.
  */
 export function CommentCard({
   comment,
+  label,
   sending,
-  showQuote = false,
+  outdated = false,
   onEdit,
   onDelete,
 }: {
   comment: ReviewComment;
+  /** The lines it covers where it is shown, such as "Line 12". */
+  label: string;
   sending: boolean;
-  showQuote?: boolean;
+  outdated?: boolean;
   onEdit?: () => void;
   onDelete?: () => void;
 }) {
-  const label = commentLinesLabel(comment.lines);
   const headingId = useId();
+  const unquoted = comment.unquoted ?? 0;
   return (
     <div className={COMMENT_FRAME} data-diff-comment="pending">
       <article
@@ -131,6 +167,16 @@ export function CommentCard({
           >
             {label}
           </span>
+          {outdated && (
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-1.5 text-2xs leading-4 font-medium",
+                STATUS_CHIP.warning,
+              )}
+            >
+              Outdated
+            </span>
+          )}
           <span className="text-muted-foreground flex min-w-0 items-center gap-1 truncate text-xs">
             {sending ? (
               <>
@@ -164,7 +210,13 @@ export function CommentCard({
             </span>
           )}
         </header>
-        {showQuote && <CommentQuote lines={comment.lines} />}
+        {outdated && <CommentQuote lines={comment.lines} />}
+        {unquoted > 0 && (
+          <p className="text-muted-foreground text-xs">
+            The agent sees the first {comment.lines.length} of{" "}
+            {comment.lines.length + unquoted} lines quoted.
+          </p>
+        )}
         <p className="text-foreground text-sm break-words whitespace-pre-wrap">
           {comment.body}
         </p>

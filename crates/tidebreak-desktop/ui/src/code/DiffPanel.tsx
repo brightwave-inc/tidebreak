@@ -144,6 +144,9 @@ export function DiffPanel({
     workspaceId: comments ? workspaceId : undefined,
     turnId,
     onDelete: onDeleteComment,
+    // A diff cut at its size cap cannot tell a line past the cut from one
+    // that changed, so it leaves the comments' places as they were.
+    relocate: Boolean(payload && !payload.truncated),
   });
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);

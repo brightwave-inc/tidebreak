@@ -18,7 +18,9 @@ import { diffRows } from "./diffModel";
 import { useDiffPreferences } from "./diffPreferences";
 import { DIFF_CHUNK_ROWS, DiffView } from "./DiffView";
 import { usePendingReviewStore } from "./pendingReview";
+import { messageWithReviewComments } from "./reviewComments";
 import { loadLanguage } from "./syntaxHighlight";
+import { useWorkspaceDiffReview } from "./useWorkspaceDiffReview";
 import {
   fileDiff,
   longFileDiff,
@@ -247,6 +249,153 @@ describe("line comments", () => {
       await screen.findByRole("region", { name: "Changes to src/queue.ts" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Comment on/ })).toBeNull();
+  });
+});
+
+describe("comments follow their code through a refresh", () => {
+  // The agent keeps working while the reader reviews: first it adds a line
+  // above the commented one, then it rewrites the commented line itself.
+  const hunk = (lines: readonly string[]) =>
+    fileDiff("src/limits.ts", [{ oldStart: 8, newStart: 8, lines }]);
+  const WRITTEN = hunk([
+    " const i = 1;",
+    " const j = 2;",
+    "-const K = 3;",
+    "+const K = 30;",
+    "+const L = 4;",
+    " const m = 5;",
+  ]);
+  const LINE_ADDED_ABOVE = hunk([
+    " const i = 1;",
+    "+const inserted = 0;",
+    " const j = 2;",
+    "-const K = 3;",
+    "+const K = 30;",
+    "+const L = 4;",
+    " const m = 5;",
+  ]);
+  const LINE_REWRITTEN = hunk([
+    " const i = 1;",
+    "+const inserted = 0;",
+    " const j = 2;",
+    "-const K = 3;",
+    "+const K = 300;",
+    "+const L = 4;",
+    " const m = 5;",
+  ]);
+
+  function ReviewedDiff({ diff }: { diff: string }) {
+    const reviewFor = useWorkspaceDiffReview({
+      workspaceId: "ws-1",
+      turnId: undefined,
+      onDelete: (id) => usePendingReviewStore.getState().remove("ws-1", id),
+    });
+    const group = groupUnifiedDiff(diff)[0]!;
+    return (
+      <DiffView
+        group={group}
+        layout="unified"
+        ignoreWhitespace={false}
+        review={reviewFor?.(group.path)}
+      />
+    );
+  }
+
+  /** The text of the diff row a comment or editor sits under. */
+  function rowAbove(element: HTMLElement): string {
+    const frame = element.closest<HTMLElement>("[data-diff-comment]")!;
+    let row = frame.previousElementSibling;
+    while (row && !row.matches("[data-row]")) row = row.previousElementSibling;
+    return row?.querySelector("[data-diff-code]")?.textContent ?? "";
+  }
+
+  it("keeps an open comment's text, and its lines, when a line lands above them", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ReviewedDiff diff={WRITTEN} />);
+    await user.click(
+      screen.getByRole("button", { name: "Comment on line 10" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "Comment on line 10" }),
+      "Keep K small.",
+    );
+
+    rerender(<ReviewedDiff diff={LINE_ADDED_ABOVE} />);
+    const editor = screen.getByRole("textbox", { name: "Comment on line 11" });
+    expect(editor).toHaveValue("Keep K small.");
+    expect(rowAbove(editor)).toBe("const K = 30;");
+    // The picked line stays picked, on its new number.
+    const picked = document.querySelectorAll(
+      "[data-diff-view] [data-selected]",
+    );
+    expect([...picked].map((row) => row.textContent)).toEqual([
+      expect.stringContaining("const K = 30;"),
+    ]);
+
+    fireEvent.keyDown(editor, { key: "Enter", metaKey: true });
+    expect(comments()).toEqual([
+      expect.objectContaining({
+        body: "Keep K small.",
+        lines: [{ kind: "add", oldNo: null, newNo: 11, text: "const K = 30;" }],
+      }),
+    ]);
+    expect(comments()[0]?.outdated).toBeUndefined();
+  });
+
+  it("moves a saved comment with its line, and marks it outdated once the line changes", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ReviewedDiff diff={WRITTEN} />);
+    await user.click(
+      screen.getByRole("button", { name: "Comment on line 10" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "Comment on line 10" }),
+      "Keep K small.",
+    );
+    await user.click(screen.getByRole("button", { name: "Add comment" }));
+
+    rerender(<ReviewedDiff diff={LINE_ADDED_ABOVE} />);
+    const card = await screen.findByRole("article", { name: "Line 11" });
+    expect(rowAbove(card)).toBe("const K = 30;");
+    // The review, and so the message, names the line where it is now.
+    await waitFor(() => expect(comments()[0]?.lines[0]?.newNo).toBe(11));
+    expect(messageWithReviewComments("", comments())).toContain('lines="11"');
+
+    rerender(<ReviewedDiff diff={LINE_REWRITTEN} />);
+    const outdated = await screen.findByRole("article", { name: "Line 11" });
+    expect(outdated.closest("[data-diff-outdated]")).not.toBeNull();
+    expect(within(outdated).getByText("Outdated")).toBeVisible();
+    // It shows the line it was written on, not whatever sits there now.
+    expect(outdated).toHaveTextContent("const K = 30;");
+    await waitFor(() => expect(comments()[0]?.outdated).toBe(true));
+    expect(messageWithReviewComments("", comments())).toContain(
+      'outdated="true"',
+    );
+  });
+
+  it("keeps what was typed when the lines change while the editor is open", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ReviewedDiff diff={WRITTEN} />);
+    await user.click(
+      screen.getByRole("button", { name: "Comment on line 10" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "Comment on line 10" }),
+      "Keep K small.",
+    );
+
+    rerender(<ReviewedDiff diff={LINE_REWRITTEN} />);
+    const editor = screen.getByRole("textbox", { name: "Comment on line 10" });
+    expect(editor).toHaveValue("Keep K small.");
+    expect(editor.closest("[data-diff-outdated]")).not.toBeNull();
+    fireEvent.keyDown(editor, { key: "Enter", metaKey: true });
+    expect(comments()).toEqual([
+      expect.objectContaining({
+        body: "Keep K small.",
+        outdated: true,
+        lines: [{ kind: "add", oldNo: null, newNo: 10, text: "const K = 30;" }],
+      }),
+    ]);
   });
 });
 

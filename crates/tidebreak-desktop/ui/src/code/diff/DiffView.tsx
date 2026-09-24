@@ -18,6 +18,13 @@ import {
 import { cn } from "@/lib/utils";
 import { STATUS_TEXT } from "../statusTone";
 import type { DiffFileGroup } from "../unifiedDiff";
+import {
+  anchorRows,
+  indexRows,
+  placeComment,
+  type CommentAnchor,
+  type CommentPlacement,
+} from "./commentAnchor";
 import { CommentCard, CommentComposer } from "./DiffComments";
 import {
   buildDiffFileModel,
@@ -31,7 +38,13 @@ import {
   type TextRange,
 } from "./diffModel";
 import { SPLIT_MIN_WIDTH, type DiffLayout } from "./diffPreferences";
-import type { ReviewComment, ReviewCommentLine } from "./reviewComments";
+import type { CommentRelocation } from "./pendingReview";
+import {
+  commentLinesLabel,
+  spansOf,
+  type CommentLineSpans,
+  type ReviewComment,
+} from "./reviewComments";
 import {
   FileSyntax,
   useLanguageReady,
@@ -64,14 +77,27 @@ const CHUNKS_PER_FRAME = 1;
 /** A hunk this small is colored during render, so short diffs never flash plain. */
 const SYNC_HIGHLIGHT_LINES = 400;
 
+/** A comment as the view writes it: its lines, and what finds them again. */
+export type NewDiffComment = Pick<
+  ReviewComment,
+  "lines" | "unquoted" | "span" | "context" | "outdated"
+>;
+
 export type DiffReview = {
   /** Pending comments on this file, in the diff this view shows. */
   comments: readonly ReviewComment[];
   /** Which of them are riding a send right now. */
   sending: ReadonlySet<string>;
-  onAdd: (lines: ReviewCommentLine[], body: string) => void;
+  onAdd: (comment: NewDiffComment, body: string) => void;
   onEdit: (id: string, body: string) => void;
   onDelete: (id: string) => void;
+  /**
+   * Record where a comment's lines are now, or that they changed, so the
+   * message that carries it names the lines as they are. Absent where the
+   * diff shown is not the whole diff, which cannot tell a missing line from
+   * a changed one.
+   */
+  onRelocate?: (id: string, change: CommentRelocation) => void;
 };
 
 export type DiffViewProps = {
@@ -101,10 +127,25 @@ type Column = "unified" | "left" | "right";
 /** A line picked for a comment, from where the mouse went down to where it is. */
 type Selection = { anchor: RowAnchor; head: RowAnchor };
 
-/** The comment editor: a new comment on a range, or an existing one rewritten. */
+/**
+ * The comment editor: a new comment on the lines it was opened on, or an
+ * existing one rewritten. A new comment holds on to its lines' code, like a
+ * saved one, so a refresh while it is open moves it with them.
+ */
 type Editor =
-  | { kind: "new"; start: RowAnchor; end: RowAnchor }
+  | {
+      kind: "new";
+      id: string;
+      anchor: CommentAnchor & { span: CommentLineSpans };
+    }
   | { kind: "edit"; id: string };
+
+/** Where an open new-comment editor sits, for the chunk that draws it. */
+type EditorSlot = {
+  id: string;
+  display: number;
+  span: CommentLineSpans;
+};
 
 type Interaction = {
   review: DiffReview | null;
@@ -113,7 +154,15 @@ type Interaction = {
   submitNew: (body: string) => void;
   submitEdit: (id: string, body: string) => void;
   startEdit: (id: string) => void;
+  /** What was typed into an editor, kept across the remounts a refresh causes. */
+  draft: (key: string) => string | undefined;
+  keepDraft: (key: string, text: string) => void;
 };
+
+/** A saved comment under its lines, with the span it covers there now. */
+type PlacedComment = { comment: ReviewComment; span: CommentLineSpans };
+
+let editorCount = 0;
 
 const InteractionContext = createContext<Interaction | null>(null);
 
@@ -271,14 +320,30 @@ export function DiffView({
     null,
   );
   const dragAnchor = useRef<RowAnchor | null>(null);
+  /** Text typed into editors, by editor, so a remount never loses it. */
+  const drafts = useRef(new Map<string, string>());
+
+  const rowIndex = useMemo(() => indexRows(model.rows), [model.rows]);
+  const editorPlacement = useMemo<CommentPlacement | null>(
+    () =>
+      editor?.kind === "new"
+        ? placeComment(model.rows, editor.anchor, rowIndex)
+        : null,
+    [editor, model.rows, rowIndex],
+  );
 
   const selected = useMemo(() => {
-    if (!selection) return null;
-    const anchor = resolve(selection.anchor);
-    const head = resolve(selection.head);
-    if (anchor === null || head === null) return null;
-    return clampToHunk(model.rows, anchor, head);
-  }, [selection, resolve, model.rows]);
+    if (selection) {
+      const anchor = resolve(selection.anchor);
+      const head = resolve(selection.head);
+      if (anchor === null || head === null) return null;
+      return clampToHunk(model.rows, anchor, head);
+    }
+    // An open editor marks the lines it is about, wherever they are now.
+    return editorPlacement?.kind === "placed"
+      ? { start: editorPlacement.start, end: editorPlacement.end }
+      : null;
+  }, [selection, resolve, model.rows, editorPlacement]);
 
   // Which display row each comment, and the editor, sits under.
   const displayOf = useMemo(() => {
@@ -294,38 +359,79 @@ export function DiffView({
     return (row: number) => map.get(row) ?? 0;
   }, [layout, model.split]);
 
-  const commentPlacement = useMemo(() => {
-    const at = new Map<number, ReviewComment[]>();
-    const away: ReviewComment[] = [];
+  // Each comment finds its lines by their code, so a line the agent added
+  // above one never slides it onto the wrong line.
+  const placements = useMemo(() => {
+    const found = new Map<string, CommentPlacement>();
     for (const comment of review?.comments ?? []) {
-      const last = comment.lines.at(-1);
-      const anchor: RowAnchor | null = !last
-        ? null
-        : last.kind === "del"
-          ? last.oldNo === null
-            ? null
-            : { side: "old", line: last.oldNo }
-          : last.newNo === null
-            ? null
-            : { side: "new", line: last.newNo };
-      const row = anchor ? resolve(anchor) : null;
-      if (row === null) {
-        away.push(comment);
+      found.set(comment.id, placeComment(model.rows, comment, rowIndex));
+    }
+    return found;
+  }, [review?.comments, model.rows, rowIndex]);
+
+  const commentPlacement = useMemo(() => {
+    const at = new Map<number, PlacedComment[]>();
+    const outdated: ReviewComment[] = [];
+    for (const comment of review?.comments ?? []) {
+      const placement = placements.get(comment.id);
+      if (!placement || placement.kind === "outdated") {
+        outdated.push(comment);
         continue;
       }
-      const display = displayOf(row);
-      at.set(display, [...(at.get(display) ?? []), comment]);
+      const display = displayOf(placement.end);
+      at.set(display, [
+        ...(at.get(display) ?? []),
+        { comment, span: placement.span },
+      ]);
     }
-    return { at, away };
-  }, [review?.comments, resolve, displayOf]);
+    return { at, outdated };
+  }, [review?.comments, placements, displayOf]);
 
-  const editorRows = useMemo(() => {
+  // Tell the review where each comment's lines are now, so the message that
+  // carries it names them as they are, or says they changed.
+  const onRelocate = review?.onRelocate;
+  const reviewComments = review?.comments;
+  useEffect(() => {
+    if (!onRelocate || !reviewComments) return;
+    for (const comment of reviewComments) {
+      const placement = placements.get(comment.id);
+      if (!placement) continue;
+      if (placement.kind === "outdated") {
+        if (!comment.outdated) onRelocate(comment.id, { outdated: true });
+        continue;
+      }
+      const moved = placement.lines.some(
+        (line, index) =>
+          line.oldNo !== comment.lines[index]?.oldNo ||
+          line.newNo !== comment.lines[index]?.newNo,
+      );
+      const spanMoved =
+        comment.unquoted !== undefined &&
+        (comment.span?.lines !== placement.span.lines ||
+          comment.span?.oldLines !== placement.span.oldLines);
+      if (moved || spanMoved || comment.outdated) {
+        onRelocate(comment.id, {
+          lines: placement.lines,
+          ...(comment.unquoted !== undefined ? { span: placement.span } : {}),
+          outdated: false,
+        });
+      }
+    }
+  }, [placements, onRelocate, reviewComments]);
+
+  const editorSlot = useMemo<EditorSlot | null>(() => {
     if (!editor || editor.kind !== "new") return null;
-    const start = resolve(editor.start);
-    const end = resolve(editor.end);
-    if (start === null || end === null) return null;
-    return { start, end, display: displayOf(end) };
-  }, [editor, resolve, displayOf]);
+    if (editorPlacement?.kind !== "placed") return null;
+    return {
+      id: editor.id,
+      display: displayOf(editorPlacement.end),
+      span: editorPlacement.span,
+    };
+  }, [editor, editorPlacement, displayOf]);
+  // The lines an open editor was about changed under it: it moves to the top
+  // with the lines as they were, and keeps what was typed.
+  const editorOutdated =
+    editor?.kind === "new" && editorPlacement?.kind === "outdated";
 
   const reviewRef = useRef(review);
   reviewRef.current = review;
@@ -333,6 +439,8 @@ export function DiffView({
   rowsRef.current = model.rows;
   const editorRef = useRef(editor);
   editorRef.current = editor;
+  const editorPlacementRef = useRef(editorPlacement);
+  editorPlacementRef.current = editorPlacement;
   const rowByAnchorRef = useRef(rowByAnchor);
   rowByAnchorRef.current = rowByAnchor;
 
@@ -355,39 +463,72 @@ export function DiffView({
       },
       openEditor: ({ start, end }) => {
         const rows = rowsRef.current;
-        const first = rowAnchor(rows[start]!);
-        const last = rowAnchor(rows[end]!);
-        if (!first || !last) return;
-        setEditor({ kind: "new", start: first, end: last });
+        if (!isCodeRow(rows[start]!) || !isCodeRow(rows[end]!)) return;
+        editorCount += 1;
+        setSelection(null);
+        setEditor({
+          kind: "new",
+          id: `editor-${editorCount}`,
+          anchor: anchorRows(rows, start, end),
+        });
       },
       closeEditor: () => {
         const current = editorRef.current;
+        const placement = editorPlacementRef.current;
         setEditor(null);
         setSelection(null);
-        if (current?.kind === "new") {
-          const row = rowByAnchorRef.current.get(anchorKey(current.end));
-          if (row !== undefined) focusRow(row);
+        if (!current) return;
+        drafts.current.delete(
+          current.kind === "new" ? current.id : `edit:${current.id}`,
+        );
+        if (current.kind === "new" && placement?.kind === "placed") {
+          focusRow(placement.end);
         }
       },
       submitNew: (body) => {
         const current = editorRef.current;
         const target = reviewRef.current;
         if (!current || current.kind !== "new" || !target) return;
-        const start = rowByAnchorRef.current.get(anchorKey(current.start));
-        const end = rowByAnchorRef.current.get(anchorKey(current.end));
-        if (start === undefined || end === undefined) return;
-        const lines = quoteRows(rowsRef.current, start, end);
-        if (lines.length === 0) return;
-        target.onAdd(lines, body);
+        // Where the lines are at the moment of saving, not where they were
+        // when the editor opened.
+        const rows = rowsRef.current;
+        const placement = placeComment(rows, current.anchor);
+        if (placement.kind === "placed") {
+          const { span, ...anchor } = anchorRows(
+            rows,
+            placement.start,
+            placement.end,
+          );
+          target.onAdd(
+            { ...anchor, ...(anchor.unquoted ? { span } : {}) },
+            body,
+          );
+          focusRow(placement.end);
+        } else {
+          const { span, ...anchor } = current.anchor;
+          target.onAdd(
+            {
+              ...anchor,
+              ...(anchor.unquoted ? { span } : {}),
+              outdated: true,
+            },
+            body,
+          );
+        }
+        drafts.current.delete(current.id);
         setEditor(null);
         setSelection(null);
-        focusRow(end);
       },
       submitEdit: (commentId, body) => {
         reviewRef.current?.onEdit(commentId, body);
+        drafts.current.delete(`edit:${commentId}`);
         setEditor(null);
       },
       startEdit: (commentId) => setEditor({ kind: "edit", id: commentId }),
+      draft: (key) => drafts.current.get(key),
+      keepDraft: (key, text) => {
+        drafts.current.set(key, text);
+      },
     }),
     [focusRow, setSelection],
   );
@@ -645,13 +786,31 @@ export function DiffView({
             )}
           </p>
         )}
-        {commentPlacement.away.length > 0 && (
-          <div className="border-border-subtle border-b py-1 font-sans">
+        {(commentPlacement.outdated.length > 0 || editorOutdated) && (
+          <div
+            className="border-border-subtle border-b py-1 font-sans"
+            data-diff-outdated=""
+          >
             <p className="text-muted-foreground px-3 pt-1 text-xs">
-              On lines this diff no longer shows
+              The code these comments quote has changed since they were written.
             </p>
-            {commentPlacement.away.map((comment) => (
-              <CommentSlot key={comment.id} comment={comment} quote />
+            {editorOutdated && editor?.kind === "new" && (
+              <NewCommentSlot
+                key={`editor:${editor.id}`}
+                editorId={editor.id}
+                span={editor.anchor.span}
+                outdatedQuote={editor.anchor.lines}
+              />
+            )}
+            {commentPlacement.outdated.map((comment) => (
+              <CommentSlot
+                key={comment.id}
+                comment={comment}
+                span={spansOf(comment)}
+                editing={editor?.kind === "edit" && editor.id === comment.id}
+                sending={review?.sending.has(comment.id) ?? false}
+                outdated
+              />
             ))}
           </div>
         )}
@@ -677,7 +836,11 @@ export function DiffView({
                     : null
                 }
                 comments={commentsIn(commentPlacement.at, start, end)}
-                editor={editorIn(editor, editorRows, start, end)}
+                editor={
+                  editorSlot && inChunk(editorSlot.display, start, end)
+                    ? editorSlot
+                    : null
+                }
                 editingId={editor?.kind === "edit" ? editor.id : null}
                 sending={review?.sending}
               />
@@ -734,27 +897,6 @@ function clampToHunk(
   return { start: Math.min(anchor, to), end: Math.max(anchor, to) };
 }
 
-function quoteRows(
-  rows: readonly DiffRow[],
-  start: number,
-  end: number,
-): ReviewCommentLine[] {
-  const lines: ReviewCommentLine[] = [];
-  for (let index = start; index <= end; index += 1) {
-    const row = rows[index]!;
-    if (row.kind !== "add" && row.kind !== "del" && row.kind !== "context") {
-      continue;
-    }
-    lines.push({
-      kind: row.kind,
-      oldNo: row.oldNo,
-      newNo: row.newNo,
-      text: row.text,
-    });
-  }
-  return lines;
-}
-
 /** The selected rows a chunk shows, or null so an untouched chunk stays memoized. */
 function intersect(
   selected: { start: number; end: number } | null,
@@ -782,30 +924,20 @@ function intersect(
   return null;
 }
 
-const NO_COMMENTS: ReadonlyMap<number, readonly ReviewComment[]> = new Map();
+const NO_COMMENTS: ReadonlyMap<number, readonly PlacedComment[]> = new Map();
 
 function commentsIn(
-  at: ReadonlyMap<number, readonly ReviewComment[]>,
+  at: ReadonlyMap<number, readonly PlacedComment[]>,
   start: number,
   end: number,
-): ReadonlyMap<number, readonly ReviewComment[]> {
-  let found: Map<number, readonly ReviewComment[]> | null = null;
+): ReadonlyMap<number, readonly PlacedComment[]> {
+  let found: Map<number, readonly PlacedComment[]> | null = null;
   for (const [display, comments] of at) {
     if (display < start || display >= end) continue;
     found ??= new Map();
     found.set(display, comments);
   }
   return found ?? NO_COMMENTS;
-}
-
-function editorIn(
-  editor: Editor | null,
-  rows: { start: number; end: number; display: number } | null,
-  start: number,
-  end: number,
-): { start: number; end: number; display: number } | null {
-  if (!editor || editor.kind !== "new" || !rows) return null;
-  return inChunk(rows.display, start, end) ? rows : null;
 }
 
 type ChunkProps = {
@@ -819,8 +951,8 @@ type ChunkProps = {
   commentable: boolean;
   selected: { start: number; end: number } | null;
   tabStop: { row: number; column: Column } | null;
-  comments: ReadonlyMap<number, readonly ReviewComment[]>;
-  editor: { start: number; end: number; display: number } | null;
+  comments: ReadonlyMap<number, readonly PlacedComment[]>;
+  editor: EditorSlot | null;
   editingId: string | null;
   sending: ReadonlySet<string> | undefined;
 };
@@ -895,18 +1027,22 @@ const DiffChunk = memo(function DiffChunk({
       ),
     );
     if (editor && editor.display === display) {
+      // Keyed by the editor, not the row: a refresh that moves its lines
+      // keeps the same editor, and what was typed in it.
       rows.push(
         <NewCommentSlot
-          key={`e${display}`}
-          lines={quoteRows(model.rows, editor.start, editor.end)}
+          key={`editor:${editor.id}`}
+          editorId={editor.id}
+          span={editor.span}
         />,
       );
     }
-    for (const comment of comments.get(display) ?? []) {
+    for (const { comment, span } of comments.get(display) ?? []) {
       rows.push(
         <CommentSlot
           key={comment.id}
           comment={comment}
+          span={span}
           editing={editingId === comment.id}
           sending={sending?.has(comment.id) ?? false}
         />,
@@ -936,12 +1072,29 @@ function displayRows(
   return [entry.left, entry.right].filter((row): row is number => row !== null);
 }
 
-function NewCommentSlot({ lines }: { lines: ReviewCommentLine[] }) {
+function NewCommentSlot({
+  editorId,
+  span,
+  outdatedQuote,
+}: {
+  editorId: string;
+  span: CommentLineSpans;
+  /** The lines as they were, when they changed while the editor was open. */
+  outdatedQuote?: CommentAnchor["lines"];
+}) {
   const interaction = useContext(InteractionContext);
   if (!interaction) return null;
   return (
     <CommentComposer
-      lines={lines}
+      label={commentLinesLabel(span)}
+      quote={outdatedQuote}
+      note={
+        outdatedQuote
+          ? "These lines changed while you wrote. The comment keeps them as they were."
+          : undefined
+      }
+      initial={interaction.draft(editorId) ?? ""}
+      onDraftChange={(text) => interaction.keepDraft(editorId, text)}
       submitLabel="Add comment"
       onSubmit={interaction.submitNew}
       onCancel={interaction.closeEditor}
@@ -951,23 +1104,30 @@ function NewCommentSlot({ lines }: { lines: ReviewCommentLine[] }) {
 
 function CommentSlot({
   comment,
+  span,
   editing = false,
   sending = false,
-  quote = false,
+  outdated = false,
 }: {
   comment: ReviewComment;
+  /** The lines it covers where the diff shows it now. */
+  span: CommentLineSpans;
   editing?: boolean;
   sending?: boolean;
-  quote?: boolean;
+  /** Its code changed: it shows its quote, and says so. */
+  outdated?: boolean;
 }) {
   const interaction = useContext(InteractionContext);
   const review = interaction?.review;
   if (!interaction || !review) return null;
   if (editing) {
+    const key = `edit:${comment.id}`;
     return (
       <CommentComposer
-        lines={comment.lines}
-        initial={comment.body}
+        label={commentLinesLabel(span)}
+        quote={outdated ? comment.lines : undefined}
+        initial={interaction.draft(key) ?? comment.body}
+        onDraftChange={(text) => interaction.keepDraft(key, text)}
         submitLabel="Save"
         onSubmit={(body) => interaction.submitEdit(comment.id, body)}
         onCancel={interaction.closeEditor}
@@ -977,8 +1137,9 @@ function CommentSlot({
   return (
     <CommentCard
       comment={comment}
+      label={commentLinesLabel(span)}
       sending={sending || review.sending.has(comment.id)}
-      showQuote={quote}
+      outdated={outdated}
       onEdit={() => interaction.startEdit(comment.id)}
       onDelete={() => review.onDelete(comment.id)}
     />

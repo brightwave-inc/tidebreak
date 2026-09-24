@@ -4,6 +4,7 @@ import type { DiffReview } from "./DiffView";
 import {
   usePendingReview,
   usePendingReviewStore,
+  type CommentRelocation,
   type PendingReviewStore,
 } from "./pendingReview";
 import type { ReviewComment } from "./reviewComments";
@@ -13,7 +14,7 @@ const NO_COMMENTS: readonly ReviewComment[] = [];
 /**
  * Line comments for the files of one workspace diff: the workspace against
  * its base, or one turn's changes. A comment belongs to the diff it was
- * written on, since the same line number names different text in another.
+ * written on, since the same code can sit on different lines in another.
  *
  * Returns a lookup by path, stable while the review is unchanged, or null
  * where there is no workspace to hold a review.
@@ -22,12 +23,18 @@ export function useWorkspaceDiffReview({
   workspaceId,
   turnId,
   onDelete,
+  relocate = true,
   store = usePendingReviewStore,
 }: {
   workspaceId: string | undefined;
   turnId: string | undefined;
   /** Delete one comment; the host asks first. */
   onDelete: (id: string) => void;
+  /**
+   * Record where comments' lines are now. Off while the diff is cut short,
+   * where a line missing from it may only be past the cut.
+   */
+  relocate?: boolean;
   store?: PendingReviewStore;
 }): ((path: string) => DiffReview) | null {
   const { comments, sending } = usePendingReview(workspaceId, store);
@@ -45,21 +52,27 @@ export function useWorkspaceDiffReview({
       const review: DiffReview = {
         comments: byPath.get(path) ?? NO_COMMENTS,
         sending,
-        onAdd: (lines, body) =>
+        onAdd: (comment, body) =>
           store.getState().add(workspaceId, {
             id: crypto.randomUUID(),
             author: { kind: "person" },
             path,
             ...(turnId ? { turnId } : {}),
-            lines,
+            ...comment,
             body,
             createdAt: new Date().toISOString(),
           }),
         onEdit: (id, body) => store.getState().edit(workspaceId, id, body),
         onDelete,
+        ...(relocate
+          ? {
+              onRelocate: (id: string, change: CommentRelocation) =>
+                store.getState().relocate(workspaceId, id, change),
+            }
+          : {}),
       };
       reviews.set(path, review);
       return review;
     };
-  }, [workspaceId, turnId, comments, sending, onDelete, store]);
+  }, [workspaceId, turnId, comments, sending, onDelete, relocate, store]);
 }
