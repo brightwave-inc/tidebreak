@@ -243,16 +243,20 @@ async fn save_response(
 /// authority (decision 27). Then, in order:
 ///
 /// 1. Every agent stops. If one will not, nothing is deleted.
-/// 2. The keychain items go. If one will not, nothing else is deleted.
-/// 3. The embedded server and its workers stop, so nothing refreshes a token
-///    or writes a file from here on, and every code browser closes.
-/// 4. The browsers' website data stores, the data, cache, settings, and log
-///    folders, and the app window's own website data go.
-/// 5. The keychain items go again, last, in case anything wrote one back.
+/// 2. The embedded server, its workers, and the code runtime's sweeps stop,
+///    so nothing refreshes a token or writes a file from here on. If they do
+///    not stop in time, nothing is deleted.
+/// 3. The keychain items go. If one will not, nothing else is deleted.
+/// 4. The code browsers close, and their website data stores, the data,
+///    cache, settings, and log folders, and the app window's own website
+///    data go. A failure here does not stop the rest.
+/// 5. The keychain items go again, and once more right before the exit, in
+///    case anything wrote one back.
 ///
 /// The process then exits at once, without the usual quit path, whose
 /// window-state save would write a new file into the folder it just removed.
-/// A step after the keys that fails is reported in a native dialog first.
+/// Anything step 4 could not remove is reported in a native dialog first, by
+/// the path where it remains.
 ///
 /// Code worktrees under `~/Tidebreak/workspaces` hold work on real branches
 /// and stay, and so do the repositories they came from. Worktrees from before
@@ -279,10 +283,7 @@ pub(crate) async fn delete_all_data(
     let folders = profile_folders(&app, data.clone());
     refuse_linked_folders(&folders)?;
     let channel = crate::channel::current();
-    let message = delete_all_data_message(
-        legacy_worktree_count(&data),
-        channel.keychain_service().is_none(),
-    );
+    let message = delete_all_data_message(legacy_worktree_count(&data));
     if !confirm_natively(&app, message).await? {
         return Ok(false);
     }
@@ -307,22 +308,23 @@ pub(crate) async fn delete_all_data(
             ));
         }
     };
+    // With the server stopped, this window has nothing to talk to, so each
+    // refusal below asks for a restart.
+    if let Err(error) = host_access.stop_server().await {
+        return Err(format!(
+            "Tidebreak could not stop its server, so it deleted nothing: {error}. Quit \
+             Tidebreak, open it again, and try again."
+        ));
+    }
     if let Err(error) = tidebreak_server::secret_rehome::erase_secret_keys(&keychain, &keys).await {
-        host_access.resume_after_cancelled_quit();
         return Err(format!(
             "Tidebreak could not remove your keys from the keychain, so it deleted nothing \
-             else: {error}"
+             else: {error}. Quit Tidebreak, open it again, and try again."
         ));
     }
 
     // From here on the deletion goes through. What fails is reported below.
-    let mut failures = Vec::new();
-    if let Err(error) = host_access.stop_server().await {
-        failures.push(error);
-    }
-    if let Err(error) = crate::code_browser::remove_all_browser_data(&app).await {
-        failures.push(format!("the code browser's website data: {error}"));
-    }
+    let mut failures = crate::code_browser::remove_all_browser_data(&app).await;
     if let Some(runtime) =
         app.try_state::<Arc<crate::computer_runtime_adapter::DesktopComputerRuntime>>()
     {
@@ -332,7 +334,9 @@ pub(crate) async fn delete_all_data(
     tidebreak_server::logging::shutdown();
     failures.extend(remove_profile_folders(&folders));
     if let Err(error) = crate::code_browser::remove_default_website_data(&app).await {
-        failures.push(format!("the app window's website data: {error}"));
+        failures.push(format!(
+            "the app window's own website data under ~/Library/WebKit: {error}"
+        ));
     }
     if let Err(error) = tidebreak_server::secret_rehome::erase_secret_keys(&keychain, &keys).await {
         failures.push(format!("a keychain item: {error}"));
@@ -343,6 +347,8 @@ pub(crate) async fn delete_all_data(
         }
         report_leftovers(&app, &failures).await;
     }
+    // The dialog above waits for the person; erase once more after it.
+    let _ = tidebreak_server::secret_rehome::erase_secret_keys(&keychain, &keys).await;
     std::process::exit(0);
 }
 
@@ -400,20 +406,21 @@ fn legacy_worktree_count(data: &Path) -> usize {
         .sum()
 }
 
-/// What the native confirmation says. Every clause is true for this build
-/// and this data folder.
-fn delete_all_data_message(legacy_worktrees: usize, shares_cli_keychain: bool) -> String {
+/// What the native confirmation says. Every clause is true for this data
+/// folder.
+///
+/// The keychain items it erases are the app's own profile's. The command line
+/// uses that profile, data and keys, unless `TIDEBREAK_DATA_DIR` names another
+/// folder, and a profile in another folder keeps its own keychain items
+/// (decision 56).
+fn delete_all_data_message(legacy_worktrees: usize) -> String {
     let mut message = String::from(
         "Tidebreak stops every agent, deletes every conversation, memory, setting, attachment, \
-         output, log, and backup on this computer, removes your keys from the keychain, and \
-         quits. This cannot be undone.",
+         output, and log, and the backups in the Tidebreak data folder, removes your keys from \
+         the keychain, and quits. Backups you saved elsewhere stay. This cannot be undone.\n\nThe tidebreak command line works on this same data \
+         and these keys unless you point it at another folder, so its default profile goes too. \
+         Profiles in other folders keep their data and keys.",
     );
-    if shares_cli_keychain {
-        message.push_str(
-            "\n\nThe tidebreak command-line tool keeps its keys in the same keychain item, so it \
-             is signed out too.",
-        );
-    }
     if legacy_worktrees == 0 {
         message.push_str("\n\nCode worktrees in ~/Tidebreak and your repositories stay.");
     } else {
@@ -457,11 +464,17 @@ async fn confirm_natively(app: &AppHandle, message: String) -> Result<bool, Stri
 /// Say what a deletion that went through could not remove, before the app
 /// quits.
 async fn report_leftovers(app: &AppHandle, failures: &[String]) {
+    let hidden = if cfg!(target_os = "macos") {
+        "\n\nFolders whose names start with a dot are hidden in Finder. Press \
+         Command-Shift-Period to show them."
+    } else {
+        ""
+    };
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
         .message(format!(
             "Tidebreak deleted your data, but some of it is still on this computer. Remove it \
-             yourself:\n\n{}",
+             yourself:\n\n{}{hidden}",
             failures.join("\n")
         ))
         .title("Some data is still here")
@@ -503,12 +516,14 @@ fn remove_profile_folders(folders: &[PathBuf]) -> Vec<String> {
             Ok(()) => aside,
             Err(_) => folder.clone(),
         };
+        // Name the folder where the data remains, which after the rename is
+        // the hidden one beside the original.
         if let Err(error) = std::fs::remove_dir_all(&target) {
-            failures.push(format!("could not remove {}: {error}", folder.display()));
+            failures.push(format!("{}: {error}", target.display()));
         }
         if std::fs::symlink_metadata(folder).is_ok() {
             if let Err(error) = std::fs::remove_dir_all(folder) {
-                failures.push(format!("could not remove {}: {error}", folder.display()));
+                failures.push(format!("{}: {error}", folder.display()));
             }
         }
     }
@@ -546,6 +561,49 @@ mod tests {
         assert_eq!(leftovers.len(), 2, "{leftovers:?}");
     }
 
+    /// A folder that cannot be removed is reported where its data is left:
+    /// the hidden folder it was renamed to, not the name it had.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_left_behind_is_named_where_it_remains() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("io.example.tidebreak");
+        let locked = data.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("file"), b"bytes").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let failures = remove_profile_folders(std::slice::from_ref(&data));
+
+        let aside: Vec<PathBuf> = std::fs::read_dir(root.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        for path in &aside {
+            let locked = path.join("locked");
+            if locked.exists() {
+                std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        assert!(
+            aside[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".io.example.tidebreak.deleting-"),
+            "{aside:?}"
+        );
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            failures[0].starts_with(&aside[0].display().to_string()),
+            "{failures:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_linked_profile_folder_stops_the_deletion_before_it_starts() {
@@ -573,17 +631,20 @@ mod tests {
         }
         assert_eq!(legacy_worktree_count(root.path()), 3);
 
-        let message = delete_all_data_message(3, false);
+        let message = delete_all_data_message(3);
         assert!(
             message.contains("3 worktrees from before version 0.59"),
             "{message}"
         );
-        assert!(!message.contains("command-line"), "{message}");
-        let message = delete_all_data_message(0, true);
+        assert!(
+            message.contains("Profiles in other folders keep"),
+            "{message}"
+        );
+        let message = delete_all_data_message(0);
         assert!(
             message.contains("Code worktrees in ~/Tidebreak"),
             "{message}"
         );
-        assert!(message.contains("command-line tool"), "{message}");
+        assert!(!message.contains("before version 0.59"), "{message}");
     }
 }

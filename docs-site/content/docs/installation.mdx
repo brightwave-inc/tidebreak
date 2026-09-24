@@ -160,9 +160,10 @@ To remove the data and your keys in one step, use **Delete all data** in
 `delete all data`, then asks once more in a system dialog. It stops every
 agent, deletes the application data, cache, and log directories, the code
 browser's website data, and this installation's keychain items, and quits.
-The release app and the `tidebreak` command-line tool share one keychain item,
-so the command line is signed out too. It leaves the worktrees in
-`~/Tidebreak` and your repositories alone. Worktrees from before version 0.59
+The `tidebreak` command line works on the app's data and keys unless
+`TIDEBREAK_DATA_DIR` names another folder, so its default profile goes too; a
+profile in another folder keeps its own data and keys. It leaves the worktrees
+in `~/Tidebreak` and your repositories alone. Worktrees from before version 0.59
 live inside the data directory, and the system dialog says so when it finds
 any.
 

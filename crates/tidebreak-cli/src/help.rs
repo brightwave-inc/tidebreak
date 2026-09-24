@@ -242,8 +242,9 @@ that database up with its own tools. export writes your chats as a .zip of
 Markdown files, or as one JSON file with --format json: the messages and the
 names of attached files, without coding sessions, tool activity, or
 attachment contents. --chat limits it to the chats you name. Neither replaces
-a file already at <path> unless you pass --force.
-These commands take --server <url> [--server-token-env <var>] or --attach.";
+a file already at <path> unless you pass --force. With no flag they work on the
+app's data through the running app. These commands take --server <url>
+[--server-token-env <var>], --attach, or --embed.";
 
 const FOLDER_USAGE: &str = "\
 usage: tidebreak folder connect <path> --chat <id> [--output-format text|json]

@@ -223,7 +223,7 @@ export function DataPrivacyPanel({
     const ok = await confirm({
       title: "Delete all data?",
       description:
-        "Tidebreak stops every agent and deletes every conversation, memory, setting, attachment, output, log, and backup on this computer. It removes your keys from the keychain, then quits. Code worktrees in ~/Tidebreak and your repositories stay. This cannot be undone.",
+        "Tidebreak stops every agent and deletes every conversation, memory, setting, attachment, output, and log, and the backups in the Tidebreak data folder. It removes your keys from the keychain, then quits. Backups you saved elsewhere, code worktrees in ~/Tidebreak, and your repositories stay. This cannot be undone.",
       confirmLabel: "Delete all data",
       destructive: true,
       requireText: DELETE_ALL_DATA_PHRASE,
@@ -452,7 +452,7 @@ export function DataPrivacyPanel({
           {local && (
             <ActionRow
               title="Delete all data"
-              description="Delete every conversation, memory, setting, and file on this computer, and your keys. Tidebreak quits when it is done."
+              description="Delete every conversation, memory, setting, and file in the Tidebreak data folder, and your keys. Tidebreak quits when it is done."
             >
               <Button
                 type="button"
