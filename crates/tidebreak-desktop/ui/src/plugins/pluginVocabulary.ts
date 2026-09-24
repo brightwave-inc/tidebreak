@@ -4,7 +4,7 @@ import type { LucideIcon } from "lucide-react";
 import type { PluginCapability, PluginCategory } from "@/api";
 
 /**
- * A short, human reading of one derived badge.
+ * A short, human reading of one derived capability.
  *
  * The vocabulary is closed server-side, so this table is total: a capability
  * the host can derive always has words here rather than falling back to the

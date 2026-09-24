@@ -148,8 +148,8 @@ describe("Plugins library", () => {
     expect(pdf).not.toBeChecked();
 
     // Capability badges read as sentences on the detail view.
-    expect(screen.getByText("Writes files")).toBeInTheDocument();
-    expect(screen.getByText("Installs host software")).toBeInTheDocument();
+    expect(screen.getByText(/Writes files/)).toBeInTheDocument();
+    expect(screen.getByText(/Installs host software/)).toBeInTheDocument();
   });
 
   it("ungates the members once the plugin's own toggle round trip lands", async () => {

@@ -685,6 +685,34 @@ describe("McpPanel", () => {
     await waitFor(() => expect(putMcpServers).toHaveBeenCalledWith([]));
   });
 
+  it("replaces the editor with a load error instead of an empty list", async () => {
+    const client = api(
+      { servers: [] },
+      {
+        listMcpServers: vi
+          .fn()
+          .mockRejectedValue(new Error("mcp backend unavailable")),
+      },
+    );
+    render(<McpPanel client={client} />);
+
+    expect(
+      await screen.findByText("MCP servers could not load"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/No MCP servers configured/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add server" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Save and verify/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Try again" }),
+    ).toBeInTheDocument();
+  });
+
   it("surfaces a failed server-list fetch as a retryable error, not dead toggles", async () => {
     const listMcpServers = vi
       .fn()

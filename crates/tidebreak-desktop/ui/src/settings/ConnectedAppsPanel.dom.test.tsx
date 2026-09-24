@@ -201,13 +201,43 @@ describe("ConnectedAppsPanel", () => {
       list.compareDocumentPosition(save) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
 
-    // The reconnect action rides the entries themselves.
+    // Reconnect stays in the row menu when a server is healthy.
     expect(
-      within(list).getAllByRole("button", { name: /Reconnect/ }).length,
-    ).toBeGreaterThan(0);
+      within(list).queryByRole("button", { name: /Reconnect/ }),
+    ).not.toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(
+      within(list).getByRole("button", { name: "Actions for docs" }),
+    );
+    expect(
+      await screen.findByRole("menuitem", { name: /Reconnect/ }),
+    ).toBeInTheDocument();
 
     // The approval boundary is stated once, as the page footer.
     expect(screen.getAllByText(/existing approval boundary/)).toHaveLength(1);
+  });
+
+  it("replaces the body with a load error instead of an empty list", async () => {
+    const client = api({
+      listConnectedApps: vi
+        .fn()
+        .mockRejectedValue(new Error("connected apps backend unavailable")),
+    });
+    render(<ConnectedAppsPanel client={client} managed={false} />);
+
+    expect(
+      await screen.findByText("Connected apps could not load"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No apps connected/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Add REST API/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add server" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Try again" }),
+    ).toBeInTheDocument();
   });
 
   it("managed: prose notice, once-only facts, and a collapsed Advanced", async () => {
