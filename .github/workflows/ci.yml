@@ -68,6 +68,11 @@ jobs:
         run: node --test scripts/.trusted-workflow-security.test.mjs
       - name: Test semantic title and tag policy
         run: node --test scripts/*.test.mjs
+      # macOS checks out onto a case-insensitive disk, so two paths or module
+      # names that differ only in case break the only shipping platform while
+      # every Linux lane passes.
+      - name: Reject paths that differ only in case
+        run: node scripts/check-path-case.mjs
 
   changes:
     name: change scope
@@ -634,6 +639,62 @@ jobs:
       - name: Seatbelt profile escaping tests
         run: cargo test -p tidebreak-code-execution --locked --lib sbpl::tests
 
+  macos-desktop:
+    name: macOS desktop
+    needs: changes
+    # macOS is the only platform that ships, and no other pull request lane
+    # compiles the desktop's `cfg(target_os = "macos")` code. The desktop
+    # depends on every workspace crate except the CLI, whose tests the subset
+    # below also runs, so this lane is rust-scoped like clippy.
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      RUSTC_WRAPPER: sccache
+      # CI tests need no keychain identity or interactive signing setup.
+      TIDEBREAK_DEV_SIGNING_IDENTITY: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Set up compiler cache
+        uses: ./.github/actions/setup-sccache-s3
+        with:
+          access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: macos-desktop-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: clippy
+        run: cargo clippy -p tidebreak-desktop --all-targets --locked -- -D warnings
+      # Keep this selection in step with the Linux `desktop test` lane.
+      - name: desktop and credential integration tests
+        run: >-
+          cargo nextest run --locked -p tidebreak-desktop
+          -p tidebreak-cli
+          -p tidebreak-server
+          -p tidebreak-core
+          -E 'package(tidebreak-desktop)
+          | (package(tidebreak-cli) & (test(~setup::tests) | binary(serve)))
+          | (package(tidebreak-server) & test(~tests::listener))
+          | (package(tidebreak-core) & test(~keychain))'
+
   test:
     name: test partition ${{ matrix.part }}/3
     needs: changes
@@ -870,6 +931,43 @@ jobs:
         run: pnpm test
       - name: Build
         run: pnpm build
+      # tsc type-checks the stories, but only the Storybook build indexes and
+      # bundles them with the Storybook config, so a broken story or preview
+      # fails nowhere else.
+      - name: Build Storybook
+        run: pnpm storybook:build
+
+  storybook-a11y:
+    name: Storybook accessibility
+    needs: changes
+    # Runs axe, through the Storybook a11y addon, over every built story and
+    # fails on critical and serious violations. Known problems live in
+    # crates/tidebreak-desktop/ui/scripts/storybook-a11y-allowlist.mjs.
+    if: ${{ needs.changes.outputs.ui == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: crates/tidebreak-desktop/ui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack install --global pnpm@10.18.3
+          node -e 'const version = require("node:child_process").execFileSync("pnpm", ["--version"], { encoding: "utf8" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
+      - name: Install UI dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build Storybook
+        run: pnpm storybook:build
+      # The locked playwright-core version picks the Chromium build.
+      - name: Install headless Chromium
+        run: pnpm exec playwright-core install --only-shell chromium
+      - name: Check every story
+        run: pnpm storybook:a11y
 
   docs-site:
     name: documentation site

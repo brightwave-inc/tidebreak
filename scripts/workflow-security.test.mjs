@@ -517,10 +517,12 @@ test("PR lanes are scope-gated, never label-gated", () => {
     [workflowJob(ci, "lint"), "rust"],
     [workflowJob(ci, "desktop"), "rust"],
     [workflowJob(ci, "windows-check"), "rust"],
+    [workflowJob(ci, "macos-desktop"), "rust"],
     [workflowJob(ci, "macos-sandbox"), "workspace"],
     [testPartitions, "workspace"],
     [postgres, "workspace"],
     [workflowJob(ci, "ui"), "ui"],
+    [workflowJob(ci, "storybook-a11y"), "ui"],
     [docsSite, "docs_site"],
     [e2bCli, "e2b_cli"],
   ]) {
@@ -735,8 +737,47 @@ test("UI tests and production build each gate the UI lane", () => {
   assert.match(ui, /run: pnpm lint/);
   assert.match(ui, /run: pnpm test/);
   assert.match(ui, /run: pnpm build/);
+  // Only the Storybook build indexes and bundles the stories.
+  assert.match(ui, /run: pnpm storybook:build/);
   assert.doesNotMatch(ui, /& wait/);
   assert.doesNotMatch(ci, /matrix\.task/);
+
+  // The accessibility lane checks the stories it built from this commit.
+  const a11y = workflowJob(ci, "storybook-a11y");
+  const a11ySteps = [
+    "run: pnpm install --frozen-lockfile",
+    "run: pnpm storybook:build",
+    "run: pnpm exec playwright-core install --only-shell chromium",
+    "run: pnpm storybook:a11y",
+  ].map((step) => a11y.indexOf(step));
+  assert.ok(
+    a11ySteps.every((at, index) => at !== -1 && (index === 0 || at > a11ySteps[index - 1])),
+    "the accessibility lane must install, build Storybook, install Chromium, then check",
+  );
+  assert.doesNotMatch(a11y, /continue-on-error|\|\| true/);
+});
+
+test("macOS CI lints and tests the desktop with the Linux desktop selection", () => {
+  const ci = workflows["ci.yml"];
+  const macos = workflowJob(ci, "macos-desktop");
+  assert.match(macos, /runs-on: macos-latest/);
+  assert.match(macos, /TIDEBREAK_DEV_SIGNING_IDENTITY: ""/);
+  assert.match(
+    macos,
+    /run: cargo clippy -p tidebreak-desktop --all-targets --locked -- -D warnings/,
+  );
+  // One selection for both platforms, so a test the Linux lane gains cannot
+  // silently skip macOS.
+  const selection = (job) =>
+    job.match(/cargo nextest run --locked -p tidebreak-desktop[\s\S]*?'\n/)?.[0];
+  assert.ok(selection(macos), "the macOS lane must run the desktop tests under nextest");
+  assert.equal(selection(macos), selection(workflowJob(ci, "desktop")));
+  assert.doesNotMatch(macos, /continue-on-error|--ignored|\|\| true/);
+});
+
+test("the release policy lane rejects paths that differ only in case", () => {
+  const policy = workflowJob(workflows["ci.yml"], "release-policy");
+  assert.match(policy, /run: node scripts\/check-path-case\.mjs/);
 });
 
 test("macOS CI exercises Seatbelt and the egress broker without signing setup", () => {
@@ -768,6 +809,7 @@ test("compiler caches use OIDC-scoped S3 access", () => {
     "desktop",
     "windows-check",
     "macos-sandbox",
+    "macos-desktop",
     "test",
     "postgres",
     "self-host-build",
