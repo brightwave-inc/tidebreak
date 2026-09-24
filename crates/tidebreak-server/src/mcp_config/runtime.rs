@@ -28,6 +28,13 @@ use super::validation::{
     failure_diagnostic, failure_park, validate_server, validate_servers, validation_reason,
 };
 
+/// The stored credentials a replacement may change, and their values before
+/// it: `values[i]` is the value of `keys[i]`, or `None` for no entry.
+struct CredentialSnapshot {
+    keys: Vec<String>,
+    values: Vec<Option<String>>,
+}
+
 /// What a failed MCP replacement's error ends with when a stored credential it
 /// changed could not be put back, so the caller does not say nothing changed.
 pub const CREDENTIALS_NOT_RESTORED: &str =
@@ -1725,51 +1732,88 @@ impl McpRuntime {
                 .collect()
         };
         // Read before anything below writes: a replacement that fails puts
-        // every stored credential it touched back the way it was.
+        // back what it changed itself, and nothing newer.
         let snapshot = self.credential_snapshot(&ids).await?;
-        match self.apply_strict(definitions, ids, persist, skipped).await {
+        let mut written = None;
+        match self
+            .apply_strict(definitions, ids, persist, skipped, &snapshot, &mut written)
+            .await
+        {
             Ok(()) => Ok(()),
-            Err(error) => Err(self.restore_credentials(snapshot, error).await),
+            Err(error) => Err(self.restore_credentials(&snapshot, written, error).await),
         }
     }
 
-    /// The stored credentials a replacement over `ids` may rewrite or clear:
-    /// each server's environment values and OAuth sign-in, for the servers
-    /// it names and for the ones it drops.
+    /// The stored credentials a replacement over `ids` may rewrite or clear,
+    /// as they stand before it: each server's environment values and OAuth
+    /// sign-in, for the servers it names and for the ones it drops.
     async fn credential_snapshot(
         &self,
         ids: &BTreeMap<String, ConnectedAppId>,
-    ) -> Result<Vec<(String, Option<String>)>> {
+    ) -> Result<CredentialSnapshot> {
         let mut apps: BTreeSet<ConnectedAppId> = ids.values().copied().collect();
         apps.extend(self.state.lock().await.ids.values().copied());
-        let mut snapshot = Vec::with_capacity(apps.len() * 3);
-        for id in apps {
-            for key in [
-                env_secret_key(id),
-                crate::connectors::oauth_client_secret_key(id),
-                crate::connectors::oauth_token_secret_key(id),
-            ] {
-                let value = self.secrets.get_secret(&key).await?;
-                snapshot.push((key, value));
-            }
-        }
-        Ok(snapshot)
+        let keys: Vec<String> = apps
+            .into_iter()
+            .flat_map(|id| {
+                [
+                    env_secret_key(id),
+                    crate::connectors::oauth_client_secret_key(id),
+                    crate::connectors::oauth_token_secret_key(id),
+                ]
+            })
+            .collect();
+        let values = self.read_credentials(&keys).await?;
+        Ok(CredentialSnapshot { keys, values })
     }
 
-    /// Put back what [`Self::credential_snapshot`] read, and return the
-    /// replacement's error. When a credential cannot be put back, the error
-    /// says so with [`CREDENTIALS_NOT_RESTORED`], so no caller reports that
-    /// nothing changed.
+    /// The stored value of each key, in order.
+    async fn read_credentials(&self, keys: &[String]) -> Result<Vec<Option<String>>> {
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys {
+            values.push(self.secrets.get_secret(key).await?);
+        }
+        Ok(values)
+    }
+
+    /// Put back what the replacement itself changed, and return its error.
+    ///
+    /// `written` is what the replacement left in the store before it
+    /// connected anything. A key that holds something else now changed after
+    /// that: a connection refreshed a token, which under refresh-token
+    /// rotation spends the old one, or a sign-in finished. That key stays as
+    /// it is. When `written` is unknown, the replacement stopped before it
+    /// connected, and what is there now is its own.
+    ///
+    /// When a credential cannot be put back, the error says so with
+    /// [`CREDENTIALS_NOT_RESTORED`], so no caller reports that nothing changed.
     async fn restore_credentials(
         &self,
-        snapshot: Vec<(String, Option<String>)>,
+        snapshot: &CredentialSnapshot,
+        written: Option<Vec<Option<String>>>,
         error: AgentError,
     ) -> AgentError {
         let mut failed = false;
-        for (key, value) in snapshot {
-            let restored = match value {
-                Some(value) => self.secrets.set_secret(&key, &value).await,
-                None => self.secrets.delete_secret(&key).await,
+        for (index, key) in snapshot.keys.iter().enumerate() {
+            let before = &snapshot.values[index];
+            let current = match self.secrets.get_secret(key).await {
+                Ok(current) => current,
+                Err(read_error) => {
+                    tracing::warn!(
+                        %read_error,
+                        "could not read an MCP credential after a failed replacement"
+                    );
+                    failed = true;
+                    continue;
+                }
+            };
+            let own = written.as_ref().map_or(&current, |written| &written[index]);
+            if current != *own || current == *before {
+                continue;
+            }
+            let restored = match before {
+                Some(value) => self.secrets.set_secret(key, value).await,
+                None => self.secrets.delete_secret(key).await,
             };
             if let Err(restore_error) = restored {
                 tracing::warn!(
@@ -1779,11 +1823,14 @@ impl McpRuntime {
                 failed = true;
             }
         }
-        if failed {
-            AgentError::config(format!("{error} {CREDENTIALS_NOT_RESTORED}"))
-        } else {
-            error
+        if !failed {
+            return error;
         }
+        let message = match &error {
+            AgentError::Config(message) => message.clone(),
+            other => other.to_string(),
+        };
+        AgentError::config(format!("{message} {CREDENTIALS_NOT_RESTORED}"))
     }
 
     async fn apply_strict(
@@ -1792,6 +1839,8 @@ impl McpRuntime {
         ids: BTreeMap<String, ConnectedAppId>,
         persist: bool,
         skipped: Vec<SkippedRecord>,
+        snapshot: &CredentialSnapshot,
+        written: &mut Option<Vec<Option<String>>>,
     ) -> Result<()> {
         // Before anything connects, so the children below see the environment
         // this replacement declares rather than the previous one's. A boot
@@ -1802,6 +1851,9 @@ impl McpRuntime {
         // Before anything connects, so no connection below can present a
         // session issued for a URL this replacement no longer names.
         self.reconcile_oauth_sessions(&definitions, &ids).await;
+        // What this replacement wrote, before a connection below can refresh
+        // a token over it.
+        *written = Some(self.read_credentials(&snapshot.keys).await?);
         let configured = definitions;
         // Plugin-sourced servers ride along the same connection pass but are
         // never part of what is persisted or validated as a candidate: they
@@ -2505,6 +2557,10 @@ impl McpRuntime {
                 return;
             }
         };
+        // A replacement reads the stored sign-ins before it writes and puts
+        // back what it changed if it fails. Storing this session inside one
+        // would let that restore erase it, so the store waits for it to end.
+        let mutation = self.mutation.lock().await;
         if !self.sign_in_is_current(&sign_in) {
             return;
         }
@@ -2575,6 +2631,7 @@ impl McpRuntime {
             }
         }
         drop(state);
+        drop(mutation);
         // The reconnect runs as its own task: a newer Connect aborts this one,
         // and an abort mid-reconnect would leave the server showing
         // `reconnecting`.

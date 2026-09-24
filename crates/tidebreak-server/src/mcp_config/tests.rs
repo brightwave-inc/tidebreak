@@ -2086,6 +2086,8 @@ struct FakeOAuthServer {
     refresh_resources: std::sync::Mutex<Vec<String>>,
     /// When not zero, the status the token endpoint answers a refresh with.
     refresh_status: std::sync::atomic::AtomicU16,
+    /// Whether a refresh issues a new refresh token, spending the old one.
+    rotate_refresh: std::sync::atomic::AtomicBool,
     /// When not zero, the status the authorization-server metadata answers.
     metadata_status: std::sync::atomic::AtomicU16,
     /// How long an authorized `initialize` takes, in milliseconds.
@@ -2108,6 +2110,7 @@ impl FakeOAuthServer {
             tool_call_bearers: Default::default(),
             refresh_resources: Default::default(),
             refresh_status: Default::default(),
+            rotate_refresh: Default::default(),
             metadata_status: Default::default(),
             initialize_delay_ms: Default::default(),
         });
@@ -2329,6 +2332,19 @@ impl FakeOAuthServer {
                 .lock()
                 .unwrap()
                 .push(form.get("resource").cloned().unwrap_or_default());
+            if server
+                .rotate_refresh
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return axum::Json(serde_json::json!({
+                    "access_token": server.access_token,
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "refresh_token": "fake-refresh-token-rotated",
+                    "scope": "projects:read"
+                }))
+                .into_response();
+            }
             return tokens.into_response();
         }
         assert_eq!(form["grant_type"], "authorization_code");
@@ -2785,6 +2801,49 @@ async fn a_token_service_outage_keeps_the_session_and_retries() {
     runtime.reconnect("vercel").await.unwrap();
     assert_eq!(runtime.info().await.servers[0].health, McpHealth::Healthy);
     assert_eq!(*fake.refresh_resources.lock().unwrap(), [fake.mcp_url()]);
+}
+
+/// Review finding: a failed replacement put back the session its own
+/// connection had just refreshed. Under refresh-token rotation the token it
+/// put back was already spent, which signed the person out while the import
+/// said nothing changed. A key that holds something newer than the
+/// replacement's own write now stays.
+#[tokio::test]
+async fn a_failed_replacement_keeps_the_session_its_connection_refreshed() {
+    let fake = FakeOAuthServer::approving().await;
+    let (runtime, store, _directory) = oauth_test_runtime().await;
+    sign_in_to(&runtime, "vercel", &fake).await;
+    let id = saved_records(&store).await[0].id;
+    let vault = crate::connectors::McpOAuthCredentialVault::new(runtime.secrets(), id);
+    // Age the access token so the replacement's connection must refresh it.
+    let mut credentials = vault.load().await.unwrap().unwrap();
+    credentials.expires_at_unix = 1;
+    vault.save(&credentials).await.unwrap();
+    fake.rotate_refresh
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![
+                http_definition("vercel", &fake.mcp_url()),
+                http_definition("dead", "http://127.0.0.1:1/mcp"),
+            ],
+        })
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("failed to start"), "{error}");
+    assert_eq!(fake.refresh_resources.lock().unwrap().len(), 1);
+    assert_eq!(
+        vault
+            .load()
+            .await
+            .unwrap()
+            .unwrap()
+            .refresh_token
+            .as_deref(),
+        Some("fake-refresh-token-rotated")
+    );
 }
 
 /// Finding: a sign-in service outage read as "Sign-in not supported" and
