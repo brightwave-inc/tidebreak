@@ -135,6 +135,14 @@ export type UiStore = {
   commandPaletteOpen: boolean;
   setCommandPaletteOpen: (open: boolean) => void;
   toggleCommandPalette: () => void;
+  /**
+   * The notifications popover was asked for from somewhere other than its
+   * bell, such as the command palette. The bell opens its popover and clears
+   * the ask, even when the ask came before the rail was on screen.
+   */
+  notificationsRequested: boolean;
+  requestNotifications: () => void;
+  clearNotificationsRequest: () => void;
 };
 
 export function createUiStore() {
@@ -170,6 +178,9 @@ export function createUiStore() {
     setCommandPaletteOpen: (commandPaletteOpen) => set({ commandPaletteOpen }),
     toggleCommandPalette: () =>
       set((state) => ({ commandPaletteOpen: !state.commandPaletteOpen })),
+    notificationsRequested: false,
+    requestNotifications: () => set({ notificationsRequested: true }),
+    clearNotificationsRequest: () => set({ notificationsRequested: false }),
   }));
 }
 

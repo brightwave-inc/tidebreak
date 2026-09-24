@@ -22,6 +22,7 @@ import { notificationHref } from "./notificationPresent";
 import { useNotifications } from "./NotificationStore";
 import { Button } from "@/components/ui/button";
 import { SidebarButton } from "./sidebar/primitives";
+import { useUiStore } from "./UiStore";
 
 export function NotificationBellButton({
   defaultOpen = false,
@@ -34,6 +35,15 @@ export function NotificationBellButton({
   const unread = useNotifications((state) => state.unread);
   const loaded = useNotifications((state) => state.loaded);
   const compact = useCompactNotificationPopover();
+  const [popoverOpen, setPopoverOpen] = useState(defaultOpen);
+  // The command palette asks for the popover through the store; answering
+  // clears the ask, so it opens once rather than every time the rail mounts.
+  const requested = useUiStore((state) => state.notificationsRequested);
+  useEffect(() => {
+    if (!requested) return;
+    useUiStore.getState().clearNotificationsRequest();
+    setPopoverOpen(true);
+  }, [requested]);
 
   const reload = async () => {
     const [page, count] = await Promise.all([
@@ -59,7 +69,7 @@ export function NotificationBellButton({
   };
 
   return (
-    <Popover defaultOpen={defaultOpen}>
+    <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
       <PopoverTrigger asChild>
         <SidebarButton
           type="button"

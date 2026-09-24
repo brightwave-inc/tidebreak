@@ -127,6 +127,7 @@ import {
   type ShellShortcutMode,
 } from "./ShellShortcuts";
 import { CommandPaletteDialog } from "./CommandPaletteDialog";
+import { useTranscriptFindStore } from "./search/transcriptFind";
 import { RepositoryTrustSheetHost } from "./code/RepositoryTrustStore";
 import { EngineSignInHost } from "./code/EngineSignIn";
 import { ShortcutsDialog } from "./ShortcutsDialog";
@@ -326,7 +327,8 @@ export function AppShell() {
   // nothing new, or fails, leaves its result in the card; one that finds an
   // update hands over to the update card, even one you dismissed before,
   // because you asked. Automatic checks stay quiet unless they find an update.
-  useNativeHostEvent(UPDATE_CHECK_REQUESTED_EVENT, () => {
+  // The command palette's row runs the same check.
+  function checkForUpdatesExplicitly() {
     setExplicitUpdateCheck("running");
     void desktopUpdates.check().then((next) => {
       if (!next.enabled) {
@@ -341,7 +343,8 @@ export function AppShell() {
       setDismissedUpdateVersion(null);
       window.localStorage.removeItem(DISMISSED_UPDATE_VERSION_KEY);
     });
-  });
+  }
+  useNativeHostEvent(UPDATE_CHECK_REQUESTED_EVENT, checkForUpdatesExplicitly);
 
   // A settled result describes the last explicit check. Once the state moves
   // on, because another check started or an update turned up, it goes.
@@ -503,13 +506,18 @@ export function AppShell() {
       useCodeUiStore.getState().requestQuickOpen();
     },
     "code-find": () => {
-      // Monaco owns Cmd+F while it has focus, and its find widget is the
-      // better answer inside a file than a filename search is. Declining the
-      // key hands it back to the editor rather than to the shell.
-      if (isMonacoFocused()) return false;
       const { pathname } = router.state.location;
       if (!codeWorkspaceIdFromPath(pathname)) return false;
       useCodeUiStore.getState().requestFilesSearch();
+    },
+    "find-in-transcript": () => {
+      // Monaco owns Cmd+F while it has focus, and its find widget is the
+      // better answer inside a file. Declining the key hands it back to the
+      // editor rather than to the shell.
+      if (isMonacoFocused()) return false;
+      // Off a conversation there is nothing to find in, so the key goes to
+      // whatever is focused.
+      if (!useTranscriptFindStore.getState().requestOpen()) return false;
     },
     "code-prev-workspace": () => stepWorkspace(-1),
     "code-next-workspace": () => stepWorkspace(1),
@@ -1402,7 +1410,15 @@ export function AppShell() {
             open={shortcutsOpen}
             onOpenChange={setShortcutsOpen}
           />
-          <CommandPaletteDialog />
+          <CommandPaletteDialog
+            onShowShortcuts={() => setShortcutsOpen(true)}
+            onCheckForUpdates={
+              desktopUpdates.state.enabled
+                ? checkForUpdatesExplicitly
+                : undefined
+            }
+            zoom={zoom}
+          />
           <RepositoryTrustSheetHost />
           <EngineSignInHost />
           {/* The macOS permission ask opens when a task first needs a

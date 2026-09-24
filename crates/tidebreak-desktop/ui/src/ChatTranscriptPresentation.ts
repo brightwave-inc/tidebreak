@@ -74,6 +74,11 @@ export type PresentedTranscript = {
    * reaches the start of the conversation.
    */
   earlierCursor: number | null;
+  /**
+   * Where the conversation goes on after this page: the cursor of the first
+   * message a newer page holds, or null when this page reaches the end.
+   */
+  laterCursor: number | null;
   /** The first durable message on this page, where it meets the one before. */
   firstMessageId: string | null;
 };
@@ -105,6 +110,7 @@ export function presentChatTranscript(
     earlierCursor: transcript.has_more
       ? (transcript.earlier_cursor ?? null)
       : null,
+    laterCursor: transcript.later_cursor ?? null,
     firstMessageId: transcript.messages[0]?.id ?? null,
   };
 }

@@ -19,6 +19,7 @@ export type ShellShortcutAction =
   | "code-new-tab"
   | "code-quick-open"
   | "code-find"
+  | "find-in-transcript"
   | "code-prev-tab"
   | "code-next-tab"
   | "code-select-tab"
@@ -265,9 +266,13 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     allowInEditable: true,
   },
   {
+    // Cmd+Shift+F is where every editor this app sits beside searches across
+    // files, and it leaves Cmd+F to find in what is on screen, the way every
+    // app on the platform uses it.
     id: "code-find",
     codes: ["KeyF"],
     mod: true,
+    shift: true,
     description: "Search the worktree files",
     group: "Code",
     scope: "code",
@@ -476,6 +481,17 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     codes: ["KeyL"],
     mod: true,
     description: "Focus the message composer",
+    group: "Work",
+    allowInEditable: true,
+  },
+  {
+    // Cmd+F finds in the document on screen in every app on the platform,
+    // and here the document is the open chat or session. Inside a file,
+    // Monaco's own find answers it instead.
+    id: "find-in-transcript",
+    codes: ["KeyF"],
+    mod: true,
+    description: "Find in this conversation",
     group: "Work",
     allowInEditable: true,
   },

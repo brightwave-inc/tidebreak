@@ -64,6 +64,9 @@ import { toast } from "sonner";
 import { useCodeUpdatesStore, useSessionDigest } from "../CodeUpdatesStore";
 import { useStreamStalled } from "@/useStreamStalled";
 import { useTranscriptFollow } from "@/useTranscriptFollow";
+import { EarlierHistoryNotice } from "@/search/EarlierHistoryNotice";
+import { TranscriptFindBar } from "@/search/TranscriptFindBar";
+import { useCodeTranscriptSearch } from "@/search/useCodeTranscriptSearch";
 
 /**
  * Stable empty ladder. A fresh `[]` per render is a new snapshot every time,
@@ -188,6 +191,22 @@ export function CodeSessionPane({
     ? selectedSubagent?.status === "running"
     : busy;
   const streamStalled = useStreamStalled(transcriptBusy, lastSeq);
+  // Find in this session, and the palette's jumps into it. An event older
+  // than the journal this transcript replayed opens its own window of it.
+  const transcriptSearch = useCodeTranscriptSearch({
+    client,
+    sessionId: session.id,
+    hydrated,
+    items: transcriptItems,
+    scrollElement: follow.scrollElement,
+    pauseFollow: follow.pauseFollow,
+  });
+  const history = transcriptSearch.history;
+  const findBar = transcriptSearch.find;
+  const historyItems = useMemo(
+    () => (history ? mainAgentTranscriptItems(history.items) : null),
+    [history],
+  );
   const storeLifecycle = store((state) => state.lifecycle);
   // Archive search opens ended sessions. Hydration then writes idle because
   // the journal has no ended event, and that would resurrect the composer.
@@ -595,7 +614,25 @@ export function CodeSessionPane({
       {!subagentCallId && (
         <CodeSessionTree nodes={treeChildren} wait={treeWait} />
       )}
-      <div className={cn("message-view", follow.fadeClass)}>
+      <div
+        className={cn("message-view", follow.fadeClass)}
+        onFocusCapture={findBar.activate}
+        onPointerDownCapture={findBar.activate}
+      >
+        {findBar.open && (
+          <div className="pointer-events-none absolute inset-x-0 top-2 z-[3] flex justify-end px-3">
+            <TranscriptFindBar
+              ref={findBar.inputRef}
+              className="pointer-events-auto"
+              query={findBar.query}
+              onQueryChange={findBar.setQuery}
+              state={findBar.state}
+              onOlder={findBar.older}
+              onNewer={findBar.newer}
+              onClose={findBar.close}
+            />
+          </div>
+        )}
         {connectionState === "reconnecting" && (
           <p
             role="status"
@@ -608,28 +645,47 @@ export function CodeSessionPane({
           </p>
         )}
         <CodeTranscript
-          items={transcriptItems}
+          key={historyItems ? "history" : "live"}
+          items={historyItems ?? transcriptItems}
           sessionId={session.id}
           hydrated={hydrated}
-          busy={transcriptBusy}
-          streamStalled={streamStalled}
-          animateStreaming={animateStreaming}
+          busy={historyItems ? false : transcriptBusy}
+          streamStalled={historyItems ? false : streamStalled}
+          animateStreaming={historyItems ? false : animateStreaming}
           approvals={approvals}
           decidingId={decidingId}
           approvalError={approvalError}
           approvalErrorId={approvalErrorId}
           onOpenTurnDiff={onOpenTurnDiff}
-          onForkFromTurn={subagentCallId ? undefined : onForkFromTurn}
-          onRestoreBeforeTurn={subagentCallId ? undefined : onRestoreBeforeTurn}
-          onUndoRestore={subagentCallId ? undefined : onUndoRestore}
+          onForkFromTurn={
+            subagentCallId || historyItems ? undefined : onForkFromTurn
+          }
+          onRestoreBeforeTurn={
+            subagentCallId || historyItems ? undefined : onRestoreBeforeTurn
+          }
+          onUndoRestore={
+            subagentCallId || historyItems ? undefined : onUndoRestore
+          }
           undoUnavailableReason={undoUnavailableReason}
           onFileIssue={subagentCallId ? undefined : onFileIssue}
           onReveal={follow.pauseFollow}
           scrollRef={follow.scrollRef}
           contentRef={follow.contentRef}
           onScroll={follow.onScroll}
-          onDecide={canContribute ? decideApproval : undefined}
-          recap={sessionDigest?.recap}
+          onDecide={canContribute && !historyItems ? decideApproval : undefined}
+          recap={historyItems ? undefined : sessionDigest?.recap}
+          revealItemId={transcriptSearch.revealItemId}
+          trailingNotice={
+            historyItems ? (
+              <EarlierHistoryNotice
+                label="This is an earlier part of the session. Newer activity is not shown here."
+                onLeave={() => {
+                  transcriptSearch.leaveHistory();
+                  follow.armFollow(followScrollBehavior(false));
+                }}
+              />
+            ) : undefined
+          }
           emptyState={
             subagentCallId
               ? subagentEmptyState(selectedSubagent?.status)

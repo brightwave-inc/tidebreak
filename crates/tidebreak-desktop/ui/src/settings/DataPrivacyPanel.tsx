@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { SegmentedControl } from "@/components/ui/segmented";
 import { formatBytes } from "@/lib/formatBytes";
+import { downloadBlob } from "@/lib/downloadBlob";
 import { friendlyErrorMessage } from "@/lib/utils";
 import {
   DELETE_ALL_DATA_PHRASE,
@@ -667,14 +668,4 @@ function safeStorage(): Storage | undefined {
   } catch {
     return undefined;
   }
-}
-
-/** Save a file the server answered with, in a browser with no save dialog. */
-function downloadBlob(blob: Blob, fileName: string) {
-  const url = URL.createObjectURL(blob);
-  const link = window.document.createElement("a");
-  link.href = url;
-  link.download = fileName;
-  link.click();
-  URL.revokeObjectURL(url);
 }

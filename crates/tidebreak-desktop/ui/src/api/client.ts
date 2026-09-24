@@ -15,6 +15,7 @@ import { withCodeTerminalsApi } from "./client/code-terminals";
 import { withCodeEventsApi } from "./client/code-events";
 import { withMemoryApi } from "./client/memory";
 import { withDataApi } from "./client/data";
+import { withSearchApi } from "./client/search";
 import { HttpCore } from "./client/http";
 export {
   ARCHIVE_FORCE_KINDS,
@@ -23,6 +24,7 @@ export {
   type DeliveryRequestOptions,
 } from "./client/http";
 export { type CodeWorkspaceMergeRequest } from "./client/code-git";
+export { type MessageSearchQuery } from "./client/search";
 
 /**
  * The desktop's HTTP and WebSocket client, assembled from per-domain facets
@@ -32,22 +34,24 @@ export { type CodeWorkspaceMergeRequest } from "./client/code-git";
  * methods through a mixin. This class only composes them, so call sites keep
  * `client.method()` and a change to one route family touches one file.
  */
-export class ApiClient extends withDataApi(
-  withMemoryApi(
-    withCodeEventsApi(
-      withCodeTerminalsApi(
-        withCodeGrantsApi(
-          withCodeGitApi(
-            withCodeFilesApi(
-              withCodeSessionsApi(
-                withCodeWorkspacesApi(
-                  withCodeReposApi(
-                    withDeliveryApi(
-                      withTurnsApi(
-                        withAgentRunsApi(
-                          withChatApi(
-                            withProjectsApi(
-                              withAppsApi(withSettingsApi(HttpCore)),
+export class ApiClient extends withSearchApi(
+  withDataApi(
+    withMemoryApi(
+      withCodeEventsApi(
+        withCodeTerminalsApi(
+          withCodeGrantsApi(
+            withCodeGitApi(
+              withCodeFilesApi(
+                withCodeSessionsApi(
+                  withCodeWorkspacesApi(
+                    withCodeReposApi(
+                      withDeliveryApi(
+                        withTurnsApi(
+                          withAgentRunsApi(
+                            withChatApi(
+                              withProjectsApi(
+                                withAppsApi(withSettingsApi(HttpCore)),
+                              ),
                             ),
                           ),
                         ),

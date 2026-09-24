@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 
 import { useApp } from "@/AppContext";
@@ -40,9 +40,26 @@ import { CommandPaletteList } from "./CommandPaletteList";
 import { settingsPaletteRows } from "./settingsPaletteRows";
 import { useManagedPolicy } from "./managedPolicy";
 import { useUiStore } from "./UiStore";
+import {
+  appPaletteRows,
+  currentChatPaletteRows,
+  findPaletteRow,
+} from "./appPaletteRows";
+import { exportChatConversation } from "./chatExport";
+import type { InterfaceZoom } from "./InterfaceZoom";
+import type { MessageSearchHit } from "./generated/wire";
+import { hitRoute, hitTarget, queryTerms } from "./search/messageSearch";
+import { useTranscriptFindStore } from "./search/transcriptFind";
+import { useTranscriptRevealStore } from "./search/transcriptReveal";
+import { useMessageSearch } from "./search/useMessageSearch";
+import { sidebarUsesOverlay } from "./sidebar/sidebarLayout";
+import { useTheme } from "./theme";
 
 /** The tree read is bounded the same way the file picker's is. */
 const TREE_LIMIT = 5000;
+
+/** Message hits the palette shows; the find bar reaches the rest. */
+const PALETTE_MESSAGE_HITS = 8;
 
 /**
  * The command palette: one keyboard surface over everything the app can do.
@@ -56,14 +73,34 @@ const TREE_LIMIT = 5000;
  * listener here, so it appears in the shortcuts dialog and closes the palette
  * as well as opening it.
  */
-export function CommandPaletteDialog() {
-  const { client, newChat } = useApp();
+export function CommandPaletteDialog({
+  onShowShortcuts,
+  onCheckForUpdates,
+  zoom,
+}: {
+  /** Open the keyboard shortcuts dialog the shell owns. */
+  onShowShortcuts?: () => void;
+  /** The native menu's explicit update check; absent where there is none. */
+  onCheckForUpdates?: () => void;
+  zoom?: InterfaceZoom;
+} = {}) {
+  const { client, newChat, startRename, deleteChat, moveChatToProject } =
+    useApp();
   const navigate = useNavigate();
   const { managed } = useManagedPolicy();
+  const theme = useTheme();
   const open = useUiStore((state) => state.commandPaletteOpen);
   const setOpen = useUiStore((state) => state.setCommandPaletteOpen);
   const [query, setQuery] = useState("");
   const [recents, setRecents] = useState<string[]>([]);
+  // The shell's actions change identity on every render; the rows read them
+  // when picked, so they are held here instead of re-ranking the list.
+  const shellActions = useRef({ onShowShortcuts, onCheckForUpdates, zoom });
+  shellActions.current = { onShowShortcuts, onCheckForUpdates, zoom };
+  const canCheckForUpdates = onCheckForUpdates !== undefined;
+  const canShowShortcuts = onShowShortcuts !== undefined;
+  // Set by a row whose action takes focus somewhere of its own.
+  const keepFocusOnClose = useRef(false);
 
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const mode = shellShortcutMode(pathname);
@@ -92,6 +129,12 @@ export function CommandPaletteDialog() {
   const parsed = parsePaletteQuery(query);
   const filesWanted = open && (parsed.sections?.includes("files") ?? false);
   const files = useWorkspaceFilePaths(client, workspaceId, filesWanted);
+  // What was said, searched as the reader types. A prefix narrows the list
+  // to one kind of row, and messages are not one of them.
+  const messages = useMessageSearch(client, parsed.query, {
+    enabled: open && parsed.sections === null,
+    limit: PALETTE_MESSAGE_HITS,
+  });
 
   const rows = useMemo<PaletteRow[]>(() => {
     // Settings sections are addressed from a runtime table and never enter the
@@ -101,15 +144,47 @@ export function CommandPaletteDialog() {
     // Store actions are stable for the store's lifetime, so reading them here
     // keeps the memo from re-running on every unrelated store write.
     const codeUi = useCodeUiStore.getState();
+    const findInConversation = () => {
+      useTranscriptFindStore.getState().requestOpen();
+    };
+    const app = appPaletteRows({
+      theme: theme.mode,
+      onTheme: theme.setMode,
+      onZoomIn: () => shellActions.current.zoom?.zoomIn(),
+      onZoomOut: () => shellActions.current.zoom?.zoomOut(),
+      onZoomReset: () => shellActions.current.zoom?.resetZoom(),
+      onNotifications: showNotifications,
+      onShortcuts: canShowShortcuts
+        ? () => shellActions.current.onShowShortcuts?.()
+        : undefined,
+      onCheckForUpdates: canCheckForUpdates
+        ? () => shellActions.current.onCheckForUpdates?.()
+        : undefined,
+    });
 
     if (mode === "chat") {
+      const openChatId = chatIdFromPath(pathname);
+      const openChat = openChatId
+        ? chats.find((chat) => chat.id === openChatId)
+        : undefined;
       return [
+        ...(openChat
+          ? currentChatPaletteRows({
+              chat: openChat,
+              projects,
+              onFind: findInConversation,
+              onRename: () => startRename(openChat),
+              onDelete: () => deleteChat(openChat),
+              onMove: (projectId) => moveChatToProject(openChat, projectId),
+              onExport: () => void exportChatConversation(client, openChat.id),
+            })
+          : []),
         ...chatPaletteRows({
           // The rail's rows in the rail's order, so with nothing typed the
           // palette opens on the conversations the reader already sees.
           chats: sortChats(chats.filter((chat) => isListableChat(chat))),
           projects,
-          activeChatId: chatIdFromPath(pathname),
+          activeChatId: openChatId,
           onOpen: (chat) => go(`/c/${chat.id}`),
         }),
         ...projectPaletteRows({
@@ -121,6 +196,7 @@ export function CommandPaletteDialog() {
           onNewChat: newChat,
         }),
         ...settings,
+        ...app,
       ];
     }
 
@@ -176,6 +252,9 @@ export function CommandPaletteDialog() {
             },
           })
         : []),
+      ...(workspaceId
+        ? [findPaletteRow(findInConversation, "Find in this session")]
+        : []),
       ...codeNavigationPaletteRows({
         navigate: go,
         onNewWorkspace: () => codeUi.startNewWorkspace(repo?.id),
@@ -190,6 +269,7 @@ export function CommandPaletteDialog() {
         onSelect: () => codeUi.requestOpenFilePath(path),
       })),
       ...settings,
+      ...app,
     ];
   }, [
     mode,
@@ -208,6 +288,14 @@ export function CommandPaletteDialog() {
     projects,
     files,
     workspaceRunner,
+    theme.mode,
+    theme.setMode,
+    canShowShortcuts,
+    canCheckForUpdates,
+    client,
+    startRename,
+    deleteChat,
+    moveChatToProject,
   ]);
 
   const groups = useMemo(
@@ -216,9 +304,38 @@ export function CommandPaletteDialog() {
   );
 
   function choose(row: PaletteRow) {
+    keepFocusOnClose.current = row.movesFocus === true;
     setOpen(false);
     if (!row.transient) setRecents(rememberPaletteRow(row.id, recents));
     row.onSelect();
+  }
+
+  // A hit opens its conversation at the message. The request is raised
+  // first: the transcript answers it once its history has loaded, whether
+  // the conversation was already open or opens now.
+  function chooseMessage(hit: MessageSearchHit) {
+    const target = hitTarget(hit);
+    setOpen(false);
+    if (!target) return;
+    useTranscriptRevealStore
+      .getState()
+      .reveal(target, queryTerms(messages.query || parsed.query));
+    if (target.kind === "code" && target.workspaceId) {
+      const sameWorkspace = target.workspaceId === workspaceId;
+      void navigate({
+        to: "/code/w/$workspaceId",
+        params: { workspaceId: target.workspaceId },
+        // The open workspace keeps its tabs; another one opens on the session.
+        search: sameWorkspace
+          ? (previous: Record<string, unknown>) => ({
+              ...previous,
+              task: target.sessionId,
+            })
+          : { task: target.sessionId },
+      });
+      return;
+    }
+    void navigate({ to: hitRoute(target) as "/" });
   }
 
   return (
@@ -228,10 +345,15 @@ export function CommandPaletteDialog() {
           withCloseButton={false}
           className="top-1/2 max-w-2xl gap-0 overflow-hidden rounded-xl p-0 shadow-2xl"
           overlayClassName="bg-black/45 backdrop-blur-[1px]"
+          onCloseAutoFocus={(event) => {
+            if (!keepFocusOnClose.current) return;
+            keepFocusOnClose.current = false;
+            event.preventDefault();
+          }}
         >
           <DialogTitle className="sr-only">Command palette</DialogTitle>
           <DialogDescription className="sr-only">
-            Search commands, workspaces, files, and settings.
+            Search commands, conversations, messages, files, and settings.
           </DialogDescription>
           <CommandPaletteList
             groups={groups}
@@ -246,12 +368,25 @@ export function CommandPaletteDialog() {
                 ? `Nothing matches “${parsed.query}”.`
                 : "Nothing here yet."
             }
+            messages={messages}
+            onSelectMessage={chooseMessage}
           />
         </DialogContent>
       </Dialog>
       {workspaceRunner.dialogs}
     </>
   );
+}
+
+/**
+ * Open the notifications popover from outside its bell. The bell lives in
+ * the rail, so the rail comes out first when it is folded away.
+ */
+function showNotifications() {
+  const ui = useUiStore.getState();
+  if (sidebarUsesOverlay(window.innerWidth)) ui.setSidebarOverlayOpen(true);
+  else if (ui.sidebarCollapsed) ui.toggleSidebar();
+  ui.requestNotifications();
 }
 
 /**

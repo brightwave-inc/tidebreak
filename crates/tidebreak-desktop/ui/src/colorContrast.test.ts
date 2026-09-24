@@ -419,6 +419,16 @@ describe("token contrast in both themes (see DESIGN.md)", () => {
   it("keeps the unchecked switch track visible on the page and card", () => {
     expect(tokenPairs(["switch-track"], () => SURFACES, MARK)).toEqual([]);
   });
+
+  it("keeps search matches readable on their marks", () => {
+    // `.search-match` and `::highlight(transcript-find)` paint foreground ink
+    // on the citation tint; the match being pointed at inverts to background
+    // ink on the foreground.
+    expect([
+      ...tokenPairs(["foreground"], () => ["citation-mark"], TEXT),
+      ...tokenPairs(["background"], () => ["foreground"], TEXT),
+    ]).toEqual([]);
+  });
 });
 
 describe("status tones keep their hue (see DESIGN.md)", () => {

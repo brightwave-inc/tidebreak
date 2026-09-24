@@ -89,6 +89,12 @@ export type PaletteRow = {
   onSelect: () => void;
   /** Kept out of the recents memory — a row nobody means to repeat. */
   transient?: boolean;
+  /**
+   * The action puts focus somewhere of its own, such as a rename field or
+   * the find bar, so closing the palette must not hand focus back to where
+   * it was before the palette opened.
+   */
+  movesFocus?: boolean;
 };
 
 /**

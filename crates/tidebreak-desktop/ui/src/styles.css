@@ -970,6 +970,38 @@ body {
     }
   }
 
+  /* Where a search landed: the same brief ring a deep link gets. */
+  .is-search-revealed {
+    border-radius: var(--radius);
+    outline: 2px solid var(--ring);
+    outline-offset: 4px;
+    transition: outline-color 400ms ease-out;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .is-search-revealed {
+      transition: none;
+    }
+  }
+
+  /* Search matches stay neutral: the citation's quiet tint marks each one,
+     and inverse ink marks the one being pointed at. No new hue. */
+  .search-match {
+    border-radius: 2px;
+    background: var(--citation-mark);
+    color: var(--foreground);
+  }
+
+  ::highlight(transcript-find) {
+    background-color: var(--citation-mark);
+    color: var(--foreground);
+  }
+
+  ::highlight(transcript-find-current) {
+    background-color: var(--foreground);
+    color: var(--background);
+  }
+
   .message {
     width: 100%;
     overflow-wrap: anywhere;
