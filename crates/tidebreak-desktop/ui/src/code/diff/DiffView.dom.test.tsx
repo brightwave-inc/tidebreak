@@ -365,42 +365,97 @@ describe("keys", () => {
   });
 });
 
+/**
+ * The view's animation frames, run when the test says so. A long diff then
+ * mounts on the test's schedule rather than the clock's, so a slow machine
+ * changes how long the test takes and never what it sees.
+ */
+function manualFrames() {
+  let queue: Array<{ id: number; run: FrameRequestCallback }> = [];
+  let last = 0;
+  const request = vi
+    .spyOn(window, "requestAnimationFrame")
+    .mockImplementation((run) => {
+      last += 1;
+      queue.push({ id: last, run });
+      return last;
+    });
+  const cancel = vi
+    .spyOn(window, "cancelAnimationFrame")
+    .mockImplementation((id) => {
+      queue = queue.filter((frame) => frame.id !== id);
+    });
+  return {
+    pending: () => queue.length,
+    /** Run every frame asked for so far, and what they render. */
+    next() {
+      const due = queue;
+      queue = [];
+      act(() => {
+        for (const frame of due) frame.run(performance.now());
+      });
+    },
+    restore() {
+      request.mockRestore();
+      cancel.mockRestore();
+    },
+  };
+}
+
 describe("a long diff", () => {
   // The browser story `Code/Diff review/Very long file` times the whole
   // 5,000 lines; jsdom is too slow to time anything, so this pins the shape
-  // that keeps each frame short: one chunk first, then a bounded step.
-  it("draws its first chunk at once and the rest a few chunks a frame", async () => {
-    const group = groupUnifiedDiff(longFileDiff(5_000))[0]!;
-    const { container } = render(
-      <DiffView group={group} layout="unified" ignoreWhitespace={false} />,
-    );
-    const rows = () => container.querySelectorAll("[data-row]").length;
-    expect(rows()).toBe(DIFF_CHUNK_ROWS);
-    await waitFor(() => expect(rows()).toBeGreaterThan(DIFF_CHUNK_ROWS));
-    expect(rows()).toBeLessThanOrEqual(DIFF_CHUNK_ROWS * 3);
+  // that keeps each frame short: one chunk first, then one chunk a frame.
+  it("draws its first chunk at once and the rest one chunk a frame", () => {
+    const frames = manualFrames();
+    try {
+      const group = groupUnifiedDiff(longFileDiff(5_000))[0]!;
+      const { container } = render(
+        <DiffView group={group} layout="unified" ignoreWhitespace={false} />,
+      );
+      const rows = () => container.querySelectorAll("[data-row]").length;
+      expect(rows()).toBe(DIFF_CHUNK_ROWS);
+      frames.next();
+      expect(rows()).toBe(DIFF_CHUNK_ROWS * 2);
+      frames.next();
+      expect(rows()).toBe(DIFF_CHUNK_ROWS * 3);
+    } finally {
+      frames.restore();
+    }
   });
 
-  it("keeps every row through a refresh while an agent works", async () => {
-    const diff = longFileDiff(600);
-    const { container, rerender } = render(
-      <DiffView
-        group={groupUnifiedDiff(diff)[0]!}
-        layout="unified"
-        ignoreWhitespace={false}
-      />,
-    );
-    const rows = () => container.querySelectorAll("[data-row]").length;
-    const total = diffRows(groupUnifiedDiff(diff)[0]!).length;
-    await waitFor(() => expect(rows()).toBe(total));
-    // A refetch hands over a new group for the same file.
-    rerender(
-      <DiffView
-        group={groupUnifiedDiff(diff)[0]!}
-        layout="unified"
-        ignoreWhitespace={false}
-      />,
-    );
-    expect(rows()).toBe(total);
+  it("keeps every row through a refresh while an agent works", () => {
+    const frames = manualFrames();
+    try {
+      const diff = longFileDiff(600);
+      const view = () => (
+        <DiffView
+          group={groupUnifiedDiff(diff)[0]!}
+          layout="unified"
+          ignoreWhitespace={false}
+        />
+      );
+      const { container, rerender } = render(view());
+      const rows = () => container.querySelectorAll("[data-row]").length;
+      const total = diffRows(groupUnifiedDiff(diff)[0]!).length;
+      expect(total).toBeGreaterThan(DIFF_CHUNK_ROWS * 4);
+
+      // A refetch hands over a new group for the same file. Halfway through
+      // mounting, it keeps what was mounted and carries on from there.
+      frames.next();
+      frames.next();
+      rerender(view());
+      expect(rows()).toBe(DIFF_CHUNK_ROWS * 3);
+
+      while (frames.pending() > 0) frames.next();
+      expect(rows()).toBe(total);
+      // Once everything is mounted, a refetch mounts nothing again.
+      rerender(view());
+      expect(rows()).toBe(total);
+      expect(frames.pending()).toBe(0);
+    } finally {
+      frames.restore();
+    }
   });
 });
 
