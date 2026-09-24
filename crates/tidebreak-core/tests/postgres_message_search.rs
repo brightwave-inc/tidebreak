@@ -657,8 +657,8 @@ async fn postgres_a_rebuild_whose_connection_drops_counts_and_blocks_nothing() {
 }
 
 /// A conversation the backfill gave up on is tried again when something new
-/// is written to it, when a newer app version starts, and when turning
-/// memory incognito off rebuilds it.
+/// is written to it a day or more after it was given up on, when a newer app
+/// version starts, and when turning memory incognito off rebuilds it.
 #[tokio::test]
 async fn postgres_a_given_up_conversation_is_tried_again() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
@@ -685,9 +685,9 @@ async fn postgres_a_given_up_conversation_is_tried_again() {
     .await;
     assert_eq!(queued(&url, &name, lost.id).await, Some((8, true)));
 
-    // New content.
+    // New content, long after the backfill gave up: one more attempt.
     say(&store, lost.id, Role::User, "written today").await;
-    assert_eq!(queued(&url, &name, lost.id).await, Some((0, false)));
+    assert_eq!(queued(&url, &name, lost.id).await, Some((7, false)));
     store.backfill_message_search(10).await.unwrap();
     assert_eq!(search(&store, &owner, "long").await.hits.len(), 1);
     assert_eq!(queued(&url, &name, lost.id).await, None);

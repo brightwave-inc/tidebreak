@@ -8,10 +8,11 @@
 //! search route reports how many of the caller's conversations remain, and
 //! how many could not be added.
 //!
-//! A conversation given up on gets another try when something new is written
-//! to it, and when a newer app version starts. So the worker stops only once
-//! nothing is waiting and nothing was given up on; while something was, it
-//! waits to be woken rather than polling.
+//! A conversation given up on gets one more try when something new is
+//! written to it a day or more after it was given up on, and a fresh round
+//! when a newer app version starts. So the worker stops only once nothing is
+//! waiting and nothing was given up on; while something was, it waits to be
+//! woken rather than polling.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

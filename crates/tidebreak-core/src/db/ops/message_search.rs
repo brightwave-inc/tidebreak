@@ -78,6 +78,9 @@ const BACKFILL_RETRY_MICROS: i64 = 30 * 1_000_000;
 const MAX_BACKFILL_RETRY_MICROS: i64 = 60 * 60 * 1_000_000;
 /// Longest error a queued conversation keeps, in characters.
 const MAX_BACKFILL_ERROR_CHARS: usize = 1_000;
+/// How long after the backfill gives up on a conversation new content in it
+/// earns another attempt.
+const NEW_CONTENT_RETRY_AFTER_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 
 /// One piece of a conversation, ready to index.
 #[derive(Debug, Clone)]
@@ -410,7 +413,7 @@ where
     {
         return Ok(());
     }
-    retry_on_new_content(conn, message.chat_id).await?;
+    retry_on_new_content(conn, message.chat_id, message.created_at).await?;
     insert_pieces_on(
         conn,
         &facts.owner,
@@ -490,7 +493,7 @@ where
     if terms.is_empty() {
         return Ok(());
     }
-    retry_on_new_content(conn, session_id.0).await?;
+    retry_on_new_content(conn, session_id.0, started_at).await?;
     insert_pieces_on(
         conn,
         &facts.owner,
@@ -585,7 +588,7 @@ where
             continue;
         };
         if !retried {
-            retry_on_new_content(conn, session_id.0).await?;
+            retry_on_new_content(conn, session_id.0, *at).await?;
             retried = true;
         }
         if piece.source_key.starts_with("call:") {
@@ -833,7 +836,8 @@ where
 /// its error are recorded, and the session is tried again after a wait that
 /// doubles with each failure. After [`MAX_BACKFILL_ATTEMPTS`] failures the
 /// session is marked failed and left out of the index's history, and a search
-/// reports it. Its new messages are still indexed as they land.
+/// reports it. Its new messages are still indexed as they land, and new
+/// content a day or more after it was given up on earns it one more attempt.
 pub(in crate::db) async fn backfill(
     store: &DbStore,
     sessions: u64,
@@ -1001,28 +1005,20 @@ pub(in crate::db) async fn backfill_woken() {
 /// The `setting` key holding the newest app version the backfill ran under.
 const BACKFILL_VERSION_SETTING: &str = "message_search.backfill_version";
 
-/// Make a conversation the backfill gave up on due again, with a fresh count
-/// of attempts. Its last error stays, for anyone reading the queue.
-async fn retry_given_up_on<C>(conn: &C, session_id: Option<uuid::Uuid>) -> Result<u64>
+/// Give every conversation the backfill gave up on a fresh count of attempts.
+/// Their last errors stay, for anyone reading the queue.
+async fn retry_every_given_up_on<C>(conn: &C) -> Result<u64>
 where
     C: ConnectionTrait,
 {
     let backend = conn.get_database_backend();
-    let mut sql = String::from(
-        "UPDATE \"message_search_backfill\" SET \"attempts\" = 0, \
-         \"retry_at_micros\" = NULL, \"failed_at_micros\" = NULL \
-         WHERE \"failed_at_micros\" IS NOT NULL",
-    );
-    let mut values: Vec<Value> = Vec::new();
-    if let Some(session_id) = session_id {
-        values.push(session_id.into());
-        sql.push_str(&format!(
-            " AND \"session_id\" = {}",
-            placeholder(backend, 1)
-        ));
-    }
     let retried = conn
-        .execute_raw(Statement::from_sql_and_values(backend, sql, values))
+        .execute_raw(Statement::from_string(
+            backend,
+            "UPDATE \"message_search_backfill\" SET \"attempts\" = 0, \
+             \"retry_at_micros\" = NULL, \"failed_at_micros\" = NULL \
+             WHERE \"failed_at_micros\" IS NOT NULL",
+        ))
         .await
         .map_err(store_err)?
         .rows_affected();
@@ -1032,14 +1028,46 @@ where
     Ok(retried)
 }
 
-/// A conversation that has something new in it gets another try at its
-/// history, if the backfill gave up on it. Runs with every live index write,
-/// and costs one primary-key lookup when there is nothing to retry.
-async fn retry_on_new_content<C>(conn: &C, session_id: uuid::Uuid) -> Result<()>
+/// A conversation that gets something new, written at `at`, gets one more
+/// attempt at its history if the backfill gave up on it a day or more
+/// before. One attempt, not a fresh count: if it fails again the backfill
+/// gives up on it again, so a conversation that always fails costs at most
+/// one rebuild a day however much is said in it. Its last error stays.
+///
+/// Runs with every live index write, and costs one primary-key lookup when
+/// there is nothing to retry.
+async fn retry_on_new_content<C>(conn: &C, session_id: uuid::Uuid, at: DateTime<Utc>) -> Result<()>
 where
     C: ConnectionTrait,
 {
-    retry_given_up_on(conn, Some(session_id)).await.map(|_| ())
+    let backend = conn.get_database_backend();
+    let retried = conn
+        .execute_raw(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "UPDATE \"message_search_backfill\" SET \"attempts\" = {}, \
+                 \"retry_at_micros\" = NULL, \"failed_at_micros\" = NULL \
+                 WHERE \"session_id\" = {} AND \"failed_at_micros\" IS NOT NULL \
+                 AND \"failed_at_micros\" <= {}",
+                placeholder(backend, 1),
+                placeholder(backend, 2),
+                placeholder(backend, 3)
+            ),
+            [
+                (MAX_BACKFILL_ATTEMPTS - 1).into(),
+                session_id.into(),
+                micros(at)
+                    .saturating_sub(NEW_CONTENT_RETRY_AFTER_MICROS)
+                    .into(),
+            ],
+        ))
+        .await
+        .map_err(store_err)?
+        .rows_affected();
+    if retried > 0 {
+        BACKFILL_WAKE.notify_one();
+    }
+    Ok(())
 }
 
 /// Take a conversation out of the backfill queue, after a write that settled
@@ -1063,29 +1091,17 @@ where
     Ok(())
 }
 
-/// The release a version string names, as `(major, minor, patch)`, and
-/// whether it is a pre-release. `None` for anything else.
-fn release_of(version: &str) -> Option<([u64; 3], bool)> {
-    let version = version.split('+').next()?;
-    let (core, pre_release) = match version.split_once('-') {
-        Some((core, _)) => (core, true),
-        None => (version, false),
-    };
-    let mut parts = core.split('.');
-    let mut release = [0_u64; 3];
-    for part in &mut release {
-        *part = parts.next()?.parse().ok()?;
-    }
-    parts.next().is_none().then_some((release, pre_release))
-}
-
-/// Whether `current` is a newer release than `previous`. A pre-release comes
-/// before its release. Versions that do not parse are newer when they differ.
+/// Whether `current` is a newer version than `previous`, by semantic
+/// versioning precedence: pre-release identifiers count, so
+/// `0.0.0-staging.2` is newer than `0.0.0-staging.1`, and a pre-release comes
+/// before its release. Build metadata does not count. Versions that do not
+/// parse are newer when they differ.
 pub(in crate::db) fn newer_release(current: &str, previous: &str) -> bool {
-    match (release_of(current), release_of(previous)) {
-        (Some((current, current_pre)), Some((previous, previous_pre))) => {
-            current > previous || (current == previous && previous_pre && !current_pre)
-        }
+    match (
+        semver::Version::parse(current),
+        semver::Version::parse(previous),
+    ) {
+        (Ok(current), Ok(previous)) => current.cmp_precedence(&previous).is_gt(),
         _ => current != previous,
     }
 }
@@ -1113,7 +1129,7 @@ pub(in crate::db) async fn retry_after_upgrade(store: &DbStore, version: &str) -
         transaction.rollback().await.map_err(store_err)?;
         return Ok(0);
     }
-    let retried = retry_given_up_on(&transaction, None).await?;
+    let retried = retry_every_given_up_on(&transaction).await?;
     entities::setting::Entity::insert(entities::setting::ActiveModel {
         key: Set(BACKFILL_VERSION_SETTING.to_owned()),
         value_json: Set(serde_json::Value::String(version.to_owned())),

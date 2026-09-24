@@ -1106,28 +1106,61 @@ async fn give_up(store: &DbStore) -> DateTime<Utc> {
     now
 }
 
-/// A conversation the backfill gave up on gets another try once something
-/// new is written to it, and the try adds its history.
+/// A conversation the backfill gave up on gets one more attempt when
+/// something new is written to it a day or more after it was given up on.
+/// Sooner, it waits. If that attempt fails, it is given up on again, so a
+/// conversation that always fails is rebuilt at most once a day however much
+/// is said in it.
 #[tokio::test]
-async fn a_given_up_conversation_is_tried_again_when_it_gets_new_content() {
+async fn a_given_up_conversation_is_tried_again_once_a_day_on_new_content() {
     let (_dir, store) = temp_store().await;
     let owner = OwnerId::local();
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    say(&store, chat.id, Role::User, "written long ago", Utc::now()).await;
+    let old = say(&store, chat.id, Role::User, "written long ago", Utc::now()).await;
     forget_and_queue(&store).await;
-    refuse_index_writes(&store).await;
-    let now = give_up(&store).await;
+    // Rebuilding the history fails; indexing what is new does not.
+    store
+        .conn
+        .execute_unprepared(&format!(
+            "CREATE TRIGGER refuse_history BEFORE INSERT ON message_search \
+             WHEN NEW.source_key = 'message:{}' \
+             BEGIN SELECT RAISE(ABORT, 'the index refused the row'); END",
+            old.0
+        ))
+        .await
+        .unwrap();
+    let gave_up_at = give_up(&store).await;
     assert!(queued(&store, chat.id).await.2);
-    allow_index_writes(&store).await;
 
-    // Given up stays given up while nothing happens.
-    backfill(&store, 8, now + Duration::days(1)).await.unwrap();
+    // Given up stays given up while nothing happens, and while what is new
+    // comes within a day.
+    backfill(&store, 8, gave_up_at + Duration::days(1))
+        .await
+        .unwrap();
+    say(
+        &store,
+        chat.id,
+        Role::User,
+        "written an hour later",
+        gave_up_at + Duration::hours(1),
+    )
+    .await;
     assert!(queued(&store, chat.id).await.2);
 
-    say(&store, chat.id, Role::User, "written today", Utc::now()).await;
+    // A day later, new content earns one attempt. It fails, and the
+    // conversation is given up on again at once.
+    let day_later = gave_up_at + Duration::days(1);
+    say(
+        &store,
+        chat.id,
+        Role::User,
+        "written a day later",
+        day_later,
+    )
+    .await;
     let (attempts, error, gave_up) = queued(&store, chat.id).await;
-    assert_eq!((attempts, gave_up), (0, false));
+    assert_eq!((attempts, gave_up), (MAX_BACKFILL_ATTEMPTS - 1, false));
     assert!(
         error.is_some(),
         "the last error is kept for whoever reads it"
@@ -1135,8 +1168,38 @@ async fn a_given_up_conversation_is_tried_again_when_it_gets_new_content() {
     let page = search(&store, &owner, "long").await;
     assert_eq!(page.indexing.pending_conversations, 1);
     assert_eq!(page.indexing.failed_conversations, 0);
+    let state = backfill(&store, 8, day_later).await.unwrap();
+    assert_eq!((state.waiting, state.failed), (0, 1));
+    let (attempts, _, gave_up) = queued(&store, chat.id).await;
+    assert_eq!((attempts, gave_up), (MAX_BACKFILL_ATTEMPTS, true));
 
-    let state = backfill(&store, 8, micros_now()).await.unwrap();
+    // The next day's content earns the next attempt, which adds the history
+    // once the failure has passed.
+    store
+        .conn
+        .execute_unprepared("DROP TRIGGER refuse_history")
+        .await
+        .unwrap();
+    say(
+        &store,
+        chat.id,
+        Role::User,
+        "written the next day",
+        day_later + Duration::hours(23),
+    )
+    .await;
+    assert!(queued(&store, chat.id).await.2, "not a day yet");
+    say(
+        &store,
+        chat.id,
+        Role::User,
+        "written two days later",
+        day_later + Duration::days(1),
+    )
+    .await;
+    let state = backfill(&store, 8, day_later + Duration::days(1))
+        .await
+        .unwrap();
     assert_eq!((state.waiting, state.failed), (0, 0));
     let page = search(&store, &owner, "long").await;
     assert_eq!(page.hits.len(), 1);
@@ -1358,6 +1421,15 @@ fn a_newer_release_is_one_with_a_higher_version() {
     assert!(!newer_release("1.4.0", "1.4.0"));
     assert!(!newer_release("1.4.0-rc.2", "1.4.0"));
     assert!(!newer_release("1.3.9", "1.4.0"));
+    // Pre-releases compare by their identifiers, numbers as numbers.
+    assert!(newer_release("0.0.0-staging.2", "0.0.0-staging.1"));
+    assert!(newer_release("0.0.0-staging.10", "0.0.0-staging.9"));
+    assert!(!newer_release("0.0.0-staging.1", "0.0.0-staging.2"));
+    assert!(!newer_release("0.0.0-staging.2", "0.0.0-staging.2"));
+    assert!(newer_release("1.4.0-rc.1", "1.4.0-beta.9"));
+    assert!(newer_release("1.4.0-rc.1.1", "1.4.0-rc.1"));
+    // Build metadata does not make a version newer.
+    assert!(!newer_release("1.4.0+build.8", "1.4.0+build.7"));
     // A version that is not a release is newer only when it differs.
     assert!(newer_release("dev", "1.4.0"));
     assert!(!newer_release("dev", "dev"));
