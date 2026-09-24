@@ -21,9 +21,9 @@ An entry means a person ran the server against a real Tidebreak profile and
 exercised, at minimum:
 
 - **The auth flow** — whatever the server needs to authenticate (a stdio
-  server's forwarded environment names, or an HTTP server's bearer token
-  variable), configured from Settings and reconnecting cleanly after a
-  restart.
+  server's forwarded environment names, or an HTTP server's bearer token,
+  headers, or OAuth sign-in), configured from Settings and reconnecting
+  cleanly after a restart.
 - **Tool schemas** — discovery completes inside Tidebreak's bounds (frame size,
   tool count, description and schema limits), the mounted names survive the
   `mcp__{namespace}__{tool}` contract, and the published schemas describe the
