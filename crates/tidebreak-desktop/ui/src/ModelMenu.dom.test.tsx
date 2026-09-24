@@ -267,3 +267,51 @@ it("toasts when changing the model fails", async () => {
     screen.getByRole("button", { name: "Model: Claude Sonnet 4" }),
   ).toBeInTheDocument();
 });
+
+/**
+ * New work starts on the model picked last, ahead of the Settings default.
+ * When those differ, the composer names both, so a changed default is never
+ * outranked in silence.
+ */
+it("names the last-used model and the default when they differ", async () => {
+  render(
+    <ModelMenu
+      models={MODELS}
+      value="anthropic::claude-sonnet-4"
+      defaultKey="openai::gpt-5"
+      lastUsed
+      onSetUpProvider={() => {}}
+      onChange={vi.fn()}
+    />,
+  );
+
+  const trigger = screen.getByRole("button", {
+    name: "Model: Claude Sonnet 4",
+  });
+  expect(trigger).toHaveAttribute(
+    "aria-description",
+    "Last used: Claude Sonnet 4 · Default: GPT-5",
+  );
+  await userEvent.setup().click(trigger);
+  expect(
+    await screen.findByText("Last used: Claude Sonnet 4"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Default: GPT-5")).toBeInTheDocument();
+});
+
+it("says nothing extra when the last-used model is the default", () => {
+  render(
+    <ModelMenu
+      models={MODELS}
+      value="openai::gpt-5"
+      defaultKey="openai::gpt-5"
+      lastUsed
+      onSetUpProvider={() => {}}
+      onChange={vi.fn()}
+    />,
+  );
+
+  expect(
+    screen.getByRole("button", { name: "Model: GPT-5" }),
+  ).not.toHaveAttribute("aria-description");
+});

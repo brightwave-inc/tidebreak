@@ -1722,6 +1722,7 @@ async fn chatgpt_auth_marks_api_only_openai_models_unavailable() {
             enabled: true,
             base_url: None,
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -1792,6 +1793,7 @@ async fn a_rejected_chatgpt_session_is_unavailable_across_configuration_routes()
             enabled: true,
             base_url: None,
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -2011,6 +2013,7 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
             // must not let it redirect the credential.
             base_url: Some("https://attacker.invalid/v1".into()),
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -2161,6 +2164,240 @@ async fn provider_discovery_lists_models_with_the_saved_key_and_never_returns_it
     );
 }
 
+/// Review finding: a member of a shared deployment read whether its
+/// provider keys work, through `last_test` on the member-plane
+/// `GET /providers`. Decision 6 keeps that on the deployment plane, so only
+/// an administrator sees it.
+#[tokio::test]
+async fn only_an_administrator_sees_a_provider_test_result() {
+    let endpoint = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(|| async {
+            axum::Json(serde_json::json!({
+                "object": "list",
+                "data": [{ "id": "local/chat-model", "object": "model" }]
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, endpoint).await;
+    });
+    let tokens = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tokens.path(),
+        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\n"),
+    )
+    .unwrap();
+    let (router, _dir) = standalone_app(|config| {
+        config.auth_tokens_file = Some(tokens.path().to_owned());
+    })
+    .await;
+    let call = |token: &'static str,
+                method: &'static str,
+                uri: &'static str,
+                body: Option<serde_json::Value>| {
+        let router = router.clone();
+        async move {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"));
+            let body = match body {
+                Some(body) => {
+                    request = request.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(body.to_string())
+                }
+                None => Body::empty(),
+            };
+            let response = router.oneshot(request.body(body).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8(bytes.to_vec()).unwrap())
+        }
+    };
+    let last_test = |text: String| {
+        let listed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        listed["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|provider| provider["kind"] == "openai_compatible")
+            .unwrap()["last_test"]
+            .clone()
+    };
+
+    let (status, text) = call(
+        ALICE_TOKEN,
+        "PUT",
+        "/providers/openai_compatible",
+        Some(serde_json::json!({
+            "enabled": true,
+            "base_url": format!("http://{address}/v1"),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let (status, text) = call(
+        ALICE_TOKEN,
+        "POST",
+        "/providers/openai_compatible/test",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+
+    let (status, text) = call(ALICE_TOKEN, "GET", "/providers", None).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert_eq!(last_test(text)["outcome"], "connected");
+    let (status, text) = call(BOB_TOKEN, "GET", "/providers", None).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert!(last_test(text).is_null(), "a member sees no test result");
+}
+
+/// A local OpenAI-compatible server on plain HTTP needs no key and no test
+/// seam: saving it makes its models available, and a connection test records
+/// what it found until the endpoint changes. A key goes over the same HTTP
+/// only with consent, and never comes back in a response.
+#[tokio::test]
+async fn a_local_compatible_server_saves_without_a_key_and_records_its_test() {
+    let key = ["stand-in", "local", "server", "credential"].join("-");
+    let seen_authorization = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let endpoint = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get({
+            let seen_authorization = seen_authorization.clone();
+            move |headers: axum::http::HeaderMap| {
+                let seen_authorization = seen_authorization.clone();
+                async move {
+                    seen_authorization.lock().unwrap().push(
+                        headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                    axum::Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{ "id": "local/chat-model", "object": "model" }]
+                    }))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, endpoint).await;
+    });
+    let base_url = format!("http://{address}/v1");
+
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let call = |method: &'static str, uri: String, body: Option<serde_json::Value>| {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        async move {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::AUTHORIZATION, &bearer);
+            let body = match body {
+                Some(body) => {
+                    request = request.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(body.to_string())
+                }
+                None => Body::empty(),
+            };
+            let response = router.oneshot(request.body(body).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8(bytes.to_vec()).unwrap())
+        }
+    };
+
+    let (status, text) = call(
+        "PUT",
+        "/providers/openai_compatible".into(),
+        Some(serde_json::json!({
+            "enabled": true,
+            "base_url": base_url,
+            "models": [{ "id": "local/chat-model" }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+
+    let (status, text) = call("GET", "/models".into(), None).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let catalog: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let local = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["key"] == "openai_compatible::local/chat-model")
+        .expect("the saved model is in the catalog");
+    assert_eq!(local["available"], true, "a keyless local server can run");
+
+    let (status, text) = call("POST", "/providers/openai_compatible/test".into(), None).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let tested: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(tested["outcome"], "connected");
+    assert_eq!(tested["model_count"], 1);
+
+    let (_, text) = call("GET", "/providers".into(), None).await;
+    let listed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let compatible = listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["kind"] == "openai_compatible")
+        .unwrap()
+        .clone();
+    assert_eq!(compatible["last_test"], tested);
+
+    // A key over the same clear-text endpoint is refused without consent...
+    let (status, text) = call(
+        "PUT",
+        "/providers/openai_compatible".into(),
+        Some(serde_json::json!({
+            "credential": { "type": "api_key", "key": key },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    assert!(text.contains("unless you allow"), "{text}");
+
+    // ...and accepted with it. The earlier verdict no longer applies.
+    let (status, text) = call(
+        "PUT",
+        "/providers/openai_compatible".into(),
+        Some(serde_json::json!({
+            "credential": { "type": "api_key", "key": key },
+            "allow_loopback_http": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let saved: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(saved["allow_loopback_http"], true);
+    assert!(saved.get("last_test").is_none(), "{text}");
+
+    let (status, text) = call("POST", "/providers/openai_compatible/test".into(), None).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert!(!text.contains(&key), "the key reached the client: {text}");
+    assert_eq!(
+        *seen_authorization.lock().unwrap(),
+        [String::new(), format!("Bearer {key}")],
+        "the keyless test sent no key and the consented one sent it once"
+    );
+}
+
 #[tokio::test]
 async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unavailable_providers() {
     let dir = tempfile::tempdir().unwrap();
@@ -2180,6 +2417,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
             enabled: true,
             base_url: None,
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -2990,6 +3228,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
             enabled: true,
             base_url: None,
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -3038,6 +3277,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
             enabled: false,
             base_url: None,
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -3083,6 +3323,7 @@ async fn resolver_includes_configured_curated_api_key_providers() {
                 enabled: true,
                 base_url: None,
                 models: Vec::new(),
+                allow_loopback_http: false,
             },
         )
         .await
@@ -3150,6 +3391,7 @@ async fn openai_compatible_route_is_free_form_fallback() {
             enabled: true,
             base_url: Some("https://compat.example/v1".into()),
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -3199,6 +3441,7 @@ async fn direct_compatible_presets_use_fixed_endpoints_and_distinct_routes() {
                 enabled: true,
                 base_url: None,
                 models: Vec::new(),
+                allow_loopback_http: false,
             },
         )
         .await
@@ -3294,6 +3537,7 @@ async fn ollama_is_usable_without_a_credential_and_serves_only_configured_models
                 display_name: Some("Qwen 3 0.6B".into()),
                 ..providers::CustomModelConfig::default()
             }],
+            allow_loopback_http: false,
         },
     )
     .await
@@ -3401,6 +3645,7 @@ async fn openrouter_uses_its_fixed_endpoint_and_serves_only_configured_models() 
                 display_name: Some("Claude Sonnet 4".into()),
                 ..providers::CustomModelConfig::default()
             }],
+            allow_loopback_http: false,
         },
     )
     .await
@@ -3558,6 +3803,7 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
                 enabled: true,
                 base_url,
                 models: Vec::new(),
+                allow_loopback_http: false,
             },
         )
         .await
@@ -3662,6 +3908,7 @@ async fn a_base_url_environment_fallback_reaches_the_route() {
             enabled: true,
             base_url: None,
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -3687,6 +3934,7 @@ async fn a_base_url_environment_fallback_reaches_the_route() {
             enabled: true,
             base_url: Some("https://stored.example/v1".to_string()),
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -3727,6 +3975,7 @@ async fn an_unreadable_policy_fails_the_resolver_closed() {
             enabled: true,
             base_url: None,
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -3793,6 +4042,7 @@ async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
             enabled: true,
             base_url: None,
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -6441,6 +6691,7 @@ async fn a_stored_provider_and_the_caller_path_coexist() {
             enabled: true,
             base_url: None,
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await

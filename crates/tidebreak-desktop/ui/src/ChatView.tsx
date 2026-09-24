@@ -44,6 +44,7 @@ import {
   type ComposerImages,
   type ComposerPastedTexts,
   type ComposerProps,
+  type ComposerSendBlocker,
   type ComposerSlash,
   type ComposerVoice,
 } from "./Composer";
@@ -109,6 +110,8 @@ export type ChatViewProps = {
   deletingChat: boolean;
   composerModelMenu: ReactNode;
   composerPermissionMenu: ReactNode;
+  /** Why the composer cannot send, such as no model being able to run. */
+  composerSendBlocker?: ComposerSendBlocker | null;
   /** Context-window reading the composer shows beside its own controls. */
   contextUsage?: ContextUsageReading | null;
   composerNetwork?: ComposerNetwork;
@@ -157,6 +160,7 @@ export function ChatView({
   deletingChat,
   composerModelMenu,
   composerPermissionMenu,
+  composerSendBlocker = null,
   contextUsage,
   composerNetwork,
   composerReasoning,
@@ -821,6 +825,7 @@ export function ChatView({
               }
               steerStatus={turnControls.steerStatus}
               turnStatus={composerStatus}
+              sendBlocker={composerSendBlocker}
             />
           </>
         )}

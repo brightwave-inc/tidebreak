@@ -38,6 +38,12 @@ export type AppContextValue = {
   attachment: Attachment;
   models: ModelInfo[];
   /**
+   * False while the first model catalog read is in flight, when `models` is
+   * empty only because nothing has arrived yet. Absent means loaded, which is
+   * what tests and stories that pass a catalog want.
+   */
+  catalogLoaded?: boolean;
+  /**
    * The catalog key a chat without an override runs against, so the picker can
    * name its default rather than merely offering it. `null` when the server's
    * fallback is nothing the catalog names.

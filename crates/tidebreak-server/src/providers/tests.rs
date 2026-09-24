@@ -244,6 +244,7 @@ async fn a_rejected_chatgpt_session_stays_stored_but_is_not_routable() {
             enabled: true,
             base_url: None,
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -294,6 +295,7 @@ async fn replacing_a_rejected_chatgpt_session_with_an_api_key_restores_routing()
             base_url: None,
             credential: Some(ProviderCredential::api_key("replacement")),
             models: None,
+            allow_loopback_http: None,
         },
         &*provisioned,
         &crate::managed_policy::NoOsPolicy,
@@ -371,6 +373,7 @@ async fn provider_updates_reject_credentials_on_cleartext_endpoints() {
             base_url: Some(Some("http://127.0.0.1:1234/v1".into())),
             credential: Some(ProviderCredential::api_key("secret")),
             models: None,
+            allow_loopback_http: None,
         },
         &*provisioned,
         &crate::managed_policy::NoOsPolicy,
@@ -402,6 +405,7 @@ async fn credentialless_ollama_keeps_loopback_http_support() {
             base_url: Some(Some("http://localhost:11434/v1".into())),
             credential: None,
             models: None,
+            allow_loopback_http: None,
         },
         &*provisioned,
         &crate::managed_policy::NoOsPolicy,
@@ -419,6 +423,7 @@ async fn credentialless_ollama_keeps_loopback_http_support() {
             base_url: Some(Some("http://192.168.1.10:11434/v1".into())),
             credential: None,
             models: None,
+            allow_loopback_http: None,
         },
         &*provisioned,
         &crate::managed_policy::NoOsPolicy,
@@ -426,6 +431,323 @@ async fn credentialless_ollama_keeps_loopback_http_support() {
     .await
     .expect_err("credentialless cleartext is loopback-only");
     assert!(error.message().contains("loopback"));
+}
+
+fn unmanaged_policy() -> crate::managed_policy::ManagedPolicy {
+    crate::managed_policy::resolve(
+        &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .unwrap()
+}
+
+fn compatible_update(base_url: &str) -> ProviderUpdate {
+    ProviderUpdate {
+        enabled: Some(true),
+        base_url: Some(Some(base_url.into())),
+        credential: None,
+        models: None,
+        allow_loopback_http: None,
+    }
+}
+
+/// LM Studio, llama.cpp, and vLLM on this computer take no key. With none
+/// saved, an OpenAI-compatible endpoint reaches them over loopback HTTP the
+/// way Ollama does: it saves, it counts as usable, and it becomes a keyless
+/// route.
+#[tokio::test]
+async fn a_keyless_compatible_server_on_loopback_http_saves_and_routes() {
+    let (store, _directory) = provider_test_store().await;
+    let secrets = TestSecrets::default();
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+
+    let info = update_provider(
+        &store,
+        &secrets,
+        ProviderKind::OpenaiCompatible,
+        compatible_update("http://127.0.0.1:1234/v1"),
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .expect("a keyless local server is allowed");
+    assert!(!info.has_credential);
+    assert!(provider_is_usable(
+        &store,
+        &secrets,
+        ProviderKind::OpenaiCompatible,
+        &unmanaged_policy(),
+        None
+    )
+    .await
+    .unwrap());
+    let routes = collect_routes(&store, &secrets, None, None, None, &unmanaged_policy()).await;
+    let route = routes
+        .iter()
+        .find(|route| route.kind == tidebreak_router::RouteKind::OpenaiCompatible)
+        .expect("the keyless server is routed");
+    assert!(route.api_key.is_empty());
+    assert!(!route.allow_loopback_http);
+
+    // Off the machine, clear text still needs HTTPS.
+    let error = update_provider(
+        &store,
+        &secrets,
+        ProviderKind::OpenaiCompatible,
+        compatible_update("http://192.168.1.10:1234/v1"),
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .expect_err("keyless clear text is loopback-only");
+    assert!(error.message().contains("loopback"), "{}", error.message());
+}
+
+/// Review finding: a test that finished after the key changed recorded its
+/// verdict for the new key, so a rejected key read as Connected. A stored
+/// test now counts only while the key, endpoint, and consent it tested are
+/// still the saved ones.
+#[tokio::test]
+async fn a_test_of_an_earlier_key_never_describes_the_saved_one() {
+    let (store, _directory) = provider_test_store().await;
+    let secrets = TestSecrets::default();
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let kind = ProviderKind::OpenaiCompatible;
+    let save_key = |key: &'static str| {
+        update_provider(
+            &store,
+            &secrets,
+            kind,
+            ProviderUpdate {
+                credential: Some(ProviderCredential::api_key(key)),
+                ..compatible_update("https://compat.remote.example/v1")
+            },
+            &*provisioned,
+            &crate::managed_policy::NoOsPolicy,
+        )
+    };
+    let connected = ProviderTestResult {
+        outcome: ProviderTestOutcome::Connected,
+        message: "Connected.".to_owned(),
+        status: Some(200),
+        model_count: Some(3),
+        tested_at: chrono::Utc::now(),
+    };
+    let fingerprint = || async {
+        let config = read_config(&store, kind).await.unwrap();
+        test_fingerprint(&secrets, kind, &config).await
+    };
+
+    save_key("first-server-key").await.unwrap();
+    let first = fingerprint().await;
+    save_key("second-server-key").await.unwrap();
+    // The first key's test lands after the second key was saved.
+    write_last_test(&store, kind, &first, &connected)
+        .await
+        .unwrap();
+    assert_eq!(read_last_test(&store, &secrets, kind).await.unwrap(), None);
+
+    let second = fingerprint().await;
+    assert_ne!(first, second);
+    write_last_test(&store, kind, &second, &connected)
+        .await
+        .unwrap();
+    assert_eq!(
+        read_last_test(&store, &secrets, kind).await.unwrap(),
+        Some(connected)
+    );
+}
+
+/// Review finding: deleting the key of a remote OpenAI-compatible endpoint
+/// left the provider counting as usable, so Home showed no setup card and
+/// every turn failed with 401. Only a server on this computer counts
+/// without a key.
+#[tokio::test]
+async fn a_remote_compatible_endpoint_without_a_key_is_not_usable() {
+    let (store, _directory) = provider_test_store().await;
+    let secrets = TestSecrets::default();
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let usable = || async {
+        provider_is_usable(
+            &store,
+            &secrets,
+            ProviderKind::OpenaiCompatible,
+            &unmanaged_policy(),
+            None,
+        )
+        .await
+        .unwrap()
+    };
+
+    update_provider(
+        &store,
+        &secrets,
+        ProviderKind::OpenaiCompatible,
+        ProviderUpdate {
+            credential: Some(ProviderCredential::api_key("remote-server-key")),
+            ..compatible_update("https://compat.remote.example/v1")
+        },
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .expect("a keyed HTTPS endpoint saves");
+    assert!(usable().await, "a keyed remote endpoint is usable");
+
+    delete_credential(&secrets, ProviderKind::OpenaiCompatible)
+        .await
+        .unwrap();
+    assert!(
+        !usable().await,
+        "without its key the remote endpoint is not"
+    );
+}
+
+/// A saved key crosses clear-text HTTP only with the reader's consent, only
+/// to a loopback IP literal, and only while the endpoint it was given for
+/// stays the same.
+#[tokio::test]
+async fn a_saved_key_uses_loopback_http_only_with_consent() {
+    let (store, _directory) = provider_test_store().await;
+    let secrets = TestSecrets::default();
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let keyed = |base: &str, consent: Option<bool>| ProviderUpdate {
+        credential: Some(ProviderCredential::api_key("local-server-key")),
+        allow_loopback_http: consent,
+        ..compatible_update(base)
+    };
+
+    let error = update_provider(
+        &store,
+        &secrets,
+        ProviderKind::OpenaiCompatible,
+        keyed("http://127.0.0.1:1234/v1", None),
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .expect_err("no consent, no clear-text key");
+    assert!(
+        error.message().contains("unless you allow"),
+        "{}",
+        error.message()
+    );
+    assert_eq!(
+        read_credential(&secrets, ProviderKind::OpenaiCompatible)
+            .await
+            .unwrap(),
+        None,
+        "validation happens before the key is stored"
+    );
+
+    let error = update_provider(
+        &store,
+        &secrets,
+        ProviderKind::OpenaiCompatible,
+        keyed("http://localhost:1234/v1", Some(true)),
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .expect_err("a name is not an address");
+    assert!(error.message().contains("127.0.0.1"), "{}", error.message());
+
+    let info = update_provider(
+        &store,
+        &secrets,
+        ProviderKind::OpenaiCompatible,
+        keyed("http://127.0.0.1:1234/v1", Some(true)),
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .expect("consented loopback clear text");
+    assert!(info.allow_loopback_http);
+    assert!(provider_is_usable(
+        &store,
+        &secrets,
+        ProviderKind::OpenaiCompatible,
+        &unmanaged_policy(),
+        None
+    )
+    .await
+    .unwrap());
+    let routes = collect_routes(&store, &secrets, None, None, None, &unmanaged_policy()).await;
+    let route = routes
+        .iter()
+        .find(|route| route.kind == tidebreak_router::RouteKind::OpenaiCompatible)
+        .expect("the consented server is routed");
+    assert!(route.allow_loopback_http);
+    assert_eq!(route.api_key, "local-server-key");
+
+    // A new endpoint saved without consent starts without it, and a key
+    // cannot follow it over clear text.
+    let error = update_provider(
+        &store,
+        &secrets,
+        ProviderKind::OpenaiCompatible,
+        compatible_update("http://127.0.0.2:8080/v1"),
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .expect_err("consent does not carry over to another endpoint");
+    assert!(error.message().contains("unless you allow"));
+    assert!(
+        read_config(&store, ProviderKind::OpenaiCompatible)
+            .await
+            .unwrap()
+            .allow_loopback_http,
+        "a refused save leaves the stored consent alone"
+    );
+
+    // A kind with a fixed transport never takes consent.
+    let error = update_provider(
+        &store,
+        &secrets,
+        ProviderKind::Anthropic,
+        ProviderUpdate {
+            enabled: None,
+            base_url: None,
+            credential: None,
+            models: None,
+            allow_loopback_http: Some(true),
+        },
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .expect_err("only local kinds take consent");
+    assert!(error.message().contains("only over HTTPS"));
+}
+
+#[test]
+fn only_local_kinds_may_skip_the_key() {
+    for kind in ProviderKind::ALL {
+        let local = matches!(kind, ProviderKind::Ollama | ProviderKind::OpenaiCompatible);
+        assert_eq!(kind.requires_credential(), !local, "{kind}");
+        assert_eq!(kind.has_configurable_transport(), local, "{kind}");
+    }
+    // The consent path admits loopback IP literals only.
+    for (base, allowed) in [
+        ("http://127.0.0.1:1234/v1", true),
+        ("http://127.8.9.10:1234/v1", true),
+        ("http://[::1]:1234/v1", true),
+        ("http://localhost:1234/v1", false),
+        ("http://[::ffff:127.0.0.1]:1234/v1", false),
+        ("http://10.0.0.2:1234/v1", false),
+        ("http://user@127.0.0.1:1234/v1", false),
+    ] {
+        assert_eq!(
+            endpoint_is_allowed(ProviderKind::OpenaiCompatible, base, true, true),
+            allowed,
+            "{base}"
+        );
+        assert!(
+            !endpoint_is_allowed(ProviderKind::Anthropic, base, true, true),
+            "{base}"
+        );
+    }
 }
 
 fn gateway_test_snapshot(
@@ -512,6 +834,7 @@ async fn a_bare_curated_id_shadowed_by_a_configured_model_does_not_migrate() {
                 max_output_tokens: 4_096,
                 ..Default::default()
             }],
+            allow_loopback_http: false,
         },
     )
     .await
@@ -1333,6 +1656,7 @@ async fn custom_models_on_a_curated_provider_reach_the_catalog_beside_its_rows()
             base_url: None,
             credential: Some(ProviderCredential::api_key("anthropic-test-key")),
             models: Some(vec![custom.clone()]),
+            allow_loopback_http: None,
         },
         &*provisioned,
         &crate::managed_policy::NoOsPolicy,
@@ -1401,6 +1725,7 @@ async fn a_configured_row_a_catalog_update_curated_gives_way_to_the_curated_row(
                 display_name: Some("My Opus".into()),
                 ..Default::default()
             }],
+            allow_loopback_http: false,
         },
     )
     .await
@@ -1454,6 +1779,7 @@ async fn a_row_the_catalog_builds_in_leaves_the_card_and_goes_on_the_next_save()
             enabled: true,
             base_url: None,
             models: vec![row("grok-4.7"), row("grok-account-model")],
+            allow_loopback_http: false,
         },
     )
     .await
@@ -1477,6 +1803,7 @@ async fn a_row_the_catalog_builds_in_leaves_the_card_and_goes_on_the_next_save()
         base_url: None,
         credential: None,
         models: Some(models),
+        allow_loopback_http: None,
     };
     let saved = update_provider(
         &store,
@@ -1616,6 +1943,7 @@ async fn chatgpt_sign_in_leaves_custom_openai_rows_unavailable() {
                 id: "gpt-next-preview".into(),
                 ..Default::default()
             }],
+            allow_loopback_http: false,
         },
     )
     .await

@@ -68,10 +68,11 @@ impl OpenAiCompatProvider {
 
     /// Build a provider for a custom OpenAI-compatible gateway.
     pub fn compatible(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
+        let base_url = base_url.into();
         Self {
-            client: crate::http::streaming_client(),
+            client: crate::http::streaming_client_for(&base_url),
             api_key: api_key.into(),
-            base_url: base_url.into(),
+            base_url,
             token_source: None,
             conversation_attribution: false,
             streaming_usage: false,
@@ -83,6 +84,8 @@ impl OpenAiCompatProvider {
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        // A new endpoint can be this computer, which no proxy may see.
+        self.client = crate::http::streaming_client_for(&self.base_url);
         self
     }
 
@@ -1733,6 +1736,7 @@ mod tests {
                     as std::sync::Arc<dyn crate::BearerTokenSource>
             }),
             chatgpt_account_id: None,
+            allow_loopback_http: false,
         }])
     }
 
@@ -1912,6 +1916,7 @@ mod tests {
             model_rewrites: std::collections::HashMap::new(),
             token_source: Some(source.clone()),
             chatgpt_account_id: None,
+            allow_loopback_http: false,
         }]);
         let conversation = tidebreak_core::id::SessionId::new();
         let stream = provider

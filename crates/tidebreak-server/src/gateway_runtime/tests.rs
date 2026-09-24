@@ -1602,6 +1602,7 @@ async fn the_route_token_source_mints_llm_tokens_per_rotation() {
             enabled: true,
             base_url: Some("http://127.0.0.1:9".to_string()),
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await
@@ -2384,6 +2385,7 @@ async fn an_unmanaged_profile_with_a_legacy_row_has_no_gateway_surface() {
                 max_output_tokens: 4_096,
                 ..Default::default()
             }],
+            allow_loopback_http: false,
         },
     )
     .await
@@ -2505,6 +2507,7 @@ async fn boot_carries_a_managed_rows_snapshot_forward_once() {
             max_output_tokens: 4_096,
             ..Default::default()
         }],
+        allow_loopback_http: false,
     };
     providers::write_config(
         &*store,
@@ -2584,6 +2587,7 @@ async fn boot_discards_a_snapshot_from_a_foreign_deployment() {
                 max_output_tokens: 4_096,
                 ..Default::default()
             }],
+            allow_loopback_http: false,
         },
     )
     .await
@@ -2635,6 +2639,7 @@ async fn boot_drops_an_unmanaged_legacy_row_without_making_it_managed() {
                 max_output_tokens: 4_096,
                 ..Default::default()
             }],
+            allow_loopback_http: false,
         },
     )
     .await

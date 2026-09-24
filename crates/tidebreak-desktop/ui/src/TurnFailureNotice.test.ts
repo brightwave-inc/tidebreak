@@ -19,8 +19,23 @@ describe("TurnFailureNotice copy", () => {
   it("keeps invalid credentials separate from provider account access", () => {
     const copy = turnFailureCopy("auth", "xAI");
 
-    expect(copy.title).toContain("authenticate");
+    expect(copy.title).toBe("Tidebreak has no working credential for xAI");
     expect(copy.body).toContain("API key");
     expect(copy.body).not.toContain("credits");
+  });
+
+  /**
+   * The same category covers a key that was never saved, which no provider
+   * saw. The copy must not say the provider refused it.
+   */
+  it("does not blame the provider for a credential that may be missing", () => {
+    const copy = turnFailureCopy("auth", "OpenAI");
+
+    expect(copy.title).not.toContain("could not authenticate");
+    expect(copy.body).toContain("missing");
+
+    expect(turnFailureCopy("auth").title).toBe(
+      "Tidebreak has no working credential for the model provider",
+    );
   });
 });

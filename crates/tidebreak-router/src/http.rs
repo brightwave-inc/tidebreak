@@ -130,6 +130,59 @@ pub fn streaming_client() -> reqwest::Client {
     build(builder)
 }
 
+/// [`streaming_client`] for requests to `base_url`, with no proxy when that
+/// is this computer. See [`bypass_proxy_for_loopback`].
+#[must_use]
+pub fn streaming_client_for(base_url: &str) -> reqwest::Client {
+    let builder = reqwest::Client::builder();
+    let builder = match timeouts().dead_air {
+        Some(dead_air) => builder.read_timeout(dead_air),
+        None => builder,
+    };
+    build(bypass_proxy_for_loopback(builder, base_url))
+}
+
+/// Turn off every proxy, including `HTTP_PROXY`, `ALL_PROXY`, and the
+/// system's own, when `base_url` names this computer.
+///
+/// A request to a server on this computer has no reason to leave it, and
+/// over plain HTTP a proxy would receive the key, when one is sent, and the
+/// whole conversation in clear text. macOS's HTTP proxy setting applies even
+/// to loopback addresses, because its exceptions list is not read. A remote
+/// endpoint keeps the proxy, which a network may need to reach it.
+pub fn bypass_proxy_for_loopback(
+    builder: reqwest::ClientBuilder,
+    base_url: &str,
+) -> reqwest::ClientBuilder {
+    if names_this_computer(base_url) {
+        builder.no_proxy()
+    } else {
+        builder
+    }
+}
+
+/// Whether `url`'s host is a loopback address or `localhost`.
+#[must_use]
+pub fn names_this_computer(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => {
+            address.is_loopback()
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| mapped.is_loopback())
+        }
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            domain == "localhost" || domain.ends_with(".localhost")
+        }
+        None => false,
+    }
+}
+
 /// Why a provider byte stream stopped early.
 ///
 /// Adapters already treat a mid-stream error as a hard failure (the step's
@@ -267,5 +320,102 @@ mod tests {
             deadline.client_message("anthropic"),
             "anthropic stream ended early: exceeded the 3600s stream duration limit"
         );
+    }
+
+    /// Accept connections on a loopback port, count them, and answer each
+    /// with an empty JSON body.
+    async fn counting_listener() -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                    )
+                    .await;
+            }
+        });
+        (address, hits)
+    }
+
+    /// Review finding: a key a person agreed to send in clear text to a
+    /// server on this computer went to an HTTP proxy instead, because the
+    /// provider clients honored `HTTP_PROXY` and the system proxy for
+    /// loopback URLs.
+    #[tokio::test]
+    async fn a_request_to_this_computer_never_goes_through_a_proxy() {
+        let (target, target_hits) = counting_listener().await;
+        let (proxy, proxy_hits) = counting_listener().await;
+        let base = format!("http://127.0.0.1:{}/v1", target.port());
+        let client = bypass_proxy_for_loopback(
+            reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all(format!("http://{proxy}")).unwrap()),
+            &base,
+        )
+        .build()
+        .unwrap();
+
+        client.get(format!("{base}/models")).send().await.unwrap();
+
+        let seen =
+            |hits: &std::sync::atomic::AtomicUsize| hits.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(seen(&proxy_hits), 0, "the proxy saw the request");
+        assert_eq!(
+            seen(&target_hits),
+            1,
+            "the server on this computer answered"
+        );
+    }
+
+    /// A remote endpoint keeps the proxy, which a network may need to reach
+    /// it.
+    #[tokio::test]
+    async fn a_request_to_another_host_keeps_the_proxy() {
+        let (proxy, proxy_hits) = counting_listener().await;
+        let base = "http://provider.example/v1";
+        let client = bypass_proxy_for_loopback(
+            reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all(format!("http://{proxy}")).unwrap()),
+            base,
+        )
+        .build()
+        .unwrap();
+
+        client.get(format!("{base}/models")).send().await.unwrap();
+
+        assert_eq!(proxy_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn this_computer_is_a_loopback_address_or_localhost() {
+        for url in [
+            "http://127.0.0.1:1234/v1",
+            "http://127.9.9.9/",
+            "http://[::1]:8080/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://localhost:11434",
+            "http://LOCALHOST./v1",
+            "http://models.localhost/",
+        ] {
+            assert!(names_this_computer(url), "{url}");
+        }
+        for url in [
+            "http://10.0.0.2/",
+            "https://api.openai.com/v1",
+            "http://localhost.example.com/",
+            "not a url",
+        ] {
+            assert!(!names_this_computer(url), "{url}");
+        }
     }
 }

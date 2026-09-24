@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   AppWindow,
   ArrowUpRight,
@@ -144,6 +144,7 @@ export function WelcomeState({
   heading = "How can I help?",
   description = "Ask a question, work through your files, or start a task.",
   onStartWalkthrough,
+  setup,
 }: {
   onSelectPrompt?: (prompt: string, options?: StarterPromptOptions) => void;
   executionConfigClient?: Pick<ApiClient, "getExecConfig">;
@@ -156,6 +157,11 @@ export function WelcomeState({
    * no prompts sees exactly what it saw before.
    */
   promptLibrary?: PromptLibraryApis;
+  /**
+   * What stands where the starters go when a starter could not run yet: the
+   * ways to connect a model. The starters return once one is connected.
+   */
+  setup?: ReactNode;
 }) {
   const [executionProviders, setExecutionProviders] = useState<
     ExecConfigInfo["providers"] | null
@@ -237,7 +243,7 @@ export function WelcomeState({
           )}
         </div>
       </div>
-      {onStartWalkthrough && (
+      {onStartWalkthrough && !setup && (
         <Button
           className="self-center"
           type="button"
@@ -247,7 +253,8 @@ export function WelcomeState({
           Set up your first task
         </Button>
       )}
-      {onSelectPrompt && (
+      {setup && <div className="welcome-setup">{setup}</div>}
+      {onSelectPrompt && !setup && (
         <div className="welcome-prompts" data-first-task-target="starters">
           {libraryPrompts.length > 0
             ? libraryPrompts.map((prompt, index) => (

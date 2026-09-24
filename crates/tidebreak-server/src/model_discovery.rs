@@ -25,6 +25,10 @@ use crate::managed_policy::ManagedPolicy;
 use crate::model_registry;
 use crate::providers::{self, CustomModelConfig, ProviderCredential, ProviderKind};
 
+mod connection;
+
+pub use connection::{test_provider, CONNECTION_TEST_TIMEOUT};
+
 /// The whole budget for one discovery, every request included.
 pub const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// The largest listing body read from a provider. OpenRouter's full catalog,
@@ -141,7 +145,7 @@ pub async fn discover_models(
     let config = providers::read_config(store, kind).await?;
     let api_key = discovery_key(secrets, kind).await?;
     let base = discovery_base(kind, config.base_url.as_deref())?;
-    if !providers::base_url_is_allowed(&base, !kind.requires_credential() && api_key.is_none()) {
+    if !providers::endpoint_is_allowed(kind, &base, api_key.is_some(), config.allow_loopback_http) {
         return Err(ServerError::bad_request_kind(
             "provider_endpoint_insecure",
             format!(
@@ -161,12 +165,15 @@ pub(crate) async fn discover_at(
     api_key: Option<&str>,
     configured: &[CustomModelConfig],
 ) -> std::result::Result<DiscoveredModels, ServerError> {
-    let http = reqwest::Client::builder()
-        .timeout(DISCOVERY_TIMEOUT)
-        // A redirect could carry the key to another host.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| ServerError::internal("could not build the model discovery client"))?;
+    let http = tidebreak_router::http::bypass_proxy_for_loopback(
+        reqwest::Client::builder()
+            .timeout(DISCOVERY_TIMEOUT)
+            // A redirect could carry the key to another host.
+            .redirect(reqwest::redirect::Policy::none()),
+        base,
+    )
+    .build()
+    .map_err(|_| ServerError::internal("could not build the model discovery client"))?;
     let fetcher = Fetcher {
         http,
         kind,

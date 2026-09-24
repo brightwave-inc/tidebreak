@@ -93,6 +93,7 @@ async fn code_recap_app(
             enabled: true,
             base_url: Some(provider_base_url),
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await

@@ -319,6 +319,7 @@ pub async fn put_api_key(
     let mut config = providers::read_config(&*state.store, ProviderKind::Anthropic).await?;
     config.enabled = true;
     providers::write_config(&*state.store, ProviderKind::Anthropic, &config).await?;
+    providers::clear_last_test(&*state.store, ProviderKind::Anthropic).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -331,6 +332,7 @@ pub async fn put_api_key(
 pub async fn delete_api_key(State(state): State<AppState>) -> Result<StatusCode, ServerError> {
     refuse_credential_writes_when_managed(&state).await?;
     providers::delete_credential(&*state.secrets, ProviderKind::Anthropic).await?;
+    providers::clear_last_test(&*state.store, ProviderKind::Anthropic).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -354,15 +356,21 @@ pub async fn list_providers(
     let caller_gateway = state
         .caller_gateway_snapshot(&auth.principal.owner_id())
         .await?;
-    Ok(Json(ProvidersList {
-        providers: providers::list_providers(
-            &*state.store,
-            &*state.secrets,
-            &policy,
-            caller_gateway.as_ref(),
-        )
-        .await?,
-    }))
+    let mut providers = providers::list_providers(
+        &*state.store,
+        &*state.secrets,
+        &policy,
+        caller_gateway.as_ref(),
+    )
+    .await?;
+    // Whether the deployment's shared key works is secret metadata, which
+    // decision 6 keeps on the deployment plane: only an admin reads it.
+    if !auth.principal.is_admin() {
+        for provider in &mut providers {
+            provider.last_test = None;
+        }
+    }
+    Ok(Json(ProvidersList { providers }))
 }
 
 /// `PUT /providers/{kind}` — update a provider's config and/or credential.
@@ -420,6 +428,8 @@ pub async fn delete_provider_credential(
     if kind == ProviderKind::Openai {
         providers::clear_chatgpt_reconnect_required(&*state.store).await?;
     }
+    // The last test vouched for the key that just went.
+    providers::clear_last_test(&*state.store, kind).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -438,6 +448,26 @@ pub async fn post_provider_models_discover(
     let policy = state.managed_policy()?;
     Ok(Json(
         crate::model_discovery::discover_models(&*state.store, &*state.secrets, kind, &policy)
+            .await?,
+    ))
+}
+
+/// `POST /providers/{kind}/test` — make one cheap request with the saved
+/// credential and endpoint, record what it found, and return it.
+///
+/// A provider that answered at all gets `200` with the classified result,
+/// whatever the outcome. Only a test that could not start (no key, no
+/// endpoint, ChatGPT sign-in, the gateway, a managed profile) is an error, and
+/// it records nothing. The key never leaves the server.
+pub async fn post_provider_test(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+) -> Result<Json<providers::ProviderTestResult>, ServerError> {
+    let kind = ProviderKind::parse(&kind)
+        .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
+    let policy = state.managed_policy()?;
+    Ok(Json(
+        crate::model_discovery::test_provider(&*state.store, &*state.secrets, kind, &policy)
             .await?,
     ))
 }

@@ -80,6 +80,37 @@ model data only: a row that echoes the key is dropped, and an error names the
 status but never repeats the provider's body. Discovery proposes rows; saving
 them goes through the same validation as a row typed by hand.
 
+## Connection tests
+
+`POST /providers/{kind}/test` makes one cheap request with the saved key and
+endpoint: the smallest page of the provider's model listing, or OpenRouter's
+`/key`, because OpenRouter lists its models to anyone. It shares discovery's
+guarantees: the key stays on the server, no redirect is followed, and the
+whole test gives up after eight seconds. It answers with one classified
+outcome (`connected`, `key_rejected`, `access_denied`, `unreachable`,
+`rate_limited`, or `unexpected_answer`) and a sentence Tidebreak writes. A
+bare 403 is `access_denied`, not `key_rejected`, for the reason decision 20
+gives: it does not say whether the key, the account, or a policy refused.
+
+The server records the result as the provider's last test, and
+`GET /providers` carries it until the key, the endpoint, or the clear-text
+consent changes. The Settings badge reads that record rather than the
+configuration, so a stored key that stopped working reads as what it is.
+ChatGPT sign-in and the gateway have no test; each is checked when the person
+signs in.
+
+## Local endpoints and clear text
+
+Ollama and OpenAI-compatible endpoints are the two kinds whose address the
+person chooses (`ProviderKind::has_configurable_transport`). Both take a key
+only when the server asks for one. Without a key, either may use clear-text
+HTTP to a loopback host, `localhost` included. A saved key travels only over
+HTTPS unless the person consents (`allow_loopback_http`), and even then only
+to a loopback IP literal, the line the REST connected apps draw: a name such
+as `localhost` resolves through files and resolvers Tidebreak does not
+control. A new endpoint saved without the consent field withdraws it. The
+router checks the same rule again when it builds the route.
+
 ## Flatten-on-switch
 
 **Foreign provider-native artifacts degrade to plain content.** One rule,

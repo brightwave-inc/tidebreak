@@ -104,6 +104,8 @@ import {
   type Project as WireProject,
   type ProviderInfo as WireProviderInfo,
   type ProviderAuthMode as WireProviderAuthMode,
+  type ProviderTestOutcome as WireProviderTestOutcome,
+  type ProviderTestResult as WireProviderTestResult,
   type ProviderKind as WireProviderKind,
   type ChatGptSignInStatus as WireChatGptSignInStatus,
   type PermissionMode as WirePermissionMode,
@@ -443,6 +445,10 @@ export type StickyChatDefaults = WireStickyChatDefaults;
 
 export type ProviderInfo = WireProviderInfo;
 export type ProviderAuthMode = WireProviderAuthMode;
+/** What a provider connection test found. */
+export type ProviderTestOutcome = WireProviderTestOutcome;
+/** One provider connection test: its outcome, a sentence, and when it ran. */
+export type ProviderTestResult = WireProviderTestResult;
 export type ChatGptSignInStatus = WireChatGptSignInStatus;
 
 export type VoiceTranscriptionModel =

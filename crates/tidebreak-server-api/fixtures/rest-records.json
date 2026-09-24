@@ -81,12 +81,19 @@
           "enabled": true,
           "has_credential": true,
           "kind": "anthropic",
+          "last_test": {
+            "message": "Anthropic rejected the saved API key (HTTP 401). Save a valid key, then test again.",
+            "outcome": "key_rejected",
+            "status": 401,
+            "tested_at": "2026-09-21T14:13:20Z"
+          },
           "models": [],
           "replaced_by_built_in": [
             "claude-opus-5-5"
           ]
         },
         {
+          "allow_loopback_http": true,
           "base_url": "http://localhost:11434/v1",
           "custom_reasoning_efforts": [
             "low",
@@ -98,6 +105,12 @@
           "enabled": false,
           "has_credential": false,
           "kind": "openai_compatible",
+          "last_test": {
+            "message": "Tidebreak reached the server. It lists 1 model.",
+            "model_count": 1,
+            "outcome": "connected",
+            "tested_at": "2026-09-21T14:14:20Z"
+          },
           "models": [
             {
               "context_window": 32768,

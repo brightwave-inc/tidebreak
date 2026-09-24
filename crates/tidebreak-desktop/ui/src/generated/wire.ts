@@ -4889,13 +4889,54 @@ custom_reasoning_efforts?: Array<ReasoningEffort>,
  * covers. Tidebreak uses the built-in model and leaves these out of
  * `models`; the next save to this provider drops them for good.
  */
-replaced_by_built_in?: Array<string>, };
+replaced_by_built_in?: Array<string>,
+/**
+ * Whether the reader agreed to send the saved key over clear-text HTTP to
+ * a loopback address. Absent when they have not.
+ */
+allow_loopback_http?: boolean,
+/**
+ * The last connection test, when one ran since the credential or the
+ * endpoint last changed.
+ */
+last_test?: ProviderTestResult, };
 
 /**
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without
  * breaking wire clients that match on the string form.
  */
 export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "fireworks" | "together" | "openrouter" | "ollama" | "openai_compatible" | "model_gateway";
+
+/**
+ * What a provider connection test found.
+ */
+export type ProviderTestOutcome = "connected" | "key_rejected" | "access_denied" | "unreachable" | "rate_limited" | "unexpected_answer";
+
+/**
+ * The result of one provider connection test.
+ */
+export type ProviderTestResult = {
+/**
+ * What the test found.
+ */
+outcome: ProviderTestOutcome,
+/**
+ * One plain sentence about the result. Tidebreak writes it; it never
+ * repeats the provider's answer or the key.
+ */
+message: string,
+/**
+ * The HTTP status the provider answered with, when it answered.
+ */
+status?: number,
+/**
+ * How many models the provider's list named, when it answered with one.
+ */
+model_count?: number,
+/**
+ * When the test ran.
+ */
+tested_at: string, };
 
 /**
  * One CI check on a pull request.

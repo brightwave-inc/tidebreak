@@ -626,9 +626,20 @@ impl ProviderKind {
     }
 
     /// Whether a stored or env credential is required before the route is
-    /// usable. Local Ollama accepts unauthenticated requests.
+    /// usable. Ollama and generic OpenAI-compatible servers usually run on this
+    /// computer and accept unauthenticated requests, so their key is optional.
     pub const fn requires_credential(self) -> bool {
-        !matches!(self, Self::Ollama)
+        !self.has_configurable_transport()
+    }
+
+    /// Whether the reader chooses how this kind is reached: a daemon or server
+    /// on this computer over loopback HTTP, or any HTTPS endpoint.
+    ///
+    /// Only these kinds may send requests over clear-text HTTP, and only to a
+    /// loopback address: with no key at all, or with a key the reader agreed
+    /// to send in clear text ([`ProviderConfig::allow_loopback_http`]).
+    pub const fn has_configurable_transport(self) -> bool {
+        matches!(self, Self::Ollama | Self::OpenaiCompatible)
     }
 
     /// Environment variable consulted for this kind's base URL when the
@@ -789,23 +800,71 @@ pub fn allow_test_loopback_provider_base_url(base: &str) {
         .insert(url.to_string());
 }
 
+/// Whether `kind` may send its requests to `base`.
+///
+/// HTTPS is always allowed. Clear-text HTTP is allowed only to this computer,
+/// and only for a kind whose transport the reader configures: with no key, to
+/// any loopback host; with a key, only after the reader agreed to send it in
+/// clear text, and only to a loopback IP literal, because a name such as
+/// `localhost` resolves through files and resolvers Tidebreak does not control.
+/// That is the same line the REST connected apps draw.
+pub(crate) fn endpoint_is_allowed(
+    kind: ProviderKind,
+    base: &str,
+    sends_key: bool,
+    loopback_http_consent: bool,
+) -> bool {
+    if base_url_is_allowed(base, !kind.requires_credential() && !sends_key) {
+        return true;
+    }
+    sends_key
+        && loopback_http_consent
+        && kind.has_configurable_transport()
+        && is_loopback_ip_http(base)
+}
+
+/// A clear-text URL to a loopback IP literal: `127.0.0.0/8` or `[::1]`, with
+/// no user info and no fragment.
+fn is_loopback_ip_http(base: &str) -> bool {
+    let Ok(url) = url::Url::parse(base) else {
+        return false;
+    };
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
+    }
+}
+
 fn validate_base_url_transport(
     kind: ProviderKind,
     base: &str,
     has_reusable_credential: bool,
+    loopback_http_consent: bool,
 ) -> std::result::Result<(), ServerError> {
-    let allow_credentialless_loopback_http =
-        !kind.requires_credential() && !has_reusable_credential;
-    if base_url_is_allowed(base, allow_credentialless_loopback_http) {
+    if endpoint_is_allowed(kind, base, has_reusable_credential, loopback_http_consent) {
         return Ok(());
     }
-    Err(ServerError::bad_request(
-        if allow_credentialless_loopback_http {
-            "base_url must use HTTPS, or HTTP on a loopback address for a credentialless provider"
-        } else {
-            "base_url must use HTTPS when provider credentials are present or required"
-        },
-    ))
+    let message = if !kind.has_configurable_transport() {
+        "base_url must use HTTPS when provider credentials are present or required"
+    } else if !has_reusable_credential {
+        "base_url must use HTTPS, or HTTP on a loopback address when no API key is saved"
+    } else if base_url_is_allowed(base, true) && !is_loopback_ip_http(base) {
+        // `localhost` and friends: loopback, but a name rather than an address.
+        "base_url must use a loopback IP address such as 127.0.0.1 or [::1] to send an API key over HTTP, or use HTTPS"
+    } else if is_loopback_ip_http(base) {
+        "base_url must use HTTPS when an API key is saved, unless you allow sending the key over HTTP to this computer"
+    } else {
+        "base_url must use HTTPS when an API key is saved"
+    };
+    Err(ServerError::bad_request(message))
 }
 
 impl std::fmt::Display for ProviderKind {
@@ -888,6 +947,14 @@ pub struct ProviderConfig {
     /// A row never shadows a curated id of the same provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<CustomModelConfig>,
+    /// The reader agreed to send this provider's saved key over clear-text
+    /// HTTP to a loopback IP address.
+    ///
+    /// Only Ollama and OpenAI-compatible endpoints read it: they are the kinds
+    /// that run on this computer. Without it, a saved key travels only over
+    /// HTTPS. A keyless endpoint needs no consent for loopback HTTP.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_loopback_http: bool,
 }
 
 /// Non-secret runtime health for a stored ChatGPT OAuth session.
@@ -928,6 +995,7 @@ impl ProviderConfig {
             enabled: false,
             base_url: None,
             models: Vec::new(),
+            allow_loopback_http: false,
         }
     }
 }
@@ -1697,6 +1765,163 @@ pub struct ProviderInfo {
     /// `models`; the next save to this provider drops them for good.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replaced_by_built_in: Vec<String>,
+    /// Whether the reader agreed to send the saved key over clear-text HTTP to
+    /// a loopback address. Absent when they have not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_loopback_http: bool,
+    /// The last connection test, when one ran since the credential or the
+    /// endpoint last changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_test: Option<ProviderTestResult>,
+}
+
+/// What a provider connection test found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderTestOutcome {
+    /// The provider answered its model listing with the saved credential.
+    Connected,
+    /// The provider refused the saved key: HTTP 401, or the answer the
+    /// provider documents for an invalid key.
+    KeyRejected,
+    /// The provider answered HTTP 403. The key may lack a permission, or the
+    /// account may be out of credits or restricted. The answer does not say
+    /// which, so the key is not called invalid.
+    AccessDenied,
+    /// Tidebreak could not connect, or the provider did not answer in time.
+    Unreachable,
+    /// The provider is limiting requests (HTTP 429).
+    RateLimited,
+    /// The provider answered, but not with the model list it documents:
+    /// another status, a redirect, or a body Tidebreak could not read.
+    UnexpectedAnswer,
+}
+
+impl ProviderTestOutcome {
+    /// The wire spelling, for a client that prints the outcome without a
+    /// serde round trip.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::KeyRejected => "key_rejected",
+            Self::AccessDenied => "access_denied",
+            Self::Unreachable => "unreachable",
+            Self::RateLimited => "rate_limited",
+            Self::UnexpectedAnswer => "unexpected_answer",
+        }
+    }
+}
+
+/// The result of one provider connection test.
+//
+// Read tolerantly, like the rest of `ProviderInfo`: a key a newer server adds
+// must not break a client a release behind. A plain comment, so the generated
+// `wire.ts` does not carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct ProviderTestResult {
+    /// What the test found.
+    pub outcome: ProviderTestOutcome,
+    /// One plain sentence about the result. Tidebreak writes it; it never
+    /// repeats the provider's answer or the key.
+    pub message: String,
+    /// The HTTP status the provider answered with, when it answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status: Option<u16>,
+    /// How many models the provider's list named, when it answered with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_count: Option<u32>,
+    /// When the test ran.
+    pub tested_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The store key holding one provider's last connection test.
+fn last_test_key(kind: ProviderKind) -> String {
+    format!("{}.last_test", kind.setting_key())
+}
+
+/// A stored connection test and what it tested.
+#[derive(Serialize, Deserialize)]
+struct StoredTest {
+    /// [`test_fingerprint`] of the key, endpoint, and consent the test used.
+    fingerprint: String,
+    #[serde(flatten)]
+    result: ProviderTestResult,
+}
+
+/// What a connection test of `kind` depends on, as a short digest: the key
+/// it sends, the endpoint, and the clear-text consent.
+///
+/// A stored test counts only while these still match, so a test that
+/// finishes after the key or the endpoint changed never describes the new
+/// one. Only a prefix of the digest is kept: enough to tell a change, too
+/// little to confirm a guessed key.
+pub async fn test_fingerprint(
+    secrets: &dyn SecretProvider,
+    kind: ProviderKind,
+    config: &ProviderConfig,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let key = resolve_api_key(secrets, kind).await.unwrap_or_default();
+    let base = kind
+        .effective_base_url(config.base_url.as_deref())
+        .unwrap_or_default();
+    let consent = if config.allow_loopback_http { "1" } else { "0" };
+    let mut digest = Sha256::new();
+    digest.update(b"tidebreak provider test\n");
+    for part in [key.as_str(), base.as_str(), consent] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    digest.finalize()[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The last connection test of `kind`, if one is stored and still describes
+/// the saved key, endpoint, and consent. A record this build cannot read
+/// counts as none: the reader can run the test again.
+pub async fn read_last_test(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+    kind: ProviderKind,
+) -> Result<Option<ProviderTestResult>> {
+    let Some(stored) = store
+        .get_setting(&last_test_key(kind))
+        .await?
+        .and_then(|value| serde_json::from_value::<StoredTest>(value).ok())
+    else {
+        return Ok(None);
+    };
+    let config = read_config(store, kind).await?;
+    let current = test_fingerprint(secrets, kind, &config).await;
+    Ok((stored.fingerprint == current).then_some(stored.result))
+}
+
+/// Record the connection test that just ran for `kind`, against the
+/// [`test_fingerprint`] it was run with.
+pub async fn write_last_test(
+    store: &dyn Store,
+    kind: ProviderKind,
+    fingerprint: &str,
+    result: &ProviderTestResult,
+) -> Result<()> {
+    let stored = StoredTest {
+        fingerprint: fingerprint.to_owned(),
+        result: result.clone(),
+    };
+    store
+        .set_setting(&last_test_key(kind), &serde_json::to_value(stored)?)
+        .await
+}
+
+/// Forget the last connection test of `kind`. Called whenever its credential
+/// or endpoint changes, so a stale "Connected" never describes a new key.
+pub async fn clear_last_test(store: &dyn Store, kind: ProviderKind) -> Result<()> {
+    store.delete_setting(&last_test_key(kind)).await
 }
 
 /// How a provider's credential was established.
@@ -1746,6 +1971,12 @@ pub struct ProviderUpdate {
     /// strictly, unlike a row read back.
     #[serde(default, deserialize_with = "strict_configured_models")]
     pub models: Option<Vec<CustomModelConfig>>,
+    /// Consent to send the saved key over clear-text HTTP to a loopback IP
+    /// address. Only Ollama and OpenAI-compatible endpoints take it. A new
+    /// `base_url` without this field withdraws an earlier consent, so consent
+    /// always names the endpoint the reader saw.
+    #[serde(default)]
+    pub allow_loopback_http: Option<bool>,
 }
 
 /// Read the stored config for `kind`, or the disabled default.
@@ -1931,6 +2162,8 @@ pub async fn list_providers(
                     models: snapshot.models.clone(),
                     custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
                     replaced_by_built_in: Vec::new(),
+                    allow_loopback_http: false,
+                    last_test: None,
                 });
                 continue;
             }
@@ -1950,6 +2183,8 @@ pub async fn list_providers(
                 models: gateway_models(store, policy, caller_gateway).await?,
                 custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
                 replaced_by_built_in: Vec::new(),
+                allow_loopback_http: false,
+                last_test: None,
             });
             continue;
         }
@@ -1974,6 +2209,8 @@ pub async fn list_providers(
             models,
             custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
             replaced_by_built_in,
+            allow_loopback_http: config.allow_loopback_http,
+            last_test: read_last_test(store, secrets, kind).await?,
         });
     }
     Ok(out)
@@ -2012,9 +2249,18 @@ pub async fn update_provider(
         ));
     }
     let policy = crate::managed_policy::resolve(provisioned_policy, os_policy)?;
-    if policy.managed && (update.credential.is_some() || update.base_url.is_some()) {
+    if policy.managed
+        && (update.credential.is_some()
+            || update.base_url.is_some()
+            || update.allow_loopback_http.is_some())
+    {
         return Err(managed_profile_refusal(format!(
             "this profile is managed by a model gateway; {kind} credentials and endpoints are locked"
+        )));
+    }
+    if update.allow_loopback_http == Some(true) && !kind.has_configurable_transport() {
+        return Err(ServerError::bad_request(format!(
+            "{kind} sends its key only over HTTPS; only Ollama and OpenAI-compatible endpoints can use HTTP on this computer"
         )));
     }
 
@@ -2040,6 +2286,7 @@ pub async fn update_provider(
     if let Some(enabled) = update.enabled {
         config.enabled = enabled;
     }
+    let previous_base_url = config.base_url.clone();
     match update.base_url {
         None => {}
         Some(_) if kind == ProviderKind::Xai => {
@@ -2060,6 +2307,16 @@ pub async fn update_provider(
             config.base_url = Some(url);
         }
     }
+    let endpoint_changed = config.base_url != previous_base_url;
+    // Consent names the endpoint the reader saw when they gave it, so a new
+    // endpoint saved without it starts without it.
+    let previous_consent = config.allow_loopback_http;
+    match update.allow_loopback_http {
+        Some(consent) => config.allow_loopback_http = consent,
+        None if endpoint_changed => config.allow_loopback_http = false,
+        None => {}
+    }
+    let consent_changed = config.allow_loopback_http != previous_consent;
     if let Some(models) = update.models {
         if !kind.accepts_configured_models() {
             return Err(ServerError::bad_request(format!(
@@ -2089,14 +2346,19 @@ pub async fn update_provider(
             "openai_compatible requires a base_url when enabled",
         ));
     }
-    if config.enabled || base_url_changed || credential_changed {
+    if config.enabled || base_url_changed || credential_changed || consent_changed {
         if let Some(base) = kind
             .effective_base_url(config.base_url.as_deref())
             .as_deref()
         {
             let has_reusable_credential =
                 update.credential.is_some() || has_credential(secrets, kind).await;
-            validate_base_url_transport(kind, base, has_reusable_credential)?;
+            validate_base_url_transport(
+                kind,
+                base,
+                has_reusable_credential,
+                config.allow_loopback_http,
+            )?;
         }
     }
     if let Some(credential) = update.credential {
@@ -2113,6 +2375,11 @@ pub async fn update_provider(
     if kind == ProviderKind::Openai && credential_changed {
         clear_chatgpt_reconnect_required(store).await?;
     }
+    // A test describes the key and endpoint it reached. Once either changes,
+    // its verdict no longer applies until the next test.
+    if credential_changed || endpoint_changed || consent_changed {
+        clear_last_test(store, kind).await?;
+    }
 
     Ok(ProviderInfo {
         kind,
@@ -2123,6 +2390,8 @@ pub async fn update_provider(
         models: config.models,
         custom_reasoning_efforts: kind.custom_reasoning_efforts().to_vec(),
         replaced_by_built_in,
+        allow_loopback_http: config.allow_loopback_http,
+        last_test: read_last_test(store, secrets, kind).await?,
     })
 }
 
@@ -2472,6 +2741,7 @@ pub async fn collect_routes(
                 model_rewrites: HashMap::new(),
                 token_source: Some(source),
                 chatgpt_account_id: Some(account_id),
+                allow_loopback_http: false,
             });
             continue;
         }
@@ -2480,9 +2750,10 @@ pub async fn collect_routes(
             Some(_) => None,
             None => env_api_key(kind),
         };
-        // Local Ollama accepts unauthenticated requests. Keep its route key
-        // empty so the router can distinguish this narrow trust class from a
-        // reusable bearer credential when validating cleartext loopback URLs.
+        // Ollama and OpenAI-compatible servers on this computer accept
+        // unauthenticated requests. Keep their route key empty so the router
+        // can tell this narrow trust class from a reusable bearer credential
+        // when it validates clear-text loopback URLs.
         let api_key = match api_key {
             Some(key) => key,
             None if !kind.requires_credential() => String::new(),
@@ -2494,7 +2765,8 @@ pub async fn collect_routes(
         }
         if !matches!(kind, ProviderKind::Gemini | ProviderKind::Xai) {
             if let Some(base) = base_url.as_deref() {
-                if !base_url_is_allowed(base, kind == ProviderKind::Ollama && api_key.is_empty()) {
+                if !endpoint_is_allowed(kind, base, !api_key.is_empty(), config.allow_loopback_http)
+                {
                     continue;
                 }
             }
@@ -2514,6 +2786,7 @@ pub async fn collect_routes(
             model_rewrites: HashMap::new(),
             token_source: None,
             chatgpt_account_id: None,
+            allow_loopback_http: kind.has_configurable_transport() && config.allow_loopback_http,
         });
     }
     routes
@@ -2566,6 +2839,7 @@ fn gateway_snapshot_routes(
             model_rewrites: HashMap::new(),
             token_source: Some(source),
             chatgpt_account_id: None,
+            allow_loopback_http: false,
         });
         return routes;
     }
@@ -2578,6 +2852,7 @@ fn gateway_snapshot_routes(
             model_rewrites: anthropic_rewrites,
             token_source: Some(source.clone()),
             chatgpt_account_id: None,
+            allow_loopback_http: false,
         });
     }
     if !openai_models.is_empty() {
@@ -2589,6 +2864,7 @@ fn gateway_snapshot_routes(
             model_rewrites: openai_rewrites,
             token_source: Some(source),
             chatgpt_account_id: None,
+            allow_loopback_http: false,
         });
     }
     routes
@@ -2616,8 +2892,7 @@ pub async fn migrate_legacy_provider_enablement(
                 kind,
                 &ProviderConfig {
                     enabled: true,
-                    base_url: None,
-                    models: Vec::new(),
+                    ..ProviderConfig::disabled()
                 },
             )
             .await?;
@@ -2738,6 +3013,26 @@ pub async fn provider_is_usable(
     if kind.requires_credential() && !has_credential(secrets, kind).await {
         return Ok(false);
     }
+    // A keyless OpenAI-compatible endpoint is only as reachable as its URL,
+    // and without one there is nothing to route to.
+    if kind == ProviderKind::OpenaiCompatible
+        && kind
+            .effective_base_url(config.base_url.as_deref())
+            .is_none()
+    {
+        return Ok(false);
+    }
+    // Only a server on this computer is taken to answer without a key. A
+    // remote endpoint whose key was removed would fail every turn with 401,
+    // so it stops counting until a key is saved again.
+    if kind == ProviderKind::OpenaiCompatible
+        && !has_credential(secrets, kind).await
+        && !kind
+            .effective_base_url(config.base_url.as_deref())
+            .is_some_and(|base| tidebreak_router::http::names_this_computer(&base))
+    {
+        return Ok(false);
+    }
     if kind == ProviderKind::Openai
         && matches!(
             auth_mode_for(secrets, kind).await,
@@ -2750,9 +3045,11 @@ pub async fn provider_is_usable(
     if !matches!(kind, ProviderKind::Gemini | ProviderKind::Xai) {
         if let Some(base) = kind.effective_base_url(config.base_url.as_deref()) {
             let has_reusable_credential = has_credential(secrets, kind).await;
-            if !base_url_is_allowed(
+            if !endpoint_is_allowed(
+                kind,
                 &base,
-                kind == ProviderKind::Ollama && !has_reusable_credential,
+                has_reusable_credential,
+                config.allow_loopback_http,
             ) {
                 return Ok(false);
             }

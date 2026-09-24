@@ -407,6 +407,26 @@ export function useModelSettingsNav(): {
 }
 
 /**
+ * "Last used: X · Default: Y", when new work starts on the model the reader
+ * picked last and that is not the default Settings names. `null` when there
+ * is nothing to explain: no last-used model, no default that can run, or the
+ * two are the same model.
+ */
+export function lastUsedPrecedence(
+  lastUsed: boolean,
+  current: ModelInfo | null,
+  defaultModel: ModelInfo | null,
+): { lastUsedName: string; defaultName: string; text: string } | null {
+  if (!lastUsed || !current || !defaultModel) return null;
+  if (current.key === defaultModel.key) return null;
+  return {
+    lastUsedName: current.display_name,
+    defaultName: defaultModel.display_name,
+    text: `Last used: ${current.display_name} · Default: ${defaultModel.display_name}`,
+  };
+}
+
+/**
  * Per-chat model selector for the message bar.
  *
  * `null` still means the chat follows Settings, but the picker does not
@@ -417,12 +437,18 @@ export function useModelSettingsNav(): {
  * `defaultKey` is the catalog key the server says that fallback resolves
  * to. It is only treated as selected when that row can actually run.
  *
+ * `lastUsed` says the value is the model the reader picked most recently in
+ * any conversation, which new work starts on ahead of the default. When the
+ * two differ the menu names both, so a default changed in Settings is never
+ * silently outranked.
+ *
  * The list is every catalog row for the selected provider.
  */
 export function ModelMenu({
   models,
   value,
   defaultKey = null,
+  lastUsed = false,
   disabled,
   providers = [],
   onSetUpProvider,
@@ -431,6 +457,8 @@ export function ModelMenu({
   models: ModelInfo[];
   value: string | null;
   defaultKey?: string | null;
+  /** `value` is the model picked last anywhere, not a pick made here. */
+  lastUsed?: boolean;
   disabled?: boolean;
   /** Provider status, for the unconfigured rail icons. Empty until it loads. */
   providers?: ProviderInfo[];
@@ -456,6 +484,7 @@ export function ModelMenu({
     : (known?.display_name ?? `${value} (unavailable)`);
   const triggerLabel =
     isDefault && !usableDefault ? "No model selected" : `Model: ${label}`;
+  const precedence = lastUsedPrecedence(lastUsed, known, usableDefault);
 
   // The mark of whatever will actually run, so the pill reads the same whether
   // the model was chosen here or inherited from Settings.
@@ -532,6 +561,11 @@ export function ModelMenu({
             {providerLabel(model.provider)}
           </span>
         )}
+        {precedence && model.key === usableDefault?.key && (
+          <span className="text-muted-foreground shrink-0 text-2xs">
+            Default
+          </span>
+        )}
         <ModelToolCapabilityChip model={model} />
         {selected && <Check className="ml-auto size-4" />}
       </DropdownMenuItem>
@@ -550,7 +584,8 @@ export function ModelMenu({
           className="h-8 max-w-56 gap-2"
           disabled={disabled}
           aria-label={triggerLabel}
-          title={triggerLabel}
+          aria-description={precedence?.text}
+          title={precedence?.text ?? triggerLabel}
         >
           {pillModel ? (
             <ProviderIcon
@@ -655,6 +690,18 @@ export function ModelMenu({
             </label>
           </div>
           <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-1">
+            {precedence && !searching && (
+              <p className="text-muted-foreground px-2 pt-1 pb-0.5 text-xs">
+                {/* Wrap between the two names, never inside one. */}
+                <span className="whitespace-nowrap">
+                  Last used: {precedence.lastUsedName}
+                </span>
+                {" · "}
+                <span className="whitespace-nowrap">
+                  Default: {precedence.defaultName}
+                </span>
+              </p>
+            )}
             {!anyAvailable && (
               <p className="text-muted-foreground px-2 py-2 text-sm">
                 {managed

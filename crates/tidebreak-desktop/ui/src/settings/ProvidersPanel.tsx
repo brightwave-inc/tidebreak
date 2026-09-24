@@ -2,20 +2,46 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { ChevronRight } from "lucide-react";
 import { toast } from "sonner";
-import type { ApiClient, ModelInfo, ProviderInfo, ProviderKind } from "../api";
+import type {
+  ApiClient,
+  ModelInfo,
+  ProviderInfo,
+  ProviderKind,
+  ProviderTestResult,
+} from "../api";
 import { openInBrowser } from "../openInBrowser";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { hostMachineLabel } from "@/remoteMachine";
 import { useConfirm } from "../components/ConfirmDialog";
-import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
+import {
+  SettingsError,
+  SettingsPanel,
+  SettingsSection,
+  SettingsStatus,
+} from "./primitives";
 import { ProviderIcon } from "../ProviderIcons";
 import { providerLabel } from "../ModelSelection";
 import { ProviderModelsSection } from "./ProviderModelsSection";
+import {
+  loopbackIpHttpHost,
+  providerBadge,
+  providerConfigured,
+  providerRequiresCredential,
+  providerTakesBaseUrl,
+  providerTestable,
+  usesChatgptSignIn,
+  testedAgo,
+  testOutcomeLabel,
+  testOutcomeTone,
+} from "./providerConnection";
 
 const CHATGPT_SIGN_IN_POLL_MS = 2_000;
 // Matches the server's sign-in window; polling past it can only report a
@@ -165,17 +191,48 @@ function ProviderRow({
 }) {
   const [key, setKey] = useState("");
   const [baseUrl, setBaseUrl] = useState(info.base_url ?? "");
+  const [allowLoopbackHttp, setAllowLoopbackHttp] = useState(
+    info.has_credential && info.allow_loopback_http === true,
+  );
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  // The answer of a test this card just ran, shown until the provider list
+  // catches up with it.
+  const [ranTest, setRanTest] = useState<ProviderTestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
-  const acceptsBaseUrl =
-    info.kind === "openai_compatible" || info.kind === "ollama";
-  const requiresCredential = info.kind !== "ollama";
+  const acceptsBaseUrl = providerTakesBaseUrl(info.kind);
+  const requiresCredential = providerRequiresCredential(info.kind);
   const [pendingCredentialFocus, setPendingCredentialFocus] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
   const credentialRef = useRef<HTMLInputElement | null>(null);
-  const connected =
-    info.enabled && (info.has_credential || !requiresCredential);
+  const connected = providerConfigured(info);
+  const lastTest = ranTest ?? info.last_test ?? null;
+  const badge = providerBadge(info, testing, lastTest);
+  // The badge carries a test's verdict only while the card can run; ChatGPT
+  // sign-in has no test to date.
+  const showTestedAt =
+    lastTest !== null && connected && !testing && !usesChatgptSignIn(info);
+  // A saved or typed key crosses clear-text HTTP only to this computer, and
+  // only once the reader says so.
+  const consentHost =
+    acceptsBaseUrl && (info.has_credential || key.trim() !== "")
+      ? loopbackIpHttpHost(baseUrl)
+      : null;
+  const recordedTestAt = info.last_test?.tested_at;
+  const savedConsent = info.has_credential && info.allow_loopback_http === true;
+
+  useEffect(() => {
+    // Consent is given for one saved key and endpoint. When either changes
+    // on the server, such as a deleted key, the box follows what is saved.
+    setAllowLoopbackHttp(savedConsent);
+  }, [savedConsent, info.base_url]);
+
+  useEffect(() => {
+    // The provider list now carries a newer answer, or none at all after the
+    // key or endpoint changed.
+    setRanTest(null);
+  }, [recordedTestAt]);
   // A provider with no curated rows and no custom ones yet has nothing to
   // summarize.
   const summary =
@@ -206,9 +263,38 @@ function ProviderRow({
     onExpandedChange(true);
   }
 
+  /**
+   * Test the saved key and endpoint. The server records the answer as this
+   * provider's last test, so the badge still says it after a restart.
+   */
+  async function runTest() {
+    setTesting(true);
+    setError(null);
+    try {
+      setRanTest(await client.testProvider(info.kind as ProviderKind));
+    } catch (err) {
+      setError(friendlyErrorMessage(err, "Could not test this provider."));
+    } finally {
+      setTesting(false);
+      onChanged();
+    }
+  }
+
   async function save(enabled: boolean) {
+    const trimmedKey = key.trim();
+    const sendsKeyOverHttp =
+      enabled &&
+      loopbackIpHttpHost(baseUrl) !== null &&
+      (info.has_credential || trimmedKey !== "");
+    if (acceptsBaseUrl && sendsKeyOverHttp && !allowLoopbackHttp) {
+      setError(
+        `Confirm that Tidebreak may send the key over HTTP to ${hostMachineLabel()}, or use HTTPS.`,
+      );
+      return;
+    }
     setSaving(true);
     setError(null);
+    let saved: ProviderInfo;
     try {
       // Models save on their own from the Models section, so this write
       // leaves the custom list alone.
@@ -216,21 +302,31 @@ function ProviderRow({
         enabled: boolean;
         base_url?: string | null;
         credential?: { type: "api_key"; key: string };
+        allow_loopback_http?: boolean;
       } = { enabled };
       if (acceptsBaseUrl) {
         body.base_url = baseUrl.trim() || null;
+        body.allow_loopback_http =
+          allowLoopbackHttp && loopbackIpHttpHost(baseUrl) !== null;
       }
-      if (key.trim()) {
-        body.credential = { type: "api_key", key: key.trim() };
+      if (trimmedKey) {
+        body.credential = { type: "api_key", key: trimmedKey };
       }
-      await client.putProvider(info.kind as ProviderKind, body);
+      saved = await client.putProvider(info.kind as ProviderKind, body);
       setKey("");
-      onChanged();
       toast.success(`Saved ${providerLabel(info.kind)} settings`);
     } catch (err) {
       setError(String(err));
-    } finally {
       setSaving(false);
+      return;
+    }
+    setSaving(false);
+    // A mistyped key or a stopped server should show up here, not in the
+    // first conversation.
+    if (saved && providerConfigured(saved) && providerTestable(saved)) {
+      await runTest();
+    } else {
+      onChanged();
     }
   }
 
@@ -294,13 +390,27 @@ function ProviderRow({
         {summary && (
           <span className="text-xs text-muted-foreground">{summary}</span>
         )}
-        <Badge
-          variant={connected ? "success" : "outline"}
-          size="sm"
-          className="ml-auto"
-        >
-          {connected ? "Connected" : "Not connected"}
-        </Badge>
+        <span className="ml-auto flex min-w-0 items-center gap-2">
+          {showTestedAt && lastTest && (
+            // When the verdict was reached, beside it, so a days-old
+            // "Connected" reads as old without opening the card.
+            <span className="hidden min-w-0 truncate text-xs text-muted-foreground sm:inline">
+              {testedAgo(lastTest.tested_at)}
+            </span>
+          )}
+          <Badge
+            variant={badge.variant}
+            size="sm"
+            title={
+              showTestedAt && lastTest
+                ? `Tested ${testedAgo(lastTest.tested_at)}`
+                : undefined
+            }
+          >
+            {testing && <Spinner className="size-3" />}
+            {badge.label}
+          </Badge>
+        </span>
         {!connected && (
           <Button
             type="button"
@@ -332,10 +442,17 @@ function ProviderRow({
             <Switch
               aria-label="Enabled"
               checked={info.enabled}
-              disabled={saving}
+              disabled={saving || testing}
               onCheckedChange={(checked) => void save(checked)}
             />
           </div>
+          {connected && lastTest && !usesChatgptSignIn(info) && (
+            <SettingsStatus
+              tone={testOutcomeTone(lastTest.outcome)}
+              label={testOutcomeLabel(lastTest.outcome)}
+              description={`${lastTest.message} Tested ${testedAgo(lastTest.tested_at)}.`}
+            />
+          )}
           {info.kind === "xai" && (
             <p className="text-xs text-muted-foreground">
               Requests go directly to api.x.ai/v1.
@@ -347,12 +464,37 @@ function ProviderRow({
               aria-label="Base URL"
               placeholder={
                 info.kind === "ollama"
-                  ? "base URL (default http://127.0.0.1:11434/v1)"
-                  : "base URL (e.g. http://127.0.0.1:1234/v1)"
+                  ? "Base URL (default http://127.0.0.1:11434/v1)"
+                  : "Base URL, such as http://127.0.0.1:1234/v1"
               }
               value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
+              onChange={(e) => {
+                setBaseUrl(e.target.value);
+                // Consent names one endpoint; a different one asks again.
+                setAllowLoopbackHttp(false);
+              }}
             />
+          )}
+          {consentHost && (
+            <div className="notice-surface notice-warning flex flex-col gap-2 rounded-xl border px-3 py-2">
+              <p className="text-sm font-medium">
+                Send the key over HTTP to {hostMachineLabel()}?
+              </p>
+              <p className="text-sm">
+                This server runs on {hostMachineLabel()} without HTTPS.
+                Tidebreak sends the key in clear text to {consentHost} only.
+              </p>
+              <Label className="flex items-start gap-2 text-sm font-normal">
+                <Checkbox
+                  checked={allowLoopbackHttp}
+                  disabled={saving}
+                  onCheckedChange={(checked) =>
+                    setAllowLoopbackHttp(checked === true)
+                  }
+                />
+                Send the key in clear text to this loopback address
+              </Label>
+            </div>
           )}
           {(info.kind === "fireworks" ||
             info.kind === "together" ||
@@ -366,7 +508,7 @@ function ProviderRow({
             <OpenAiCredentialSection
               info={info}
               client={client}
-              saving={saving}
+              saving={saving || testing}
               setSaving={setSaving}
               setError={setError}
               onChanged={onChanged}
@@ -374,6 +516,11 @@ function ProviderRow({
               setApiKey={setKey}
               apiKeyRef={credentialRef}
               onSaveApiKey={() => void save(true)}
+              onTest={
+                connected && providerTestable(info)
+                  ? () => void runTest()
+                  : undefined
+              }
               onClear={() => void clearCredential()}
             />
           ) : (
@@ -381,11 +528,16 @@ function ProviderRow({
               <Input
                 ref={credentialRef}
                 type="password"
+                aria-label="API key"
                 placeholder={
-                  info.kind === "ollama" ? "API key (optional)" : "API key"
+                  requiresCredential ? "API key" : "API key (optional)"
                 }
                 value={key}
-                onChange={(e) => setKey(e.target.value)}
+                onChange={(e) => {
+                  setKey(e.target.value);
+                  // Consent covers the saved key; a new one asks again.
+                  setAllowLoopbackHttp(false);
+                }}
                 autoComplete="off"
               />
               <div className="flex flex-wrap gap-2">
@@ -393,20 +545,29 @@ function ProviderRow({
                   type="button"
                   disabled={
                     saving ||
-                    (!info.has_credential &&
-                      requiresCredential &&
-                      info.kind !== "openai_compatible" &&
-                      !key.trim())
+                    testing ||
+                    (!info.has_credential && requiresCredential && !key.trim())
                   }
                   onClick={() => void save(true)}
                 >
                   Save configuration
                 </Button>
+                {connected && providerTestable(info) && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={saving || testing}
+                    onClick={() => void runTest()}
+                  >
+                    {testing && <Spinner />}
+                    {testing ? "Testing…" : "Test"}
+                  </Button>
+                )}
                 {info.has_credential && (
                   <Button
                     type="button"
                     variant="outline"
-                    disabled={saving}
+                    disabled={saving || testing}
                     onClick={() => void clearCredential()}
                   >
                     Clear
@@ -431,9 +592,11 @@ function ProviderRow({
 
 function credentialStatusLabel(info: ProviderInfo): string {
   if (!info.has_credential) {
-    return info.kind === "ollama"
-      ? "No API key required for a local Ollama"
-      : "No credential";
+    if (info.kind === "ollama") return "No API key required for a local Ollama";
+    if (info.kind === "openai_compatible") {
+      return `No API key required for a server on ${hostMachineLabel()}`;
+    }
+    return "No credential";
   }
   if (info.kind === "openai" && info.auth_mode === "chatgpt") {
     return "Signed in with ChatGPT";
@@ -455,6 +618,7 @@ function OpenAiCredentialSection({
   setApiKey,
   apiKeyRef,
   onSaveApiKey,
+  onTest,
   onClear,
 }: {
   info: ProviderInfo;
@@ -467,6 +631,8 @@ function OpenAiCredentialSection({
   setApiKey: (value: string) => void;
   apiKeyRef: RefObject<HTMLInputElement | null>;
   onSaveApiKey: () => void;
+  /** Test the saved API key. Absent when there is no key to test. */
+  onTest?: () => void;
   onClear: () => void;
 }) {
   const signedInWithChatgpt =
@@ -647,6 +813,16 @@ function OpenAiCredentialSection({
         >
           {signedInWithChatgpt ? "Switch to API key" : "Save API key"}
         </Button>
+        {onTest && info.auth_mode === "api_key" && (
+          <Button
+            type="button"
+            variant="outline"
+            disabled={saving}
+            onClick={onTest}
+          >
+            Test
+          </Button>
+        )}
         {info.has_credential && info.auth_mode === "api_key" && (
           <Button
             type="button"

@@ -275,6 +275,10 @@ pub struct Route {
     /// ChatGPT account id for OpenAI routes authenticated via ChatGPT OAuth.
     /// Baked into the adapter (only the bearer rotates).
     pub chatgpt_account_id: Option<String>,
+    /// The person agreed to send `api_key` over clear-text HTTP to a loopback
+    /// IP address. Read only for Ollama and OpenAI-compatible routes; every
+    /// other route, and every keyed route without it, stays on HTTPS.
+    pub allow_loopback_http: bool,
 }
 
 impl std::fmt::Debug for Route {
@@ -287,6 +291,7 @@ impl std::fmt::Debug for Route {
             .field("model_rewrites", &self.model_rewrites)
             .field("token_source", &self.token_source.is_some())
             .field("chatgpt_account_id", &self.chatgpt_account_id)
+            .field("allow_loopback_http", &self.allow_loopback_http)
             .finish()
     }
 }
@@ -479,9 +484,13 @@ impl ModelProvider for Router {
 }
 
 fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
-    let credentialless_ollama =
-        route.kind == RouteKind::Ollama && route.api_key.is_empty() && route.token_source.is_none();
-    if route.api_key.is_empty() && route.token_source.is_none() && !credentialless_ollama {
+    // Ollama and OpenAI-compatible servers on this computer take requests
+    // without a key. Every other route needs a key or a token source.
+    let configurable_transport =
+        matches!(route.kind, RouteKind::Ollama | RouteKind::OpenaiCompatible);
+    let credentialless =
+        configurable_transport && route.api_key.is_empty() && route.token_source.is_none();
+    if route.api_key.is_empty() && route.token_source.is_none() && !credentialless {
         return None;
     }
     match route.kind {
@@ -579,9 +588,9 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         | RouteKind::Ollama
         | RouteKind::OpenaiCompatible => {
             let base = route.base_url.as_deref()?;
-            let configurable_transport =
-                matches!(route.kind, RouteKind::Ollama | RouteKind::OpenaiCompatible);
-            if configurable_transport && !base_url_is_allowed(base, credentialless_ollama) {
+            if configurable_transport
+                && !configurable_transport_allowed(base, credentialless, route.allow_loopback_http)
+            {
                 return None;
             }
             if !configurable_transport
@@ -620,6 +629,33 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
     }
 }
 
+/// Whether an Ollama or OpenAI-compatible route may reach `base`: HTTPS
+/// always; clear-text HTTP to any loopback host without a key; and with a key,
+/// clear-text HTTP only to a loopback IP literal the person agreed to.
+fn configurable_transport_allowed(base: &str, credentialless: bool, consent: bool) -> bool {
+    if base_url_is_allowed(base, credentialless) {
+        return true;
+    }
+    if credentialless || !consent {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(base) else {
+        return false;
+    };
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
+    }
+}
+
 fn base_url_is_allowed(base: &str, allow_credentialless_loopback_http: bool) -> bool {
     let Ok(url) = url::Url::parse(base) else {
         return false;
@@ -648,7 +684,7 @@ fn fingerprint_routes(routes: &[Route]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "{}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}|{}",
                 r.kind.as_str(),
                 // A rotating token must not thrash the cached router; the
                 // fingerprint tracks *whether* a live source exists, and the
@@ -673,7 +709,8 @@ fn fingerprint_routes(routes: &[Route]) -> String {
                         .collect::<Vec<_>>()
                         .join(",")
                 },
-                r.chatgpt_account_id.as_deref().unwrap_or("")
+                r.chatgpt_account_id.as_deref().unwrap_or(""),
+                r.allow_loopback_http
             )
         })
         .collect();
@@ -713,6 +750,7 @@ mod tests {
             model_rewrites: HashMap::new(),
             token_source: None,
             chatgpt_account_id: None,
+            allow_loopback_http: false,
         }
     }
 
@@ -896,6 +934,90 @@ mod tests {
             Some("http://192.168.1.10:11434/v1"),
         )]);
         assert_eq!(lan.select("remote"), None);
+    }
+
+    /// A local OpenAI-compatible server (LM Studio, llama.cpp, vLLM) takes the
+    /// same keyless loopback path Ollama does, and no wider one.
+    #[test]
+    fn credentialless_openai_compatible_allows_only_loopback_cleartext() {
+        for base in [
+            "http://127.0.0.1:1234/v1",
+            "http://localhost:1234/v1",
+            "http://[::1]:1234/v1",
+        ] {
+            let router = Router::build(vec![route(
+                RouteKind::OpenaiCompatible,
+                "",
+                &["local"],
+                Some(base),
+            )]);
+            assert_eq!(
+                router.select("local"),
+                Some(RouteKind::OpenaiCompatible),
+                "{base}"
+            );
+        }
+        let lan = Router::build(vec![route(
+            RouteKind::OpenaiCompatible,
+            "",
+            &["remote"],
+            Some("http://192.168.1.10:1234/v1"),
+        )]);
+        assert_eq!(lan.select("remote"), None);
+        // Only the two configurable kinds run without a key.
+        let keyless_hosted = Router::build(vec![route(
+            RouteKind::Openrouter,
+            "",
+            &["hosted"],
+            Some("https://openrouter.ai/api/v1"),
+        )]);
+        assert_eq!(keyless_hosted.select("hosted"), None);
+    }
+
+    /// A key crosses clear-text HTTP only with consent, and only to a loopback
+    /// IP literal: never to a name such as `localhost`, never off the machine.
+    #[test]
+    fn a_keyed_loopback_route_needs_consent_and_an_ip_literal() {
+        let consented = |base: &str, kind: RouteKind| {
+            let mut route = route(kind, "local-key", &["local"], Some(base));
+            route.allow_loopback_http = true;
+            Router::build(vec![route])
+        };
+        assert_eq!(
+            consented("http://127.0.0.1:1234/v1", RouteKind::OpenaiCompatible).select("local"),
+            Some(RouteKind::OpenaiCompatible)
+        );
+        assert_eq!(
+            consented("http://[::1]:11434/v1", RouteKind::Ollama).select("local"),
+            Some(RouteKind::Ollama)
+        );
+        for base in [
+            "http://localhost:1234/v1",
+            "http://192.168.1.10:1234/v1",
+            "http://[::ffff:127.0.0.1]:1234/v1",
+        ] {
+            assert_eq!(
+                consented(base, RouteKind::OpenaiCompatible).select("local"),
+                None,
+                "{base}"
+            );
+        }
+    }
+
+    #[test]
+    fn consent_is_part_of_the_route_fingerprint() {
+        let plain = route(
+            RouteKind::OpenaiCompatible,
+            "local-key",
+            &["local"],
+            Some("https://compat.example/v1"),
+        );
+        let mut consented = plain.clone();
+        consented.allow_loopback_http = true;
+        assert_ne!(
+            Router::build(vec![plain]).fingerprint(),
+            Router::build(vec![consented]).fingerprint()
+        );
     }
 
     struct StaticSource(&'static str);

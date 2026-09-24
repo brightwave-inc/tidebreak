@@ -51,6 +51,7 @@ type SettingsClientMethods = Pick<
   | "putSettings"
   | "putProvider"
   | "discoverProviderModels"
+  | "testProvider"
   | "deleteCredential"
   | "getOpenaiChatgptStatus"
   | "openaiChatgptSignIn"
@@ -608,6 +609,12 @@ function createSettingsStoryClient(
       read({
         provider: kind,
         models: kind === "anthropic" ? discoveredAnthropicModels : [],
+      }),
+    testProvider: () =>
+      write({
+        outcome: "connected",
+        message: "The provider accepted the saved key.",
+        tested_at: new Date().toISOString(),
       }),
     deleteCredential: () => write(undefined),
     getOpenaiChatgptStatus: () =>

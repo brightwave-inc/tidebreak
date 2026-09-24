@@ -742,7 +742,21 @@ async fn discovery_refuses_before_any_request_when_it_cannot_proceed() {
         .unwrap_err();
     assert_eq!(error.kind(), "managed_profile");
 
-    // No stored key and no environment fallback for this kind.
+    // No stored key and no environment fallback for this kind. Every kind
+    // that needs a key also reads one from the environment, so the check only
+    // holds where that variable is unset.
+    if std::env::var_os("TOGETHER_API_KEY").is_none() {
+        let error = discover_models(&store, &secrets, ProviderKind::Together, &unmanaged())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "provider_credential_missing");
+        assert!(error
+            .message()
+            .contains("Save an API key for Together AI first"));
+    }
+
+    // An OpenAI-compatible server may go without a key, but not without an
+    // address.
     let error = discover_models(
         &store,
         &secrets,
@@ -751,10 +765,7 @@ async fn discovery_refuses_before_any_request_when_it_cannot_proceed() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.kind(), "provider_credential_missing");
-    assert!(error
-        .message()
-        .contains("Save an API key for OpenAI-compatible first"));
+    assert_eq!(error.kind(), "provider_endpoint_missing");
 
     // A key but no endpoint to send it to.
     providers::write_credential(
@@ -782,6 +793,7 @@ async fn discovery_refuses_before_any_request_when_it_cannot_proceed() {
             enabled: true,
             base_url: Some("http://models.internal/v1".into()),
             models: Vec::new(),
+            allow_loopback_http: false,
         },
     )
     .await

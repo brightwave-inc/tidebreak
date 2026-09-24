@@ -44,9 +44,13 @@ export function turnFailureCopy(
         body: "Automatic retries are already spent. Try again after demand or your provider quota resets.",
       };
     case "auth":
+      // Decision 20 files a key the provider rejected and a key that was
+      // never saved under this one category, and only the first reached the
+      // provider. So the copy names the credential, not the provider, as
+      // the problem; a provider's own words arrive as the detail below.
       return {
-        title: `${titled} could not authenticate this request`,
-        body: "Check that the API key is present, active, and belongs to the account or organization you intended to use.",
+        title: `Tidebreak has no working credential for ${provider}`,
+        body: "The API key or sign-in may be missing, expired, or rejected. Check it in provider settings, then send again.",
       };
     case "provider_access":
       return {

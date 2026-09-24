@@ -384,6 +384,8 @@ pub fn app(state: AppState) -> Router {
             "/providers/{kind}/models/discover",
             post(routes::post_provider_models_discover),
         )
+        // So does a connection test, which also records its result.
+        .route("/providers/{kind}/test", post(routes::post_provider_test))
         .route(
             "/providers/openai/chatgpt/sign-in",
             post(routes::post_openai_chatgpt_sign_in),

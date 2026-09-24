@@ -5,7 +5,11 @@ import { toast } from "sonner";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ManagedPolicy, PermissionMode } from "./api";
 import { ManagedPolicyContext } from "./managedPolicy";
-import { clampPermissionMode, PermissionModeMenu } from "./PermissionModeMenu";
+import {
+  clampPermissionMode,
+  PermissionModeMenu,
+  WORK_PERMISSION_MODE_DESCRIPTIONS,
+} from "./PermissionModeMenu";
 import { useFirstTaskGuide } from "./FirstTaskWalkthrough";
 
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
@@ -203,4 +207,70 @@ it("opens when the first-task walkthrough is on the permissions step", () => {
     "permissions-ask",
   );
   expect(screen.getByRole("menuitem", { name: /Plan/ })).toBeInTheDocument();
+});
+
+/**
+ * Work's picker is the only thing between a first-time reader and a mode
+ * that runs everything unasked, so each row says what it does and the
+ * trigger names the posture in force.
+ */
+it("describes each mode in Work and names the current posture", async () => {
+  render(
+    <PermissionModeMenu
+      scopeKey="chat-1"
+      value="auto"
+      descriptions={WORK_PERMISSION_MODE_DESCRIPTIONS}
+      onChange={vi.fn()}
+    />,
+  );
+
+  const trigger = screen.getByRole("button", { name: "Permissions: Auto" });
+  expect(trigger).toHaveAttribute(
+    "aria-description",
+    "Workspace edits run. A reviewer model may approve routine actions; others still ask.",
+  );
+
+  await userEvent.click(trigger);
+  expect(
+    await screen.findByRole("menuitem", {
+      name: /Plan.*Reads and plans\. Changes nothing\./,
+    }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("menuitem", {
+      name: /Ask.*Asks before edits and actions outside its workspace\./,
+    }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("menuitem", {
+      name: /Allow all.*Runs every action without asking\./,
+    }),
+  ).toBeInTheDocument();
+});
+
+it("lets a locked mode's reason stand in for its description", async () => {
+  const capped: ManagedPolicy = {
+    managed: false,
+    source: "unmanaged",
+    misconfigured: false,
+    allow_local_mcp_servers: false,
+    permission_mode_ceiling: "auto",
+  };
+  render(
+    <ManagedPolicyContext.Provider value={capped}>
+      <PermissionModeMenu
+        scopeKey="chat-1"
+        value="ask"
+        descriptions={WORK_PERMISSION_MODE_DESCRIPTIONS}
+        onChange={vi.fn()}
+      />
+    </ManagedPolicyContext.Provider>,
+  );
+
+  await userEvent.click(
+    screen.getByRole("button", { name: "Permissions: Ask" }),
+  );
+  const allow = await screen.findByRole("menuitem", { name: /Allow all/ });
+  expect(allow).toHaveTextContent("Locked by your organization's policy.");
+  expect(allow).not.toHaveTextContent("without asking");
 });
