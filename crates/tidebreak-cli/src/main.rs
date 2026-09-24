@@ -927,6 +927,8 @@ fn parse_agent_run_id(value: &str) -> tidebreak_core::AgentRunId {
 /// Build one MCP server definition from flags, in the shape
 /// `PUT /mcp/servers` takes. Values the server keeps out of its definitions —
 /// environment values, bearer tokens — are named here, never given.
+/// `--oauth` marks a remote server that signs in with OAuth; connect it
+/// afterwards from Settings, where the sign-in opens in a browser.
 fn parse_mcp_definition(cursor: &mut Cursor) -> serde_json::Value {
     let name = cursor.positional("an MCP server name");
     let mut definition = serde_json::json!({ "name": name });
@@ -949,6 +951,7 @@ fn parse_mcp_definition(cursor: &mut Cursor) -> serde_json::Value {
             "--bearer-token-env" => {
                 definition["bearer_token_env"] = cursor.value("--bearer-token-env").into();
             }
+            "--oauth" => definition["oauth"] = true.into(),
             "--gateway-endpoint" => {
                 transports += 1;
                 definition["gateway_endpoint"] = cursor.value("--gateway-endpoint").into();
@@ -971,6 +974,14 @@ fn parse_mcp_definition(cursor: &mut Cursor) -> serde_json::Value {
     }
     if transports != 1 {
         usage_error("mcp-server add takes exactly one of --command, --url, or --gateway-endpoint");
+    }
+    if definition.get("oauth").is_some() {
+        if definition.get("url").is_none() {
+            usage_error("--oauth applies only to a --url server");
+        }
+        if definition.get("bearer_token_env").is_some() {
+            usage_error("--oauth and --bearer-token-env are two ways to authenticate; pick one");
+        }
     }
     if !args.is_empty() {
         definition["args"] = args.into();
@@ -1287,4 +1298,36 @@ async fn serve_mcp(workspace: PathBuf) -> Result<()> {
     tidebreak_mcp::serve_stdio(server)
         .await
         .map_err(|error| AgentError::msg(format!("MCP stdio error: {error}")))
+}
+
+#[cfg(test)]
+mod mcp_definition_tests {
+    use super::{parse_mcp_definition, Cursor};
+
+    fn definition(args: &[&str]) -> serde_json::Value {
+        parse_mcp_definition(&mut Cursor::new(
+            args.iter().map(|arg| (*arg).to_owned()).collect(),
+        ))
+    }
+
+    /// SET-03: `--oauth` marks a remote server that signs in with OAuth, in
+    /// the shape `PUT /mcp/servers` takes. Without the flag the definition
+    /// carries no `oauth` key, so an older server still reads it.
+    #[test]
+    fn oauth_marks_a_remote_server_that_signs_in() {
+        let marked = definition(&["vercel", "--url", "https://mcp.vercel.com", "--oauth"]);
+        assert_eq!(
+            marked,
+            serde_json::json!({
+                "name": "vercel",
+                "url": "https://mcp.vercel.com",
+                "oauth": true
+            })
+        );
+        let plain = definition(&["docs", "--url", "https://mcp.example.test/mcp"]);
+        assert!(plain.get("oauth").is_none(), "{plain}");
+        let definition: tidebreak_server::wire::McpServerDefinition =
+            serde_json::from_value(marked).expect("the route's definition type reads it");
+        assert!(definition.oauth);
+    }
 }

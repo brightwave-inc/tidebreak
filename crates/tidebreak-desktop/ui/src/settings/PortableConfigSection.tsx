@@ -419,11 +419,32 @@ function sentVariables(server: ExportedMcpServer): string[] {
   ];
 }
 
+/** The stored values a remote server sends that never travel in the file:
+ * its bearer token, when it is stored, and its custom header values, by
+ * header name. They have to be entered on this computer before the server
+ * can connect. */
+function storedValues(server: ExportedMcpServer): {
+  bearer: boolean;
+  headers: string[];
+} {
+  if (server.url === undefined) return { bearer: false, headers: [] };
+  return {
+    bearer: server.bearer_token_stored === true,
+    headers: server.headers ?? [],
+  };
+}
+
 /** A server whose start needs the person's switch for this row: it runs a
- * command on this computer, or sends a value from this computer's
- * environment to a URL the file chose. */
+ * command on this computer, sends a value from this computer's environment
+ * to a URL the file chose, or needs stored values entered here first. */
 function waitsForStart(server: ExportedMcpServer): boolean {
-  return server.command !== undefined || sentVariables(server).length > 0;
+  const stored = storedValues(server);
+  return (
+    server.command !== undefined ||
+    sentVariables(server).length > 0 ||
+    stored.bearer ||
+    stored.headers.length > 0
+  );
 }
 
 /** The host a URL names, for a sentence. */
@@ -553,6 +574,8 @@ function PreviewRow({
       : [];
   const local = server?.command !== undefined;
   const sent = server ? sentVariables(server) : [];
+  const stored = server ? storedValues(server) : { bearer: false, headers: [] };
+  const needsStored = stored.bearer || stored.headers.length > 0;
   const waits = server !== undefined && waitsForStart(server);
   const offersStart = waits && server?.enabled === true && action !== "skip";
   // An entry that needs a path on this machine stays on Skip until it has
@@ -588,6 +611,20 @@ function PreviewRow({
         <p className="mt-2 text-xs break-words">
           Sends <code className="font-mono">{sent.join(", ")}</code> to{" "}
           <code className="font-mono">{urlHost(server.url)}</code>.
+        </p>
+      )}
+      {server?.url && needsStored && (
+        <p className="mt-2 text-xs break-words">
+          Enter its {stored.bearer ? "bearer token" : null}
+          {stored.bearer && stored.headers.length > 0 ? " and " : null}
+          {stored.headers.length > 0 ? (
+            <>
+              <code className="font-mono">{stored.headers.join(", ")}</code>{" "}
+              {stored.headers.length === 1 ? "header" : "headers"}
+            </>
+          ) : null}{" "}
+          in Connected apps before it connects. Stored values never travel in
+          the file.
         </p>
       )}
       <div

@@ -239,7 +239,7 @@ describe("McpPanel", () => {
     expect(status.closest("[aria-live]")).toBeNull();
     expect(status).not.toContainElement(
       within(importSection).getByRole("list", {
-        name: "Environment values to enter",
+        name: "Values to enter",
       }),
     );
     expect(within(status).getByText(fileName)).toHaveClass("break-all");
@@ -1698,5 +1698,196 @@ describe("McpPanel after Tidebreak starts", () => {
     await user.click(await screen.findByRole("button", { name: "Add server" }));
     expect(screen.getByText("Not verified")).toBeInTheDocument();
     expect(screen.queryByText("Connecting")).not.toBeInTheDocument();
+  });
+});
+
+/** A saved remote server with no authentication, healthy. */
+function remoteServer(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
+  return {
+    ...signInServer(),
+    name: "docs",
+    url: "https://mcp.example.test/mcp",
+    health: "healthy",
+    tool_count: 3,
+    diagnostic: null,
+    oauth_status: undefined,
+    ...overrides,
+  };
+}
+
+describe("McpPanel remote authentication", () => {
+  it("stores a pasted bearer token and header value, and sends each only once", async () => {
+    // Built at run time so no credential-shaped literal sits in the source.
+    const token = ["panel", "bearer", "value"].join("-");
+    const apiKey = ["panel", "header", "value"].join("-");
+    const putMcpServers = vi
+      .fn()
+      .mockResolvedValue({ servers: [remoteServer()] });
+    const client = api({ servers: [remoteServer()] }, { putMcpServers });
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    const authentication = await screen.findByRole("radiogroup", {
+      name: "Authentication",
+    });
+    expect(
+      within(authentication).getByRole("radio", { name: "None" }),
+    ).toBeChecked();
+    await user.click(
+      within(authentication).getByRole("radio", {
+        name: "Bearer token, stored",
+      }),
+    );
+    const field = screen.getByLabelText("Bearer token");
+    expect(field).toHaveAttribute("type", "password");
+    await user.type(field, token);
+    await user.click(screen.getByRole("button", { name: "Add header" }));
+    await user.type(screen.getByLabelText("Header name 1"), "X-Api-Key");
+    await user.type(screen.getByLabelText("Header value 1"), apiKey);
+    await user.click(screen.getByRole("button", { name: "Save and verify" }));
+
+    await waitFor(() => expect(putMcpServers).toHaveBeenCalledTimes(1));
+    const [sent] = putMcpServers.mock.calls[0][0] as Record<string, unknown>[];
+    expect(sent).toMatchObject({
+      name: "docs",
+      bearer_token_env: null,
+      bearer_token_stored: true,
+      bearer_token_value: token,
+      headers: ["X-Api-Key"],
+      header_values: { "X-Api-Key": apiKey },
+      oauth: false,
+    });
+    // The answer carries names only, and the fields start blank again.
+    expect(screen.queryByDisplayValue(token)).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue(apiKey)).not.toBeInTheDocument();
+  });
+
+  it("says a stored token and header are set without showing them", async () => {
+    render(
+      <McpPanel
+        client={api({
+          servers: [
+            remoteServer({ bearer_token_stored: true, headers: ["X-Api-Key"] }),
+          ],
+        })}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("radio", { name: "Bearer token, stored" }),
+    ).toBeChecked();
+    const token = screen.getByLabelText("Bearer token");
+    expect(token).toHaveValue("");
+    expect(token).toHaveAttribute(
+      "placeholder",
+      "Stored. Leave blank to keep it.",
+    );
+    expect(screen.getByLabelText("Header value 1")).toHaveAttribute(
+      "placeholder",
+      "Stored. Leave blank to keep it.",
+    );
+  });
+
+  it("choosing OAuth drops the bearer token setting", async () => {
+    const putMcpServers = vi
+      .fn()
+      .mockResolvedValue({ servers: [remoteServer()] });
+    const client = api(
+      { servers: [remoteServer({ bearer_token_env: "DOCS_TOKEN" })] },
+      { putMcpServers },
+    );
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    expect(await screen.findByDisplayValue("DOCS_TOKEN")).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "OAuth" }));
+    expect(screen.queryByDisplayValue("DOCS_TOKEN")).not.toBeInTheDocument();
+    expect(screen.getByText(/save, then select Connect/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save and verify" }));
+    await waitFor(() => expect(putMcpServers).toHaveBeenCalledTimes(1));
+    const [sent] = putMcpServers.mock.calls[0][0] as Record<string, unknown>[];
+    expect(sent).toMatchObject({ oauth: true, bearer_token_env: null });
+    expect(sent.bearer_token_stored).toBeFalsy();
+  });
+
+  it("offers Use OAuth for a server that refused its bearer, then switches it and opens the sign-in", async () => {
+    const page = "https://vercel.com/oauth/authorize?client_id=tidebreak-2";
+    const refused = remoteServer({
+      name: "vercel",
+      url: "https://mcp.vercel.com",
+      bearer_token_stored: true,
+      health: "degraded",
+      tool_count: 0,
+      diagnostic:
+        "This server did not accept the bearer token. It offers an OAuth sign-in on vercel.com instead: select Use OAuth to sign in with your browser, or correct the token.",
+      oauth_status: { state: "available", sign_in_host: "vercel.com" },
+    });
+    const switched = signInServer({
+      oauth: true,
+      oauth_status: { state: "not_connected", sign_in_host: "vercel.com" },
+    });
+    // The list reads what was last saved, as the server's would.
+    let saved: McpServerInfo = refused;
+    const listMcpServers = vi.fn(async () => ({ servers: [saved] }));
+    const putMcpServers = vi.fn(async () => {
+      saved = switched;
+      return { servers: [switched] };
+    });
+    const connectMcpServer = vi.fn().mockResolvedValue({
+      state: "authorizing",
+      pending_authorization_url: page,
+      sign_in_host: "vercel.com",
+    });
+    const client = api(
+      { servers: [refused] },
+      { listMcpServers, putMcpServers, connectMcpServer },
+    );
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    expect(await screen.findByText("Sign-in available")).toBeInTheDocument();
+    expect(screen.getByText("Opens vercel.com")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Use OAuth" }));
+
+    await waitFor(() =>
+      expect(connectMcpServer).toHaveBeenCalledWith("vercel"),
+    );
+    const [sent] = putMcpServers.mock.calls[0][0] as Record<string, unknown>[];
+    expect(sent).toMatchObject({
+      name: "vercel",
+      oauth: true,
+      bearer_token_env: null,
+    });
+    expect(sent.bearer_token_stored).toBeFalsy();
+    expect(sent).not.toHaveProperty("oauth_status");
+    expect(openInBrowser).toHaveBeenCalledWith(page);
+    expect(screen.getByRole("radio", { name: "OAuth" })).toBeChecked();
+  });
+});
+
+describe("McpPanel local servers", () => {
+  it("lists HOME and PATH as forwarded by default, until the server sets one itself", async () => {
+    const user = userEvent.setup();
+    render(<McpPanel client={api()} />);
+
+    const defaults = await screen.findByRole("list", {
+      name: "Forwarded by default",
+    });
+    expect(
+      within(defaults)
+        .getAllByRole("listitem")
+        .map((item) => item.querySelector("code")?.textContent),
+    ).toEqual(["HOME", "PATH"]);
+
+    await user.click(screen.getByRole("button", { name: "Add variable name" }));
+    await user.type(
+      screen.getByLabelText("Forward environment names 2"),
+      "PATH",
+    );
+    expect(
+      within(screen.getByRole("list", { name: "Forwarded by default" }))
+        .getAllByRole("listitem")
+        .map((item) => item.querySelector("code")?.textContent),
+    ).toEqual(["HOME"]);
   });
 });

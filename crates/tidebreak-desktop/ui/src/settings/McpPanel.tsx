@@ -48,6 +48,7 @@ import {
   parseMcpImportText,
   type McpImportResult,
   type McpImportSecret,
+  type McpImportStored,
 } from "./mcpImport";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -130,8 +131,9 @@ function chipLabel(health: McpHealth): string {
 
 /**
  * The sign-in action for one HTTP MCP server that uses OAuth: Connect,
- * reopen or cancel the page while a sign-in waits, or Disconnect. What the
- * state means is said once, by the status line above it
+ * reopen or cancel the page while a sign-in waits, or Disconnect. A server
+ * that refused its bearer token and offers OAuth instead gets Use OAuth. What
+ * the state means is said once, by the status line above it
  * ({@link mcpServerStatus}), so this carries actions, and the host the
  * sign-in page is on, so the person sees where Connect sends them.
  */
@@ -142,6 +144,7 @@ export function McpOAuthControl({
   onConnect,
   onDisconnect,
   onCancel,
+  onUseOAuth,
 }: {
   status: McpOAuthStatus;
   busy?: boolean;
@@ -149,15 +152,16 @@ export function McpOAuthControl({
   onConnect?: () => void;
   onDisconnect?: () => void;
   onCancel?: () => void;
+  onUseOAuth?: () => void;
 }) {
   const host = status.sign_in_host;
-  const connect = (label: string) => (
+  const connect = (label: string, onClick = onConnect) => (
     <div className="flex flex-wrap items-center gap-2">
       <Button
         type="button"
         size="sm"
         disabled={disabled || busy}
-        onClick={onConnect}
+        onClick={onClick}
       >
         {busy && <Spinner aria-hidden className="size-3.5" />}
         {busy ? "Connecting…" : label}
@@ -170,6 +174,8 @@ export function McpOAuthControl({
   switch (status.state) {
     case "unsupported":
       return null;
+    case "available":
+      return connect("Use OAuth", onUseOAuth);
     case "not_connected":
       return connect("Connect");
     case "expired":
@@ -316,6 +322,14 @@ export function mcpServerStatus(
             oauth.error ??
             "Tidebreak cannot complete this server's sign-in.",
         };
+      case "available":
+        return {
+          tone: "warning",
+          label: "Sign-in available",
+          description:
+            server.diagnostic ??
+            "This server did not accept the bearer token. It offers an OAuth sign-in instead: select Use OAuth, or correct the token.",
+        };
       case "connected":
         break;
     }
@@ -342,6 +356,7 @@ export function McpServerSummary({
   onConnect,
   onDisconnect,
   onCancel,
+  onUseOAuth,
 }: {
   server: McpServerInfo;
   busy?: boolean;
@@ -353,6 +368,9 @@ export function McpServerSummary({
   onConnect?: () => void;
   onDisconnect?: () => void;
   onCancel?: () => void;
+  /** Switch a server that refused its bearer token to OAuth, save it, and
+   * start the sign-in. */
+  onUseOAuth?: () => void;
 }) {
   const oauth = oauthStatusOf(server);
   return (
@@ -368,6 +386,7 @@ export function McpServerSummary({
             onConnect={onConnect}
             onDisconnect={onDisconnect}
             onCancel={onCancel}
+            onUseOAuth={onUseOAuth}
           />
         ) : null}
       </div>
@@ -402,21 +421,91 @@ function transportFields(transport: "stdio" | "http"): Partial<McpServerInfo> {
         command: null,
         args: [],
         env: [],
+        env_values: undefined,
         env_from: [],
         cwd: null,
         url: "",
-        bearer_token_env: null,
         gateway_endpoint: null,
-        oauth: false,
+        ...authenticationFields("none", null),
       }
     : {
         command: "",
         url: null,
-        bearer_token_env: null,
         gateway_endpoint: null,
-        oauth: false,
+        headers: undefined,
+        header_values: undefined,
+        ...authenticationFields("none", null),
       };
 }
+
+/** How an HTTP server proves who it is. */
+type Authentication = "none" | "stored" | "variable" | "oauth";
+
+const AUTHENTICATIONS: ReadonlyArray<{ value: Authentication; label: string }> =
+  [
+    { value: "none", label: "None" },
+    { value: "stored", label: "Bearer token, stored" },
+    { value: "variable", label: "Bearer token from a variable" },
+    { value: "oauth", label: "OAuth" },
+  ];
+
+/** What one sentence under the Authentication choice says about it. */
+const AUTHENTICATION_HINT: Record<Authentication, string> = {
+  none: "Tidebreak sends no credential. A server that asks you to sign in offers Connect after you save.",
+  stored:
+    "Tidebreak keeps the token in the OS credential store and sends it only to this server's address. It works however Tidebreak starts, Dock and Finder included.",
+  variable:
+    "Tidebreak reads the variable from the environment it started with. Export it in the shell you start Tidebreak from, then restart Tidebreak. A Dock or Finder launch does not see variables from your shell profile.",
+  oauth:
+    "Sign in with your browser: save, then select Connect. Tidebreak keeps the session in the OS credential store.",
+};
+
+function authenticationOf(server: McpServerInfo): Authentication {
+  if (server.oauth) return "oauth";
+  if (server.bearer_token_stored === true) return "stored";
+  if (server.bearer_token_env !== null) return "variable";
+  return "none";
+}
+
+/** The definition fields one Authentication choice sets. Every choice clears
+ * the others, so a saved definition carries exactly one way to
+ * authenticate. `current` keeps a variable name already typed. */
+function authenticationFields(
+  choice: Authentication,
+  current: McpServerInfo | null,
+): Partial<McpServerInfo> {
+  // Leaving a field out is the same as its default, and keeps a definition
+  // with nothing stored byte-for-byte what it was before these settings.
+  const cleared: Partial<McpServerInfo> = {
+    oauth: false,
+    bearer_token_env: null,
+    bearer_token_stored: undefined,
+    bearer_token_value: undefined,
+  };
+  switch (choice) {
+    case "none":
+      return cleared;
+    case "stored":
+      return { ...cleared, bearer_token_stored: true };
+    case "variable":
+      return { ...cleared, bearer_token_env: current?.bearer_token_env ?? "" };
+    case "oauth":
+      return { ...cleared, oauth: true };
+  }
+}
+
+/** The most custom headers one server sends; the server refuses more. */
+const MAX_HEADERS = 8;
+
+/** Names Tidebreak gives every local server's process unless its definition
+ * sets them itself. */
+const FORWARDED_BY_DEFAULT: ReadonlyArray<{ name: string; note: string }> = [
+  { name: "HOME", note: "your home folder" },
+  {
+    name: "PATH",
+    note: "the search path the executable was found on, with your login shell's folders",
+  },
+];
 
 /** The definition half of a listed server: every projection field comes
  * off, because the server refuses a definition with a field it does not
@@ -529,6 +618,11 @@ export function McpPanel({
   const [savedNames, setSavedNames] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  // The same list by name, so a draft row can tell what is already stored
+  // for its server: a stored bearer token and the header names with values.
+  const [savedServers, setSavedServers] = useState<
+    ReadonlyMap<string, McpServerInfo>
+  >(() => new Map());
   // The directory of remote servers: `null` while it loads.
   const [directory, setDirectory] = useState<McpDirectoryEntry[] | null>(null);
   const [directoryError, setDirectoryError] = useState<string | null>(null);
@@ -544,6 +638,7 @@ export function McpPanel({
   /** Note which servers an authoritative list says are saved. */
   function rememberSaved(fresh: McpServerInfo[]) {
     setSavedNames(new Set(fresh.map((server) => server.name)));
+    setSavedServers(new Map(fresh.map((server) => [server.name, server])));
   }
 
   /** Install a fresh, authoritative server list: wholesale when nothing is
@@ -924,6 +1019,53 @@ export function McpPanel({
     await refreshServers();
   }
 
+  /** Switch one saved server that refused its bearer token to OAuth, save
+   * it, and start its sign-in. The write is rebuilt from the saved
+   * configuration, like a mount toggle, so it saves no other unsaved edit;
+   * the draft row takes the same switch so a later save keeps it. */
+  async function switchToOAuth(name: string) {
+    setOauthWorking(name);
+    setError(null);
+    let signIn = false;
+    try {
+      const current = (await client.listMcpServers()).servers
+        .filter((server) => server.plugin === null)
+        .map(definition);
+      if (!current.some((server) => server.name === name)) {
+        throw new Error(`${name} is not saved yet. Save and verify it first.`);
+      }
+      const next = current.map((server) =>
+        server.name === name
+          ? { ...server, ...authenticationFields("oauth", null) }
+          : server,
+      );
+      const result = await client.putMcpServers(next);
+      // Supersede any in-flight background read; this list is fresher.
+      requestRef.current += 1;
+      setServers((rows) =>
+        rows.map((server) =>
+          server.name === name
+            ? { ...server, ...authenticationFields("oauth", null) }
+            : server,
+        ),
+      );
+      adoptServers(result.servers);
+      setServersKnown(true);
+      setListError(null);
+      const saved = result.servers.find((server) => server.name === name);
+      // A window attached to another machine cannot finish a sign-in, so
+      // it leaves Connect to the row, which says where it has to run.
+      signIn =
+        saved?.oauth_status?.state === "not_connected" && !attachedRemotely();
+      if (!signIn) toast.success(`Switched ${name} to OAuth`);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setOauthWorking(null);
+    }
+    if (signIn) await connectOauth(name);
+  }
+
   /** Add one directory server, then start its sign-in when it asks for one.
    * The add saves only that server, so unsaved edits stay unsaved: the new
    * row joins the draft, and the next save keeps it. Without `start`, the
@@ -1269,8 +1411,10 @@ export function McpPanel({
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                Tidebreak imports environment variable names but never their
-                values. Enter secret values again before you save.
+                Tidebreak imports environment variable names but not their
+                values; enter those again before you save. A bearer token or
+                header value written in the file is kept and goes to the OS
+                credential store when you save.
               </p>
             </div>
             {importSummary !== null && (
@@ -1307,6 +1451,7 @@ export function McpPanel({
                   onConnect={() => void connectOauth(server.name)}
                   onDisconnect={() => void disconnectOauth(server.name)}
                   onCancel={() => void cancelOauth(server.name)}
+                  onUseOAuth={() => void switchToOAuth(server.name)}
                 />
 
                 <div className="flex items-center justify-between gap-4">
@@ -1453,23 +1598,25 @@ export function McpPanel({
                       />
                     </SettingsField>
 
-                    <SettingsField
-                      label="Bearer token variable"
-                      hint="Optional. Leave it blank for a server you sign in to with Connect. Tidebreak reads this variable from the process environment it started with and never displays the value. Export it in the shell you start Tidebreak from, then restart Tidebreak. A Dock or Finder launch does not see variables from your shell profile."
-                    >
-                      <Input
-                        value={server.bearer_token_env ?? ""}
-                        disabled={working}
-                        autoComplete="off"
-                        spellCheck={false}
-                        placeholder="GATEWAY_TOKEN"
-                        onChange={(event) =>
-                          update(index, {
-                            bearer_token_env: event.target.value || null,
-                          })
-                        }
-                      />
-                    </SettingsField>
+                    <HttpAuthentication
+                      server={server}
+                      saved={savedServers.get(server.name)}
+                      disabled={working}
+                      onChange={(change) => update(index, change)}
+                    />
+
+                    <HeadersEditor
+                      names={server.headers ?? []}
+                      values={server.header_values ?? {}}
+                      stored={storedHeaderNames(
+                        server,
+                        savedServers.get(server.name),
+                      )}
+                      disabled={working}
+                      onChange={(headers, header_values) =>
+                        update(index, { headers, header_values })
+                      }
+                    />
                   </>
                 )}
 
@@ -1510,7 +1657,11 @@ export function McpPanel({
                       disabled={working}
                       addLabel="Add variable name"
                       onChange={(env_from) => update(index, { env_from })}
-                    />
+                    >
+                      <ForwardedByDefault
+                        replaced={[...server.env, ...server.env_from]}
+                      />
+                    </StringListEditor>
                   </>
                 )}
 
@@ -1600,8 +1751,9 @@ export function McpPanel({
           )}
 
           <p className="text-sm leading-relaxed text-muted-foreground">
-            Child environments start empty. Environment values are held in the
-            OS credential store and never come back to this window; do not enter
+            Child environments start with only HOME and PATH. Environment
+            values, stored bearer tokens, and header values are held in the OS
+            credential store and never come back to this window; do not enter
             secrets in the executable, arguments, working directory, or a server
             URL, which are ordinary settings.
           </p>
@@ -1617,6 +1769,7 @@ function ImportSummary({ summary }: { summary: McpImportSummary }) {
   const imported = summary.servers.length;
   const skipped = summary.skipped.length;
   const secrets = secretsByServer(summary.secrets);
+  const stored = storedByServer(summary.stored);
   return (
     <div className="flex min-w-0 flex-col gap-2">
       <p className="min-w-0 text-sm" role="status" aria-atomic="true">
@@ -1634,11 +1787,35 @@ function ImportSummary({ summary }: { summary: McpImportSummary }) {
         {skipped > 0 &&
           `${skipped} entr${skipped === 1 ? "y was" : "ies were"} skipped.`}
       </p>
+      {stored.length > 0 && (
+        <div className="text-xs text-muted-foreground">
+          <p>
+            These values from the file go to the OS credential store when you
+            save, and are not shown again:
+          </p>
+          <ul
+            aria-label="Values stored when you save"
+            className="mt-1 list-disc space-y-1 pl-5"
+          >
+            {stored.map(([server, names]) => (
+              <li key={server} className="min-w-0 break-words">
+                <code className="break-all">{server}</code>:{" "}
+                {names.map((name, index) => (
+                  <span key={name}>
+                    {index > 0 && ", "}
+                    <SecretName name={name} />
+                  </span>
+                ))}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {secrets.length > 0 && (
         <div className="text-xs text-muted-foreground">
-          <p>Enter these environment values before saving:</p>
+          <p>Enter these values before saving:</p>
           <ul
-            aria-label="Environment values to enter"
+            aria-label="Values to enter"
             className="mt-1 list-disc space-y-1 pl-5"
           >
             {secrets.map(([server, names]) => (
@@ -1647,7 +1824,7 @@ function ImportSummary({ summary }: { summary: McpImportSummary }) {
                 {names.map((name, index) => (
                   <span key={name}>
                     {index > 0 && ", "}
-                    <code className="break-all">{name}</code>
+                    <SecretName name={name} />
                   </span>
                 ))}
               </li>
@@ -1671,14 +1848,39 @@ function ImportSummary({ summary }: { summary: McpImportSummary }) {
   );
 }
 
+/** A value named in an import summary: a variable or header name as code,
+ * the bearer token in words. */
+function SecretName({ name }: { name: string }) {
+  return name === BEARER_TOKEN ? (
+    <>{name}</>
+  ) : (
+    <code className="break-all">{name}</code>
+  );
+}
+
+/** How an import summary names a server's bearer token. */
+const BEARER_TOKEN = "bearer token";
+
 function secretsByServer(
   secrets: McpImportSecret[],
 ): Array<[string, string[]]> {
   const grouped = new Map<string, string[]>();
   for (const secret of secrets) {
     const names = grouped.get(secret.server) ?? [];
-    if (!names.includes(secret.name)) names.push(secret.name);
+    const name = secret.kind === "bearer" ? BEARER_TOKEN : secret.name;
+    if (!names.includes(name)) names.push(name);
     grouped.set(secret.server, names);
+  }
+  return [...grouped.entries()];
+}
+
+function storedByServer(stored: McpImportStored[]): Array<[string, string[]]> {
+  const grouped = new Map<string, string[]>();
+  for (const value of stored) {
+    const names = grouped.get(value.server) ?? [];
+    const name = value.kind === "bearer" ? BEARER_TOKEN : (value.name ?? "");
+    if (!names.includes(name)) names.push(name);
+    grouped.set(value.server, names);
   }
   return [...grouped.entries()];
 }
@@ -1929,6 +2131,7 @@ function StringListEditor({
   disabled,
   addLabel,
   onChange,
+  children,
 }: {
   label: string;
   hint?: string;
@@ -1936,10 +2139,13 @@ function StringListEditor({
   disabled: boolean;
   addLabel: string;
   onChange: (values: string[]) => void;
+  /** Shown above the editable rows, such as entries that are not edited. */
+  children?: ReactNode;
 }) {
   return (
     <FieldGroup label={label} hint={hint}>
       <div className="flex flex-col gap-2">
+        {children}
         {values.map((value, index) => (
           <div className="flex gap-2" key={index}>
             <Input
@@ -2004,6 +2210,94 @@ function EnvironmentEditor({
   disabled: boolean;
   onChange: (names: string[], values: Record<string, string>) => void;
 }) {
+  return (
+    <NamedValuesEditor
+      label="Environment"
+      hint="Values are held in the OS credential store, never in settings, and are never sent back to this window. Leave a value blank to keep the one already stored."
+      noun="Environment"
+      namePlaceholder="NAME"
+      valuePlaceholder={() => "leave blank to keep"}
+      removeLabel={(position) => `Remove environment value ${position}`}
+      addLabel="Add variable"
+      names={names}
+      values={values}
+      disabled={disabled}
+      onChange={onChange}
+    />
+  );
+}
+
+/**
+ * An HTTP server's custom headers, such as an API key a server wants in its
+ * own header. Like the environment, the names are settings and the values
+ * live in the OS credential store: a stored value never comes back, so its
+ * field says it is stored and staying blank keeps it.
+ */
+function HeadersEditor({
+  names,
+  values,
+  stored,
+  disabled,
+  onChange,
+}: {
+  names: string[];
+  values: Record<string, string>;
+  /** Header names whose value is already stored for this server. */
+  stored: ReadonlySet<string>;
+  disabled: boolean;
+  onChange: (names: string[], values: Record<string, string>) => void;
+}) {
+  return (
+    <NamedValuesEditor
+      label="Headers"
+      hint={`Optional, up to ${MAX_HEADERS}. Values are held in the OS credential store, sent only to this server's address, and never shown again. Set a bearer token under Authentication, not here.`}
+      noun="Header"
+      namePlaceholder="X-Api-Key"
+      valuePlaceholder={(name) =>
+        stored.has(name) ? "Stored. Leave blank to keep it." : "Value"
+      }
+      removeLabel={(position) => `Remove header ${position}`}
+      addLabel="Add header"
+      max={MAX_HEADERS}
+      names={names}
+      values={values}
+      disabled={disabled}
+      onChange={onChange}
+    />
+  );
+}
+
+/** Rows of a name and a password-style value, for names whose values the
+ * server keeps in the OS credential store. */
+function NamedValuesEditor({
+  label,
+  hint,
+  noun,
+  namePlaceholder,
+  valuePlaceholder,
+  removeLabel,
+  addLabel,
+  max,
+  names,
+  values,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  /** Leads each input's accessible name: "Environment name 1". */
+  noun: string;
+  namePlaceholder: string;
+  valuePlaceholder: (name: string) => string;
+  removeLabel: (position: number) => string;
+  addLabel: string;
+  /** The most rows the server takes; Add stops there. */
+  max?: number;
+  names: string[];
+  values: Record<string, string>;
+  disabled: boolean;
+  onChange: (names: string[], values: Record<string, string>) => void;
+}) {
   function replaceRow(index: number, name: string, value: string | null) {
     const previous = names[index];
     const nextNames = names.map((item, itemIndex) =>
@@ -2020,10 +2314,7 @@ function EnvironmentEditor({
     onChange(nextNames, nextValues);
   }
   return (
-    <FieldGroup
-      label="Environment"
-      hint="Values are held in the OS credential store, never in settings, and are never sent back to this window. Leave a value blank to keep the one already stored."
-    >
+    <FieldGroup label={label} hint={hint}>
       <div className="flex flex-col gap-2">
         {names.map((name, index) => (
           <div
@@ -2031,8 +2322,8 @@ function EnvironmentEditor({
             key={index}
           >
             <Input
-              aria-label={`Environment name ${index + 1}`}
-              placeholder="NAME"
+              aria-label={`${noun} name ${index + 1}`}
+              placeholder={namePlaceholder}
               value={name}
               disabled={disabled}
               autoComplete="off"
@@ -2041,8 +2332,8 @@ function EnvironmentEditor({
             />
             <Input
               type="password"
-              aria-label={`Environment value ${index + 1}`}
-              placeholder="leave blank to keep"
+              aria-label={`${noun} value ${index + 1}`}
+              placeholder={valuePlaceholder(name)}
               value={values[name] ?? ""}
               disabled={disabled}
               autoComplete="off"
@@ -2052,7 +2343,7 @@ function EnvironmentEditor({
             <Button
               type="button"
               variant="outline"
-              aria-label={`Remove environment value ${index + 1}`}
+              aria-label={removeLabel(index + 1)}
               disabled={disabled}
               onClick={() => {
                 const nextValues = { ...values };
@@ -2071,14 +2362,143 @@ function EnvironmentEditor({
           type="button"
           variant="outline"
           className="self-start"
-          disabled={disabled}
+          disabled={disabled || (max !== undefined && names.length >= max)}
           onClick={() => onChange([...names, ""], values)}
         >
           <Plus size={14} />
-          Add variable
+          {addLabel}
         </Button>
       </div>
     </FieldGroup>
+  );
+}
+
+/**
+ * How an HTTP server authenticates: none, a bearer token stored in the OS
+ * credential store, a bearer token read from a variable, or OAuth. One
+ * choice at a time, with the field that choice needs below it.
+ */
+function HttpAuthentication({
+  server,
+  saved,
+  disabled,
+  onChange,
+}: {
+  server: McpServerInfo;
+  /** The server as last saved, to tell whether a token is already stored. */
+  saved: McpServerInfo | undefined;
+  disabled: boolean;
+  onChange: (change: Partial<McpServerInfo>) => void;
+}) {
+  const choice = authenticationOf(server);
+  const tokenStored =
+    saved?.bearer_token_stored === true && saved.url === server.url;
+  return (
+    <>
+      <FieldGroup label="Authentication" hint={AUTHENTICATION_HINT[choice]}>
+        <RadioGroup
+          className="flex flex-row flex-wrap gap-x-4 gap-y-2"
+          value={choice}
+          aria-label="Authentication"
+          disabled={disabled}
+          onValueChange={(value) =>
+            onChange(authenticationFields(value as Authentication, server))
+          }
+        >
+          {AUTHENTICATIONS.map(({ value, label }) => (
+            <Label
+              key={value}
+              className="flex items-center gap-2 text-sm font-normal"
+            >
+              <RadioGroupItem value={value} />
+              {label}
+            </Label>
+          ))}
+        </RadioGroup>
+      </FieldGroup>
+
+      {choice === "stored" && (
+        <SettingsField
+          label="Bearer token"
+          hint={
+            tokenStored
+              ? "A token is stored for this server. Enter a new one to replace it."
+              : "Paste the token alone, without the word Bearer."
+          }
+        >
+          <Input
+            type="password"
+            value={server.bearer_token_value ?? ""}
+            disabled={disabled}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={
+              tokenStored ? "Stored. Leave blank to keep it." : "Token"
+            }
+            onChange={(event) =>
+              onChange({
+                bearer_token_value: event.target.value || undefined,
+              })
+            }
+          />
+        </SettingsField>
+      )}
+
+      {choice === "variable" && (
+        <SettingsField
+          label="Bearer token variable"
+          hint="The variable's name, never its value. Tidebreak never displays the value."
+        >
+          <Input
+            value={server.bearer_token_env ?? ""}
+            disabled={disabled}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="GATEWAY_TOKEN"
+            onChange={(event) =>
+              onChange({ bearer_token_env: event.target.value })
+            }
+          />
+        </SettingsField>
+      )}
+    </>
+  );
+}
+
+/** The header names whose value is already stored for this server: the
+ * saved server's, while the draft keeps the same URL. */
+function storedHeaderNames(
+  server: McpServerInfo,
+  saved: McpServerInfo | undefined,
+): ReadonlySet<string> {
+  if (saved === undefined || saved.url !== server.url) return new Set();
+  return new Set(saved.headers ?? []);
+}
+
+/**
+ * The names every local server's process gets without being asked, listed
+ * as forwarded names so the editor shows the whole environment. A name the
+ * definition sets itself replaces the default and leaves this list.
+ */
+function ForwardedByDefault({ replaced }: { replaced: readonly string[] }) {
+  const shown = FORWARDED_BY_DEFAULT.filter(
+    ({ name }) => !replaced.includes(name),
+  );
+  if (shown.length === 0) return null;
+  return (
+    <ul aria-label="Forwarded by default" className="flex flex-col gap-1">
+      {shown.map(({ name, note }) => (
+        <li
+          key={name}
+          className="flex min-h-control flex-wrap items-center gap-x-2 rounded-md bg-muted px-3 py-1 text-sm"
+        >
+          <code className="font-mono">{name}</code>
+          <span className="text-xs text-muted-foreground">
+            Forwarded by default: {note}
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 

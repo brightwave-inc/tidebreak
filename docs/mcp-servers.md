@@ -23,9 +23,17 @@ Each server has:
     process PATH extended with the login-shell PATH the harness probe already
     captures (plus `PATHEXT` on Windows). Tidebreak never invokes a shell to
     run the server. The stored definition keeps what you typed. A relative path
-    that contains separators is refused; or
-  - **HTTP** — an `http`/`https` URL and an optional bearer-token variable
-    name selected from the Tidebreak host environment; or
+    that contains separators is refused. Every stdio child gets `HOME` and a
+    `PATH` set to that same search path, so a script such as `npx` finds
+    `node` and its cache; Settings lists both as forwarded names. Name `HOME`
+    or `PATH` under Environment or Forward environment names to replace the
+    default; or
+  - **HTTP** — an `http`/`https` URL, one way to authenticate, and up to eight
+    custom headers. The authentication is one of: none; a bearer token
+    variable name selected from the Tidebreak host environment
+    (`bearer_token_env`); a bearer token held in the OS credential store
+    (`bearer_token_stored`); or OAuth (`oauth`). Custom headers
+    (`headers`) are names whose values are held in the credential store; or
   - **gateway** — the slug of a model-gateway MCP endpoint
     (`gateway_endpoint`). The endpoint URL and a short-lived `mcp:<slug>`
     bearer are resolved from the signed-in gateway session at every
@@ -35,6 +43,18 @@ Each server has:
     recovers on the next reconnect after sign-in;
 - a request timeout from 1 to 3,600,000 milliseconds; and
 - an enabled switch.
+
+In the desktop app, saving an enabled stdio server shows an OS dialog before
+anything runs (decision 27). A bare command name is resolved first, the same
+way verify and launch resolve it, and the dialog shows the absolute path it
+resolves to beside the arguments as typed, for example `"executable":
+"/opt/homebrew/bin/npx"`, and lists `HOME` and `PATH` as forwarded by
+default. A name that does not resolve refuses the save with the same
+"Command not found" sentence Settings shows.
+
+`tidebreak mcp-server add <name> --url <url> --oauth` saves a remote server
+that signs in with OAuth. Connect it afterwards from Settings, which opens the
+sign-in page in your browser.
 
 ## Portable workspace configuration
 
@@ -48,11 +68,13 @@ Included:
   `cloned_from`), default base ref, branch prefix, setup/archive scripts,
   quick actions, and the device `root_path` as a remap hint.
 - MCP servers: name, command, args, environment *names*, `env_from`, cwd,
-  URL, `bearer_token_env` *name*, gateway endpoint, timeout, enabled.
+  URL, `bearer_token_env` *name*, whether the bearer token is stored
+  (`bearer_token_stored`), custom header *names*, the `oauth` flag, gateway
+  endpoint, timeout, enabled.
 
-Excluded: secret values (`env_values`, bearer token values, credentials),
-plugin-sourced servers, connected apps, folders, plugins, providers,
-preferences, transcripts, and worktrees.
+Excluded: secret values (`env_values`, bearer token values, header values,
+credentials), plugin-sourced servers, connected apps, folders, plugins,
+providers, preferences, transcripts, and worktrees.
 
 On import, Tidebreak previews each entry as new, identical, or conflicting
 (same repo remote or same MCP name with different fields). Device-specific
@@ -79,16 +101,20 @@ unless you turn on **Start after import** for them:
   mcp.example.com." The switch is the consent; no OS dialog follows. Without
   an explicit choice, apply writes such a server turned off even when the
   file has it on.
+- A remote server with a stored bearer token or custom headers. Their values
+  never travel in the file, so the server cannot connect until you enter them
+  in Connected apps on this computer. Its row says so.
 
 A remote server that sends nothing from this computer imports as the file has
 it. On a multi-user deployment, only an administrator can import MCP servers,
 the same rule `PUT /mcp/servers` follows; a member can still import
 repository entries.
 
-The child environment starts empty, and **no environment value of any kind
-lives in a definition**. Executables, arguments, working directories, and URLs
-are ordinary displayed settings, so do not put credentials in any of those
-fields. The two channels that do carry a value are:
+A stdio child's environment starts empty apart from `HOME` and `PATH`, and
+**no credential value of any kind lives in a definition**. Executables,
+arguments, working directories, URLs, and header names are ordinary
+displayed settings, so do not put credentials in any of those fields. The
+channels that do carry a value are:
 
 - **Environment** (`env`) — the definition holds the variable names; the values
   live in the OS credential store, keyed by the server's connected-app record.
@@ -96,13 +122,38 @@ fields. The two channels that do carry a value are:
   stored value if you leave it blank. The values are never returned to the
   renderer and never enter SQLite. Deleting a name, or the server, deletes its
   stored value.
+- **Stored bearer token** (`bearer_token_stored`) and **header values**
+  (`headers`) — for an HTTP server, the same way: the definition says a bearer
+  token is stored and names each header, and the values live in the OS
+  credential store under the server's connected-app record. Settings shows
+  that a value is set, never the value, and leaving a field blank keeps it.
+  A stored value is bound to the origin (scheme, host, and port) of the URL it
+  was entered for: a save that points the server at another origin drops the
+  values it does not set again, so a credential never follows an edited URL
+  to a new host. Switching to another way to authenticate, removing a header,
+  or removing the server deletes the value. A save that fails puts back every
+  value it wrote.
 - **`env_from`** and **Bearer token variable** — a name selected from the
   environment that launched Tidebreak, resolved at the connection boundary and
   never stored at all.
 
+A custom header may not be `Authorization` (use the bearer token setting),
+a hop-by-hop or framing field (`Connection`, `Keep-Alive`,
+`Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Host`,
+`Content-Length`, `Content-Encoding`, `Expect`), a proxy credential, or a
+field the connection sets itself (`Accept`, `Content-Type`,
+`MCP-Protocol-Version`, `Mcp-Session-Id`). A server sends at most eight
+custom headers, each value at most 8 KiB of visible ASCII. A server that
+sends a stored bearer or a custom header must use `https` unless its URL
+names a literal loopback address, the same rule a bearer variable follows,
+and the HTTP client never follows a redirect, so no stored value reaches
+another origin.
+
 A missing selected name produces a server-specific error containing the name,
 not a value, and tells you to export it in the shell you start Tidebreak from
-and then restart Tidebreak. Save and verify classifies the failure: DNS
+and then restart Tidebreak. A stored bearer or header value this computer
+does not hold, for example after an import, fails with "Not stored:" and the
+field to fill in. Save and verify classifies the failure: DNS
 resolution (the host), TLS handshake (the reason), HTTP status (401/403 as
 authentication, 404 as wrong path, 5xx as server error, with the status line),
 protocol negotiation (quotes the first bytes when the endpoint answered but
@@ -199,8 +250,23 @@ for example "Opens vercel.com", so you see where Connect sends you. You do not
 have to mark the server as OAuth. When an HTTP server that sends no bearer
 token answers `401`, Tidebreak asks it how to authorize, and a server whose
 metadata names an authorization server gets a sign-in. Imported definitions
-and definitions saved before this behave the same way. The saved `oauth` flag
-still forces the OAuth path. You never paste a token into the definition.
+and definitions saved before this behave the same way. You never paste a
+token into the definition.
+
+To mark a server as OAuth from the start, choose **OAuth** under
+**Authentication** in its settings, pass `--oauth` to `tidebreak mcp-server
+add`, or import a file whose entry sets `"oauth": true`. The saved `oauth`
+flag forces the OAuth path: the row offers Connect before the server has
+answered at all.
+
+A server set up with a bearer token, from a variable or stored, that refuses
+it with a `401` whose challenge names protected-resource metadata (RFC 9728)
+is saved rather than failing the save, as long as Tidebreak can run the
+sign-in that metadata leads to. Its row reads **Sign-in available** and offers
+**Use OAuth**, which switches the server's authentication to OAuth, drops the
+bearer token setting, saves, and starts Connect. Or correct the token and
+save again. A `401` that names no such metadata still fails the save as an
+authentication failure.
 
 **Save and verify** keeps a server that asks you to sign in, because you can
 connect only a saved server. A server whose sign-in Tidebreak cannot complete
@@ -258,6 +324,8 @@ Connection states:
   no longer accepts it.
 - **Access denied** — you declined on the sign-in page, or the authorization
   server refused you.
+- **Sign-in available** — the server refused the bearer token it is set up
+  with and offers an OAuth sign-in instead; **Use OAuth** switches it.
 
 A session ends only when the sign-in service refuses its refresh token. A
 refresh the service does not answer — a timeout, a network failure, or a `5xx`
@@ -413,8 +481,7 @@ binary on your `PATH`, or its absolute path.
 - **Executable:** `tidebreak`
 - **Arguments:** `mcp`, then the absolute workspace path (`/absolute/path/to/workspace`)
 - **Working directory:** leave blank
-- **Environment / Forward environment names:** none
-- **Bearer token variable:** not used
+- **Environment / Forward environment names:** none beyond the defaults
 - **Request timeout:** `60000`
 - **Enabled:** on
 
@@ -427,16 +494,41 @@ literal loopback address; remote URLs that send a bearer token must use
 - **Namespace:** `docs`
 - **Transport:** Remote endpoint (HTTP)
 - **Server URL:** `http://127.0.0.1:8080/mcp` (the path your server actually serves)
-- **Bearer token variable:** leave blank on loopback with no auth
+- **Authentication:** None on loopback with no auth
 - **Request timeout:** `60000`
 - **Enabled:** on
 
 For a remote HTTPS server that expects a bearer token, set **Server URL** to
-the `https://` MCP path and **Bearer token variable** to the *name* of the
-variable (for example `GATEWAY_TOKEN`). Export that variable in the shell you
-start Tidebreak from, then restart Tidebreak. Tidebreak reads its process
-environment; it does not read a `.env` file or the token from this form. A
-Dock or Finder launch does not see variables you set only in another terminal.
+the `https://` MCP path and choose one of two ways to give Tidebreak the
+token under **Authentication**:
+
+- **Bearer token, stored** — paste the token, without the word `Bearer`.
+  Tidebreak keeps it in the OS credential store and sends it only to that
+  server's origin. This works however Tidebreak was launched, including from
+  the Dock or Finder.
+- **Bearer token from a variable** — enter the *name* of the variable (for
+  example `GATEWAY_TOKEN`), export it in the shell you start Tidebreak from,
+  then restart Tidebreak. Tidebreak reads its process environment; it does not
+  read a `.env` file. A Dock or Finder launch does not see variables you set
+  only in a shell profile or another terminal.
+
+A server that wants an API key in its own header, such as `X-Api-Key`, takes
+it under **Headers**: the name, and a value Tidebreak stores the same way.
+
+### Stdio: an `npx` package
+
+The filesystem reference server, run the way its README shows. `npx` is a
+bare name, so Tidebreak resolves it on your login-shell PATH, and the child
+gets that PATH and your HOME, which `npx` needs to find `node` and its cache.
+
+- **Namespace:** `files`
+- **Transport:** Process on this computer (stdio)
+- **Executable:** `npx`
+- **Arguments:** `-y`, `@modelcontextprotocol/server-filesystem`, then each
+  absolute directory the server may use
+- **Environment / Forward environment names:** none beyond the defaults
+- **Request timeout:** `60000`
+- **Enabled:** on
 
 ## Headless bootstrap
 
@@ -471,9 +563,10 @@ named by `TIDEBREAK_MCP_CONFIG`:
 ```
 
 The schema is closed, including at the API boundary. Broad process-environment
-inheritance is not supported. `env_values` is an input only — it is written to
-the credential store and never appears in a response or a saved record, and a
-bootstrap file's values land in the same place as any other. When there is no
+inheritance is not supported. `env_values`, `bearer_token_value`, and
+`header_values` are inputs only — they are written to the credential store and
+never appear in a response or a saved record, and a bootstrap file's values
+land in the same place as any other. When there is no
 saved desktop configuration, a malformed bootstrap file, missing selected
 environment name, or failed enabled server makes startup fail rather than
 silently narrowing the advertised tools. That check needs the file's servers

@@ -185,7 +185,7 @@ usage: tidebreak provider list
        tidebreak settings exec remove-key <provider>
        tidebreak mcp-server list
        tidebreak mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
-                  [--env-from <var>]… [--cwd <dir>] [--bearer-token-env <var>]
+                  [--env-from <var>]… [--cwd <dir>] [--bearer-token-env <var> | --oauth]
                   [--timeout-ms <ms>] [--disabled]
        tidebreak mcp-server remove <name>
        tidebreak chat list [--archived]

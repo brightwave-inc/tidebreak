@@ -17,19 +17,30 @@ Two transports:
 
 | Field | |
 | --- | --- |
-| **Executable** | The program to run. |
+| **Executable** | The program to run: a bare name such as `npx`, or an absolute path. A bare name is found on your login-shell `PATH`, and Settings shows the path it resolved to. |
 | **Arguments** | One per row. |
 | **Working directory** | Where to run it. |
-| **Environment** | Name/value pairs passed to the process. |
-| **Forward environment names** | Variables to pass through from your own environment by name, without copying their values into the config. |
+| **Environment** | Name/value pairs passed to the process. The values are kept in the OS credential store. |
+| **Forward environment names** | Variables to pass through from your own environment by name, without copying their values into the config. `HOME` and `PATH` are always forwarded, so a script such as `npx` finds `node`. |
+
+In the desktop app, saving a local server asks first in an OS dialog, which
+names the absolute path of the program that will run.
 
 **Remote endpoint (HTTP)** — Tidebreak connects to a URL.
 
 | Field | |
 | --- | --- |
 | **Server URL** | The endpoint. |
-| **Bearer token variable** | The name of an environment variable holding the token. |
+| **Authentication** | **None**, **Bearer token, stored** (kept in the OS credential store and sent only to this server), **Bearer token from a variable** (the name of an environment variable holding the token), or **OAuth** (sign in with your browser). |
+| **Headers** | Up to eight custom headers, such as `X-Api-Key`. The values are kept in the OS credential store. |
 | **Request timeout (ms)** | |
+
+A stored bearer token or header value is shown as set, never shown again,
+and goes only to the origin of the URL you entered it for.
+
+A server that refuses its bearer token and offers an OAuth sign-in instead is
+saved with **Sign-in available**, and **Use OAuth** switches it and opens the
+sign-in page.
 
 Every server has a **Namespace**, which is the `<server>` part of the tool
 names, and an **Enabled** switch.

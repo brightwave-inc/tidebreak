@@ -423,6 +423,8 @@ cargo run -p tidebreak-cli -- settings exec set-key e2b --from-env E2B_KEY
 cargo run -p tidebreak-cli -- mcp-server list
 cargo run -p tidebreak-cli -- mcp-server add docs \
   --command npx --arg -y --arg @acme/docs-mcp --env-from ACME_TOKEN
+cargo run -p tidebreak-cli -- mcp-server add vercel \
+  --url https://mcp.vercel.com --oauth
 cargo run -p tidebreak-cli -- mcp-server remove docs
 
 # Plugins from a pinned Git source
@@ -494,7 +496,9 @@ to edit them. `--command` (with repeatable `--arg`), `--url`, and
 `--gateway-endpoint` are the three transports, and exactly one is required.
 Secret material is named, not given: `--env-from` forwards a variable from the
 parent environment, and `--bearer-token-env` names the variable holding a
-remote server's token. Both are resolved when the server connects.
+remote server's token. Both are resolved when the server connects. `--oauth`
+marks a `--url` server that signs in with OAuth instead; connect it from
+Settings, which opens the sign-in page in a browser.
 
 ### `output`
 
