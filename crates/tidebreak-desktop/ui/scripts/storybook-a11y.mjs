@@ -250,6 +250,7 @@ async function checkStories(queue) {
     reducedMotion: "reduce",
   });
   await context.addInitScript(recordStoryOutcome);
+  await context.addInitScript(settleTransitions);
   let page = await context.newPage();
   try {
     for (let story = queue.shift(); story; story = queue.shift()) {
@@ -278,6 +279,26 @@ async function checkStory(page, story) {
     polling: 100,
   });
   return page.evaluate(() => globalThis.__tidebreakA11y);
+}
+
+// Runs in the page before Storybook's own scripts. Axe reads colors as they
+// stand when the story ends, so a transition still running reads as the wrong
+// colors, such as a ghost button still fading in from its disabled opacity
+// after its data loads. Transitions end at once here, so every check sees the
+// settled state. Animations keep running: Radix waits for them to end before
+// it removes content, and a story must still reach its real state.
+function settleTransitions() {
+  const install = () => {
+    const style = document.createElement("style");
+    style.textContent =
+      "*, *::before, *::after { transition-duration: 0s !important; transition-delay: 0s !important; }";
+    (document.head ?? document.documentElement).append(style);
+  };
+  if (document.documentElement) {
+    install();
+  } else {
+    document.addEventListener("DOMContentLoaded", install, { once: true });
+  }
 }
 
 // Runs in the page before Storybook's own scripts. It catches the preview's
