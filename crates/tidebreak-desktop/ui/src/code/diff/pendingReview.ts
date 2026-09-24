@@ -81,6 +81,12 @@ type PendingReviewState = {
     block: string,
     fromBlock: () => readonly ReviewComment[],
   ) => void;
+  /** Move comments to a file the diff now shows under a new name. */
+  moveToPath: (
+    workspaceId: string,
+    ids: readonly string[],
+    path: string,
+  ) => void;
   /**
    * Record where a comment's lines are now, or that they changed. Nothing
    * is written when that is what the review already says.
@@ -354,6 +360,20 @@ export function createPendingReviewStore(
           if (left.length > 0) queued[workspaceId] = left;
           else delete queued[workspaceId];
           return { byWorkspace, queued };
+        }),
+      moveToPath: (workspaceId, ids, path) =>
+        update(workspaceId, (comments) => {
+          const moving = new Set(ids);
+          if (
+            !comments.some(
+              (comment) => moving.has(comment.id) && comment.path !== path,
+            )
+          ) {
+            return comments;
+          }
+          return comments.map((comment) =>
+            moving.has(comment.id) ? { ...comment, path } : comment,
+          );
         }),
       relocate: (workspaceId, id, change) =>
         update(workspaceId, (comments) => {

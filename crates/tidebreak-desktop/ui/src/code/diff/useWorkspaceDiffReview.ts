@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import type { DiffReview } from "./DiffView";
 import {
@@ -10,20 +10,33 @@ import {
 import type { ReviewComment } from "./reviewComments";
 
 const NO_COMMENTS: readonly ReviewComment[] = [];
+const NO_RENAMES: ReadonlyMap<string, string> = new Map();
+
+/** The review of one workspace diff, file by file. */
+export type WorkspaceDiffReview = {
+  /** The review of one file, stable while the review is unchanged. */
+  forPath: (path: string) => DiffReview;
+  /** The files this diff's comments are on, by the names the diff uses. */
+  paths: ReadonlySet<string>;
+};
 
 /**
  * Line comments for the files of one workspace diff: the workspace against
  * its base, or one turn's changes. A comment belongs to the diff it was
  * written on, since the same code can sit on different lines in another.
  *
- * Returns a lookup by path, stable while the review is unchanged, or null
- * where there is no workspace to hold a review.
+ * A file the diff now shows under a new name takes its comments along, and
+ * the review records the new name, so the message names the file as it is.
+ *
+ * Returns null where there is no workspace to hold a review.
  */
 export function useWorkspaceDiffReview({
   workspaceId,
   turnId,
   onDelete,
   relocate = true,
+  renamed = NO_RENAMES,
+  onWriting,
   store = usePendingReviewStore,
 }: {
   workspaceId: string | undefined;
@@ -35,18 +48,37 @@ export function useWorkspaceDiffReview({
    * where a line missing from it may only be past the cut.
    */
   relocate?: boolean;
+  /** Files the diff shows under a new name: old path to new. */
+  renamed?: ReadonlyMap<string, string>;
+  /** Told when a new comment starts or stops being written on a file. */
+  onWriting?: (path: string, writing: boolean) => void;
   store?: PendingReviewStore;
-}): ((path: string) => DiffReview) | null {
+}): WorkspaceDiffReview | null {
   const { comments, sending } = usePendingReview(workspaceId, store);
+
+  useEffect(() => {
+    if (!workspaceId || renamed.size === 0) return;
+    const moves = new Map<string, string[]>();
+    for (const comment of comments) {
+      if ((comment.turnId ?? null) !== (turnId ?? null)) continue;
+      const to = renamed.get(comment.path);
+      if (to) moves.set(to, [...(moves.get(to) ?? []), comment.id]);
+    }
+    for (const [to, ids] of moves) {
+      store.getState().moveToPath(workspaceId, ids, to);
+    }
+  }, [workspaceId, turnId, comments, renamed, store]);
+
   return useMemo(() => {
     if (!workspaceId) return null;
     const byPath = new Map<string, ReviewComment[]>();
     for (const comment of comments) {
       if ((comment.turnId ?? null) !== (turnId ?? null)) continue;
-      byPath.set(comment.path, [...(byPath.get(comment.path) ?? []), comment]);
+      const path = renamed.get(comment.path) ?? comment.path;
+      byPath.set(path, [...(byPath.get(path) ?? []), comment]);
     }
     const reviews = new Map<string, DiffReview>();
-    return (path: string) => {
+    const forPath = (path: string) => {
       const known = reviews.get(path);
       if (known) return known;
       const review: DiffReview = {
@@ -70,9 +102,23 @@ export function useWorkspaceDiffReview({
                 store.getState().relocate(workspaceId, id, change),
             }
           : {}),
+        ...(onWriting
+          ? { onWriting: (writing: boolean) => onWriting(path, writing) }
+          : {}),
       };
       reviews.set(path, review);
       return review;
     };
-  }, [workspaceId, turnId, comments, sending, onDelete, relocate, store]);
+    return { forPath, paths: new Set(byPath.keys()) };
+  }, [
+    workspaceId,
+    turnId,
+    comments,
+    sending,
+    onDelete,
+    relocate,
+    renamed,
+    onWriting,
+    store,
+  ]);
 }

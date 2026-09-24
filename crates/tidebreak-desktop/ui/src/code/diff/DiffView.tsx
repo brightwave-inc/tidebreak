@@ -101,6 +101,12 @@ export type DiffReview = {
    * a changed one.
    */
   onRelocate?: (id: string, change: CommentRelocation) => void;
+  /**
+   * Told when a new comment starts or stops being written here, so the host
+   * keeps this file's view, and what was typed, even if the file leaves the
+   * diff meanwhile.
+   */
+  onWriting?: (writing: boolean) => void;
 };
 
 /**
@@ -495,6 +501,14 @@ export function DiffView({
 
   const reviewRef = useRef(review);
   reviewRef.current = review;
+  const writing = editor?.kind === "new";
+  useEffect(() => {
+    if (!writing) return;
+    // The review as the editor opened: it says when this editor closes.
+    const report = reviewRef.current?.onWriting;
+    report?.(true);
+    return () => report?.(false);
+  }, [writing]);
   const rowsRef = useRef(model.rows);
   rowsRef.current = model.rows;
   const shownRowsRef = useRef(shownRows);

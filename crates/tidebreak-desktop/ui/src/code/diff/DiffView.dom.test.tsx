@@ -291,7 +291,7 @@ describe("comments follow their code through a refresh", () => {
     diff: string;
     ignoreWhitespace?: boolean;
   }) {
-    const reviewFor = useWorkspaceDiffReview({
+    const review = useWorkspaceDiffReview({
       workspaceId: "ws-1",
       turnId: undefined,
       onDelete: (id) => usePendingReviewStore.getState().remove("ws-1", id),
@@ -302,7 +302,7 @@ describe("comments follow their code through a refresh", () => {
         group={group}
         layout="unified"
         ignoreWhitespace={ignoreWhitespace}
-        review={reviewFor?.(group.path)}
+        review={review?.forPath(group.path)}
       />
     );
   }
@@ -425,12 +425,11 @@ describe("comments follow their code through a refresh", () => {
       ].join("\n");
     let writes = 0;
     function View({ diff }: { diff: string }) {
-      const reviewFor = useWorkspaceDiffReview({
+      const review = useWorkspaceDiffReview({
         workspaceId: "ws-1",
         turnId: undefined,
         onDelete: () => {},
-      });
-      const review = reviewFor?.(PATH);
+      })?.forPath(PATH);
       // A fresh group every render, as a caller that does not keep one would
       // pass: what a view records hangs on the diff, not on the object.
       const group = groupUnifiedDiff(diff)[0]!;
@@ -561,6 +560,155 @@ describe("comments follow their code through a refresh", () => {
         lines: [{ kind: "add", oldNo: null, newNo: 10, text: "const K = 30;" }],
       }),
     ]);
+  });
+});
+
+describe("a file that leaves the diff", () => {
+  const A = fileDiff("src/a.ts", [
+    {
+      oldStart: 1,
+      newStart: 1,
+      lines: [" keep();", "-old();", "+fresh();", " last();"],
+    },
+  ]);
+  const B = fileDiff("src/b.ts", [
+    { oldStart: 1, newStart: 1, lines: ["-x();", "+y();"] },
+  ]);
+
+  /** A panel over a diff the test changes, as an agent's edits would. */
+  function renderLivePanel(diff: string) {
+    const current = { diff };
+    const client = {
+      getCodeWorkspaceDiff: vi.fn(async () => ({
+        diff: current.diff,
+        truncated: false,
+        stat: { files: 2, insertions: 2, deletions: 2, truncated: false },
+      })),
+    };
+    let revision = 0;
+    const view = render(
+      <DiffPanel client={client} workspaceId="ws-1" contentRevision={0} />,
+    );
+    return {
+      change: async (next: string) => {
+        current.diff = next;
+        revision += 1;
+        view.rerender(
+          <DiffPanel
+            client={client}
+            workspaceId="ws-1"
+            contentRevision={revision}
+          />,
+        );
+        await waitFor(() =>
+          expect(client.getCodeWorkspaceDiff).toHaveBeenCalledTimes(
+            revision + 1,
+          ),
+        );
+      },
+    };
+  }
+
+  async function commentOnFresh(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(
+      await screen.findByRole("button", { name: "Comment on line 2" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "Comment on line 2" }),
+      "Why fresh?",
+    );
+  }
+
+  it("keeps its comments at the top, outdated, and sends them as outdated", async () => {
+    const user = userEvent.setup();
+    const panel = renderLivePanel(`${A}\n${B}`);
+    await commentOnFresh(user);
+    await user.click(screen.getByRole("button", { name: "Add comment" }));
+
+    // The agent reverts src/a.ts: only src/b.ts is left in the diff.
+    await panel.change(B);
+    await waitFor(() =>
+      expect(document.body.textContent).not.toContain("keep();"),
+    );
+    const section = document.querySelector<HTMLElement>(
+      "[data-diff-file-gone]",
+    )!;
+    expect(section).toHaveTextContent("src/a.ts");
+    expect(section).toHaveTextContent("No longer in this diff");
+    // First in the list, above the files still in the diff.
+    expect(document.querySelector("[data-diff-file]")).toBe(section);
+    const card = within(section).getByRole("article", { name: "Line 2" });
+    expect(within(card).getByText("Outdated")).toBeVisible();
+    expect(card).toHaveTextContent("fresh();");
+    await waitFor(() => expect(comments()[0]?.outdated).toBe(true));
+    expect(messageWithReviewComments("", comments())).toContain(
+      'outdated="true"',
+    );
+  });
+
+  it("keeps a comment being written, and its lines, until the file comes back", async () => {
+    const user = userEvent.setup();
+    const panel = renderLivePanel(`${A}\n${B}`);
+    await commentOnFresh(user);
+
+    await panel.change(B);
+    const away = await screen.findByRole("textbox", {
+      name: "Comment on line 2",
+    });
+    expect(away).toHaveValue("Why fresh?");
+    expect(away.closest("[data-diff-file-gone]")).not.toBeNull();
+
+    await panel.change(`${A}\n${B}`);
+    await waitFor(() =>
+      expect(document.querySelector("[data-diff-file-gone]")).toBeNull(),
+    );
+    const back = screen.getByRole("textbox", { name: "Comment on line 2" });
+    expect(back).toHaveValue("Why fresh?");
+    expect(back.closest("[data-diff-outdated]")).toBeNull();
+    fireEvent.keyDown(back, { key: "Enter", metaKey: true });
+    expect(comments()).toEqual([
+      expect.objectContaining({
+        path: "src/a.ts",
+        body: "Why fresh?",
+        lines: [{ kind: "add", oldNo: null, newNo: 2, text: "fresh();" }],
+      }),
+    ]);
+    expect(comments()[0]?.outdated).toBeUndefined();
+  });
+
+  it("follows its comments to the file's new name", async () => {
+    const user = userEvent.setup();
+    const panel = renderLivePanel(`${A}\n${B}`);
+    await commentOnFresh(user);
+    await user.click(screen.getByRole("button", { name: "Add comment" }));
+
+    // The agent renames src/a.ts to src/c.ts and adds a line at its top.
+    await panel.change(
+      [
+        "diff --git a/src/a.ts b/src/c.ts",
+        "similarity index 80%",
+        "rename from src/a.ts",
+        "rename to src/c.ts",
+        "index 3b18e51..a9c4f02 100644",
+        "--- a/src/a.ts",
+        "+++ b/src/c.ts",
+        "@@ -1,3 +1,4 @@",
+        "+// moved",
+        " keep();",
+        "-old();",
+        "+fresh();",
+        " last();",
+        B,
+      ].join("\n"),
+    );
+    await waitFor(() => expect(comments()[0]?.path).toBe("src/c.ts"));
+    const card = await screen.findByRole("article", { name: "Line 3" });
+    expect(card.closest("[data-diff-outdated]")).toBeNull();
+    expect(document.querySelector("[data-diff-file-gone]")).toBeNull();
+    await waitFor(() => expect(comments()[0]?.lines[0]?.newNo).toBe(3));
+    expect(messageWithReviewComments("", comments())).toContain(
+      '<comment path="src/c.ts" diff="working tree" lines="3">',
+    );
   });
 });
 

@@ -275,7 +275,9 @@ Enter opens the editor under the lines. A diff that takes no comments draws
 plain numbers and makes the region itself focusable. Pending comments are
 cards under their last line, bordered, never shadowed. A comment whose code
 changed sits at the top of the file with its quote and a warning-toned
-Outdated pill; it never moves onto whatever now sits at its old number.
+Outdated pill; it never moves onto whatever now sits at its old number. A
+file that leaves the diff while it has comments stays first in the list,
+under its path and "No longer in this diff", with those comments outdated.
 
 ### Live labels
 

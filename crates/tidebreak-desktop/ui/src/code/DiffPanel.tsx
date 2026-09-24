@@ -16,10 +16,13 @@ import { cn } from "@/lib/utils";
 import { changedFileOrder } from "./DiffOverview";
 import { diffFileKey, stepDiffFile } from "./diff/diffKeys";
 import { useDiffPreferences } from "./diff/diffPreferences";
-import { DiffView, type DiffReview, type HunkAction } from "./diff/DiffView";
+import { DiffView, type HunkAction } from "./diff/DiffView";
 import { DiffViewOptions } from "./diff/DiffViewOptions";
 import { usePendingReviewStore } from "./diff/pendingReview";
-import { useWorkspaceDiffReview } from "./diff/useWorkspaceDiffReview";
+import {
+  useWorkspaceDiffReview,
+  type WorkspaceDiffReview,
+} from "./diff/useWorkspaceDiffReview";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
 import { OpenInEditorButton } from "./OpenInEditorButton";
@@ -32,6 +35,8 @@ import type { RevertRequest } from "./worktreeUndo";
 
 /** Files longer than this start collapsed behind "Show diff". */
 export const DIFF_COLLAPSE_LINE_THRESHOLD = 400;
+
+const NO_PATHS: ReadonlySet<string> = new Set();
 
 export type {
   DiffFileGroup,
@@ -140,14 +145,61 @@ export function DiffPanel({
     (id: string) => void deleteComment(id),
     [deleteComment],
   );
-  const reviewFor = useWorkspaceDiffReview({
+  // A diff cut at its size cap cannot tell a line past the cut, or a file,
+  // from one that changed, so it leaves the comments' places as they were.
+  const whole = Boolean(payload && !payload.truncated);
+  const renamed = useMemo(() => {
+    const shown = new Set(groups.map((group) => group.path));
+    const moves = new Map<string, string>();
+    for (const group of groups) {
+      const previous = fileChangeOf(group).previousPath;
+      if (previous && !shown.has(previous)) moves.set(previous, group.path);
+    }
+    return moves;
+  }, [groups]);
+  // Files with a new comment being written in them, whose views stay while
+  // it is, even when the file leaves the diff.
+  const [writingIn, setWritingIn] = useState<ReadonlySet<string>>(NO_PATHS);
+  const onWriting = useCallback((path: string, writing: boolean) => {
+    setWritingIn((current) => {
+      if (current.has(path) === writing) return current;
+      const next = new Set(current);
+      if (writing) next.add(path);
+      else next.delete(path);
+      return next;
+    });
+  }, []);
+  const review = useWorkspaceDiffReview({
     workspaceId: comments ? workspaceId : undefined,
     turnId,
     onDelete: onDeleteComment,
-    // A diff cut at its size cap cannot tell a line past the cut from one
-    // that changed, so it leaves the comments' places as they were.
-    relocate: Boolean(payload && !payload.truncated),
+    relocate: whole,
+    renamed,
+    onWriting,
   });
+  // Files the diff no longer shows that still have comments, or a comment
+  // being written: the agent reverted them, say. They stay at the top with
+  // their comments, outdated, instead of vanishing with the file.
+  const goneKey = useMemo(() => {
+    if (!review || !whole) return "";
+    const shown = new Set(groups.map((group) => group.path));
+    const left = new Set(
+      [...review.paths, ...writingIn].filter(
+        (path) => !shown.has(path) && (!file || path === file),
+      ),
+    );
+    return JSON.stringify([...left].sort());
+  }, [review, whole, groups, writingIn, file]);
+  const gone = useMemo<DiffFileGroup[]>(
+    () =>
+      goneKey
+        ? (JSON.parse(goneKey) as string[]).map((path) => ({
+            path,
+            lines: [],
+          }))
+        : [],
+    [goneKey],
+  );
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const stepping = useRef(false);
@@ -190,7 +242,7 @@ export function DiffPanel({
       ? (turnLabel ?? "This turn")
       : "Workspace vs base";
 
-  const options = { layout, ignoreWhitespace, reviewFor, reverts };
+  const options = { layout, ignoreWhitespace, review, reverts };
 
   return (
     <div
@@ -273,28 +325,34 @@ export function DiffPanel({
             <Skeleton className="h-3 w-2/3" />
           </div>
         )}
-        {file && groups.length === 1 ? (
-          <FileDiff
-            group={groups[0]}
-            options={options}
-            onShowWhitespace={() => setIgnoreWhitespace(false)}
-          />
-        ) : (
-          groups.map((group) => (
-            <FileDiffSection
-              key={group.path}
-              group={group}
-              onOpenFile={onOpenFile}
-              options={options}
-              onShowWhitespace={() => setIgnoreWhitespace(false)}
-            />
-          ))
-        )}
         {payload && groups.length === 0 && !error && (
           <p className="text-muted-foreground px-3 py-6 text-sm">
             {emptyDiffText(file, turnId, turnLabel)}
           </p>
         )}
+        {/*
+          A file that leaves the diff keeps its place in this list, under the
+          same key, so an editor open on it keeps what was typed and is there
+          again when the file comes back.
+        */}
+        {file && groups.length <= 1
+          ? (groups[0] ?? gone[0]) && (
+              <FileDiff
+                group={groups[0] ?? gone[0]!}
+                options={options}
+                onShowWhitespace={() => setIgnoreWhitespace(false)}
+              />
+            )
+          : [...gone, ...groups].map((group, index) => (
+              <FileDiffSection
+                key={group.path}
+                group={group}
+                gone={index < gone.length}
+                onOpenFile={onOpenFile}
+                options={options}
+                onShowWhitespace={() => setIgnoreWhitespace(false)}
+              />
+            ))}
       </div>
     </div>
   );
@@ -304,7 +362,7 @@ export function DiffPanel({
 type FileDiffOptions = {
   layout: "unified" | "split";
   ignoreWhitespace: boolean;
-  reviewFor: ((path: string) => DiffReview) | null;
+  review: WorkspaceDiffReview | null;
   reverts: RevertTracker | null;
 };
 
@@ -468,11 +526,17 @@ function emptyDiffText(
 
 function FileDiffSection({
   group,
+  gone = false,
   onOpenFile,
   options,
   onShowWhitespace,
 }: {
   group: DiffFileGroup;
+  /**
+   * The diff no longer shows this file. It stays, with no lines, for its
+   * comments, which read as outdated, and for any comment being written.
+   */
+  gone?: boolean;
   onOpenFile?: (path: string) => void;
   options: FileDiffOptions;
   onShowWhitespace: () => void;
@@ -481,7 +545,45 @@ function FileDiffSection({
   const [expanded, setExpanded] = useState(!large);
   const bodyId = useId();
   const { insertions, deletions } = fileDiffstat(group.lines);
-  const reverts = options.reverts;
+  const reverts = gone ? null : options.reverts;
+
+  if (gone) {
+    return (
+      <section
+        className="border-b last:border-b-0"
+        data-diff-file=""
+        data-diff-file-gone=""
+      >
+        <header className="bg-background sticky top-0 z-10 flex items-center gap-1.5 pr-3">
+          {/* Nothing to open, but J and K land here like on any file. */}
+          <h3
+            tabIndex={-1}
+            data-diff-file-header=""
+            className={cn(
+              "flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pl-3",
+              FOCUS_RING_TIGHT,
+            )}
+          >
+            {/* The chevron's room, so the path lines up with the others. */}
+            <span className="size-3 shrink-0" aria-hidden="true" />
+            <MiddleTruncate
+              text={group.path}
+              className="text-muted-foreground min-w-0 flex-1 font-mono text-xs"
+            />
+          </h3>
+          <span className="text-muted-foreground shrink-0 text-xs">
+            No longer in this diff
+          </span>
+        </header>
+        <FileDiff
+          group={group}
+          id={bodyId}
+          options={options}
+          onShowWhitespace={onShowWhitespace}
+        />
+      </section>
+    );
+  }
 
   return (
     <section className="border-b last:border-b-0" data-diff-file="">
@@ -635,7 +737,7 @@ function FileDiff({
       layout={options.layout}
       ignoreWhitespace={options.ignoreWhitespace}
       hunkAction={reverts ? hunkAction : undefined}
-      review={options.reviewFor?.(group.path)}
+      review={options.review?.forPath(group.path)}
       onShowWhitespace={onShowWhitespace}
     />
   );
