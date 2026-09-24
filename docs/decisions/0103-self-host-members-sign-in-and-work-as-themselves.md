@@ -146,11 +146,12 @@ still names only members, and members revoke their own devices from `/me/`.
 
 ### 6. Upgrades and what stays shared
 
-After an upgrade, a deployment runs under `accounts`, and each owner's checkouts
-pass to their account before the owner's first process runs. Members stay on the
-shared keys, which engines now reach through the relay, until they add their own
-or sharing stops. Sessions that relied on the shared engine sign-in use a shared
-key or ask their owner to sign in. `GH_TOKEN` and token paste stay.
+After an upgrade, a deployment runs under `accounts`. Before an owner's first
+process runs, the launcher hands that owner's checkouts to their account without
+following links. Members stay on the shared keys, which engines now reach
+through the relay, until they add their own or sharing stops. Sessions that
+relied on the shared engine sign-in use a shared key or ask their owner to sign
+in. `GH_TOKEN` and token paste stay.
 
 Shared on purpose: providers, endpoints, model roles, MCP servers, plugins,
 connected apps, engine versions, worktree roots, the GitHub App, the shared
@@ -249,6 +250,9 @@ common platforms cannot run the launcher, or for a forge other than GitHub.
 - A member process holds only its own group. A launcher that skips `setgroups`
   passes every uid check, then reads `tokens` and `secret.key` through the host
   group.
+- A member's checkout holds a link to the key file when it is handed over.
+  Afterward, the key file still belongs to the server. A handover that follows
+  links, as a plain recursive `chown` can, gives the member the key file.
 - A member repository's `core.fsmonitor` command writes a marker. After the
   server's status, diff, checkpoint, and push, the marker is absent or owned by
   the member. A server that runs git as itself and silences git's ownership
