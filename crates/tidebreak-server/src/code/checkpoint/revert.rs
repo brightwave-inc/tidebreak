@@ -18,9 +18,10 @@ use std::path::Path;
 use tidebreak_harness::OutputBudget;
 
 use super::worktree::{
-    apply, inspect, merge_blobs, name_paths, read_blob, refuse_lossy_filters,
-    refuse_sparse_checkout, tree_entry, tree_paths_under, tree_with_changes, unsaved_under,
-    write_blob, ApplyFailure, PrivateIndex, TreeEntry, MAX_BLOB_BYTES,
+    apply, disk_folds_names, fold_key, inspect, merge_blobs, name_paths, read_blob,
+    refuse_lossy_filters, refuse_sparse_checkout, tree_entry, tree_paths_folding_to,
+    tree_paths_under, tree_with_changes, unsaved_under, write_blob, ApplyFailure, PrivateIndex,
+    TreeEntry, MAX_BLOB_BYTES,
 };
 use super::{
     complete_nul_terminated_records, git_bytes_bounded, git_bytes_with_literal_paths_bounded,
@@ -433,9 +434,20 @@ pub async fn discard_paths(
     }
 
     let mut edits = Vec::new();
+    let mut unstaged = picked.clone();
     for path in &picked {
-        let committed = file_entry(worktree, "HEAD", path).await?;
         let now = file_entry(worktree, &current, path).await?;
+        let (committed_path, committed) = match file_entry(worktree, "HEAD", path).await? {
+            Some(entry) => (path.clone(), Some(entry)),
+            // Not under this spelling: on a disk that folds names, the last
+            // commit may hold the same file under another one, such as after
+            // a committed case-only rename. Put that back; never delete a
+            // file only because its spelling moved.
+            None => match committed_spelling(worktree, path).await? {
+                Some((spelling, entry)) => (spelling, Some(entry)),
+                None => (path.clone(), None),
+            },
+        };
         if committed
             .iter()
             .chain(now.iter())
@@ -447,9 +459,17 @@ pub async fn discard_paths(
             ));
         }
         if committed.is_some() {
-            refuse_folder_in_the_way(worktree, &current, path, &picked).await?;
+            refuse_folder_in_the_way(worktree, &current, &committed_path, &picked).await?;
         }
-        edits.push((path.clone(), committed));
+        if committed_path == *path {
+            edits.push((path.clone(), committed));
+        } else {
+            // The stale spelling goes, and the committed one comes back: one
+            // file, renamed back to how the last commit names it.
+            edits.push((path.clone(), None));
+            edits.push((committed_path.clone(), committed));
+            unstaged.push(committed_path);
+        }
     }
     let target = tree_with_changes(worktree, &current, &edits).await?;
     let plan = inspect(worktree, &current, &target)
@@ -459,8 +479,46 @@ pub async fn discard_paths(
     apply(worktree, &plan)
         .await
         .map_err(ApplyFailure::into_error)?;
-    run_on_paths(worktree, &["reset", "-q", "HEAD", "--"], &picked).await?;
+    run_on_paths(worktree, &["reset", "-q", "HEAD", "--"], &unstaged).await?;
     Ok(RevertedChange { paths: picked })
+}
+
+/// The one path the last commit holds that names the same file as `path` on
+/// this disk, with its entry. `None` when the disk keeps names apart or the
+/// commit holds no such path. Refused when it holds more than one, because
+/// Tidebreak cannot tell which to put back.
+async fn committed_spelling(
+    worktree: &Path,
+    path: &GitPath,
+) -> Result<Option<(GitPath, TreeEntry)>, CheckpointError> {
+    if !disk_folds_names(worktree) {
+        return Ok(None);
+    }
+    let key = fold_key(path);
+    let wanted = HashSet::from([key.clone()]);
+    let mut spellings: Vec<GitPath> = tree_paths_folding_to(worktree, "HEAD", &wanted)
+        .await?
+        .remove(&key)
+        .unwrap_or_default();
+    spellings.retain(|spelling| spelling != path);
+    match spellings.as_slice() {
+        [] => Ok(None),
+        [spelling] => Ok(file_entry(worktree, "HEAD", spelling)
+            .await?
+            .map(|entry| (spelling.clone(), entry))),
+        _ => {
+            spellings.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+            Err(CheckpointError::conflict(
+                "discard_blocked",
+                format!(
+                    "{} names the same file on this disk as {} in the last commit, so Tidebreak \
+                     cannot tell which to put back. Discard it in a terminal.",
+                    path.to_wire(),
+                    name_paths(&spellings)
+                ),
+            ))
+        }
+    }
 }
 
 /// Refuse to put a committed file back where a folder now stands with files
@@ -1448,5 +1506,54 @@ mod tests {
         );
         let removal: Vec<&[u8]> = vec![b"@@ -2 +1,0 @@", b"-gone"];
         assert_eq!(reverse_hunk(&removal, b"a\nb\n").unwrap(), b"a\ngone\nb\n");
+    }
+
+    /// Review finding: after a committed case-only rename on a disk that
+    /// folds case, a discard reached the file through the old spelling, found
+    /// nothing under it in the last commit, and deleted the committed file.
+    /// It now puts back the file the last commit holds under its own
+    /// spelling. Runs only where the disk folds case.
+    #[tokio::test]
+    async fn a_discard_after_a_case_only_rename_puts_the_committed_file_back() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "case-rename");
+        if std::fs::symlink_metadata(tree.join(".GIT")).is_err() {
+            return;
+        }
+        std::fs::write(tree.join("guide.md"), "v1\n").unwrap();
+        run(&tree, &["git", "add", "guide.md"]);
+        run(&tree, &["git", "commit", "-q", "-m", "guide"]);
+        // A checkpoint before the rename leaves the old spelling in the
+        // index checkpoints reuse.
+        snapshot_tree(&tree).await.unwrap();
+        run(&tree, &["git", "mv", "guide.md", "GUIDE.md"]);
+        run(&tree, &["git", "commit", "-q", "-m", "rename"]);
+        std::fs::write(tree.join("GUIDE.md"), "edited\n").unwrap();
+        snapshot_tree(&tree).await.unwrap();
+
+        // A row that still names the old spelling may put the committed
+        // version back, or refuse, but never deletes the file.
+        let _ = discard_paths(&tree, &["guide.md".to_owned()], None).await;
+        assert!(
+            matches!(
+                read(&tree.join("GUIDE.md")).as_deref(),
+                Some("v1\n" | "edited\n")
+            ),
+            "discarding the old spelling lost the file"
+        );
+
+        // Discarding the committed spelling puts the committed version back,
+        // under the name the last commit gives it.
+        std::fs::write(tree.join("GUIDE.md"), "edited\n").unwrap();
+        discard_paths(&tree, &["GUIDE.md".to_owned()], None)
+            .await
+            .unwrap();
+        assert_eq!(read(&tree.join("GUIDE.md")).as_deref(), Some("v1\n"));
+        let names: Vec<String> = std::fs::read_dir(&tree)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().any(|name| name == "GUIDE.md"), "{names:?}");
+        assert!(!names.iter().any(|name| name == "guide.md"), "{names:?}");
     }
 }

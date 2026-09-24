@@ -114,11 +114,18 @@ zip = { workspace = true }
 # Auxiliary workspace terminals (0036). Server-only: the harness crate
 # must never depend on a PTY library.
 portable-pty = "=0.9.0"
+# Compares worktree paths the way a disk that folds Unicode normalization
+# does, so an undo never touches one file through two spellings. Already in
+# Cargo.lock; making it direct leaves resolution unchanged.
+unicode-normalization = "=0.1.25"
 
 [target.'cfg(unix)'.dependencies]
 # Effective-uid account lookup (getpwuid_r) for the macOS managed-preferences
 # user channel; $USER is launcher-controlled and must not pick the path.
 libc = { workspace = true }
+# Extended attributes an undo saves and writes back with a file. Already in
+# Cargo.lock through tar; making it direct leaves resolution unchanged.
+xattr = "=1.6.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes"] }

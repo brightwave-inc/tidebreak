@@ -219,21 +219,9 @@ pub(super) async fn tree_of_entries(
         records.extend_from_slice(path.as_bytes());
         records.push(0);
     }
-    let input = temp_file_with(&records)?;
-    let stdin = std::fs::File::open(input.path())
-        .map_err(|err| CheckpointError::internal(format!("could not stage a file: {err}")))?;
-    let mut command = git_command(worktree);
-    command
-        .env("GIT_INDEX_FILE", &index.path)
-        .args(["update-index", "-z", "--index-info"])
-        .stdin(Stdio::from(stdin));
-    run_git_command(
-        command,
-        format!("update-index --index-info <{} paths>", entries.len()),
-        GIT_SNAPSHOT_TIMEOUT,
-    )
-    .await
-    .map_err(CheckpointError::internal)?;
+    update_index_info(worktree, &index.path, &records)
+        .await
+        .map_err(CheckpointError::internal)?;
     git_text_env(worktree, &["write-tree"], &index.env(), GIT_TIMEOUT)
         .await
         .map_err(CheckpointError::internal)
@@ -489,11 +477,27 @@ pub(super) struct Plan {
     /// stood, with no filters. Putting a path back writes these bytes, never
     /// what a clean filter made of them.
     exact_before: HashMap<GitPath, String>,
+    /// Each file the plan replaces or removes: its permission bits and
+    /// extended attributes, written back with it.
+    meta_before: HashMap<GitPath, FileMeta>,
     /// Paths whose new version is written as these exact bytes, with no
     /// filters: a saved state brought back as it stood.
     exact_after: HashMap<GitPath, TreeEntry>,
+    /// Paths whose new version takes exactly these permission bits and
+    /// extended attributes: a saved state brought back as it stood.
+    meta_after: HashMap<GitPath, FileMeta>,
     /// Whether the executable bit counts, as `core.fileMode` says.
     file_mode: bool,
+}
+
+/// A file's permission bits and extended attributes, as an undo saves them
+/// and writes them back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct FileMeta {
+    /// The permission bits: `0o7777` of the mode.
+    pub mode: u32,
+    /// Each extended attribute, by name and value.
+    pub xattrs: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Plan {
@@ -520,6 +524,19 @@ impl Plan {
             .collect()
     }
 
+    /// The permission bits and extended attributes of each file this plan
+    /// replaces or removes. A saved state keeps these, so undoing it never
+    /// leaves a private file readable by everyone.
+    pub fn meta_the_snapshot_lacks(&self) -> Vec<(GitPath, FileMeta)> {
+        let mut meta: Vec<(GitPath, FileMeta)> = self
+            .meta_before
+            .iter()
+            .map(|(path, meta)| (path.clone(), meta.clone()))
+            .collect();
+        meta.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        meta
+    }
+
     /// Write these paths' new versions as the exact bytes a saved state
     /// kept for them, instead of through the smudge filters.
     pub fn write_exact(&mut self, saved: HashMap<GitPath, TreeEntry>) {
@@ -529,6 +546,19 @@ impl Plan {
             };
             if after.is_regular_file() && exact.mode == after.mode {
                 self.exact_after.insert(change.path.clone(), exact.clone());
+            }
+        }
+    }
+
+    /// Give these paths' new versions the permission bits and extended
+    /// attributes a saved state kept for them.
+    pub fn write_meta(&mut self, saved: HashMap<GitPath, FileMeta>) {
+        for change in &self.changes {
+            let (Some(after), Some(meta)) = (&change.after, saved.get(&change.path)) else {
+                continue;
+            };
+            if after.is_regular_file() {
+                self.meta_after.insert(change.path.clone(), meta.clone());
             }
         }
     }
@@ -673,6 +703,7 @@ pub(super) async fn inspect(
     // snapshot holds. Stamp first, then hash: a change after the stamp shows
     // in the hash, and one after the hash shows in the stamp.
     let mut stamps = HashMap::new();
+    let mut meta_before = HashMap::new();
     let mut changed = Vec::new();
     let mut files: Vec<(GitPath, String)> = Vec::new();
     let mut links: Vec<(GitPath, Vec<u8>, String)> = Vec::new();
@@ -706,6 +737,8 @@ pub(super) async fn inspect(
             links.push((change.path.clone(), target, before.oid.clone()));
         } else {
             files.push((change.path.clone(), before.oid.clone()));
+            let full = full_path(worktree, &change.path).map_err(CheckpointError::internal)?;
+            meta_before.insert(change.path.clone(), file_meta(&full, &stamp));
         }
         stamps.insert(change.path.clone(), stamp);
     }
@@ -741,7 +774,9 @@ pub(super) async fn inspect(
             changes,
             stamps,
             exact_before,
+            meta_before,
             exact_after: HashMap::new(),
+            meta_after: HashMap::new(),
             file_mode,
         },
         blocked,
@@ -809,78 +844,73 @@ pub(super) fn unsaved_under(
 }
 
 /// Whether the file standing at the new path `path` is really a file this
-/// same change removes, reached under another spelling: a disk that ignores
-/// case or Unicode normalization finds `README.md` when asked for
-/// `readme.md`. That file is not in the way: it goes first.
+/// same change removes, reached under another spelling: a disk that folds
+/// case or Unicode normalization opens `docs/a.md` when asked for
+/// `Docs/a.md`. That file is not in the way: it goes first.
 fn alias_of_removed(worktree: &Path, path: &GitPath, removed: &HashSet<&GitPath>) -> bool {
-    let folder = path.folder();
-    let Some(on_disk) = folder_names(worktree, folder.as_ref()) else {
-        return false;
-    };
-    if on_disk.contains(path.name()) {
-        // The exact name is there: a real file in the way.
-        return false;
-    }
+    let key = fold_key(path);
     removed
         .iter()
-        .any(|other| *other != path && other.folder() == folder && same_file(worktree, path, other))
+        .any(|other| *other != path && fold_key(other) == key && same_file(worktree, path, other))
 }
 
 /// Pairs of paths that name one file on this disk, where `changes` touches
 /// one of them.
 ///
-/// A disk that ignores case or Unicode normalization opens `README.md` when
-/// asked for `readme.md`. When `core.ignorecase` or `core.precomposeunicode`
-/// says otherwise, git keeps both spellings apart, so a snapshot can hold two
-/// paths for one file, and changing one changes the other. A case-only
-/// rename, one spelling removed and the other added, is not a problem: the
-/// removal goes first.
+/// A disk that folds case or Unicode normalization opens `docs/a.md` when
+/// asked for `Docs/a.md`, in any part of the path. Git can still hold both
+/// spellings as separate paths: with `core.ignorecase` or
+/// `core.precomposeunicode` off, or through a stale spelling in an index.
+/// Changing one then changes the other, so every snapshot path that folds to
+/// the key of a path the change touches is checked, whatever the config says.
+/// A case-only rename, one spelling removed and the other added, is not a
+/// problem: the removal goes first.
 async fn find_aliases(
     worktree: &Path,
     snapshot: &str,
     changes: &[RawChange],
 ) -> Result<Vec<(GitPath, GitPath)>, CheckpointError> {
-    if changes.is_empty() || !may_hold_aliases(worktree).await {
+    if changes.is_empty() || !disk_folds_names(worktree) {
         return Ok(Vec::new());
     }
     let touched: HashMap<&GitPath, &RawChange> = changes
         .iter()
         .map(|change| (&change.path, change))
         .collect();
-    let mut folders: HashMap<Option<GitPath>, (HashSet<GitPath>, bool)> = HashMap::new();
+    let mut groups: HashMap<Vec<u8>, Vec<GitPath>> = HashMap::new();
     for change in changes {
-        let (claimed, in_snapshot) = folders.entry(change.path.folder()).or_default();
-        claimed.insert(change.path.clone());
-        *in_snapshot |= change.before.is_some();
+        groups
+            .entry(fold_key(&change.path))
+            .or_default()
+            .push(change.path.clone());
+    }
+    let wanted: HashSet<Vec<u8>> = groups.keys().cloned().collect();
+    for (key, paths) in tree_paths_folding_to(worktree, snapshot, &wanted).await? {
+        let group = groups.entry(key).or_default();
+        for path in paths {
+            if !group.contains(&path) {
+                group.push(path);
+            }
+        }
     }
     let mut pairs = Vec::new();
-    for (folder, (mut claimed, in_snapshot)) in folders {
-        if in_snapshot {
-            claimed.extend(snapshot_names_in(worktree, snapshot, folder.as_ref()).await?);
-        }
-        let Some(on_disk) = folder_names(worktree, folder.as_ref()) else {
-            continue;
-        };
-        let (spelled, other): (Vec<&GitPath>, Vec<&GitPath>) = claimed
-            .iter()
-            .partition(|path| on_disk.contains(path.name()));
-        // A path whose exact name is not on disk, but which opens anyway, is
-        // another spelling of a name that is.
-        for alias in other {
-            for exact in &spelled {
-                if !same_file(worktree, alias, exact) {
+    for group in groups.values().filter(|group| group.len() > 1) {
+        for (at, one) in group.iter().enumerate() {
+            for other in &group[at + 1..] {
+                let (first, second) = (touched.get(one), touched.get(other));
+                if (first.is_none() && second.is_none()) || is_rename_pair(first, second) {
                     continue;
                 }
-                let (one, two) = (touched.get(alias), touched.get(*exact));
-                if (one.is_none() && two.is_none()) || is_rename_pair(one, two) {
+                // Two spellings name one file only where this disk opens
+                // both as the same one.
+                if !same_file(worktree, one, other) {
                     continue;
                 }
-                let (first, second) = if alias.as_bytes() <= exact.as_bytes() {
-                    (alias.clone(), (*exact).clone())
+                pairs.push(if one.as_bytes() <= other.as_bytes() {
+                    (one.clone(), other.clone())
                 } else {
-                    ((*exact).clone(), alias.clone())
-                };
-                pairs.push((first, second));
+                    (other.clone(), one.clone())
+                });
             }
         }
     }
@@ -899,89 +929,84 @@ fn is_rename_pair(one: Option<&&RawChange>, two: Option<&&RawChange>) -> bool {
     }
 }
 
-/// Whether a snapshot of this worktree can hold two spellings of one file:
-/// the disk folds names in a way git's config does not.
-async fn may_hold_aliases(worktree: &Path) -> bool {
-    // The worktree's own `.git`, asked for in capitals.
-    let folds_case = std::fs::symlink_metadata(worktree.join(".GIT")).is_ok();
-    let folds_unicode = cfg!(target_os = "macos");
-    if !folds_case && !folds_unicode {
-        return false;
-    }
-    let setting = |name: &'static str| async move {
-        git_text(worktree, &["config", "--bool", "--get", name], GIT_TIMEOUT)
-            .await
-            .is_ok_and(|value| value.trim() == "true")
-    };
-    (folds_case && !setting("core.ignorecase").await)
-        || (folds_unicode && !setting("core.precomposeunicode").await)
+/// Whether this worktree's disk may open one file under two spellings: it
+/// folds case, opening the worktree's `.git` when asked for `.GIT`, or it
+/// folds Unicode normalization, as every macOS volume does.
+pub(super) fn disk_folds_names(worktree: &Path) -> bool {
+    cfg!(target_os = "macos") || std::fs::symlink_metadata(worktree.join(".GIT")).is_ok()
 }
 
-/// Every path the snapshot holds directly inside `folder`, the top of the
-/// worktree when `None`.
-async fn snapshot_names_in(
+/// A path as a disk that folds names compares it: every part Unicode
+/// normalized and lowercased.
+pub(super) fn fold_key(path: &GitPath) -> Vec<u8> {
+    use unicode_normalization::UnicodeNormalization;
+    match std::str::from_utf8(path.as_bytes()) {
+        Ok(text) => text
+            .nfc()
+            .collect::<String>()
+            .to_lowercase()
+            .nfc()
+            .collect::<String>()
+            .into_bytes(),
+        Err(_) => path.as_bytes().to_ascii_lowercase(),
+    }
+}
+
+/// Every path `tree` holds whose [`fold_key`] is in `wanted`, by key.
+///
+/// The listing streams, so a tree of any size is read in full while only the
+/// matches are kept.
+pub(super) async fn tree_paths_folding_to(
     worktree: &Path,
-    snapshot: &str,
-    folder: Option<&GitPath>,
-) -> Result<Vec<GitPath>, CheckpointError> {
-    let mut spec = OsString::from(format!("{snapshot}:"));
-    if let Some(folder) = folder {
-        spec.push(folder.to_os_string().map_err(CheckpointError::internal)?);
-    }
-    let mut command = git_command(worktree);
-    command.args(["ls-tree", "-z", "--name-only"]).arg(spec);
-    let (raw, truncated) = super::run_git_command_bounded(
-        command,
-        "ls-tree <folder>".to_owned(),
-        GIT_TIMEOUT,
-        OutputBudget::head(SCAN_BYTES, SCAN_LINES),
-        true,
-    )
-    .await
-    .map_err(CheckpointError::internal)?;
-    if truncated {
-        return Err(CheckpointError::conflict(
-            "change_too_large",
-            "A folder this change touches holds too many files to check here. Use Git in a \
-             terminal.",
-        ));
-    }
-    Ok(raw
-        .split(|byte| *byte == 0)
-        .filter(|name| !name.is_empty())
-        .map(|name| match folder {
-            Some(folder) => GitPath::from_bytes(&[&folder.child_prefix()[..], name].concat()),
-            None => GitPath::from_bytes(name),
-        })
-        .collect())
-}
-
-/// The exact names the disk holds in `folder`, the top of the worktree when
-/// `None`. `None` when the folder cannot be read.
-fn folder_names(worktree: &Path, folder: Option<&GitPath>) -> Option<HashSet<Vec<u8>>> {
-    let full = match folder {
-        Some(folder) => full_path(worktree, folder).ok()?,
-        None => worktree.to_path_buf(),
+    tree: &str,
+    wanted: &HashSet<Vec<u8>>,
+) -> Result<HashMap<Vec<u8>, Vec<GitPath>>, CheckpointError> {
+    use tokio::io::AsyncBufReadExt;
+    let mut command = tokio::process::Command::new("git");
+    command
+        .current_dir(worktree)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["ls-tree", "-r", "-z", "--name-only", "--full-tree", tree])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|err| CheckpointError::internal(format!("could not start git: {err}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CheckpointError::internal("git ls-tree gave no output"))?;
+    let listing = async {
+        let mut found: HashMap<Vec<u8>, Vec<GitPath>> = HashMap::new();
+        let mut records = tokio::io::BufReader::new(stdout).split(0);
+        while let Some(record) = records
+            .next_segment()
+            .await
+            .map_err(|err| CheckpointError::internal(format!("could not read a tree: {err}")))?
+        {
+            if record.is_empty() {
+                continue;
+            }
+            let path = GitPath::from_bytes(&record);
+            let key = fold_key(&path);
+            if wanted.contains(&key) {
+                found.entry(key).or_default().push(path);
+            }
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|err| CheckpointError::internal(format!("could not read a tree: {err}")))?;
+        if !status.success() {
+            return Err(CheckpointError::internal("git could not list a tree"));
+        }
+        Ok(found)
     };
-    let entries = std::fs::read_dir(full).ok()?;
-    Some(
-        entries
-            .flatten()
-            .map(|entry| os_bytes(&entry.file_name()))
-            .collect(),
-    )
-}
-
-fn os_bytes(name: &std::ffi::OsStr) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        name.as_bytes().to_vec()
-    }
-    #[cfg(not(unix))]
-    {
-        name.to_string_lossy().as_bytes().to_vec()
-    }
+    tokio::time::timeout(GIT_SNAPSHOT_TIMEOUT, listing)
+        .await
+        .map_err(|_| CheckpointError::internal("listing a tree took too long"))?
 }
 
 /// Whether two paths open one file, without following a symlink.
@@ -1103,7 +1128,7 @@ struct Moved {
 /// Move every path in `plan`. When one fails, every path already moved goes
 /// back, and the failure says whether the result was verified.
 pub(super) async fn apply(worktree: &Path, plan: &Plan) -> Result<(), ApplyFailure> {
-    let staging = Staging::prepare(worktree);
+    let staging = Staging::prepare(worktree).await;
     match apply_steps(worktree, &staging, plan, |_| false).await {
         Ok(()) => Ok(()),
         Err((stop, moved)) => Err(roll_back(worktree, &staging, plan, moved, stop).await),
@@ -1130,7 +1155,7 @@ fn move_order(plan: &Plan) -> Vec<usize> {
 /// process stops: nothing rolls back.
 #[cfg(any(test, feature = "test-support"))]
 pub(super) async fn apply_until_killed(worktree: &Path, plan: &Plan, killed_at: usize) {
-    let staging = Staging::prepare(worktree);
+    let staging = Staging::prepare(worktree).await;
     let _ = apply_steps(worktree, &staging, plan, |step| step == killed_at).await;
 }
 
@@ -1214,7 +1239,14 @@ async fn move_one(
         Some(exact) => Content::Exact(exact),
         None => Content::Smudged(after),
     };
-    write_entry(worktree, staging, path, &full, content, expect).await?;
+    // A saved state comes back with exactly its bits; a replaced file keeps
+    // its own, never wider; a new file takes the umask's, as git gives it.
+    let keep = match (plan.meta_after.get(path), plan.meta_before.get(path)) {
+        (Some(saved), _) => Keep::Exact(saved),
+        (None, Some(replaced)) => Keep::NoWiderThan(replaced.mode),
+        (None, None) => Keep::Default,
+    };
+    write_entry(worktree, staging, path, &full, content, keep, expect).await?;
     // The path is written; a stamp that cannot be read only makes a later
     // roll back more careful, never less.
     Ok(stamp_at(&full).ok().flatten())
@@ -1290,39 +1322,60 @@ impl Content<'_> {
 /// The name of the staging folder inside a worktree's own git folder.
 const STAGING_FOLDER: &str = "tidebreak-tmp";
 
+/// The staging folder at the top of a worktree, for a worktree whose git
+/// folder is on another disk. The repository's `info/exclude` lists it, so no
+/// snapshot, file list, or commit sees what a crash leaves in it.
+const WORKTREE_STAGING_FOLDER: &str = ".tidebreak-tmp";
+
 /// Where new versions are written before they move into place.
 ///
-/// The folder sits in the worktree's own git folder, which git never lists
-/// and a snapshot never reads, so a crash mid-write leaves nothing in the
-/// worktree. Its names are short and fixed-length, so a file whose own name
-/// is as long as the disk allows still gets written.
+/// The first choice sits in the worktree's own git folder, which git never
+/// lists and a snapshot never reads, so a crash mid-write leaves nothing in
+/// the worktree. When that folder is on another disk, a hidden folder at the
+/// top of the worktree, excluded from git, takes its place. Names in either
+/// are short and fixed-length, so a file whose own name is as long as the
+/// disk allows still gets written. Nothing is ever staged beside a file.
 struct Staging {
-    folder: Option<PathBuf>,
+    /// Staging folders on the worktree's disk, in the order they are tried.
+    folders: Vec<PathBuf>,
 }
 
 impl Staging {
-    /// The staging folder for `worktree`, emptied of anything an earlier
+    /// The staging folders for `worktree`, emptied of anything an earlier
     /// crash left. Only one change holds a worktree at a time, so nothing
-    /// in it belongs to anyone else.
-    fn prepare(worktree: &Path) -> Self {
-        let folder = staging_folder(worktree).and_then(|folder| {
-            let _ = std::fs::remove_dir_all(&folder);
-            std::fs::create_dir_all(&folder).ok().map(|()| folder)
-        });
-        Self { folder }
-    }
-
-    /// A fresh path for the new version of `full`: in the staging folder
-    /// when it is on the same disk as `full`, so the move is one rename.
-    /// Otherwise a short name beside `full`.
-    fn temp_for(&self, full: &Path) -> PathBuf {
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        if let (Some(folder), Some(parent)) = (&self.folder, full.parent()) {
-            if same_disk(folder, parent) {
-                return folder.join(&id[..16]);
+    /// in them belongs to anyone else.
+    async fn prepare(worktree: &Path) -> Self {
+        clear_staging_folder(worktree);
+        let mut folders = Vec::new();
+        if let Some(folder) = staging_folder(worktree) {
+            if std::fs::create_dir_all(&folder).is_ok() && same_disk(&folder, worktree) {
+                folders.push(folder);
             }
         }
-        full.with_file_name(format!(".tb-{}.tmp", &id[..8]))
+        if folders.is_empty() {
+            let folder = worktree.join(WORKTREE_STAGING_FOLDER);
+            if exclude_staging_folder(worktree).await && std::fs::create_dir_all(&folder).is_ok() {
+                folders.push(folder);
+            }
+        }
+        Self { folders }
+    }
+
+    /// A fresh path for the new version of `full`, in a staging folder on
+    /// the same disk as `full`, so the move is one rename.
+    fn temp_for(&self, full: &Path) -> Result<PathBuf, String> {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let parent = full.parent();
+        self.folders
+            .iter()
+            .find(|folder| parent.is_some_and(|parent| same_disk(folder, parent)))
+            .map(|folder| folder.join(&id[..16]))
+            .ok_or_else(|| {
+                format!(
+                    "Tidebreak has no staging folder on the disk that holds {}.",
+                    full.display()
+                )
+            })
     }
 }
 
@@ -1352,11 +1405,56 @@ pub(crate) fn staging_folder(worktree: &Path) -> Option<PathBuf> {
     Some(git_dir.join(STAGING_FOLDER))
 }
 
-/// Remove whatever a crash left in `worktree`'s staging folder.
+/// Remove whatever a crash left in `worktree`'s staging folders.
 pub(crate) fn clear_staging_folder(worktree: &Path) {
     if let Some(folder) = staging_folder(worktree) {
         let _ = std::fs::remove_dir_all(folder);
     }
+    let folder = worktree.join(WORKTREE_STAGING_FOLDER);
+    // Only a real folder: never follow a symlink out of the worktree.
+    if std::fs::symlink_metadata(&folder).is_ok_and(|meta| meta.is_dir()) {
+        let _ = std::fs::remove_dir_all(folder);
+    }
+}
+
+/// Make sure the repository's `info/exclude` lists the worktree staging
+/// folder. `false` when it cannot, and the folder must not be used.
+async fn exclude_staging_folder(worktree: &Path) -> bool {
+    let pattern = format!("/{WORKTREE_STAGING_FOLDER}/");
+    let Ok(exclude) = git_text(
+        worktree,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ],
+        GIT_TIMEOUT,
+    )
+    .await
+    else {
+        return false;
+    };
+    let exclude = PathBuf::from(exclude.trim());
+    let listed = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if listed.lines().any(|line| line.trim() == pattern) {
+        return true;
+    }
+    let mut addition = String::new();
+    if !listed.is_empty() && !listed.ends_with('\n') {
+        addition.push('\n');
+    }
+    addition.push_str(&pattern);
+    addition.push('\n');
+    exclude
+        .parent()
+        .is_some_and(|folder| std::fs::create_dir_all(folder).is_ok())
+        && std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&exclude)
+            .and_then(|mut file| file.write_all(addition.as_bytes()))
+            .is_ok()
 }
 
 #[cfg(unix)]
@@ -1383,6 +1481,19 @@ enum Expect<'a> {
     Stamp(&'a Stamp),
 }
 
+/// Which permission bits and extended attributes a written file gets.
+#[derive(Debug, Clone, Copy)]
+enum Keep<'a> {
+    /// A new file's: the umask's bits, executable when the tree says, the
+    /// way git writes one.
+    Default,
+    /// A replaced file's own read and write bits, never wider, executable
+    /// when the tree says.
+    NoWiderThan(u32),
+    /// Exactly these bits and attributes, as the file had them before.
+    Exact(&'a FileMeta),
+}
+
 /// Write `content` at `path`: to a temporary file first, then moved into
 /// place in one step, once the path still holds what `expect` says.
 async fn write_entry(
@@ -1391,14 +1502,15 @@ async fn write_entry(
     path: &GitPath,
     full: &Path,
     content: Content<'_>,
+    keep: Keep<'_>,
     expect: Expect<'_>,
 ) -> Result<(), Stop> {
-    let temp = staging.temp_for(full);
+    let temp = staging.temp_for(full).map_err(Stop::failed)?;
     let entry = content.entry();
     let written = if entry.is_symlink() {
         write_symlink(worktree, entry, &temp).await
     } else if entry.is_regular_file() {
-        write_file(worktree, path, content, &temp).await
+        write_file(worktree, path, content, keep, &temp).await
     } else {
         Err(format!(
             "{} is not a file Tidebreak can write.",
@@ -1466,11 +1578,13 @@ fn appeared(path: &GitPath) -> Stop {
 }
 
 /// A file's content streamed straight to `temp`: through the smudge filters
-/// its path's attributes name, or as its exact bytes.
+/// its path's attributes name, or as its exact bytes. Its permission bits
+/// and extended attributes follow `keep`.
 async fn write_file(
     worktree: &Path,
     path: &GitPath,
     content: Content<'_>,
+    keep: Keep<'_>,
     temp: &Path,
 ) -> Result<(), String> {
     let entry = content.entry();
@@ -1514,7 +1628,7 @@ async fn write_file(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    set_executable(temp, entry.is_executable())
+    finish_file(temp, entry.is_executable(), keep)
         .map_err(|err| format!("Could not set the mode of {}: {err}.", path.to_wire()))
 }
 
@@ -1536,23 +1650,149 @@ async fn write_symlink(worktree: &Path, entry: &TreeEntry, temp: &Path) -> Resul
     }
 }
 
+/// Give the written file at `path` its permission bits, and for a saved
+/// state its extended attributes too.
 #[cfg(unix)]
-fn set_executable(path: &Path, executable: bool) -> std::io::Result<()> {
+fn finish_file(path: &Path, executable: bool, keep: Keep<'_>) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let mut permissions = std::fs::metadata(path)?.permissions();
-    let mode = permissions.mode();
-    let mode = if executable {
-        mode | ((mode & 0o444) >> 2)
-    } else {
-        mode & !0o111
+    let bits = match keep {
+        Keep::Default => executable_bits(
+            std::fs::metadata(path)?.permissions().mode() & 0o777,
+            executable,
+        ),
+        // New content never inherits set-id bits.
+        Keep::NoWiderThan(bits) => executable_bits(bits & 0o777, executable),
+        Keep::Exact(meta) => meta.mode & 0o7777,
     };
-    permissions.set_mode(mode);
-    std::fs::set_permissions(path, permissions)
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits))?;
+    if let Keep::Exact(meta) = keep {
+        write_xattrs(path, &meta.xattrs);
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_executable(_path: &Path, _executable: bool) -> std::io::Result<()> {
+fn finish_file(_path: &Path, _executable: bool, _keep: Keep<'_>) -> std::io::Result<()> {
     Ok(())
+}
+
+/// `bits` with the executable bits the tree's mode asks for: set where the
+/// file is readable, or cleared.
+#[cfg(unix)]
+fn executable_bits(bits: u32, executable: bool) -> u32 {
+    if executable {
+        bits | ((bits & 0o444) >> 2)
+    } else {
+        bits & !0o111
+    }
+}
+
+/// The largest extended attribute value an undo keeps, and the most it keeps
+/// for one file. A bigger one, such as a large resource fork, is left out.
+#[cfg(unix)]
+const MAX_XATTR_BYTES: usize = 1024 * 1024;
+#[cfg(unix)]
+const MAX_XATTR_BYTES_PER_FILE: usize = 4 * 1024 * 1024;
+
+/// The permission bits and extended attributes of the file at `full`.
+#[cfg(unix)]
+fn file_meta(full: &Path, stamp: &Stamp) -> FileMeta {
+    use std::os::unix::ffi::OsStrExt;
+    let mut xattrs = Vec::new();
+    let mut total = 0usize;
+    if let Ok(names) = xattr::list(full) {
+        for name in names {
+            let Ok(Some(value)) = xattr::get(full, &name) else {
+                continue;
+            };
+            if value.len() > MAX_XATTR_BYTES || total + value.len() > MAX_XATTR_BYTES_PER_FILE {
+                continue;
+            }
+            total += value.len();
+            xattrs.push((name.as_bytes().to_vec(), value));
+        }
+    }
+    FileMeta {
+        mode: stamp.mode & 0o7777,
+        xattrs,
+    }
+}
+
+#[cfg(not(unix))]
+fn file_meta(_full: &Path, _stamp: &Stamp) -> FileMeta {
+    FileMeta::default()
+}
+
+/// Set each extended attribute on the file at `path`. The system can refuse
+/// some, such as its own provenance marks; the rest still land.
+#[cfg(unix)]
+fn write_xattrs(path: &Path, xattrs: &[(Vec<u8>, Vec<u8>)]) {
+    use std::os::unix::ffi::OsStrExt;
+    for (name, value) in xattrs {
+        let _ = xattr::set(path, std::ffi::OsStr::from_bytes(name), value);
+    }
+}
+
+/// The first line of the blob a saved state keeps file metadata in.
+const META_HEADER: &[u8] = b"tidebreak file meta 1\n";
+
+/// File metadata as a saved state keeps it: after the header, for each file,
+/// its path, its permission bits, and its extended attributes, every length
+/// a little-endian `u32`.
+pub(super) fn encode_meta(entries: &[(GitPath, FileMeta)]) -> Vec<u8> {
+    fn push(out: &mut Vec<u8>, bytes: &[u8]) {
+        out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+        out.extend_from_slice(bytes);
+    }
+    let mut out = META_HEADER.to_vec();
+    for (path, meta) in entries {
+        push(&mut out, path.as_bytes());
+        out.extend_from_slice(&meta.mode.to_le_bytes());
+        out.extend_from_slice(
+            &u32::try_from(meta.xattrs.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        for (name, value) in &meta.xattrs {
+            push(&mut out, name);
+            push(&mut out, value);
+        }
+    }
+    out
+}
+
+/// The metadata [`encode_meta`] wrote, by path. `None` when it does not read
+/// as that format.
+pub(super) fn decode_meta(bytes: &[u8]) -> Option<HashMap<GitPath, FileMeta>> {
+    fn number(bytes: &[u8], at: &mut usize) -> Option<u32> {
+        let value = u32::from_le_bytes(bytes.get(*at..*at + 4)?.try_into().ok()?);
+        *at += 4;
+        Some(value)
+    }
+    fn chunk<'a>(bytes: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
+        let len = usize::try_from(number(bytes, at)?).ok()?;
+        let value = bytes.get(*at..*at + len)?;
+        *at += len;
+        Some(value)
+    }
+    let mut at = META_HEADER.len();
+    if bytes.get(..at)? != META_HEADER {
+        return None;
+    }
+    let mut entries = HashMap::new();
+    while at < bytes.len() {
+        let path = GitPath::from_bytes(chunk(bytes, &mut at)?);
+        let mode = number(bytes, &mut at)?;
+        let count = number(bytes, &mut at)?;
+        let mut xattrs = Vec::new();
+        for _ in 0..count {
+            let name = chunk(bytes, &mut at)?.to_vec();
+            let value = chunk(bytes, &mut at)?.to_vec();
+            xattrs.push((name, value));
+        }
+        entries.insert(path, FileMeta { mode, xattrs });
+    }
+    Some(entries)
 }
 
 /// Put back every path the apply moved, newest first, as its exact bytes,
@@ -1601,15 +1841,28 @@ async fn roll_back(
                     Some(exact) => Content::Exact(exact),
                     None => Content::Smudged(before),
                 };
+                // The file comes back with its own bits and attributes.
+                let keep = match plan.meta_before.get(&change.path) {
+                    Some(meta) => Keep::Exact(meta),
+                    None => Keep::Default,
+                };
                 match folders_on_the_way(worktree, &change.path, true) {
                     Ok(()) => {
                         let expect = match &step.left {
                             Some(left) => Expect::Stamp(left),
                             None => Expect::Nothing,
                         };
-                        write_entry(worktree, staging, &change.path, &full, content, expect)
-                            .await
-                            .map_err(|stop| stop.reason)
+                        write_entry(
+                            worktree,
+                            staging,
+                            &change.path,
+                            &full,
+                            content,
+                            keep,
+                            expect,
+                        )
+                        .await
+                        .map_err(|stop| stop.reason)
                     }
                     Err(stop) => Err(stop.reason),
                 }
@@ -1811,20 +2064,22 @@ pub(super) async fn refuse_sparse_checkout(worktree: &Path) -> Result<(), Checkp
     Ok(())
 }
 
-/// Refuse a change that has no Undo when it would replace or remove a file
-/// whose exact bytes git's filters do not give back.
+/// Refuse a change that has no Undo when it would replace a file whose exact
+/// bytes git's filters do not give back.
 ///
 /// A clean filter can drop part of a file on its way into git, such as a
 /// filter that strips notebook output. A revert or a discard builds the new
 /// version from what the filter kept, so the rest would be lost, and nothing
 /// could bring it back. A filter that only changes line endings and gives
-/// them back on checkout loses nothing, and passes.
+/// them back on checkout loses nothing, and passes. So does a removal: it
+/// writes nothing from the filter, and the person asked for the whole file
+/// to go.
 pub(super) async fn refuse_lossy_filters(
     worktree: &Path,
     plan: &Plan,
     action: &str,
 ) -> Result<(), CheckpointError> {
-    for change in &plan.changes {
+    for change in plan.changes.iter().filter(|change| change.after.is_some()) {
         let Some(before) = change
             .before
             .as_ref()
@@ -1878,6 +2133,7 @@ async fn smudges_back(
             mode: "100644".to_owned(),
             oid: cleaned.to_owned(),
         }),
+        Keep::Default,
         &smudged,
     )
     .await
@@ -1959,10 +2215,96 @@ impl PrivateIndex {
         git_text_env(worktree, &["add", "-A"], &env, GIT_SNAPSHOT_TIMEOUT)
             .await
             .map_err(CheckpointError::internal)?;
-        git_text_env(worktree, &["write-tree"], &env, GIT_TIMEOUT)
+        let tree = git_text_env(worktree, &["write-tree"], &env, GIT_TIMEOUT)
             .await
-            .map_err(CheckpointError::internal)
+            .map_err(CheckpointError::internal)?;
+        Ok(respell_to_head(worktree, &self.path, &tree)
+            .await
+            .unwrap_or(tree))
     }
+}
+
+/// On a disk that folds names, a committed case-only rename can leave an
+/// index holding the old spelling of a file that the disk and `HEAD` now
+/// name another way: git finds the file under either spelling and keeps the
+/// entry it has. Re-key each such entry to `HEAD`'s spelling, so the snapshot
+/// and every list built from it name the file the way the last commit does.
+/// Returns the snapshot's tree, rewritten when an entry moved.
+pub(super) async fn respell_to_head(
+    worktree: &Path,
+    index: &Path,
+    tree: &str,
+) -> Result<String, String> {
+    if !disk_folds_names(worktree) {
+        return Ok(tree.to_owned());
+    }
+    let Ok(Some(changes)) = raw_changes(worktree, "HEAD", tree).await else {
+        return Ok(tree.to_owned());
+    };
+    // `HEAD`'s paths the snapshot lacks, by the key a folding disk compares.
+    let mut dropped: HashMap<Vec<u8>, Vec<GitPath>> = HashMap::new();
+    for change in &changes {
+        if change.before.is_some() && change.after.is_none() {
+            dropped
+                .entry(fold_key(&change.path))
+                .or_default()
+                .push(change.path.clone());
+        }
+    }
+    if dropped.is_empty() {
+        return Ok(tree.to_owned());
+    }
+    let mut records = Vec::new();
+    for change in &changes {
+        let (None, Some(entry)) = (&change.before, &change.after) else {
+            continue;
+        };
+        let Some([spelling]) = dropped.get(&fold_key(&change.path)).map(Vec::as_slice) else {
+            continue;
+        };
+        if !same_file(worktree, &change.path, spelling) {
+            continue;
+        }
+        // Drop the stale spelling, then add the committed one.
+        records.extend_from_slice(format!("0 {}\t", "0".repeat(entry.oid.len())).as_bytes());
+        records.extend_from_slice(change.path.as_bytes());
+        records.push(0);
+        records.extend_from_slice(format!("{} {}\t", entry.mode, entry.oid).as_bytes());
+        records.extend_from_slice(spelling.as_bytes());
+        records.push(0);
+    }
+    if records.is_empty() {
+        return Ok(tree.to_owned());
+    }
+    update_index_info(worktree, index, &records).await?;
+    let index = index.to_string_lossy();
+    git_text_env(
+        worktree,
+        &["write-tree"],
+        &[("GIT_INDEX_FILE", index.as_ref())],
+        GIT_TIMEOUT,
+    )
+    .await
+}
+
+/// Feed `records`, in `update-index -z --index-info` form, to the index at
+/// `index`.
+async fn update_index_info(worktree: &Path, index: &Path, records: &[u8]) -> Result<(), String> {
+    let input = temp_file_with(records).map_err(|err| err.to_string())?;
+    let stdin = std::fs::File::open(input.path())
+        .map_err(|err| format!("could not stage a file: {err}"))?;
+    let mut command = git_command(worktree);
+    command
+        .env("GIT_INDEX_FILE", index)
+        .args(["update-index", "-z", "--index-info"])
+        .stdin(Stdio::from(stdin));
+    run_git_command(
+        command,
+        "update-index --index-info".to_owned(),
+        GIT_SNAPSHOT_TIMEOUT,
+    )
+    .await
+    .map(|_| ())
 }
 
 impl Drop for PrivateIndex {
@@ -2551,5 +2893,29 @@ mod tests {
             .collect();
         assert_eq!(names, ["Readme.md"]);
         assert_eq!(read(&tree, "Readme.md").as_deref(), Some("hello\n"));
+    }
+
+    /// Review finding: a worktree on another disk than its repository staged
+    /// temporary files beside the files they replace, so a crash left them in
+    /// the worktree, where checkpoints and commits picked them up. Such a
+    /// worktree now stages in one folder at its root, which the repository's
+    /// `info/exclude` lists, and which every change and every boot clears.
+    #[tokio::test]
+    async fn the_worktree_staging_folder_never_enters_a_checkpoint_or_a_commit() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "staging");
+        assert!(exclude_staging_folder(&tree).await);
+        let folder = tree.join(WORKTREE_STAGING_FOLDER);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("left-by-a-crash.tmp"), "half a file\n").unwrap();
+
+        let snapshot = crate::code::checkpoint::snapshot_tree(&tree).await.unwrap();
+        let listed = git_stdout(&tree, &["ls-tree", "-r", "--name-only", &snapshot]);
+        assert!(!listed.contains(WORKTREE_STAGING_FOLDER), "{listed}");
+        let status = git_stdout(&tree, &["status", "--porcelain", "--untracked-files=all"]);
+        assert!(!status.contains(WORKTREE_STAGING_FOLDER), "{status}");
+
+        clear_staging_folder(&tree);
+        assert!(!folder.exists());
     }
 }

@@ -23,8 +23,8 @@ use std::path::Path;
 use tidebreak_core::{CodeRestoreId, SessionId, WorkspaceId};
 
 use super::worktree::{
-    apply, inspect, refuse_sparse_checkout, tree_entries, tree_of, tree_of_entries, ApplyFailure,
-    Plan, PrivateIndex, TreeEntry,
+    apply, decode_meta, encode_meta, inspect, read_blob, refuse_sparse_checkout, tree_entries,
+    tree_of, tree_of_entries, write_blob, ApplyFailure, FileMeta, Plan, PrivateIndex, TreeEntry,
 };
 use super::{
     checkpoint_ref, collect_changes, git_text, snapshot_tree, BoundedFiles, CheckpointError,
@@ -208,8 +208,11 @@ pub async fn prepare_restore(
         .await?
         .into_plan("restore_blocked", "The restore")?;
     // A saved state comes back as the exact bytes it kept, not as what a
-    // clean filter made of them.
-    plan.write_exact(exact_bytes_kept_by(worktree, target).await?);
+    // clean filter made of them, with the permission bits and extended
+    // attributes it kept.
+    let (exact, meta) = exact_state_kept_by(worktree, target).await?;
+    plan.write_exact(exact);
+    plan.write_meta(meta);
     let files = collect_changes(
         worktree,
         &current_tree,
@@ -228,6 +231,7 @@ pub async fn prepare_restore(
         &head,
         saved_message,
         &plan.exact_bytes_the_snapshot_lacks(),
+        &plan.meta_the_snapshot_lacks(),
     )
     .await?;
     git_text(
@@ -473,33 +477,61 @@ pub async fn restore_note(
     )))
 }
 
-/// The trailer on a saved state that names the commit holding the exact
-/// bytes of files a clean filter changed.
+/// The trailer on a saved state that names the commit holding what a
+/// snapshot does not: the exact bytes of files a clean filter changed, and
+/// every replaced file's permission bits and extended attributes.
 const EXACT_BYTES_TRAILER: &str = "Tidebreak-Exact-Bytes:";
+
+/// In the exact-state commit, the folder of exact bytes, by the file's path.
+const EXACT_BYTES_FOLDER: &[u8] = b"bytes/";
+
+/// In the exact-state commit, the blob of file metadata.
+const EXACT_META_FILE: &[u8] = b"meta";
 
 /// Commit the state a restore replaces, on top of `head`.
 ///
-/// A snapshot holds each file as git's clean filters made it. When a filter
-/// dropped part of a file the restore replaces, such as notebook output, the
-/// file's exact bytes go in a second commit: the saved state's second parent,
-/// which keeps them reachable, and which its message names. Undoing the
-/// restore writes those bytes back as they were.
+/// A snapshot holds each file as git's clean filters made it, and no
+/// permission bits beyond the executable one. What it lacks goes in a second
+/// commit: the saved state's second parent, which keeps it reachable, and
+/// which its message names. It holds the exact bytes of each file a filter
+/// changed, such as notebook output a filter strips, and the permission bits
+/// and extended attributes of every file the restore replaces or removes.
+/// Undoing the restore writes all of it back.
 async fn save_state(
     worktree: &Path,
     tree: &str,
     head: &str,
     message: &str,
     exact: &[(GitPath, TreeEntry)],
+    meta: &[(GitPath, FileMeta)],
 ) -> Result<String, CheckpointError> {
-    if exact.is_empty() {
+    if exact.is_empty() && meta.is_empty() {
         return commit_tree(worktree, tree, &[head], message).await;
     }
-    let exact_tree = tree_of_entries(worktree, exact).await?;
+    let mut entries: Vec<(GitPath, TreeEntry)> = exact
+        .iter()
+        .map(|(path, entry)| {
+            (
+                GitPath::from_bytes(&[EXACT_BYTES_FOLDER, path.as_bytes()].concat()),
+                entry.clone(),
+            )
+        })
+        .collect();
+    if !meta.is_empty() {
+        entries.push((
+            GitPath::from_bytes(EXACT_META_FILE),
+            TreeEntry {
+                mode: "100644".to_owned(),
+                oid: write_blob(worktree, &encode_meta(meta)).await?,
+            },
+        ));
+    }
+    let exact_tree = tree_of_entries(worktree, &entries).await?;
     let exact_commit = commit_tree(
         worktree,
         &exact_tree,
         &[],
-        "exact bytes of the files git's filters change",
+        "exact bytes and metadata of the files a restore replaces",
     )
     .await?;
     commit_tree(
@@ -511,12 +543,14 @@ async fn save_state(
     .await
 }
 
-/// The exact bytes a saved state kept for files a clean filter changed, by
-/// path. Empty for a turn's checkpoint, which keeps none.
-async fn exact_bytes_kept_by(
+/// What a saved state kept beyond its snapshot: the exact bytes of files a
+/// clean filter changed, and the permission bits and extended attributes of
+/// the files it replaced, each by path. Empty for a turn's checkpoint, which
+/// keeps neither.
+async fn exact_state_kept_by(
     worktree: &Path,
     target: &str,
-) -> Result<HashMap<GitPath, TreeEntry>, CheckpointError> {
+) -> Result<(HashMap<GitPath, TreeEntry>, HashMap<GitPath, FileMeta>), CheckpointError> {
     let message = git_text(
         worktree,
         &["show", "-s", "--format=%B", target, "--"],
@@ -529,9 +563,20 @@ async fn exact_bytes_kept_by(
         .find_map(|line| line.trim().strip_prefix(EXACT_BYTES_TRAILER))
         .map(str::trim)
     else {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), HashMap::new()));
     };
-    tree_entries(worktree, commit).await
+    let mut exact = HashMap::new();
+    let mut meta = HashMap::new();
+    for (path, entry) in tree_entries(worktree, commit).await? {
+        if path.as_bytes() == EXACT_META_FILE {
+            meta = decode_meta(&read_blob(worktree, &entry.oid).await?).ok_or_else(|| {
+                CheckpointError::internal("a saved state's file metadata is unreadable")
+            })?;
+        } else if let Some(file) = path.as_bytes().strip_prefix(EXACT_BYTES_FOLDER) {
+            exact.insert(GitPath::from_bytes(file), entry);
+        }
+    }
+    Ok((exact, meta))
 }
 
 async fn commit_tree(
@@ -1318,5 +1363,93 @@ mod tests {
     fn git_index_path(worktree: &Path) -> PathBuf {
         let path = git_stdout(worktree, &["rev-parse", "--git-path", "index"]);
         worktree.join(path)
+    }
+
+    /// Review finding: an Undo wrote files back with the umask's permissions,
+    /// so a private key saved as 0600 came back readable by everyone. A saved
+    /// state keeps each replaced file's permission bits, and its Undo writes
+    /// them back, for a file the restore rewrote and one it removed.
+    #[tokio::test]
+    async fn an_undo_keeps_each_file_s_permissions() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "modes");
+        std::fs::write(tree.join("deploy.pem"), "v1\n").unwrap();
+        let before = checkpoint(&tree, "before").await;
+        std::fs::write(tree.join("deploy.pem"), "v2, private\n").unwrap();
+        std::fs::set_permissions(
+            tree.join("deploy.pem"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        std::fs::write(tree.join("group.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(
+            tree.join("group.sh"),
+            std::fs::Permissions::from_mode(0o750),
+        )
+        .unwrap();
+
+        restore_worktree(&tree, &before, None, &saved_ref(), "state before restore")
+            .await
+            .unwrap();
+        assert!(!tree.join("group.sh").exists());
+        let undo = format!("{REF_PREFIX}/test/undo");
+        restore_worktree(&tree, &saved_ref(), None, &undo, "state before undo")
+            .await
+            .unwrap();
+
+        let mode = |name: &str| {
+            std::fs::metadata(tree.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        assert_eq!(
+            read(&tree.join("deploy.pem")).as_deref(),
+            Some("v2, private\n")
+        );
+        assert_eq!(mode("deploy.pem"), 0o600);
+        assert_eq!(mode("group.sh"), 0o750);
+    }
+
+    /// Review finding: with `core.ignorecase` off on a disk that folds case,
+    /// Git kept `Docs/a.md` and `docs/a.md` apart after a folder's case
+    /// changed, and a restore that removed one spelling deleted the file both
+    /// name, then refused its own Undo. The restore now refuses, names both,
+    /// and leaves the file. Runs only where the disk folds case.
+    #[tokio::test]
+    async fn a_restore_refuses_a_folder_that_differs_only_in_case() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "folder-case");
+        if std::fs::symlink_metadata(tree.join(".GIT")).is_err() {
+            return;
+        }
+        run(&tree, &["git", "config", "core.ignorecase", "false"]);
+        std::fs::create_dir_all(tree.join("Docs")).unwrap();
+        std::fs::write(tree.join("Docs/a.md"), "uncommitted notes\n").unwrap();
+        let before = checkpoint(&tree, "before").await;
+        std::fs::rename(tree.join("Docs"), tree.join("folder-case-tmp")).unwrap();
+        std::fs::rename(tree.join("folder-case-tmp"), tree.join("docs")).unwrap();
+        checkpoint(&tree, "after").await;
+
+        let err = restore_worktree(&tree, &before, None, &saved_ref(), "state before restore")
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                CheckpointError::Conflict {
+                    kind: "restore_blocked",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("name the same file"), "{err}");
+        assert_eq!(
+            read(&tree.join("docs/a.md")).as_deref(),
+            Some("uncommitted notes\n")
+        );
     }
 }

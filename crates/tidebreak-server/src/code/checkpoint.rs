@@ -183,22 +183,6 @@ impl GitPath {
         prefix
     }
 
-    /// The folder that holds this path, or `None` at the top of the worktree.
-    fn folder(&self) -> Option<GitPath> {
-        self.0
-            .iter()
-            .rposition(|byte| *byte == b'/')
-            .map(|at| Self(self.0[..at].to_vec()))
-    }
-
-    /// The entry's own name: the last part of this path.
-    fn name(&self) -> &[u8] {
-        match self.0.iter().rposition(|byte| *byte == b'/') {
-            Some(at) => &self.0[at + 1..],
-            None => &self.0,
-        }
-    }
-
     /// The entry `name` inside this folder.
     fn join_name(&self, name: &std::ffi::OsStr) -> GitPath {
         let mut path = self.child_prefix();
@@ -950,13 +934,18 @@ async fn snapshot_tree_with_index_before(
         deadline,
     )
     .await?;
-    git_text_env_before(
+    let tree = git_text_env_before(
         worktree,
         &["write-tree"],
         &[("GIT_INDEX_FILE", index.as_ref())],
         deadline.min(Instant::now() + GIT_TIMEOUT),
     )
-    .await
+    .await?;
+    // A committed case-only rename must not leave the old spelling in the
+    // index, where every list built from the snapshot would still show it.
+    Ok(self::worktree::respell_to_head(worktree, index_path, &tree)
+        .await
+        .unwrap_or(tree))
 }
 
 /// Resolve `merge-base(base_ref, HEAD)`, falling back to `base_ref`.

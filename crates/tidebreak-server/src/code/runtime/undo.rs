@@ -293,6 +293,7 @@ impl CodeRuntime {
         // A record the next boot finds if this process never gets to the
         // restore's last row.
         begun.in_flight = self.note_restore_in_flight(&RestoreInFlight {
+            boot: this_boot().to_owned(),
             owner: owner.clone(),
             workspace_id,
             session_id: begun.session_id,
@@ -336,6 +337,19 @@ impl CodeRuntime {
         prepared
             .apply_until_killed(&begun.worktree, killed_at)
             .await;
+        // In the case this simulates, the process that began the restore is
+        // gone, so its record names an earlier boot than this one.
+        if let Some(path) = &begun.in_flight {
+            if let Some(mut record) = std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<RestoreInFlight>(&bytes).ok())
+            {
+                record.boot = "an-earlier-process".to_owned();
+                if let Ok(bytes) = serde_json::to_vec(&record) {
+                    let _ = std::fs::write(path, bytes);
+                }
+            }
+        }
         Ok(begun.restore_id)
     }
 
@@ -462,6 +476,11 @@ impl CodeRuntime {
                     continue;
                 }
             };
+            // A restore this process began may still be running; it drops
+            // its own record when its last row is journaled.
+            if restore.boot == this_boot() {
+                continue;
+            }
             self.finish_interrupted_restore(&restore).await;
             let _ = std::fs::remove_file(&path);
         }
@@ -469,6 +488,9 @@ impl CodeRuntime {
             Ok(workspaces) => {
                 for workspace in workspaces {
                     if !workspace.is_remote() && !workspace.worktree_path.is_empty() {
+                        // Every change stages under this lock, so none is
+                        // using the folder while it goes.
+                        let _write = self.workspace_write_lock(workspace.id).lock_owned().await;
                         checkpoint::clear_staging_folder(std::path::Path::new(
                             &workspace.worktree_path,
                         ));
@@ -841,6 +863,10 @@ impl BegunRestore {
 /// next boot needs it if this process stops first.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct RestoreInFlight {
+    /// The process that wrote the record. Boot recovery leaves this
+    /// process's own records alone: their restores may still be running.
+    #[serde(default)]
+    boot: String,
     owner: OwnerId,
     workspace_id: WorkspaceId,
     /// The session whose transcript records the restore.
@@ -852,6 +878,12 @@ struct RestoreInFlight {
     saved_oid: String,
     /// The row journaled as started.
     started: Event,
+}
+
+/// This process's id on the restore records it writes.
+fn this_boot() -> &'static str {
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BOOT.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
 }
 
 /// `{data_dir}/code/restores`: one record per restore in flight.
