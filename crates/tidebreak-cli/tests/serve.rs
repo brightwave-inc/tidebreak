@@ -95,6 +95,7 @@ fn serve_without_keychain_rejects_desktop_before_opening_storage() {
         .env_remove("TIDEBREAK_VAULT_MOUNT")
         .env_remove("TIDEBREAK_VAULT_PATH")
         .env_remove("TIDEBREAK_VAULT_NAMESPACE")
+        .env_remove("TIDEBREAK_SECRET_KEY_FILE")
         .env_remove("ANTHROPIC_API_KEY")
         .stdin(Stdio::null())
         .output()

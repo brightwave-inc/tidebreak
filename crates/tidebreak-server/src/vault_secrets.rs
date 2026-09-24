@@ -227,8 +227,8 @@ impl SecretProvider for VaultSecretProvider {
     }
 }
 
-/// A self-host deployment without Vault can read environment fallbacks but
-/// cannot persist deployment credentials.
+/// A self-host deployment with neither a secret key file nor Vault can read
+/// environment fallbacks but cannot persist deployment credentials.
 pub(crate) struct UnavailableSelfHostSecretProvider;
 
 #[async_trait]
@@ -248,7 +248,7 @@ impl SecretProvider for UnavailableSelfHostSecretProvider {
 
 fn vault_setup_error() -> AgentError {
     AgentError::config(
-        "stored credentials are unavailable for this self-host deployment; set TIDEBREAK_VAULT_ADDR and TIDEBREAK_VAULT_TOKEN_FILE to enable Vault KV v2 custody"
+        "stored credentials are unavailable for this self-host deployment; set TIDEBREAK_SECRET_KEY_FILE to keep them encrypted in the database, or TIDEBREAK_VAULT_ADDR and TIDEBREAK_VAULT_TOKEN_FILE to keep them in Vault KV v2"
             .to_owned(),
     )
 }
@@ -736,6 +736,7 @@ mod tests {
             provider.delete_secret("provider.test").await.unwrap_err(),
         ] {
             let message = error.to_string();
+            assert!(message.contains("TIDEBREAK_SECRET_KEY_FILE"));
             assert!(message.contains("TIDEBREAK_VAULT_ADDR"));
             assert!(message.contains("TIDEBREAK_VAULT_TOKEN_FILE"));
         }

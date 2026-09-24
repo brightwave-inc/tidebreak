@@ -7597,6 +7597,7 @@ dependencies = [
  "plist",
  "portable-pty",
  "reqwest",
+ "ring",
  "schemars 1.2.2",
  "sea-orm",
  "serde",

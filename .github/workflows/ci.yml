@@ -860,10 +860,11 @@ jobs:
           --test postgres_release_upgrade
           --test postgres_message_search
           --locked
-      - name: Exercise self-host store ownership on PostgreSQL
+      - name: Exercise self-host store ownership and secrets on PostgreSQL
         run: >-
           cargo test -p tidebreak-server --features postgres
           --test postgres_store_ownership --locked
+          --test postgres_deployment_secrets
 
   self-host-build:
     name: self-host server build

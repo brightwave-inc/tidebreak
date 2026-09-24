@@ -39,6 +39,9 @@ pub mod connectors;
 /// The unified consent read model: standing tool grants and host-broker
 /// capability grants as one renderer-facing statement shape.
 pub mod consent;
+/// Self-host secrets kept encrypted in the deployment's own database.
+#[doc(hidden)]
+pub mod database_secrets;
 mod desktop_schema;
 pub mod diagnostics;
 pub mod document_decode;
@@ -1090,8 +1093,10 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
 /// The secret store the configured profile keeps its credentials in.
 ///
 /// Desktop stores one bundle in the OS keychain. Self-host stores the same
-/// bundle in Vault KV v2 when configured, or uses an unavailable provider that
-/// still lets provider environment variables act as read fallbacks.
+/// bundle encrypted in its own database when `TIDEBREAK_SECRET_KEY_FILE` names
+/// a key (decision 102), in Vault KV v2 when Vault is configured, or uses an
+/// unavailable provider that still lets provider environment variables act
+/// as read fallbacks.
 /// [`CachingSecretProvider`] sits above the bundle so a key costs one storage
 /// read per process rather than one per turn: [`resolver::ConfiguredResolver`]
 /// rebuilds its route set on every turn, and each candidate route reads its
@@ -1108,6 +1113,7 @@ enum CredentialStoragePlan {
     #[cfg(feature = "keychain")]
     Desktop(Option<String>),
     Vault(Box<vault_secrets::ValidatedVaultConfig>),
+    Database(Box<database_secrets::SecretKey>),
     UnavailableSelfHost,
 }
 
@@ -1115,6 +1121,11 @@ fn credential_storage_plan(config: &Config) -> Result<CredentialStoragePlan> {
     if config.profile != Profile::SelfHost && config.vault_secrets.is_some() {
         return Err(AgentError::config(
             "Vault secret custody is available only with TIDEBREAK_PROFILE=self_host",
+        ));
+    }
+    if config.profile != Profile::SelfHost && config.secret_key_file.is_some() {
+        return Err(AgentError::config(
+            "TIDEBREAK_SECRET_KEY_FILE is available only with TIDEBREAK_PROFILE=self_host",
         ));
     }
     match config.profile {
@@ -1126,11 +1137,20 @@ fn credential_storage_plan(config: &Config) -> Result<CredentialStoragePlan> {
         Profile::Desktop => Err(AgentError::config(
             "the desktop profile requires a build with the keychain feature; use TIDEBREAK_PROFILE=self_host for a headless build",
         )),
-        Profile::SelfHost => match &config.vault_secrets {
-            Some(vault) => Ok(CredentialStoragePlan::Vault(Box::new(
+        Profile::SelfHost => match (&config.vault_secrets, &config.secret_key_file) {
+            (Some(_), Some(_)) => Err(AgentError::config(
+                tidebreak_core::config::SECRET_CUSTODY_CONFLICT,
+            )),
+            (Some(vault), None) => Ok(CredentialStoragePlan::Vault(Box::new(
                 vault_secrets::VaultSecretProvider::validate(vault)?,
             ))),
-            None => Ok(CredentialStoragePlan::UnavailableSelfHost),
+            // The key is read here, before the lock and the database: a
+            // missing or malformed key file refuses the boot having opened
+            // nothing.
+            (None, Some(key_file)) => Ok(CredentialStoragePlan::Database(Box::new(
+                database_secrets::SecretKey::from_file(key_file)?,
+            ))),
+            (None, None) => Ok(CredentialStoragePlan::UnavailableSelfHost),
         },
         _ => Err(AgentError::config(
             "the configured profile is not supported",
@@ -1138,7 +1158,11 @@ fn credential_storage_plan(config: &Config) -> Result<CredentialStoragePlan> {
     }
 }
 
-fn secret_provider(plan: CredentialStoragePlan) -> ProfileSecrets {
+/// Open the planned credential store over the profile's database.
+///
+/// Database custody checks here that its key wrote the stored secrets, and
+/// refuses the boot when it did not. Every other custody ignores `db`.
+async fn secret_provider(plan: CredentialStoragePlan, db: &Arc<DbStore>) -> Result<ProfileSecrets> {
     let storage: Arc<dyn SecretProvider> = match plan {
         #[cfg(feature = "keychain")]
         CredentialStoragePlan::Desktop(keychain_service) => Arc::new(match keychain_service {
@@ -1147,6 +1171,9 @@ fn secret_provider(plan: CredentialStoragePlan) -> ProfileSecrets {
         }),
         CredentialStoragePlan::Vault(config) => {
             Arc::new(vault_secrets::VaultSecretProvider::new(*config))
+        }
+        CredentialStoragePlan::Database(key) => {
+            Arc::new(database_secrets::DatabaseSecretProvider::open(db.clone(), *key).await?)
         }
         CredentialStoragePlan::UnavailableSelfHost => {
             Arc::new(vault_secrets::UnavailableSelfHostSecretProvider)
@@ -1157,7 +1184,7 @@ fn secret_provider(plan: CredentialStoragePlan) -> ProfileSecrets {
         CachingSecretProvider::new(bundle.clone())
             .with_miss_passthrough([crate::connectors::GATEWAY_SECRET_KEY]),
     );
-    ProfileSecrets { bundle, provider }
+    Ok(ProfileSecrets { bundle, provider })
 }
 
 /// The profile's credential store, at the two layers callers need.
@@ -1184,20 +1211,54 @@ pub async fn rehome_configured_secrets(
         ));
     }
     let plan = credential_storage_plan(config)?;
-    let store = connect_store(config).await?;
-    secret_rehome::rehome_secrets(&*store, &secret_provider(plan).bundle).await
+    let store = connect_db(config).await?;
+    let secrets = secret_provider(plan, &store).await?;
+    secret_rehome::rehome_secrets(&*store, &secrets.bundle).await
 }
 
 #[cfg(test)]
 mod profile_secret_tests {
+    use base64::Engine as _;
+
     use super::*;
+
+    async fn test_db(directory: &Path) -> Arc<DbStore> {
+        let url = format!("sqlite://{}?mode=rwc", directory.join("test.db").display());
+        Arc::new(DbStore::connect_test_sqlite_fixture(&url).await.unwrap())
+    }
+
+    /// A key file as `openssl rand -base64 32` writes it, from bytes drawn
+    /// at run time.
+    fn write_key_file(path: &Path) {
+        use ring::rand::SecureRandom as _;
+        let mut key = [0u8; 32];
+        ring::rand::SystemRandom::new().fill(&mut key).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(key);
+        std::fs::write(path, format!("{encoded}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    fn self_host_with_key_file(directory: &Path, key_file: &Path) -> Config {
+        let mut config = Config::desktop(directory);
+        config.profile = Profile::SelfHost;
+        config.secret_key_file = Some(key_file.to_owned());
+        config
+    }
 
     #[tokio::test]
     async fn self_host_without_vault_allows_fallback_reads_but_rejects_changes() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = Config::desktop(directory.path());
         config.profile = Profile::SelfHost;
-        let secrets = secret_provider(credential_storage_plan(&config).unwrap()).provider;
+        let db = test_db(directory.path()).await;
+        let secrets = secret_provider(credential_storage_plan(&config).unwrap(), &db)
+            .await
+            .unwrap()
+            .provider;
 
         assert_eq!(secrets.get_secret("provider.test").await.unwrap(), None);
         let error = secrets
@@ -1206,6 +1267,8 @@ mod profile_secret_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("TIDEBREAK_VAULT_ADDR"));
+        assert!(error.contains("TIDEBREAK_SECRET_KEY_FILE"));
+        assert!(db.deployment_secrets().await.unwrap().is_empty());
 
         let web_search = web_search::write_credential(
             &*secrets,
@@ -1272,6 +1335,148 @@ mod profile_secret_tests {
         };
         assert!(error.contains("TIDEBREAK_PROFILE=self_host"));
     }
+
+    #[test]
+    fn desktop_storage_plan_rejects_a_programmatic_secret_key_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_file = directory.path().join("secret.key");
+        write_key_file(&key_file);
+        let mut config = Config::desktop(directory.path());
+        config.secret_key_file = Some(key_file);
+
+        let error = match credential_storage_plan(&config) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("desktop accepted a secret key file"),
+        };
+        assert!(error.contains("TIDEBREAK_SECRET_KEY_FILE"));
+        assert!(error.contains("TIDEBREAK_PROFILE=self_host"));
+    }
+
+    /// A self-host config that names both the key file and Vault is refused
+    /// before anything opens, not resolved by a silent preference.
+    #[test]
+    fn a_secret_key_file_beside_vault_is_a_config_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_file = directory.path().join("secret.key");
+        write_key_file(&key_file);
+        let mut config = self_host_with_key_file(directory.path(), &key_file);
+        config.vault_secrets = Some(tidebreak_core::VaultSecretConfig {
+            address: "https://vault.example.test".into(),
+            token_file: directory.path().join("vault-token"),
+            mount: "secret".into(),
+            path: "tidebreak".into(),
+            namespace: None,
+        });
+
+        let error = match credential_storage_plan(&config) {
+            Err(error) => error,
+            Ok(_) => panic!("self-host accepted two places to keep its secrets"),
+        };
+        assert_eq!(error.kind(), "config");
+        let message = error.to_string();
+        assert!(message.contains("TIDEBREAK_SECRET_KEY_FILE"), "{message}");
+        assert!(message.contains("TIDEBREAK_VAULT_"), "{message}");
+    }
+
+    #[test]
+    fn a_missing_key_file_refuses_before_opening_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let config = self_host_with_key_file(&data, &directory.path().join("absent.key"));
+
+        let error = match credential_storage_plan(&config) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("self-host accepted a key file that does not exist"),
+        };
+        assert!(error.contains("TIDEBREAK_SECRET_KEY_FILE"), "{error}");
+        assert!(error.contains("absent.key"), "{error}");
+        assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
+    }
+
+    /// With a key file, every credential the profile stores lands in one
+    /// encrypted row, reads back through the same layers the server uses,
+    /// and survives a restart with the same key.
+    #[tokio::test]
+    async fn self_host_with_a_key_file_keeps_credentials_encrypted_in_the_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_file = directory.path().join("secret.key");
+        write_key_file(&key_file);
+        let config = self_host_with_key_file(directory.path(), &key_file);
+        let db = test_db(directory.path()).await;
+        let value = format!("stored-{}", uuid::Uuid::new_v4().simple());
+
+        let secrets = secret_provider(credential_storage_plan(&config).unwrap(), &db)
+            .await
+            .unwrap()
+            .provider;
+        secrets.set_secret("provider.test", &value).await.unwrap();
+        assert_eq!(
+            secrets.get_secret("provider.test").await.unwrap(),
+            Some(value.clone())
+        );
+
+        let row = db
+            .deployment_secret(tidebreak_core::BUNDLE_KEY)
+            .await
+            .unwrap()
+            .expect("the credential bundle is one encrypted row");
+        assert!(!row
+            .ciphertext
+            .windows(value.len())
+            .any(|window| window == value.as_bytes()));
+        assert_eq!(db.deployment_secret("provider.test").await.unwrap(), None);
+
+        let restarted = secret_provider(credential_storage_plan(&config).unwrap(), &db)
+            .await
+            .unwrap()
+            .provider;
+        assert_eq!(
+            restarted.get_secret("provider.test").await.unwrap(),
+            Some(value)
+        );
+    }
+
+    /// A key file that did not write the stored secrets refuses the boot,
+    /// and leaves the stored row exactly as it was.
+    #[tokio::test]
+    async fn the_wrong_key_file_refuses_the_boot() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_file = directory.path().join("secret.key");
+        write_key_file(&key_file);
+        let db = test_db(directory.path()).await;
+        let config = self_host_with_key_file(directory.path(), &key_file);
+        secret_provider(credential_storage_plan(&config).unwrap(), &db)
+            .await
+            .unwrap()
+            .provider
+            .set_secret("provider.test", "kept")
+            .await
+            .unwrap();
+        let before = db
+            .deployment_secret(tidebreak_core::BUNDLE_KEY)
+            .await
+            .unwrap();
+
+        let replacement = directory.path().join("replacement.key");
+        write_key_file(&replacement);
+        let wrong = self_host_with_key_file(directory.path(), &replacement);
+        let error = match secret_provider(credential_storage_plan(&wrong).unwrap(), &db).await {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a key that wrote no stored secret opened the profile's secrets"),
+        };
+        assert!(
+            error.contains("does not match the stored secrets"),
+            "{error}"
+        );
+        assert!(error.contains("Restore the original key file"), "{error}");
+        assert_eq!(
+            db.deployment_secret(tidebreak_core::BUNDLE_KEY)
+                .await
+                .unwrap(),
+            before
+        );
+    }
 }
 
 // Every parameter is one optional native bridge an embedding may supply;
@@ -1297,18 +1502,15 @@ async fn bind_inner(
     // routable interface, and that refusal should cost nothing and leave
     // nothing behind. See [`Config::bind_addr`].
     let bind_addr = config.bind_addr()?;
-    // Storage planning validates boot-only custody settings without
-    // reading a secret. Keep it before the lock and database so an invalid
-    // Vault address leaves no local or shared resources open.
+    // Storage planning validates boot-only custody settings and reads the
+    // database custody's key file, but reads no stored secret. Keep it before
+    // the lock and database so an invalid Vault address or key file leaves no
+    // local or shared resources open.
     let credential_storage = credential_storage_plan(&config)?;
     // Parse the debug-only test engine before opening storage. Fixture smoke
     // checks must reject a malformed script without a database or credentials.
     #[cfg(debug_assertions)]
     let scripted_adapter = scripted_harness::adapter_from_env()?;
-    let ProfileSecrets {
-        bundle: secret_bundle,
-        provider: secrets,
-    } = secret_provider(credential_storage);
     // Desktop live delivery remains process-local. Turns, steering, and tool
     // approvals are durable, while one process still owns the complete data
     // directory and its worker set.
@@ -1318,6 +1520,13 @@ async fn bind_inner(
     let sandbox_spawn_execution_location = sandbox_container_admission.execution_location;
     let db = connect_db(&config).await?;
     let store: Arc<dyn Store> = db.clone();
+    // Opened once the database is, and before anything reads a credential:
+    // database custody refuses the boot here when its key file did not write
+    // the stored secrets, instead of letting every later read fail.
+    let ProfileSecrets {
+        bundle: secret_bundle,
+        provider: secrets,
+    } = secret_provider(credential_storage, &db).await?;
     // An app update replaces this binary, and macOS pins a keychain item's
     // access to the creating binary's signature — so the first boot of a new
     // binary re-homes the credential bundle before any consumer reads from

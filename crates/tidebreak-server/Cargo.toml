@@ -70,6 +70,10 @@ ts-rs = { workspace = true }
 # REST invoke responses cross to the renderer with the raw body base64-encoded.
 base64 = { workspace = true }
 sha2 = { workspace = true }
+# AES-256-GCM and the system random source for self-host secrets kept in the
+# database (decision 102). Already in Cargo.lock through rustls; making it
+# direct leaves resolution unchanged.
+ring = "=0.17.14"
 thiserror = { workspace = true }
 cap-std = { workspace = true }
 # Symlink-refusing directory traversal for private output storage.

@@ -21,6 +21,7 @@ pub(in crate::db) mod code;
 pub(in crate::db) mod connected_app;
 pub(in crate::db) mod context_checkpoint;
 pub(in crate::db) mod conversation;
+pub(in crate::db) mod deployment_secret;
 pub(in crate::db) mod document;
 pub(in crate::db) mod exec_file_change;
 pub(in crate::db) mod inbox;
