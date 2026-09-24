@@ -23,6 +23,18 @@ const managedNode = readFileSync(
   new URL("../crates/tidebreak-managed-node/src/lib.rs", import.meta.url),
   "utf8",
 );
+const compose = readFileSync(
+  new URL("../deploy/self-host/docker-compose.yml", import.meta.url),
+  "utf8",
+);
+const caddyfile = readFileSync(
+  new URL("../deploy/self-host/Caddyfile", import.meta.url),
+  "utf8",
+);
+const checkPins = readFileSync(
+  new URL("../deploy/self-host/check-pins.sh", import.meta.url),
+  "utf8",
+);
 
 /** The `RUN` block that mentions `marker`, with its line continuations intact. */
 function runBlock(marker) {
@@ -141,4 +153,46 @@ test("gh comes from the project's own release, digest-pinned", () => {
   ]) {
     assert.equal(architectureBranch(block, debian).platform, platform);
   }
+});
+
+// The compose stack runs third-party images beside the server. Each one is
+// pinned by digest, so `docker compose pull` cannot swap in different bytes
+// under the same tag; the server itself follows the release in .env.
+test("every image the compose file runs is digest-pinned, except the release", () => {
+  const images = [...compose.matchAll(/^\s+image: (.+)$/gm)].map((match) => match[1]);
+  assert.ok(images.length >= 3, "postgres, server, and caddy");
+  for (const image of images) {
+    if (image.startsWith("ghcr.io/brightwave-inc/tidebreak-server:")) {
+      assert.match(image, /:\$\{TIDEBREAK_VERSION:\?/);
+      continue;
+    }
+    assert.match(image, /^[a-z0-9./-]+:[\w.-]+@sha256:[0-9a-f]{64}$/, `${image} is not digest-pinned`);
+  }
+});
+
+test("Caddy is pinned to an exact release, and check-pins.sh verifies the pin", () => {
+  const caddy = compose.match(/^\s+image: (caddy:\S+)$/m);
+  assert.ok(caddy, "docker-compose.yml runs Caddy");
+  assert.match(caddy[1], /^caddy:\d+\.\d+\.\d+-alpine@sha256:[0-9a-f]{64}$/);
+  // check-pins.sh reads this file and asks Docker Hub's official repository
+  // for the pinned index, so a typed digest fails in CI.
+  assert.match(checkPins, /docker-compose\.yml/);
+  assert.match(checkPins, /registry-1\.docker\.io\/v2\/library\/caddy\/manifests/);
+});
+
+test("the Caddyfile proxies to the server and writes no request log", () => {
+  const directives = caddyfile
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  assert.ok(directives.includes("{$TIDEBREAK_DOMAIN} {"), "the site is the configured domain");
+  assert.ok(directives.includes("reverse_proxy server:8080"));
+  // A browser's bearer rides in Sec-WebSocket-Protocol; a request log would
+  // keep it. Logging stays off rather than filtered.
+  assert.equal(
+    directives.filter((line) => /^log\b/.test(line)).length,
+    0,
+    "a `log` directive would record bearer tokens",
+  );
+  assert.match(compose, /- \.\/Caddyfile:\/etc\/caddy\/Caddyfile:ro\n/);
 });

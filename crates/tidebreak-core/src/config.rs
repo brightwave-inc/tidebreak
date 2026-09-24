@@ -135,7 +135,9 @@ pub struct Config {
     pub profile: Profile,
     /// Directory holding the app's data (database, blobs, …).
     pub data_dir: PathBuf,
-    /// S3 bucket and optional prefix used by the self-host blob store.
+    /// Where the self-host blob store keeps bytes: an S3 bucket and optional
+    /// prefix (`s3://bucket[/prefix]`), or a directory on this machine
+    /// (`file:///absolute/path`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_store_url: Option<String>,
     /// Keychain service name secrets are stored under; `None` uses the
@@ -457,7 +459,8 @@ impl Config {
     /// (required here; [`Config::from_env_with_default_data_dir`] lets an
     /// embedding supply one, and nothing defaults to the current directory),
     /// `TIDEBREAK_BLOB_STORE_URL` (required for self-host; an S3 bucket and
-    /// optional prefix), with the Model Gateway add-on plane's
+    /// optional prefix, or `file:///absolute/path` for a local directory),
+    /// with the Model Gateway add-on plane's
     /// `GATEWAY_BASE_URL`, `DATABASE_URL`, and `ADD_ON_PUBLIC_URL` standing in
     /// for `TIDEBREAK_AUTH_GATEWAY_URL`, `TIDEBREAK_DATABASE_URL`, and
     /// `TIDEBREAK_PUBLIC_URL` when those are unset (decision 0085),

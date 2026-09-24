@@ -1,10 +1,13 @@
-//! S3-compatible [`BlobStore`](crate::BlobStore) implementation.
+//! Object-storage [`BlobStore`](crate::BlobStore) implementation for the
+//! self-host profile: an S3-compatible bucket, or a directory on the machine's
+//! own disk behind the same `object_store` contract.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use object_store::aws::{AmazonS3Builder, S3CopyIfNotExists};
+use object_store::local::LocalFileSystem;
 use object_store::path::Path;
 use object_store::{Error as ObjectError, ObjectStore, ObjectStoreExt, PutMode, PutOptions};
 use sha2::{Digest, Sha256};
@@ -16,6 +19,11 @@ use crate::{
 };
 
 const MULTIPART_CHUNK_BYTES: usize = 5 * 1024 * 1024;
+
+/// The refusal for a URL that names neither backend. It never echoes the
+/// value, which may carry credentials.
+const UNSUPPORTED_BLOB_STORE_URL: &str =
+    "TIDEBREAK_BLOB_STORE_URL must be s3://bucket[/prefix] or file:///absolute/path";
 
 #[derive(Clone)]
 pub struct ObjectBlobStore {
@@ -29,6 +37,18 @@ impl ObjectBlobStore {
         Self { store, prefix }
     }
 
+    /// Build the self-host backend `TIDEBREAK_BLOB_STORE_URL` names: an S3
+    /// bucket (`s3://bucket[/prefix]`) or a directory on this machine's disk
+    /// (`file:///absolute/path`).
+    pub fn from_url(value: &str) -> Result<Self> {
+        let url = Url::parse(value).map_err(|_| AgentError::config(UNSUPPORTED_BLOB_STORE_URL))?;
+        match url.scheme() {
+            "s3" => Self::from_s3_url(value),
+            "file" => Self::from_file_url(value),
+            _ => Err(AgentError::config(UNSUPPORTED_BLOB_STORE_URL)),
+        }
+    }
+
     /// Build the self-host backend from `s3://bucket[/prefix]` and standard
     /// `AWS_*` settings.
     pub fn from_s3_url(value: &str) -> Result<Self> {
@@ -39,6 +59,27 @@ impl ObjectBlobStore {
             .build()
             .map_err(|_| AgentError::config("invalid S3 object-store configuration"))?;
         Ok(Self::new(Arc::new(store), prefix))
+    }
+
+    /// Build the self-host backend over a directory on this machine's disk,
+    /// named by `file:///absolute/path`.
+    ///
+    /// A missing directory is created readable by its owner only. Blobs and
+    /// the `_uploads/` staging area both live inside it, so a streamed upload
+    /// publishes by hard link within one filesystem, and every write is synced
+    /// before it is acknowledged, as a bucket would be.
+    pub fn from_file_url(value: &str) -> Result<Self> {
+        let root = parse_file_root(value)?;
+        create_private_directory(&root)?;
+        let store = LocalFileSystem::new_with_prefix(&root)
+            .map_err(|error| {
+                AgentError::config(format!(
+                    "cannot open the blob directory {}: {error}",
+                    root.display()
+                ))
+            })?
+            .with_fsync(true);
+        Ok(Self::new(Arc::new(store), Path::default()))
     }
 
     pub async fn probe(&self) -> Result<()> {
@@ -107,6 +148,48 @@ fn parse_s3_prefix(value: &str) -> Result<Path> {
     }
     Path::from_url_path(url.path())
         .map_err(|_| AgentError::config("invalid TIDEBREAK_BLOB_STORE_URL prefix"))
+}
+
+/// The directory a `file:///absolute/path` URL names.
+///
+/// The spelling is checked before the URL is trusted: a parser reads
+/// `file:blobs` as `/blobs` and resolves `..`, so a relative or unnormalized
+/// value would quietly move the store somewhere the operator did not write.
+fn parse_file_root(value: &str) -> Result<std::path::PathBuf> {
+    let invalid = || {
+        AgentError::config(
+            "TIDEBREAK_BLOB_STORE_URL must be file:///absolute/path: no host, no `.` or `..` \
+             segments, no query or fragment, and special characters percent-encoded",
+        )
+    };
+    let path = value.strip_prefix("file://").ok_or_else(invalid)?;
+    if !path.starts_with('/') {
+        return Err(invalid());
+    }
+    let url = Url::parse(value).map_err(|_| invalid())?;
+    if url.path() != path || url.query().is_some() || url.fragment().is_some() {
+        return Err(invalid());
+    }
+    let root = url.to_file_path().map_err(|_| invalid())?;
+    if !root.is_absolute() {
+        return Err(invalid());
+    }
+    Ok(root)
+}
+
+/// Create `root` and any missing parents, readable by the server's user
+/// only. An existing directory keeps the permissions its operator gave it.
+fn create_private_directory(root: &std::path::Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(root).map_err(|error| {
+        AgentError::config(format!(
+            "cannot create the blob directory {}: {error}",
+            root.display()
+        ))
+    })
 }
 
 #[async_trait]
@@ -330,6 +413,8 @@ fn object_error(action: &str) -> AgentError {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+
     use futures::stream;
     use object_store::memory::InMemory;
 
@@ -337,6 +422,52 @@ mod tests {
 
     fn store() -> ObjectBlobStore {
         ObjectBlobStore::new(Arc::new(InMemory::new()), Path::from("tidebreak/blobs"))
+    }
+
+    /// A blob directory inside a fresh temporary directory, and the guard
+    /// that removes it.
+    fn disk_store() -> (ObjectBlobStore, std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("blobs");
+        let url = Url::from_file_path(&root).unwrap();
+        (ObjectBlobStore::from_url(url.as_str()).unwrap(), root, dir)
+    }
+
+    /// Run one contract against both backends the self-host profile can
+    /// select. The disk one differs where it matters: it refuses a second
+    /// create through a hard link, stages multipart parts as `#`-suffixed
+    /// files, and lists a real directory tree.
+    async fn for_each_backend<F, Fut>(check: F)
+    where
+        F: Fn(ObjectBlobStore) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        check(store()).await;
+        let (disk, _root, _dir) = disk_store();
+        check(disk).await;
+    }
+
+    /// Every regular file below `root`, relative to it.
+    fn files_below(root: &std::path::Path) -> Vec<String> {
+        let mut files = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.push(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+        }
+        files.sort();
+        files
     }
 
     #[test]
@@ -361,23 +492,229 @@ mod tests {
         }
     }
 
+    #[test]
+    fn blob_store_urls_dispatch_by_scheme_and_name_both_forms() {
+        for value in [
+            "https://access:secret@bucket/company",
+            "gs://bucket/secret",
+            "blobs/secret",
+            "",
+        ] {
+            let error = ObjectBlobStore::from_url(value).err().unwrap().to_string();
+            assert!(error.contains("s3://bucket[/prefix]"), "{error}");
+            assert!(error.contains("file:///absolute/path"), "{error}");
+            assert!(!error.contains("access") && !error.contains("secret"));
+        }
+        // Each scheme reaches its own validation.
+        let s3 = ObjectBlobStore::from_url("s3://access:secret@bucket/company")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            s3.contains("s3://bucket[/prefix] with no credentials"),
+            "{s3}"
+        );
+        assert!(!s3.contains("access") && !s3.contains("secret"));
+        let file = ObjectBlobStore::from_url("file:blobs")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(file.contains("file:///absolute/path: no host"), "{file}");
+    }
+
+    #[test]
+    fn file_urls_name_one_absolute_directory() {
+        assert_eq!(
+            parse_file_root("file:///var/lib/tidebreak/blobs").unwrap(),
+            std::path::PathBuf::from("/var/lib/tidebreak/blobs")
+        );
+        assert_eq!(
+            parse_file_root("file:///srv/tidebreak%20blobs").unwrap(),
+            std::path::PathBuf::from("/srv/tidebreak blobs")
+        );
+        for value in [
+            // Relative, however it is spelled.
+            "file:blobs",
+            "file:./blobs",
+            "file://blobs",
+            "file://./blobs",
+            // A host, even the local one.
+            "file://localhost/var/lib/tidebreak/blobs",
+            "file://server/share/blobs",
+            // Anything a parser would rewrite.
+            "file:///var/lib/../blobs",
+            "file:///var/./lib/blobs",
+            "file:///var/lib/%2e%2e/blobs",
+            "file:///var\\lib\\blobs",
+            "file:///var/lib/tidebreak blobs",
+            "file:///var/lib/blobs?mode=0700",
+            "file:///var/lib/blobs#blobs",
+            "FILE:///var/lib/blobs",
+        ] {
+            let error = parse_file_root(value).unwrap_err().to_string();
+            assert!(error.contains("file:///absolute/path"), "{value}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_missing_blob_directory_is_created_for_its_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data").join("blobs");
+        ObjectBlobStore::from_url(Url::from_file_path(&root).unwrap().as_str()).unwrap();
+        assert!(root.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&root).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+
+        // A file where the directory should be is refused at boot, by path.
+        let occupied = dir.path().join("occupied");
+        std::fs::write(&occupied, b"not a directory").unwrap();
+        let error = ObjectBlobStore::from_url(Url::from_file_path(&occupied).unwrap().as_str())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("blob directory"), "{error}");
+        assert!(error.contains("occupied"), "{error}");
+    }
+
     #[tokio::test]
     async fn immutable_puts_are_idempotent_and_reject_replacement() {
-        let store = store();
-        let id = Uuid::new_v4();
-        store.put(id, b"one".to_vec()).await.unwrap();
-        store.put(id, b"one".to_vec()).await.unwrap();
-        let error = store.put(id, b"two".to_vec()).await.unwrap_err();
-        assert!(error.to_string().contains("different bytes"));
+        for_each_backend(|store| async move {
+            let id = Uuid::new_v4();
+            store.put(id, b"one".to_vec()).await.unwrap();
+            store.put(id, b"one".to_vec()).await.unwrap();
+            let error = store.put(id, b"two".to_vec()).await.unwrap_err();
+            assert!(error.to_string().contains("different bytes"));
+            assert_eq!(store.get(id).await.unwrap(), Some(b"one".to_vec()));
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn streamed_sources_keep_ranges_inventory_and_delete() {
-        let store = store();
-        let bytes = vec![7_u8; MULTIPART_CHUNK_BYTES + 17];
+        for_each_backend(|store| async move {
+            let bytes = vec![7_u8; MULTIPART_CHUNK_BYTES + 17];
+            let source = DocumentBlob::from_bytes(&bytes);
+            let chunks =
+                stream::iter(vec![Ok(bytes[..31].to_vec()), Ok(bytes[31..].to_vec())]).boxed();
+            store.put_stream(source.clone(), chunks).await.unwrap();
+            store
+                .put_stream(
+                    source.clone(),
+                    stream::iter(vec![Ok(bytes.clone())]).boxed(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                store.metadata(source.id).await.unwrap().unwrap().byte_len,
+                source.byte_len
+            );
+            let range = store
+                .read_range(source.id, 4..19)
+                .await
+                .unwrap()
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(
+                range
+                    .into_iter()
+                    .collect::<Result<Vec<_>>>()
+                    .unwrap()
+                    .concat(),
+                bytes[4..19]
+            );
+            assert_eq!(store.get(source.id).await.unwrap(), Some(bytes.clone()));
+            let inventory = store.inventory().await.unwrap();
+            assert_eq!(inventory.len(), 1);
+            assert_eq!(inventory[0].id, source.id);
+            assert_eq!(
+                store.modified_at(source.id).await.unwrap(),
+                Some(inventory[0].modified_at)
+            );
+            assert!(store
+                .store
+                .list(Some(&store.prefix.clone().join("_uploads")))
+                .next()
+                .await
+                .is_none());
+
+            store.delete(source.id).await.unwrap();
+            store.delete(source.id).await.unwrap();
+            assert_eq!(store.get(source.id).await.unwrap(), None);
+            assert_eq!(store.metadata(source.id).await.unwrap(), None);
+            assert!(store.inventory().await.unwrap().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn streamed_sources_reject_wrong_declared_content() {
+        for_each_backend(|store| async move {
+            let source = DocumentBlob::from_bytes(b"expected");
+            let chunks = stream::iter(vec![Ok(b"changed!".to_vec())]).boxed();
+            let error = store.put_stream(source, chunks).await.unwrap_err();
+            assert!(error.to_string().contains("declared digest"));
+            assert!(store.inventory().await.unwrap().is_empty());
+            assert!(store
+                .store
+                .list(Some(&store.prefix.clone().join("_uploads")))
+                .next()
+                .await
+                .is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn streamed_sources_refuse_an_id_holding_other_bytes() {
+        for_each_backend(|store| async move {
+            let source = DocumentBlob::from_bytes(b"declared source");
+            store.put(source.id, b"other bytes".to_vec()).await.unwrap();
+            let error = store
+                .put_stream(
+                    source.clone(),
+                    stream::iter(vec![Ok(b"declared source".to_vec())]).boxed(),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("different bytes"));
+            assert_eq!(
+                store.get(source.id).await.unwrap(),
+                Some(b"other bytes".to_vec())
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn streamed_empty_sources_work_at_the_bucket_root() {
+        let (disk, _root, _dir) = disk_store();
+        for store in [
+            ObjectBlobStore::new(Arc::new(InMemory::new()), Path::default()),
+            disk,
+        ] {
+            let source = DocumentBlob::from_bytes(b"");
+            store
+                .put_stream(source.clone(), stream::empty::<Result<Vec<u8>>>().boxed())
+                .await
+                .unwrap();
+
+            assert_eq!(store.get(source.id).await.unwrap(), Some(Vec::new()));
+            assert_eq!(store.inventory().await.unwrap()[0].id, source.id);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_disk_store_keeps_blobs_and_uploads_inside_its_directory() {
+        let (store, root, _dir) = disk_store();
+        store.probe().await.unwrap();
+        let bytes = vec![3_u8; MULTIPART_CHUNK_BYTES * 2 + 5];
         let source = DocumentBlob::from_bytes(&bytes);
-        let chunks = stream::iter(vec![Ok(bytes[..31].to_vec()), Ok(bytes[31..].to_vec())]).boxed();
-        store.put_stream(source.clone(), chunks).await.unwrap();
         store
             .put_stream(
                 source.clone(),
@@ -385,64 +722,32 @@ mod tests {
             )
             .await
             .unwrap();
-
-        assert_eq!(
-            store.metadata(source.id).await.unwrap().unwrap().byte_len,
-            source.byte_len
-        );
-        let range = store
-            .read_range(source.id, 4..19)
-            .await
-            .unwrap()
-            .unwrap()
-            .collect::<Vec<_>>()
-            .await;
-        assert_eq!(
-            range
-                .into_iter()
-                .collect::<Result<Vec<_>>>()
-                .unwrap()
-                .concat(),
-            bytes[4..19]
-        );
-        assert_eq!(store.inventory().await.unwrap()[0].id, source.id);
-        assert!(store
-            .store
-            .list(Some(&store.prefix.clone().join("_uploads")))
-            .next()
-            .await
-            .is_none());
-
-        store.delete(source.id).await.unwrap();
-        assert_eq!(store.get(source.id).await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn streamed_sources_reject_wrong_declared_content() {
-        let store = store();
-        let source = DocumentBlob::from_bytes(b"expected");
-        let chunks = stream::iter(vec![Ok(b"changed!".to_vec())]).boxed();
-        let error = store.put_stream(source, chunks).await.unwrap_err();
-        assert!(error.to_string().contains("declared digest"));
-        assert!(store.inventory().await.unwrap().is_empty());
-        assert!(store
-            .store
-            .list(Some(&store.prefix.clone().join("_uploads")))
-            .next()
-            .await
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn streamed_empty_sources_work_at_the_bucket_root() {
-        let store = ObjectBlobStore::new(Arc::new(InMemory::new()), Path::default());
-        let source = DocumentBlob::from_bytes(b"");
+        let rejected = DocumentBlob::from_bytes(b"declared");
         store
-            .put_stream(source.clone(), stream::empty::<Result<Vec<u8>>>().boxed())
+            .put_stream(
+                rejected,
+                stream::iter(vec![Ok(b"streamed".to_vec())]).boxed(),
+            )
             .await
-            .unwrap();
+            .unwrap_err();
+        let small = Uuid::new_v4();
+        store.put(small, b"small".to_vec()).await.unwrap();
 
-        assert_eq!(store.get(source.id).await.unwrap(), Some(Vec::new()));
-        assert_eq!(store.inventory().await.unwrap()[0].id, source.id);
+        // Only published blobs remain: no staged part, no temporary upload,
+        // and nothing outside the configured directory.
+        let mut expected = vec![format!("{}.blob", source.id), format!("{small}.blob")];
+        expected.sort();
+        assert_eq!(files_below(&root), expected);
+        assert!(root.join("_uploads").is_dir());
+        assert_eq!(
+            std::fs::read(root.join(format!("{}.blob", source.id))).unwrap(),
+            bytes
+        );
+
+        // A second process over the same directory sees the same blobs.
+        let reopened =
+            ObjectBlobStore::from_url(Url::from_file_path(&root).unwrap().as_str()).unwrap();
+        assert_eq!(reopened.get(small).await.unwrap(), Some(b"small".to_vec()));
+        assert_eq!(reopened.inventory().await.unwrap().len(), 2);
     }
 }

@@ -1,22 +1,29 @@
-# Tidebreak self-host: the server plus its PostgreSQL database.
+# Tidebreak self-host: the server, its PostgreSQL database, and, with a
+# domain, Caddy in front for HTTPS. Everything runs on this machine.
 #
-# THIS STACK BINDS TO LOCALHOST BY DESIGN. The published port below is
-# `127.0.0.1:8080`, and the API it serves is plain HTTP with bearer-token
-# authentication. Decision record 6 (docs/decisions/
-# 0006-self-host-deployment-plane-authorization.md) states the supported
-# posture: the server and PostgreSQL run inside the operator's own network,
-# and TLS termination plus network exposure belong to the operator's fronting
-# infrastructure. Do not change the port binding to `0.0.0.0` to "make it
-# reachable" — put a TLS-terminating reverse proxy in front of it instead, as
-# described in docs/self-hosting.md. There is deliberately no TLS in this file.
+#   ./setup.sh             # once: writes .env, tokens, and secret.key
+#   docker compose up -d
 #
-#   docker compose --env-file .env up -d --build
+# `up` pulls the published server image named by TIDEBREAK_VERSION in .env; it
+# never compiles. To build this checkout instead, add the build file:
 #
-# Required before the first `up`:
-#   - a tokens file at ./tokens, naming at least one `admin` user (see
-#     docs/self-hosting.md for the format; a file with no admin refuses to boot)
-#   - POSTGRES_PASSWORD set in the environment or a .env file beside this one
-#   - TIDEBREAK_BLOB_STORE_URL set to an operator-owned S3 bucket and prefix
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# Where things live:
+#   - PostgreSQL keeps chats, projects, document records, and the stored
+#     credentials, encrypted with the key in ./secret.key.
+#   - Document and artifact bytes live on the tidebreak-data volume, under
+#     /var/lib/tidebreak/blobs. Back that volume up with the database. Set
+#     TIDEBREAK_BLOB_STORE_URL=s3://bucket/prefix in .env to use a bucket.
+#   - ./tokens names the users and their tokens.
+#
+# THE SERVER BINDS TO LOCALHOST BY DESIGN. It serves plain HTTP with bearer
+# authentication on 127.0.0.1:8080 and nowhere else. Decision record 6
+# (docs/decisions/0006-self-host-deployment-plane-authorization.md) puts TLS
+# and network exposure in the operator's fronting infrastructure: with
+# TIDEBREAK_DOMAIN and COMPOSE_PROFILES=tls in .env, the `caddy` service below
+# is that infrastructure. Do not publish the server on 0.0.0.0 to "make it
+# reachable"; give setup.sh a domain, or put your own TLS proxy in front.
 
 name: tidebreak-self-host
 
@@ -31,10 +38,10 @@ services:
       POSTGRES_USER: tidebreak
       POSTGRES_DB: tidebreak
       # No default: an unset password would silently produce a trust-auth
-      # database. Set it in .env.
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # database. setup.sh writes a random one to .env.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (setup.sh writes it)}
     volumes:
-      # The one thing to back up. See docs/self-hosting.md.
+      # Back this up with tidebreak-data. See docs/self-hosting.md.
       - tidebreak-postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tidebreak -d tidebreak"]
@@ -47,54 +54,92 @@ services:
       - "5432"
 
   server:
-    build:
-      # The workspace root, so `cargo build --locked` sees the whole workspace.
-      context: ../..
-      dockerfile: deploy/self-host/Dockerfile
-    image: tidebreak-self-host:local
+    image: ghcr.io/brightwave-inc/tidebreak-server:${TIDEBREAK_VERSION:?set TIDEBREAK_VERSION in .env (setup.sh writes it)}
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
-    # Static AWS keys and an optional compatible endpoint belong in `.env`
-    # when the deployment uses them. Do not pin those names to empty strings
-    # here: `AmazonS3Builder::from_env` treats an empty `AWS_ACCESS_KEY_ID` as
-    # a static credential and ignores instance credentials, and an empty
-    # `AWS_ENDPOINT_URL_S3` becomes the client endpoint.
+    # Everything in .env reaches the server, including optional settings such
+    # as TIDEBREAK_PUBLIC_URL, OIDC, or AWS credentials for an S3 bucket. Do
+    # not pin those names to empty strings here: `AmazonS3Builder::from_env`
+    # treats an empty `AWS_ACCESS_KEY_ID` as a static credential and ignores
+    # instance credentials, and an empty `AWS_ENDPOINT_URL_S3` becomes the
+    # client endpoint.
     env_file:
       - .env
     environment:
       TIDEBREAK_PROFILE: self_host
-      TIDEBREAK_DATABASE_URL: postgres://tidebreak:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/tidebreak
-      TIDEBREAK_BLOB_STORE_URL: ${TIDEBREAK_BLOB_STORE_URL:?set TIDEBREAK_BLOB_STORE_URL in .env}
+      TIDEBREAK_DATABASE_URL: postgres://tidebreak:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (setup.sh writes it)}@postgres:5432/tidebreak
+      # Local disk on the data volume unless .env names a bucket.
+      TIDEBREAK_BLOB_STORE_URL: ${TIDEBREAK_BLOB_STORE_URL:-file:///var/lib/tidebreak/blobs}
       TIDEBREAK_AUTH_TOKENS_FILE: /run/tidebreak/tokens
+      # Encrypts the credentials administrators save through Tidebreak.
+      TIDEBREAK_SECRET_KEY_FILE: /run/tidebreak/secret.key
       TIDEBREAK_DATA_DIR: /var/lib/tidebreak
       # All interfaces of the container, published to loopback only below.
       TIDEBREAK_LISTEN_ADDR: 0.0.0.0:8080
       # Log filter; see the server's `logging` module for the syntax.
       TIDEBREAK_LOG: ${TIDEBREAK_LOG:-info}
-      # Standard AWS variables configure AWS S3 or an S3-compatible service.
+      # Standard AWS variables configure AWS S3 or an S3-compatible service
+      # when TIDEBREAK_BLOB_STORE_URL names a bucket.
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
       AWS_ALLOW_HTTP: ${AWS_ALLOW_HTTP:-false}
-      # Model credential fallbacks for this minimal stack. To save shared
-      # credentials through Tidebreak instead, mount a Vault token file and
-      # pass the TIDEBREAK_VAULT_* variables described in docs/self-hosting.md.
-      # Only the variables you set are used.
+      # Model credential fallbacks. Administrators can also save provider
+      # keys in Settings, which stores them encrypted in PostgreSQL. Only the
+      # variables you set are used.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    # The server runs as uid 10001, which does not own ./tokens or
+    # ./secret.key on a Linux host. setup.sh makes both files readable by
+    # your own group (mode 0640) and records that group here, so the server
+    # can read them and other users of the host cannot.
+    group_add:
+      - "${TIDEBREAK_HOST_GID:-10001}"
     volumes:
-      # The operator's credential file, read-only to the container. One line
-      # per token; keep it 0600 on the host.
       - ./tokens:/run/tidebreak/tokens:ro
-      # Instance lock, logs, and per-turn scratch. Durable state lives in
-      # PostgreSQL; this volume exists so a restart does not fight itself over
-      # the lock file and so logs survive a container replacement.
+      - ./secret.key:/run/tidebreak/secret.key:ro
+      # Blobs, the instance lock, logs, per-turn scratch, and harness
+      # installs. Back it up with PostgreSQL: the database references the
+      # blobs stored here.
       - tidebreak-data:/var/lib/tidebreak
     ports:
-      # Localhost only. Everything about production exposure happens in front
-      # of this, not here.
+      # Localhost only. Exposure beyond this machine is Caddy's job.
       - "127.0.0.1:8080:8080"
+
+  caddy:
+    # Starts only with the `tls` profile, which setup.sh enables in .env
+    # (COMPOSE_PROFILES=tls) together with TIDEBREAK_DOMAIN.
+    profiles: ["tls"]
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      TIDEBREAK_DOMAIN: ${TIDEBREAK_DOMAIN:-}
+    # The image's own command, after a check that names the missing setting.
+    # Without it, an empty domain fails deep inside Caddyfile parsing.
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        [ -n "$${TIDEBREAK_DOMAIN}" ] ||
+        { echo "caddy: set TIDEBREAK_DOMAIN in .env, or remove COMPOSE_PROFILES=tls" >&2; exit 1; };
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    ports:
+      # 80 answers the ACME HTTP challenge and redirects to HTTPS; 443 serves
+      # HTTPS over TCP and HTTP/3 over UDP.
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and the ACME account. Keep it, or every restart asks
+      # the certificate authority again.
+      - caddy-data:/data
+      - caddy-config:/config
 
 volumes:
   tidebreak-postgres:
   tidebreak-data:
+  caddy-data:
+  caddy-config:

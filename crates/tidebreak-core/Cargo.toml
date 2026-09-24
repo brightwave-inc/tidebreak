@@ -43,7 +43,8 @@ keychain = ["dep:keyring", "dep:tokio"]
 tools = ["dep:cap-fs-ext", "dep:cap-std", "dep:tokio"]
 # Durable local byte storage for desktop documents and artifacts.
 blob-fs = ["dep:async-stream", "dep:tokio", "dep:windows-sys"]
-# S3-compatible byte storage for self-hosted deployments.
+# Object storage for self-hosted deployments: an S3-compatible bucket or a
+# directory on the machine's own disk.
 blob-object = ["dep:object_store", "dep:tokio"]
 
 [dependencies]
