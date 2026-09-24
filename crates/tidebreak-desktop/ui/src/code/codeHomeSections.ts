@@ -88,12 +88,19 @@ export type CodeHomeGlyph =
   | { kind: "live" }
   | { kind: "idle" };
 
+/** Why an item is in its section, in the tone that paints it. */
+export type CodeHomeStatus = {
+  label: string;
+  tone: StatusTone;
+  /** A turn is moving right now: muted ink with the live shimmer. */
+  live?: boolean;
+};
+
 export type CodeHomeItem = {
   key: string;
   section: CodeHomeSectionId;
   title: string;
-  /** Why the item is in its section, in the tone that paints it. */
-  status: { label: string; tone: StatusTone; live?: boolean } | null;
+  status: CodeHomeStatus | null;
   /** The repository, or where a conversation came from. */
   context: string | null;
   /** What tells two items apart once the titles match. */
@@ -215,18 +222,16 @@ function workspaceItem(
       watch.watch_state === "blocked",
   );
   if (stuckWatch) {
-    const blocked = stuckWatch.attention.state.type !== "needs_you";
+    const need = stuckWatch.attention.state;
+    const status: CodeHomeStatus =
+      need.type === "needs_you"
+        ? { label: sentence(need.prompt || "Needs you"), tone: "critical" }
+        : { label: "Watch is blocked", tone: "warning" };
     return {
       ...base,
       section: "needs_you",
-      status:
-        stuckWatch.attention.state.type === "needs_you"
-          ? {
-              label: sentence(stuckWatch.attention.state.prompt || "Needs you"),
-              tone: "critical",
-            }
-          : { label: "Watch is blocked", tone: "warning" },
-      glyph: { kind: "alert", tone: blocked ? "warning" : "critical" },
+      status,
+      glyph: { kind: "alert", tone: status.tone },
       target: { ...base.target, task: stuckWatch.session },
     };
   }
@@ -366,9 +371,9 @@ function conversationItem(rawDigest: CodeSessionDigest): CodeHomeItem {
 const SETUP_FAILED_STATUS = {
   label: "Setup failed",
   tone: "critical",
-} as const satisfies CodeHomeItem["status"];
+} as const satisfies CodeHomeStatus;
 
-function needStatus(digest: CodeSessionDigest): CodeHomeItem["status"] {
+function needStatus(digest: CodeSessionDigest): CodeHomeStatus {
   const attention = digest.attention.state;
   if (attention.type === "needs_you") {
     return {
@@ -383,7 +388,7 @@ function needStatus(digest: CodeSessionDigest): CodeHomeItem["status"] {
  * The section heading already says ready to merge, so a ready row says what
  * got it there: the approval, and the checks that passed.
  */
-function readyStatus(pr: PullRequestDigest): CodeHomeItem["status"] {
+function readyStatus(pr: PullRequestDigest): CodeHomeStatus {
   const passing = checkCounts(pr).passing;
   const parts = [
     pullRequestReviewSummary(pr).tone === "ready" ? "Approved" : null,
@@ -402,7 +407,7 @@ function readyStatus(pr: PullRequestDigest): CodeHomeItem["status"] {
 function runningStatus(
   digest: CodeSessionDigest,
   label: string,
-): CodeHomeItem["status"] {
+): CodeHomeStatus {
   return {
     label,
     tone: digestStatusTone(digest),
