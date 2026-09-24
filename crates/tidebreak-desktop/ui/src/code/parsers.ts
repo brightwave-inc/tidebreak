@@ -3793,11 +3793,14 @@ function parseCodeReviewResult(value: unknown): WireCodeReviewResult | null {
       "rejected",
       "raw_text",
       "diff",
+      "omitted_diffs",
     ]) ||
     !optionalBlock(value.summary) ||
     !isNonNegativeInteger(value.rejected) ||
     !optionalBlock(value.raw_text) ||
-    !rawText(value.diff)
+    !rawText(value.diff) ||
+    (value.omitted_diffs !== undefined &&
+      !isNonNegativeInteger(value.omitted_diffs))
   ) {
     return null;
   }
@@ -3811,6 +3814,9 @@ function parseCodeReviewResult(value: unknown): WireCodeReviewResult | null {
     rejected: value.rejected,
     ...(value.raw_text !== undefined ? { raw_text: value.raw_text } : {}),
     diff: value.diff,
+    ...(value.omitted_diffs !== undefined
+      ? { omitted_diffs: value.omitted_diffs }
+      : {}),
   };
 }
 

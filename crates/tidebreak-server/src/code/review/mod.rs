@@ -85,8 +85,8 @@ use tidebreak_harness::{
 
 use crate::code::checkpoint::{produce_diff, resolve_diff_range, DiffBounds};
 use crate::code::types::{
-    CodeReviewFailure, CodeReviewFailureKind, CodeReviewProgress, CodeReviewResult,
-    CodeReviewSnapshot, CodeReviewStatus, StartCodeReviewBody,
+    CodeReviewFailure, CodeReviewFailureKind, CodeReviewFinding, CodeReviewProgress,
+    CodeReviewResult, CodeReviewSnapshot, CodeReviewStatus, StartCodeReviewBody,
 };
 use crate::code::{harness_label, CodeRuntime};
 use crate::error::ServerError;
@@ -113,6 +113,8 @@ const MAX_FAILURE_CHARS: usize = 600;
 const MAX_ACTIVITY_CHARS: usize = 120;
 /// Most of a reviewer's streamed answer kept, in bytes.
 const MAX_ANSWER_TAIL_BYTES: usize = 1 << 20;
+/// Most of the reviewed diff a result carries, in bytes.
+const MAX_RESULT_DIFF_BYTES: usize = 1 << 20;
 
 /// What a refused approval tells the reviewer.
 pub const REFUSAL_FEEDBACK: &str = "This is a read-only review: do not change files, run commands that write, or push. Report what should change as a finding in your answer instead.";
@@ -180,7 +182,9 @@ impl ReviewRegistry {
         }
     }
 
-    /// The workspace's reviews, newest first.
+    /// The workspace's reviews, newest first. Only the newest carries its
+    /// result, so the list stays small however many reviews ended; read an
+    /// older one by id for its findings.
     #[must_use]
     pub fn list(&self, owner: &OwnerId, workspace: WorkspaceId) -> Vec<CodeReviewSnapshot> {
         let mut reviews: Vec<_> = self
@@ -192,6 +196,9 @@ impl ReviewRegistry {
             .map(|entry| entry.snapshot.clone())
             .collect();
         reviews.sort_by_key(|review| std::cmp::Reverse(review.started_at));
+        for older in reviews.iter_mut().skip(1) {
+            older.result = None;
+        }
         reviews
     }
 
@@ -757,6 +764,7 @@ impl CodeRuntime {
                     rejected: 0,
                     raw_text: Some(text),
                     diff: String::new(),
+                    omitted_diffs: None,
                 }
             }
             ReviewAnswer::Findings {
@@ -809,22 +817,21 @@ impl CodeRuntime {
                 unplaced.push(finding);
             }
         }
-        let diff = shown
-            .iter()
-            .map(|path| diffs[path].trim_end_matches('\n'))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let (diff, omitted) = bounded_result_diffs(
+            &shown,
+            &diffs,
+            &mut placed,
+            &mut unplaced,
+            MAX_RESULT_DIFF_BYTES,
+        );
         CodeReviewResult {
             summary,
             findings: placed,
             unplaced,
             rejected,
             raw_text: None,
-            diff: if diff.is_empty() {
-                diff
-            } else {
-                format!("{diff}\n")
-            },
+            diff,
+            omitted_diffs: (omitted > 0).then_some(omitted),
         }
     }
 
@@ -946,6 +953,39 @@ fn path_candidates(path: &str) -> Vec<String> {
 
 /// The probe's environment, less what would let a reviewer push: the SSH
 /// agent. Forge tokens never reach an engine child in the first place.
+/// The reviewed diffs a result carries, within `max_bytes`: each file with a
+/// finding on its lines, in the order the findings named them. A file whose
+/// diff does not fit is left out, and its findings move to `unplaced`, where
+/// a client lists them by file and lines instead of on the diff. Returns the
+/// diff and how many files were left out.
+fn bounded_result_diffs(
+    shown: &[String],
+    diffs: &HashMap<String, String>,
+    placed: &mut Vec<CodeReviewFinding>,
+    unplaced: &mut Vec<CodeReviewFinding>,
+    max_bytes: usize,
+) -> (String, u32) {
+    let mut diff = String::new();
+    let mut omitted = HashSet::new();
+    for path in shown {
+        let text = diffs[path].trim_end_matches('\n');
+        if diff.len() + text.len() + 1 > max_bytes {
+            omitted.insert(path.as_str());
+            continue;
+        }
+        diff.push_str(text);
+        diff.push('\n');
+    }
+    if !omitted.is_empty() {
+        let (kept, moved): (Vec<_>, Vec<_>) = std::mem::take(placed)
+            .into_iter()
+            .partition(|finding| !omitted.contains(finding.path.as_str()));
+        *placed = kept;
+        unplaced.splice(0..0, moved);
+    }
+    (diff, u32::try_from(omitted.len()).unwrap_or(u32::MAX))
+}
+
 fn reviewer_env(
     env: &[(std::ffi::OsString, std::ffi::OsString)],
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {

@@ -587,6 +587,7 @@
             "title": "The limit doubled without a reason"
           }
         ],
+        "omitted_diffs": 2,
         "rejected": 1,
         "summary": "One bug in the retry loop.",
         "unplaced": [

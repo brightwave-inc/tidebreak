@@ -722,3 +722,106 @@ fn the_sweep_removes_copies_nothing_is_running_in() {
         "one running review per workspace"
     );
 }
+
+fn result_with_diff(diff: &str) -> CodeReviewResult {
+    CodeReviewResult {
+        summary: None,
+        findings: Vec::new(),
+        unplaced: Vec::new(),
+        rejected: 0,
+        raw_text: None,
+        diff: diff.to_owned(),
+        omitted_diffs: None,
+    }
+}
+
+/// The list carries only the newest review's result, so ten ended reviews
+/// with large diffs never make one large answer.
+#[test]
+fn only_the_newest_review_in_the_list_carries_its_result() {
+    let registry = ReviewRegistry::default();
+    let workspace = WorkspaceId::new();
+    let started = Utc::now();
+    let mut ids = Vec::new();
+    for minutes in 0..3 {
+        let review = CodeReviewSnapshot {
+            id: CodeReviewId::new(),
+            workspace_id: workspace,
+            session_id: SessionId::new(),
+            harness: HarnessKind::Codex,
+            model: None,
+            turn_id: None,
+            permission_mode: PermissionMode::Plan,
+            status: CodeReviewStatus::Running,
+            progress: CodeReviewProgress::default(),
+            started_at: started + chrono::Duration::minutes(minutes),
+            finished_at: None,
+            failure: None,
+            result: None,
+        };
+        let _cancelled = registry.admit(OwnerId::local(), review.clone()).unwrap();
+        registry.update(review.id, |review| {
+            review.status = CodeReviewStatus::Completed;
+            review.result = Some(result_with_diff("diff --git a/x b/x\n"));
+        });
+        ids.push(review.id);
+    }
+    let listed = registry.list(&OwnerId::local(), workspace);
+    assert_eq!(
+        listed.iter().map(|review| review.id).collect::<Vec<_>>(),
+        ids.iter().rev().copied().collect::<Vec<_>>()
+    );
+    assert!(listed[0].result.is_some(), "the newest keeps its findings");
+    assert!(listed[1..].iter().all(|review| review.result.is_none()));
+    // Read by id, an older review still has them.
+    let older = registry
+        .get(&OwnerId::local(), workspace, ids[0])
+        .expect("the older review");
+    assert!(older.result.is_some());
+}
+
+/// Past the bound, a file's diff is left out of the result, and its findings
+/// move to the ones listed by file and lines, counted, never dropped.
+#[test]
+fn a_result_keeps_its_diffs_within_the_bound_and_moves_the_rest_off_the_diff() {
+    let small = "diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n-a\n+b\n".to_owned();
+    let large = format!(
+        "diff --git a/b.ts b/b.ts\n@@ -1 +1 @@\n+{}\n",
+        "x".repeat(4_000)
+    );
+    let diffs = HashMap::from([
+        ("a.ts".to_owned(), small.clone()),
+        ("b.ts".to_owned(), large),
+    ]);
+    let finding = |path: &str| CodeReviewFinding {
+        path: path.to_owned(),
+        start_line: 1,
+        end_line: 1,
+        severity: CodeReviewSeverity::High,
+        title: "A title".to_owned(),
+        explanation: "An explanation.".to_owned(),
+    };
+    let shown = vec!["a.ts".to_owned(), "b.ts".to_owned()];
+    let mut placed = vec![finding("a.ts"), finding("b.ts"), finding("b.ts")];
+    let mut unplaced = vec![finding("c.ts")];
+    let (diff, omitted) = bounded_result_diffs(&shown, &diffs, &mut placed, &mut unplaced, 1_000);
+    assert_eq!(diff, small);
+    assert_eq!(omitted, 1);
+    assert_eq!(placed, vec![finding("a.ts")]);
+    assert_eq!(
+        unplaced
+            .iter()
+            .map(|finding| finding.path.as_str())
+            .collect::<Vec<_>>(),
+        ["b.ts", "b.ts", "c.ts"]
+    );
+
+    // Within the bound, every diff is kept and nothing moves.
+    let mut placed = vec![finding("a.ts"), finding("b.ts")];
+    let mut unplaced = Vec::new();
+    let (diff, omitted) = bounded_result_diffs(&shown, &diffs, &mut placed, &mut unplaced, 1 << 20);
+    assert_eq!(omitted, 0);
+    assert!(diff.starts_with(&small) && diff.contains("b/b.ts"));
+    assert_eq!(placed.len(), 2);
+    assert!(unplaced.is_empty());
+}

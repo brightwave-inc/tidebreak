@@ -733,6 +733,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                     rejected: 1,
                     raw_text: None,
                     diff: "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                    omitted_diffs: Some(2),
                 }),
             },
         ),

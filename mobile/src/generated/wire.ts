@@ -1953,8 +1953,15 @@ raw_text?: string,
 /**
  * The reviewed diff of each file a finding in `findings` is on, as git
  * printed it, so a client anchors each finding to the lines it quotes.
+ * Bounded: past the bound, a file's findings move to `unplaced` and
+ * `omitted_diffs` counts the files.
  */
-diff: string, };
+diff: string,
+/**
+ * How many files' diffs were left out of `diff` to keep the result
+ * small. Their findings are in `unplaced`. Absent when none were.
+ */
+omitted_diffs?: number, };
 
 /**
  * How much a finding matters, as the reviewer judged it.

@@ -2112,7 +2112,14 @@ pub struct CodeReviewResult {
     pub raw_text: Option<String>,
     /// The reviewed diff of each file a finding in `findings` is on, as git
     /// printed it, so a client anchors each finding to the lines it quotes.
+    /// Bounded: past the bound, a file's findings move to `unplaced` and
+    /// `omitted_diffs` counts the files.
     pub diff: String,
+    /// How many files' diffs were left out of `diff` to keep the result
+    /// small. Their findings are in `unplaced`. Absent when none were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub omitted_diffs: Option<u32>,
 }
 
 /// One review of a workspace's changes by another engine.
