@@ -208,11 +208,29 @@ pub(super) async fn code_app_with_options(
     permission_mode_ceiling: Option<PermissionMode>,
     remote: bool,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    let mut registry = AdapterRegistry::new();
+    registry.register(Arc::new(adapter));
+    code_app_with_registry(
+        registry,
+        browser_runtime,
+        put_gate,
+        permission_mode_ceiling,
+        remote,
+    )
+    .await
+}
+
+/// An app whose runtime drives every engine in `registry`.
+pub(super) async fn code_app_with_registry(
+    registry: AdapterRegistry,
+    browser_runtime: Option<Arc<RecordingBrowserRuntime>>,
+    put_gate: Option<Arc<PutGate>>,
+    permission_mode_ceiling: Option<PermissionMode>,
+    remote: bool,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
-    let mut registry = AdapterRegistry::new();
-    registry.register(Arc::new(adapter));
     let installed_browser_runtime =
         browser_runtime.map(|runtime| -> Arc<dyn BrowserRuntime> { runtime });
     let browser_bridge_command = installed_browser_runtime

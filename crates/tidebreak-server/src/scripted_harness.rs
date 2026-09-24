@@ -95,6 +95,9 @@ struct ScriptedWrite {
     contents: String,
 }
 
+/// Whether a launch was read-only, and the extra environment it was handed.
+pub type LaunchPosture = (bool, Vec<(String, String)>);
+
 /// One scripted engine session.
 #[derive(Clone)]
 pub struct ScriptedAdapter {
@@ -161,6 +164,10 @@ pub struct ScriptedAdapter {
     /// Whether each launch was told to load the repository's own engine
     /// config.
     launched_project_configs: Arc<std::sync::Mutex<Vec<tidebreak_harness::ProjectConfig>>>,
+    /// Working directory and permission mode each launch was handed.
+    launched_sessions: Arc<std::sync::Mutex<Vec<(PathBuf, PermissionMode)>>>,
+    /// Whether each launch was read-only, and the environment it was handed.
+    launched_postures: Arc<std::sync::Mutex<Vec<LaunchPosture>>>,
     /// Files to materialize in the worktree at the start of each turn.
     writes: Vec<ScriptedWrite>,
     /// Sleep once at the start of each turn, so a caller can observe Running
@@ -168,6 +175,10 @@ pub struct ScriptedAdapter {
     turn_delay: Duration,
     /// What the probe reports as this engine's local sign-in state.
     authenticated: Arc<std::sync::Mutex<Option<bool>>>,
+    /// What the adapter answers when asked why a read-only session cannot
+    /// start here, and how many times it was asked.
+    read_only_blocker: Option<String>,
+    read_only_checks: Arc<AtomicU64>,
 }
 
 impl ScriptedAdapter {
@@ -211,7 +222,11 @@ impl ScriptedAdapter {
             launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
             launched_apps: Arc::new(std::sync::Mutex::new(Vec::new())),
             launched_project_configs: Arc::new(std::sync::Mutex::new(Vec::new())),
+            launched_sessions: Arc::new(std::sync::Mutex::new(Vec::new())),
+            launched_postures: Arc::new(std::sync::Mutex::new(Vec::new())),
             authenticated: Arc::new(std::sync::Mutex::new(Some(true))),
+            read_only_blocker: None,
+            read_only_checks: Arc::new(AtomicU64::new(0)),
             writes: Vec::new(),
             turn_delay: Duration::ZERO,
         }
@@ -250,6 +265,61 @@ impl ScriptedAdapter {
             .lock()
             .expect("scripted launches")
             .clone()
+    }
+
+    /// The working directory and permission mode each launched session was
+    /// given, in order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn launched_sessions(&self) -> Vec<(PathBuf, PermissionMode)> {
+        self.launched_sessions
+            .lock()
+            .expect("scripted launches")
+            .clone()
+    }
+
+    /// Whether each launched session was read-only, and the extra
+    /// environment it was handed, in order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn launched_postures(&self) -> Vec<LaunchPosture> {
+        self.launched_postures
+            .lock()
+            .expect("scripted launches")
+            .clone()
+    }
+
+    /// Write these files into the session's working directory at the start
+    /// of each turn, the way an engine that edits does.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_writes(mut self, writes: &[(&str, &str)]) -> Self {
+        self.writes = writes
+            .iter()
+            .map(|(path, contents)| ScriptedWrite {
+                path: (*path).to_owned(),
+                contents: (*contents).to_owned(),
+            })
+            .collect();
+        self
+    }
+
+    /// Sleep this long at the start of each turn, before the script plays.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_turn_delay(mut self, delay: Duration) -> Self {
+        self.turn_delay = delay;
+        self
+    }
+
+    /// Answer the read-only check with `reason`, the way Grok's adapter does
+    /// on a machine where its sandbox cannot apply.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_read_only_blocker(mut self, reason: &str) -> Self {
+        self.read_only_blocker = Some(reason.to_owned());
+        self
+    }
+
+    /// How many times the read-only check was asked.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn read_only_checks(&self) -> u64 {
+        self.read_only_checks.load(Ordering::SeqCst)
     }
 
     /// Fails every turn the way an engine does once it has lost the session
@@ -483,6 +553,11 @@ impl HarnessAdapter for ScriptedAdapter {
         self.kind
     }
 
+    async fn read_only_blocker(&self, _probe: &HarnessProbe) -> Option<String> {
+        self.read_only_checks.fetch_add(1, Ordering::SeqCst);
+        self.read_only_blocker.clone()
+    }
+
     async fn probe(&self, _host: &HostEnv) -> HarnessProbe {
         self.probes.fetch_add(1, Ordering::SeqCst);
         HarnessProbe {
@@ -553,6 +628,14 @@ impl HarnessAdapter for ScriptedAdapter {
             .lock()
             .expect("scripted launches")
             .push(spec.project_config);
+        self.launched_sessions
+            .lock()
+            .expect("scripted launches")
+            .push((spec.worktree.clone(), spec.permission_mode));
+        self.launched_postures
+            .lock()
+            .expect("scripted launches")
+            .push((spec.read_only, spec.extra_env.clone()));
         Ok(Box::new(ScriptedSession {
             sink: spec.sink,
             events: self.events.clone(),
@@ -1052,6 +1135,7 @@ mod tests {
             tool_bridge: None,
             apps: None,
             project_config: tidebreak_harness::ProjectConfig::Skip,
+            read_only: false,
         }
     }
 

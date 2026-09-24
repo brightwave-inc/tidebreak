@@ -1852,6 +1852,151 @@ harness_kind: HarnessKind, };
 export type CodeRestoreId = string;
 
 /**
+ * Why a review ended without findings.
+ */
+export type CodeReviewFailure = { kind: CodeReviewFailureKind,
+/**
+ * A sentence for the person, with the engine's own words when it gave
+ * any. Bounded.
+ */
+message: string, };
+
+/**
+ * Why a review could not finish, as a class a client picks its remedy by.
+ */
+export type CodeReviewFailureKind = "not_installed" | "signed_out" | "rate_limited" | "timed_out" | "failed";
+
+/**
+ * One problem the reviewer found, on lines of the new side of the diff.
+ */
+export type CodeReviewFinding = {
+/**
+ * The file, as the diff names it.
+ */
+path: string,
+/**
+ * First line, numbered in the file after the changes.
+ */
+start_line: number,
+/**
+ * Last line, the same as `start_line` for one line.
+ */
+end_line: number, severity: CodeReviewSeverity,
+/**
+ * One line, bounded.
+ */
+title: string,
+/**
+ * What is wrong and what to do about it. Bounded.
+ */
+explanation: string, };
+
+/**
+ * Identifies one read-only review of a workspace's changes by an engine
+ * that did not write them.
+ */
+export type CodeReviewId = string;
+
+/**
+ * `GET /code/workspaces/{id}/reviews`: the workspace's recent reviews,
+ * newest first.
+ */
+export type CodeReviewList = { reviews: Array<CodeReviewSnapshot>, };
+
+/**
+ * What the reviewer is doing, for the progress line.
+ */
+export type CodeReviewProgress = {
+/**
+ * Tool calls the reviewer made.
+ */
+tool_calls: number,
+/**
+ * Distinct files it opened.
+ */
+files_read: number,
+/**
+ * Requests to change something that Tidebreak refused.
+ */
+refused: number,
+/**
+ * The latest step, such as "Reading src/queue.ts". Absent before the
+ * reviewer starts.
+ */
+activity?: string, };
+
+/**
+ * What a completed review found.
+ */
+export type CodeReviewResult = {
+/**
+ * The reviewer's overall view, when it gave one. Bounded.
+ */
+summary?: string,
+/**
+ * Findings on lines the diff shows, ready to become line comments.
+ */
+findings: Array<CodeReviewFinding>,
+/**
+ * Valid findings on lines the diff does not show.
+ */
+unplaced: Array<CodeReviewFinding>,
+/**
+ * Entries in the answer that were not valid findings and were left out.
+ */
+rejected: number,
+/**
+ * The reviewer's answer as it wrote it, when it could not be read as
+ * findings. Bounded.
+ */
+raw_text?: string,
+/**
+ * The reviewed diff of each file a finding in `findings` is on, as git
+ * printed it, so a client anchors each finding to the lines it quotes.
+ * Bounded: past the bound, a file's findings move to `unplaced` and
+ * `omitted_diffs` counts the files.
+ */
+diff: string,
+/**
+ * How many files' diffs were left out of `diff` to keep the result
+ * small. Their findings are in `unplaced`. Absent when none were.
+ */
+omitted_diffs?: number, };
+
+/**
+ * How much a finding matters, as the reviewer judged it.
+ */
+export type CodeReviewSeverity = "high" | "medium" | "low";
+
+/**
+ * One review of a workspace's changes by another engine.
+ */
+export type CodeReviewSnapshot = { id: CodeReviewId, workspace_id: WorkspaceId,
+/**
+ * The conversation the review was started from.
+ */
+session_id: SessionId,
+/**
+ * The engine that reviews.
+ */
+harness: HarnessKind, model?: string,
+/**
+ * The turn whose changes are reviewed. Absent for the working tree
+ * against its base branch.
+ */
+turn_id?: TurnId,
+/**
+ * The permission mode the reviewer ran in: `plan`, or `ask` with every
+ * request refused for an engine that has no plan mode.
+ */
+permission_mode: PermissionMode, status: CodeReviewStatus, progress: CodeReviewProgress, started_at: string, finished_at?: string, failure?: CodeReviewFailure, result?: CodeReviewResult, };
+
+/**
+ * Where a review stands.
+ */
+export type CodeReviewStatus = "running" | "completed" | "failed" | "cancelled" | "timed_out";
+
+/**
  * Whether the request creates a child session or continues an existing one.
  */
 export type CodeSessionOperation = "create" | "continue";
@@ -2894,7 +3039,32 @@ status: CheckpointRestoreStatus,
 /**
  * Why a `failed` or `partial` restore stopped, bounded.
  */
-error?: string, } | { "type": "harness_notice",
+error?: string, } | { "type": "review_finished",
+/**
+ * Names the review.
+ */
+review_id: CodeReviewId,
+/**
+ * The engine that reviewed.
+ */
+harness: HarnessKind,
+/**
+ * The model it reviewed with, when one was chosen.
+ */
+model?: string,
+/**
+ * The turn whose changes it reviewed; absent for the working tree
+ * against its base branch.
+ */
+turn_id?: TurnId,
+/**
+ * How the review ended.
+ */
+outcome: ReviewOutcome,
+/**
+ * How many findings it returned. Zero unless it completed.
+ */
+findings: number, } | { "type": "harness_notice",
 /**
  * Severity.
  */
@@ -3484,7 +3654,14 @@ update_available: boolean,
  * (`claude auth login`). Absent for an engine with nothing to sign in
  * to. The Sign in action runs it with the pinned binary.
  */
-sign_in_command?: string, };
+sign_in_command?: string,
+/**
+ * Why this engine cannot review a workspace's changes read-only, when it
+ * cannot, in the person's terms: Grok CLI, which can't turn off network
+ * access, for one. Absent when nothing stands in the way. Review changes
+ * lists the engine but does not offer it.
+ */
+review_blocked?: string, };
 
 /**
  * Doctor report for every registered engine adapter.
@@ -5975,6 +6152,11 @@ path: string,
 hunk?: RevertHunk, };
 
 /**
+ * How a review by another engine ended.
+ */
+export type ReviewOutcome = "completed" | "failed" | "cancelled" | "timed_out";
+
+/**
  * Why a root appears in one conversation's exact ordered projection.
  */
 export type RootAttachmentOrigin = "project_default" | "conversation";
@@ -6504,6 +6686,37 @@ level: GrantLevel,
  * that chat or project is untitled.
  */
 level_title: string | null, action: RendererToolName, approval: ToolApprovalKind, scope: GrantScope, granted_at: string, };
+
+/**
+ * Body of `POST /code/workspaces/{id}/reviews`: ask another engine to review
+ * the workspace's changes, read-only.
+ */
+export type StartCodeReviewBody = {
+/**
+ * The conversation the review is started from. The review is recorded
+ * in its transcript when it ends.
+ */
+session_id: SessionId,
+/**
+ * The engine that reviews.
+ */
+harness: HarnessKind,
+/**
+ * The engine's model, when the person picked one. Absent for the
+ * engine's default.
+ */
+model?: string,
+/**
+ * The turn whose changes to review. Absent for the working tree against
+ * its base branch.
+ */
+turn_id?: TurnId,
+/**
+ * What the reviewer looks for, when the person changed it in Settings.
+ * Tidebreak adds the read-only rules, the diff, and the answer format
+ * around it.
+ */
+instructions?: string, };
 
 /**
  * The reader's last explicit per-chat choices — what an unspecified field of

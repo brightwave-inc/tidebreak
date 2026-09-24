@@ -1024,6 +1024,24 @@ pub struct SessionSpec {
     /// Whether the engine loads the configuration the repository carries for
     /// it. [`ProjectConfig::Skip`] until the user trusts the repository.
     pub project_config: ProjectConfig,
+    /// A read-only session: the engine only reads. On top of the permission
+    /// mode, each adapter takes away what the engine offers for writing
+    /// files, running commands, or reaching the network, so a person's own
+    /// allow rules, hooks, or MCP servers cannot hand them back:
+    ///
+    /// - Claude Code launches with only Read, Grep, and Glob (`--tools`),
+    ///   the writing, command, and web tools also denied by name, and the
+    ///   person's hooks off (`disableAllHooks` in `--settings`).
+    /// - opencode's session carries rules that deny every tool but reading,
+    ///   the person's own MCP servers' tools included. They come after the
+    ///   agent's and the user's rules and so win.
+    /// - Grok CLI refuses a read-only session: it can't turn off network
+    ///   access ([`HarnessAdapter::read_only_blocker`] says so first).
+    /// - Codex's Plan posture is already the read-only OS sandbox, which also
+    ///   keeps commands off the network; web search and each of the person's
+    ///   MCP servers are turned off too, and a Codex that cannot list its
+    ///   servers refuses the session.
+    pub read_only: bool,
 }
 
 /// Whether an engine loads the configuration a repository carries for it.
@@ -1124,6 +1142,15 @@ pub trait HarnessAdapter: Send + Sync {
     /// the record and the engine disagree.
     fn relaunch_composes_permission_mode(&self) -> bool {
         true
+    }
+
+    /// Why a read-only session ([`SessionSpec::read_only`]) cannot start,
+    /// when the engine cannot keep one read-only. `None` means nothing stands
+    /// in the way. A caller refuses the session rather than start it, and an
+    /// adapter that answers here also refuses such a launch itself.
+    async fn read_only_blocker(&self, probe: &HarnessProbe) -> Option<String> {
+        let _ = probe;
+        None
     }
 
     /// Spawn or connect for one session.

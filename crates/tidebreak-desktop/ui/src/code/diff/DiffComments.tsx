@@ -5,16 +5,22 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
-import { Pencil, Trash2 } from "lucide-react";
+import { Check, Pencil, Trash2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { usesCommandModifier } from "@/ShellShortcuts";
+import { HARNESS_ICONS } from "../HarnessPicker";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "../interactive";
-import { STATUS_CHIP } from "../statusTone";
-import type { ReviewComment, ReviewCommentLine } from "./reviewComments";
+import { HARNESS_LABELS } from "../labels";
+import { STATUS_CHIP, type StatusTone } from "../statusTone";
+import type {
+  ReviewComment,
+  ReviewCommentLine,
+  ReviewSeverity,
+} from "./reviewComments";
 
 const SUBMIT_CHORD =
   typeof navigator !== "undefined" && usesCommandModifier(navigator.userAgent)
@@ -134,6 +140,10 @@ export function CommentComposer({
  * One pending comment under the lines it is about. An outdated comment, whose
  * code changed after it was written, sits at the top of the file instead,
  * with its quote, so it still reads.
+ *
+ * A reviewer's finding names the engine that wrote it and how much it
+ * matters, and leads with its title. Until the person keeps it, it offers
+ * Keep and Dismiss and does not go with the next message.
  */
 export function CommentCard({
   comment,
@@ -143,6 +153,7 @@ export function CommentCard({
   outdated = false,
   onEdit,
   onDelete,
+  onKeep,
 }: {
   comment: ReviewComment;
   /** The lines it covers where it is shown, such as "Line 12". */
@@ -152,24 +163,64 @@ export function CommentCard({
   showQuote?: boolean;
   outdated?: boolean;
   onEdit?: () => void;
+  /** Delete a person's comment, or dismiss a reviewer's finding. */
   onDelete?: () => void;
+  /** Keep a reviewer's finding the person has not kept yet. */
+  onKeep?: () => void;
 }) {
   const headingId = useId();
+  const reviewerId = useId();
   const unquoted = comment.unquoted ?? 0;
+  const reviewer =
+    comment.author.kind === "reviewer" ? comment.author.engine : null;
+  const proposed = comment.proposed === true;
+  const noun = reviewer ? "finding" : "comment";
+  // "the changes", "line 12", or a file and its lines as the label names them.
+  const where = comment.general
+    ? comment.path
+      ? label
+      : "the changes"
+    : label.toLowerCase();
+  const ReviewerIcon = reviewer ? HARNESS_ICONS[reviewer] : null;
   return (
     <div className={COMMENT_FRAME} data-diff-comment="pending">
       <article
-        aria-labelledby={headingId}
+        aria-labelledby={reviewer ? `${reviewerId} ${headingId}` : headingId}
         aria-busy={sending || undefined}
+        data-comment-author={comment.author.kind}
         className="bg-background border-border flex flex-col gap-1 rounded-lg border px-2.5 py-2"
       >
-        <header className="flex min-w-0 items-center gap-2">
+        <header className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          {reviewer && ReviewerIcon && (
+            <span
+              id={reviewerId}
+              className="text-foreground flex shrink-0 items-center gap-1 text-xs font-medium"
+            >
+              <ReviewerIcon className="size-3.5 shrink-0" aria-hidden />
+              {HARNESS_LABELS[reviewer]}
+            </span>
+          )}
           <span
             id={headingId}
-            className="text-foreground min-w-0 truncate text-xs font-medium"
+            className={cn(
+              "min-w-0 truncate text-xs",
+              reviewer
+                ? "text-muted-foreground"
+                : "text-foreground font-medium",
+            )}
           >
             {label}
           </span>
+          {comment.severity && (
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-1.5 text-2xs leading-4 font-medium",
+                STATUS_CHIP[SEVERITY_TONE[comment.severity]],
+              )}
+            >
+              {SEVERITY_LABEL[comment.severity]}
+            </span>
+          )}
           {outdated && (
             <span
               className={cn(
@@ -180,21 +231,43 @@ export function CommentCard({
               Outdated
             </span>
           )}
+          {reviewer && comment.edited && (
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-1.5 text-2xs leading-4 font-medium",
+                STATUS_CHIP.neutral,
+              )}
+              title="You rewrote this finding, so it goes as your words"
+            >
+              Edited
+            </span>
+          )}
           <span className="text-muted-foreground flex min-w-0 items-center gap-1 truncate text-xs">
             {sending ? (
               <>
                 <Spinner className="size-3" aria-hidden />
                 Sending with your message…
               </>
+            ) : proposed ? (
+              "Goes with your next message once kept"
             ) : (
               "Goes with your next message"
             )}
           </span>
-          {!sending && (onEdit || onDelete) && (
+          {!sending && (onEdit || onDelete || (proposed && onKeep)) && (
             <span className="ml-auto flex shrink-0 items-center gap-0.5">
+              {proposed && onKeep && (
+                <CardAction
+                  label={`Keep the finding on ${where}`}
+                  onClick={onKeep}
+                >
+                  <Check className="size-3" aria-hidden />
+                  Keep
+                </CardAction>
+              )}
               {onEdit && (
                 <CardAction
-                  label={`Edit the comment on ${label.toLowerCase()}`}
+                  label={`Edit the ${noun} on ${where}`}
                   onClick={onEdit}
                 >
                   <Pencil className="size-3" aria-hidden />
@@ -203,21 +276,36 @@ export function CommentCard({
               )}
               {onDelete && (
                 <CardAction
-                  label={`Delete the comment on ${label.toLowerCase()}`}
+                  label={
+                    reviewer
+                      ? `Dismiss the finding on ${where}`
+                      : `Delete the comment on ${where}`
+                  }
                   onClick={onDelete}
                 >
-                  <Trash2 className="size-3" aria-hidden />
-                  Delete
+                  {reviewer ? (
+                    <X className="size-3" aria-hidden />
+                  ) : (
+                    <Trash2 className="size-3" aria-hidden />
+                  )}
+                  {reviewer ? "Dismiss" : "Delete"}
                 </CardAction>
               )}
             </span>
           )}
         </header>
-        {(showQuote || outdated) && <CommentQuote lines={comment.lines} />}
+        {(showQuote || outdated) && comment.lines.length > 0 && (
+          <CommentQuote lines={comment.lines} />
+        )}
         {unquoted > 0 && (
           <p className="text-muted-foreground text-xs">
             The agent sees the first {comment.lines.length} of{" "}
             {comment.lines.length + unquoted} lines quoted.
+          </p>
+        )}
+        {comment.title && (
+          <p className="text-foreground text-sm font-medium break-words">
+            {comment.title}
           </p>
         )}
         <p className="text-foreground text-sm break-words whitespace-pre-wrap">
@@ -227,6 +315,19 @@ export function CommentCard({
     </div>
   );
 }
+
+/** How a reviewer's severity is painted: a pill in the status tone. */
+const SEVERITY_TONE: Record<ReviewSeverity, StatusTone> = {
+  high: "critical",
+  medium: "warning",
+  low: "neutral",
+};
+
+export const SEVERITY_LABEL: Record<ReviewSeverity, string> = {
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+};
 
 function CardAction({
   label,

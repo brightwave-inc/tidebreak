@@ -94,6 +94,13 @@ export type DiffReview = {
   onAdd: (comment: NewDiffComment, body: string) => void;
   onEdit: (id: string, body: string) => void;
   onDelete: (id: string) => void;
+  /** Keep a reviewer's finding the person has not kept yet. */
+  onKeep?: (id: string) => void;
+  /**
+   * Dismiss a reviewer's finding. Absent, a finding is deleted like a
+   * person's comment.
+   */
+  onDismiss?: (id: string) => void;
   /**
    * Record where a comment's lines are now, or that they changed, so the
    * message that carries it names the lines as they are. Absent where the
@@ -1257,6 +1264,7 @@ function CommentSlot({
       />
     );
   }
+  const finding = comment.author.kind === "reviewer";
   return (
     <CommentCard
       comment={comment}
@@ -1265,7 +1273,12 @@ function CommentSlot({
       showQuote={away !== undefined}
       outdated={away === "outdated"}
       onEdit={() => interaction.startEdit(comment.id)}
-      onDelete={() => review.onDelete(comment.id)}
+      onDelete={() =>
+        finding && review.onDismiss
+          ? review.onDismiss(comment.id)
+          : review.onDelete(comment.id)
+      }
+      onKeep={review.onKeep ? () => review.onKeep?.(comment.id) : undefined}
     />
   );
 }

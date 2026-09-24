@@ -55,6 +55,7 @@ import {
   isCodexRevokedRefreshTokenError,
   CheckpointRestoreRow,
   FileIssueButton,
+  ReviewFinishedRow,
   TurnReviewCard,
 } from "./TurnReviewCard";
 
@@ -81,6 +82,7 @@ export function CodeTranscript({
   streamStalled = false,
   animateStreaming = true,
   onOpenTurnDiff,
+  onOpenWorkspaceDiff,
   onForkFromTurn,
   onRestoreBeforeTurn,
   onUndoRestore,
@@ -116,6 +118,8 @@ export function CodeTranscript({
   animateStreaming?: boolean;
   /** Scope the review sidebar to one turn's changes. */
   onOpenTurnDiff?: (turnId: string) => void;
+  /** Open the workspace diff against its base, where a review of it left findings. */
+  onOpenWorkspaceDiff?: () => void;
   /** Fork the conversation at the end of one turn, from its seam row. */
   onForkFromTurn?: (turnId: string) => void;
   /** Put the worktree back to before one turn, from its seam row. */
@@ -277,6 +281,7 @@ export function CodeTranscript({
                   onDecide={onDecide}
                   onOpenTurnDiff={onOpenTurnDiff}
                   onForkFromTurn={onForkFromTurn}
+                  onOpenWorkspaceDiff={onOpenWorkspaceDiff}
                   onRestoreBeforeTurn={onRestoreBeforeTurn}
                   onUndoRestore={onUndoRestore}
                   undoUnavailableReason={undoUnavailableReason}
@@ -642,6 +647,7 @@ const TranscriptItem = memo(function TranscriptItem({
   approvalError,
   onDecide,
   onOpenTurnDiff,
+  onOpenWorkspaceDiff,
   onForkFromTurn,
   onRestoreBeforeTurn,
   onUndoRestore,
@@ -666,6 +672,7 @@ const TranscriptItem = memo(function TranscriptItem({
     feedback?: string,
   ) => void;
   onOpenTurnDiff?: (turnId: string) => void;
+  onOpenWorkspaceDiff?: () => void;
   onForkFromTurn?: (turnId: string) => void;
   onRestoreBeforeTurn?: (turnId: string) => void;
   onUndoRestore?: (restoreId: string) => void;
@@ -787,6 +794,18 @@ const TranscriptItem = memo(function TranscriptItem({
           restore={item}
           onUndo={onUndoRestore}
           undoUnavailableReason={undoUnavailableReason}
+        />
+      );
+    case "review":
+      return (
+        <ReviewFinishedRow
+          review={item}
+          onOpenDiff={
+            onOpenTurnDiff || onOpenWorkspaceDiff
+              ? (turnId) =>
+                  turnId ? onOpenTurnDiff?.(turnId) : onOpenWorkspaceDiff?.()
+              : undefined
+          }
         />
       );
   }

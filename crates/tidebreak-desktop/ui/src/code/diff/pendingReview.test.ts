@@ -66,7 +66,7 @@ describe("pending review", () => {
         store.getState().byWorkspace["ws-1"]!,
         new Set(store.getState().sending["ws-1"]),
       ),
-    ).toEqual({ count: 1, files: 1, sending: 1 });
+    ).toEqual({ count: 1, files: 1, sending: 1, proposed: 0 });
 
     store.getState().finishSend("ws-1", claimed, true);
     expect(
@@ -215,5 +215,129 @@ describe("pending review", () => {
     expect(readStoredReview(storage)).toEqual({ "ws-1": [comment("c1")] });
     storage.setItem("tidebreak.code-pending-review.v1", "{not json");
     expect(readStoredReview(storage)).toEqual({});
+  });
+});
+
+function finding(id: string, reviewId = "rev-1"): ReviewComment {
+  return {
+    ...comment(id),
+    author: { kind: "reviewer", engine: "codex", model: "gpt-5.5", reviewId },
+    severity: "high",
+    title: `Finding ${id}`,
+    proposed: true,
+  };
+}
+
+describe("a reviewer's findings in the pending review", () => {
+  it("wait for the person: a send takes only what was kept", () => {
+    const store = createPendingReviewStore(memoryStorage());
+    store.getState().add("ws-1", comment("mine"));
+    store
+      .getState()
+      .addReviewFindings("ws-1", "rev-1", [finding("f1"), finding("f2")]);
+    expect(commentsReadyToSend("ws-1", store).map((item) => item.id)).toEqual([
+      "mine",
+    ]);
+    const pending = store.getState();
+    expect(reviewSummary(pending.byWorkspace["ws-1"] ?? [], new Set())).toEqual(
+      { count: 1, files: 1, sending: 0, proposed: 2 },
+    );
+
+    store.getState().keep("ws-1", "f1");
+    store.getState().edit("ws-1", "f2", "Reworded, so kept");
+    const claimed = store.getState().claim("ws-1");
+    expect(claimed.map((item) => item.id)).toEqual(["mine", "f1", "f2"]);
+    expect(claimed.every((item) => item.proposed === undefined)).toBe(true);
+    expect(claimed[1]?.author).toEqual({
+      kind: "reviewer",
+      engine: "codex",
+      model: "gpt-5.5",
+      reviewId: "rev-1",
+    });
+    // Kept as written, a finding is still the reviewer's; rewritten, its
+    // words are the person's, and it says so.
+    expect(claimed[1]?.edited).toBeUndefined();
+    expect(claimed[2]?.edited).toBe(true);
+    // A person's own comment is never marked as a rewritten finding.
+    store.getState().add("ws-2", comment("own"));
+    store.getState().edit("ws-2", "own", "Mine, reworded");
+    expect(store.getState().byWorkspace["ws-2"]?.[0]?.edited).toBeUndefined();
+  });
+
+  it("keeps or dismisses one review's waiting findings at once", () => {
+    const store = createPendingReviewStore(memoryStorage());
+    store
+      .getState()
+      .addReviewFindings("ws-1", "rev-1", [finding("a"), finding("b")]);
+    store
+      .getState()
+      .addReviewFindings("ws-1", "rev-2", [finding("c", "rev-2")]);
+    store.getState().keepAll("ws-1", "rev-1");
+    store.getState().dismissAll("ws-1", "rev-2");
+    expect(
+      store
+        .getState()
+        .byWorkspace["ws-1"]?.map((item) => [item.id, item.proposed ?? null]),
+    ).toEqual([
+      ["a", null],
+      ["b", null],
+    ]);
+    // Clearing the composer's comments leaves findings still waiting.
+    store
+      .getState()
+      .addReviewFindings("ws-1", "rev-3", [finding("d", "rev-3")]);
+    store.getState().clear("ws-1");
+    expect(
+      store.getState().byWorkspace["ws-1"]?.map((item) => item.id),
+    ).toEqual(["d"]);
+  });
+
+  it("adds a review once, so a dismissed finding stays dismissed after a reload", () => {
+    const storage = memoryStorage();
+    const before = createPendingReviewStore(storage);
+    before
+      .getState()
+      .addReviewFindings("ws-1", "rev-1", [finding("f1"), finding("f2")]);
+    before.getState().remove("ws-1", "f1");
+
+    const after = createPendingReviewStore(storage);
+    expect(after.getState().byWorkspace["ws-1"]).toEqual([finding("f2")]);
+    after
+      .getState()
+      .addReviewFindings("ws-1", "rev-1", [finding("f1"), finding("f2")]);
+    expect(
+      after.getState().byWorkspace["ws-1"]?.map((item) => item.id),
+    ).toEqual(["f2"]);
+  });
+
+  it("stores a comment on the whole change, and drops a malformed reviewer", () => {
+    const storage = memoryStorage();
+    const general: ReviewComment = {
+      ...finding("summary"),
+      path: "",
+      lines: [],
+      general: true,
+    };
+    storage.setItem(
+      "tidebreak.code-pending-review.v1",
+      JSON.stringify({
+        version: 1,
+        workspaces: {
+          "ws-1": [
+            general,
+            finding("f1"),
+            {
+              ...finding("bad-engine"),
+              author: { kind: "reviewer", engine: "gpt" },
+            },
+            { ...finding("bad-severity"), severity: "catastrophic" },
+            { ...comment("lineless"), lines: [] },
+          ],
+        },
+      }),
+    );
+    expect(readStoredReview(storage)).toEqual({
+      "ws-1": [general, finding("f1")],
+    });
   });
 });

@@ -18,6 +18,10 @@ export type WorkspaceDiffReview = {
   forPath: (path: string) => DiffReview;
   /** The files this diff's comments are on, by the names the diff uses. */
   paths: ReadonlySet<string>;
+  /** Comments on this diff's changes as a whole, such as a review summary. */
+  general: readonly ReviewComment[];
+  /** Which comments are riding a send right now. */
+  sending: ReadonlySet<string>;
 };
 
 /**
@@ -34,6 +38,7 @@ export function useWorkspaceDiffReview({
   workspaceId,
   turnId,
   onDelete,
+  onDismiss,
   relocate = true,
   renamed = NO_RENAMES,
   onWriting,
@@ -43,6 +48,8 @@ export function useWorkspaceDiffReview({
   turnId: string | undefined;
   /** Delete one comment; the host asks first. */
   onDelete: (id: string) => void;
+  /** Dismiss a reviewer's finding; the host may offer an undo. */
+  onDismiss?: (id: string) => void;
   /**
    * Record where comments' lines are now. Off while the diff is cut short,
    * where a line missing from it may only be past the cut.
@@ -60,6 +67,7 @@ export function useWorkspaceDiffReview({
     if (!workspaceId || renamed.size === 0) return;
     const moves = new Map<string, string[]>();
     for (const comment of comments) {
+      if (comment.general) continue;
       if ((comment.turnId ?? null) !== (turnId ?? null)) continue;
       const to = renamed.get(comment.path);
       if (to) moves.set(to, [...(moves.get(to) ?? []), comment.id]);
@@ -72,8 +80,13 @@ export function useWorkspaceDiffReview({
   return useMemo(() => {
     if (!workspaceId) return null;
     const byPath = new Map<string, ReviewComment[]>();
+    const general: ReviewComment[] = [];
     for (const comment of comments) {
       if ((comment.turnId ?? null) !== (turnId ?? null)) continue;
+      if (comment.general) {
+        general.push(comment);
+        continue;
+      }
       const path = renamed.get(comment.path) ?? comment.path;
       byPath.set(path, [...(byPath.get(path) ?? []), comment]);
     }
@@ -96,6 +109,8 @@ export function useWorkspaceDiffReview({
           }),
         onEdit: (id, body) => store.getState().edit(workspaceId, id, body),
         onDelete,
+        onKeep: (id) => store.getState().keep(workspaceId, id),
+        ...(onDismiss ? { onDismiss } : {}),
         ...(relocate
           ? {
               onRelocate: (id: string, change: CommentRelocation) =>
@@ -109,13 +124,14 @@ export function useWorkspaceDiffReview({
       reviews.set(path, review);
       return review;
     };
-    return { forPath, paths: new Set(byPath.keys()) };
+    return { forPath, paths: new Set(byPath.keys()), general, sending };
   }, [
     workspaceId,
     turnId,
     comments,
     sending,
     onDelete,
+    onDismiss,
     relocate,
     renamed,
     onWriting,

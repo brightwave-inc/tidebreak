@@ -20,6 +20,8 @@ import {
   parseCodeEvent,
   parseCodePrComments,
   parseCodePush,
+  parseCodeReview,
+  parseCodeReviewList,
   parseCodeSession,
   parseCodeSessionList,
   parseCodeSubscriptionUsage,
@@ -2210,6 +2212,7 @@ const CODE_FRAME_PARSERS: Record<string, (value: unknown) => unknown> = {
   harness_doctor: parseHarnessDoctorReport,
   workspace_files: parseCodeWorkspaceFiles,
   workspace_diff: parseCodeWorkspaceDiff,
+  code_review: parseCodeReview,
   checkpoint_restore_preview: parseCodeCheckpointRestorePreview,
   checkpoint_restore: parseCodeCheckpointRestoreResult,
   approval: parseCodeApproval,
@@ -2461,5 +2464,71 @@ describe("repository trust", () => {
     ]) {
       expect(parseCodeRepoTrust(broken)).toBeNull();
     }
+  });
+});
+
+describe("a review of the changes, as the server sends it", () => {
+  const completed = CODE_FRAMES.find(({ name }) => name === "code review")
+    ?.value as Record<string, unknown>;
+  const result = completed.result as Record<string, unknown>;
+  const finding = (result.findings as Record<string, unknown>[])[0]!;
+
+  it("reads a completed review and a failed one whole", () => {
+    expect(parseCodeReview(completed)).toEqual(completed);
+    const failed = CODE_FRAMES.find(
+      ({ name }) => name === "failed code review",
+    )?.value;
+    expect(parseCodeReview(failed)).toEqual(failed);
+    expect(parseCodeReviewList({ reviews: [completed, failed] })).toEqual({
+      reviews: [completed, failed],
+    });
+  });
+
+  it("refuses a finding that is not the shape the server promises", () => {
+    for (const broken of [
+      { ...finding, end_line: 0 },
+      { ...finding, start_line: 5, end_line: 4 },
+      { ...finding, start_line: "1" },
+      { ...finding, severity: "catastrophic" },
+      { ...finding, title: "" },
+      { ...finding, title: "two\nlines" },
+      { ...finding, path: "" },
+      { ...finding, extra: true },
+    ]) {
+      expect(
+        parseCodeReview({
+          ...completed,
+          result: { ...result, findings: [broken] },
+        }),
+        JSON.stringify(broken),
+      ).toBeNull();
+    }
+  });
+
+  it("refuses a review with an unknown status, engine, or failure", () => {
+    expect(parseCodeReview({ ...completed, status: "paused" })).toBeNull();
+    expect(parseCodeReview({ ...completed, harness: "gpt" })).toBeNull();
+    expect(
+      parseCodeReview({
+        ...completed,
+        failure: { kind: "gremlins", message: "no" },
+      }),
+    ).toBeNull();
+    expect(
+      parseCodeReviewList({ reviews: [completed, { id: "x" }] }),
+    ).toBeNull();
+  });
+
+  it("reads the transcript's record of a review", () => {
+    const record = {
+      type: "review_finished",
+      review_id: "rev-1",
+      harness: "grok",
+      outcome: "timed_out",
+      findings: 0,
+    };
+    expect(parseCodeEvent(record)).toEqual(record);
+    expect(parseCodeEvent({ ...record, outcome: "exploded" })).toBeNull();
+    expect(parseCodeEvent({ ...record, findings: -1 })).toBeNull();
   });
 });

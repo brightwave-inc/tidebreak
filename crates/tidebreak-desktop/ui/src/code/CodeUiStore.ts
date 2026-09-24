@@ -461,6 +461,15 @@ export type CodeUiStore = {
     shortcut: WorkflowShortcut,
   ) => void;
   takeWorkflowShortcut: (workspaceId: string) => WorkflowShortcut | null;
+  /**
+   * A Review changes action raised outside the diff, such as from the
+   * workflow menu: the workspace page opens the diff, and the diff's review
+   * form takes the request and opens. Scoped to the workspace it was raised
+   * on, like a workflow shortcut.
+   */
+  reviewFormPending: string | null;
+  requestReviewForm: (workspaceId: string) => void;
+  takeReviewForm: (workspaceId: string) => boolean;
   /** The archive chord, taken by the workspace page that owns the command. */
   archivePending: boolean;
   requestArchiveWorkspace: () => void;
@@ -594,6 +603,13 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     if (pending === null || pending.workspaceId !== workspaceId) return null;
     set({ workflowShortcutPending: null });
     return pending.shortcut;
+  },
+  reviewFormPending: null,
+  requestReviewForm: (workspaceId) => set({ reviewFormPending: workspaceId }),
+  takeReviewForm: (workspaceId) => {
+    if (get().reviewFormPending !== workspaceId) return false;
+    set({ reviewFormPending: null });
+    return true;
   },
   archivePending: false,
   requestArchiveWorkspace: () => set({ archivePending: true }),
@@ -751,6 +767,7 @@ export function resetCodeUiHostState(): void {
     newTabMenuPending: false,
     filesSearchPending: false,
     workflowShortcutPending: null,
+    reviewFormPending: null,
     archivePending: false,
     archiveSelectionPending: false,
     workflowSuggestion: null,

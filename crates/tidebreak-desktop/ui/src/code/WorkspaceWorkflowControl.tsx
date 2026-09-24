@@ -72,6 +72,7 @@ export function WorkspaceWorkflowControl({
   onArchive,
   onOpenPr,
   onOpenWatchTask,
+  onReviewChanges,
   allowWatch = true,
 }: {
   client: Pick<
@@ -95,6 +96,11 @@ export function WorkspaceWorkflowControl({
   onOpenPr?: () => void;
   /** Open the watch task's transcript; the segment is a link to the fork. */
   onOpenWatchTask?: () => void;
+  /**
+   * Ask another engine to review the changes, read-only. The diff opens with
+   * the review form; nothing runs until the reader starts it.
+   */
+  onReviewChanges?: () => void;
   allowWatch?: boolean;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -681,7 +687,7 @@ export function WorkspaceWorkflowControl({
             {attachingLogs ? "Reading logs…" : primaryLabel}
           </Button>
         ) : null}
-        {secondaryActions.length > 0 && (
+        {(secondaryActions.length > 0 || onReviewChanges) && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -715,6 +721,13 @@ export function WorkspaceWorkflowControl({
                   {workspaceWorkflowActionLabel(action, model.stage)}
                 </DropdownMenuItem>
               ))}
+              {onReviewChanges && (
+                // A review reads the changes and runs beside the agent, so
+                // it stays offered while a turn or a watch runs.
+                <DropdownMenuItem onSelect={onReviewChanges}>
+                  Review changes
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}

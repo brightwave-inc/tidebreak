@@ -1221,6 +1221,18 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::get_workspace_diff),
         )
         .route(
+            "/code/workspaces/{id}/reviews",
+            get(routes::code::list_reviews).post(routes::code::start_review),
+        )
+        .route(
+            "/code/workspaces/{id}/reviews/{review_id}",
+            get(routes::code::get_review),
+        )
+        .route(
+            "/code/workspaces/{id}/reviews/{review_id}/cancel",
+            post(routes::code::cancel_review),
+        )
+        .route(
             "/code/workspaces/{id}/checkpoints/restore",
             get(routes::code::preview_checkpoint_restore).post(routes::code::restore_checkpoint),
         )

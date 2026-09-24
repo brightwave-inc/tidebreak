@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { ChevronRight, FileCode2, Undo2 } from "lucide-react";
+import { toast } from "sonner";
 
 import type { ApiClient } from "../api/client";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -14,11 +15,17 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { changedFileOrder } from "./DiffOverview";
+import { CommentCard, CommentComposer } from "./diff/DiffComments";
 import { diffFileKey, stepDiffFile } from "./diff/diffKeys";
 import { useDiffPreferences } from "./diff/diffPreferences";
 import { DiffView, type HunkAction } from "./diff/DiffView";
 import { DiffViewOptions } from "./diff/DiffViewOptions";
 import { usePendingReviewStore } from "./diff/pendingReview";
+import {
+  commentLinesLabel,
+  spansOf,
+  type ReviewComment,
+} from "./diff/reviewComments";
 import {
   useWorkspaceDiffReview,
   type WorkspaceDiffReview,
@@ -26,6 +33,11 @@ import {
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
 import { OpenInEditorButton } from "./OpenInEditorButton";
+import {
+  DiffReviewStatus,
+  ReviewChangesControl,
+  type DiffReviewerContext,
+} from "./review/ReviewChanges";
 import { DiffstatBadge } from "./TurnReviewCard";
 import { useLiveResource } from "./useLiveContent";
 import { HEADER_CAPTION, WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
@@ -82,6 +94,7 @@ export function DiffPanel({
   onStepFile,
   revert,
   comments = true,
+  reviewer,
 }: {
   client: DiffPanelClient;
   workspaceId: string;
@@ -102,6 +115,12 @@ export function DiffPanel({
   revert?: DiffRevertActions;
   /** Take line comments. Off where nobody here can send them to an agent. */
   comments?: boolean;
+  /**
+   * Offer Review changes: another engine reviews the changes, read-only,
+   * and its findings land here as comments. Absent where no conversation
+   * could take them.
+   */
+  reviewer?: DiffReviewerContext;
 }) {
   const load = useCallback(
     () => client.getCodeWorkspaceDiff(workspaceId, { turn: turnId, file }),
@@ -145,6 +164,26 @@ export function DiffPanel({
     (id: string) => void deleteComment(id),
     [deleteComment],
   );
+  // A reviewer's finding goes without asking: its text is the reviewer's,
+  // not the reader's, and the toast puts it back.
+  const onDismissFinding = useCallback(
+    (id: string) => {
+      const store = usePendingReviewStore.getState();
+      const finding = store.byWorkspace[workspaceId]?.find(
+        (comment) => comment.id === id,
+      );
+      if (!finding) return;
+      store.remove(workspaceId, id);
+      toast("Finding dismissed", {
+        action: {
+          label: "Undo",
+          onClick: () =>
+            usePendingReviewStore.getState().restore(workspaceId, [finding]),
+        },
+      });
+    },
+    [workspaceId],
+  );
   // A diff cut at its size cap cannot tell a line past the cut, or a file,
   // from one that changed, so it leaves the comments' places as they were.
   const whole = Boolean(payload && !payload.truncated);
@@ -173,6 +212,7 @@ export function DiffPanel({
     workspaceId: comments ? workspaceId : undefined,
     turnId,
     onDelete: onDeleteComment,
+    onDismiss: onDismissFinding,
     relocate: whole,
     renamed,
     onWriting,
@@ -275,6 +315,18 @@ export function DiffPanel({
             ignoreWhitespace={ignoreWhitespace}
             onIgnoreWhitespaceChange={setIgnoreWhitespace}
           />
+          {reviewer && !file && (
+            <ReviewChangesControl
+              workspaceId={workspaceId}
+              reviewer={reviewer}
+              turn={
+                turnId
+                  ? { id: turnId, label: turnLabel ?? "This turn" }
+                  : undefined
+              }
+              takesRequests
+            />
+          )}
           {file && reverts && groups.length > 0 && (
             <RevertFileButton
               group={groups[0]}
@@ -305,6 +357,13 @@ export function DiffPanel({
           </span>
         </div>
       </header>
+      {reviewer && !file && (
+        <DiffReviewStatus
+          workspaceId={workspaceId}
+          reviewer={reviewer}
+          turnLabel={turnLabel}
+        />
+      )}
       {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
       {payload?.truncated && (
         <p className="text-muted-foreground border-b px-3 py-2 text-xs">
@@ -329,6 +388,15 @@ export function DiffPanel({
           <p className="text-muted-foreground px-3 py-6 text-sm">
             {emptyDiffText(file, turnId, turnLabel)}
           </p>
+        )}
+        {!file && review && review.general.length > 0 && (
+          <WholeChangeComments
+            workspaceId={workspaceId}
+            comments={review.general}
+            sending={review.sending}
+            onDelete={onDeleteComment}
+            onDismiss={onDismissFinding}
+          />
         )}
         {/*
           A file that leaves the diff keeps its place in this list, under the
@@ -522,6 +590,83 @@ function emptyDiffText(
   if (file) return "No changes in this file.";
   if (turnId) return `${turnLabel ?? "This turn"} changed no files.`;
   return "The worktree matches its base branch.";
+}
+
+/**
+ * Comments on the changes as a whole, above the files: a reviewer's answer
+ * that could not be read as findings, or its findings on lines the diff
+ * does not show. They go with the next message like any comment once kept.
+ */
+function WholeChangeComments({
+  workspaceId,
+  comments,
+  sending,
+  onDelete,
+  onDismiss,
+}: {
+  workspaceId: string;
+  comments: readonly ReviewComment[];
+  sending: ReadonlySet<string>;
+  onDelete: (id: string) => void;
+  onDismiss: (id: string) => void;
+}) {
+  const [editing, setEditing] = useState<string | null>(null);
+  return (
+    <section
+      aria-label="Comments on the changes as a whole"
+      className="border-border-subtle flex flex-col gap-1 border-b py-1"
+      data-diff-whole-change=""
+    >
+      {comments.map((comment) =>
+        editing === comment.id ? (
+          <CommentComposer
+            key={comment.id}
+            label={wholeChangeLabel(comment)}
+            initial={comment.body}
+            submitLabel="Save"
+            onSubmit={(body) => {
+              usePendingReviewStore
+                .getState()
+                .edit(workspaceId, comment.id, body);
+              setEditing(null);
+            }}
+            onCancel={() => setEditing(null)}
+          />
+        ) : (
+          <CommentCard
+            key={comment.id}
+            comment={comment}
+            label={wholeChangeLabel(comment)}
+            sending={sending.has(comment.id)}
+            onEdit={() => setEditing(comment.id)}
+            onDelete={() =>
+              comment.author.kind === "reviewer"
+                ? onDismiss(comment.id)
+                : onDelete(comment.id)
+            }
+            onKeep={() =>
+              usePendingReviewStore.getState().keep(workspaceId, comment.id)
+            }
+          />
+        ),
+      )}
+    </section>
+  );
+}
+
+/** How a comment on no lines names where it sits. */
+const WHOLE_CHANGE = "The changes as a whole";
+
+/**
+ * Where a comment that quotes no lines sits: the changes as a whole, or a
+ * file's lines the diff does not show, such as "src/queue.ts, lines 90–92".
+ */
+function wholeChangeLabel(comment: ReviewComment): string {
+  if (!comment.path) return WHOLE_CHANGE;
+  const spans = spansOf(comment);
+  return spans.lines || spans.oldLines
+    ? `${comment.path}, ${commentLinesLabel(spans).toLowerCase()}`
+    : comment.path;
 }
 
 function FileDiffSection({

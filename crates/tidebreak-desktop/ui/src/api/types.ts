@@ -229,6 +229,16 @@ import {
   type CodeCheckpointRestorePreview as WireCodeCheckpointRestorePreview,
   type CodeCheckpointRestoreResult as WireCodeCheckpointRestoreResult,
   type CodeWorktreeChange as WireCodeWorktreeChange,
+  type CodeReviewFailure as WireCodeReviewFailure,
+  type CodeReviewFailureKind as WireCodeReviewFailureKind,
+  type CodeReviewFinding as WireCodeReviewFinding,
+  type CodeReviewProgress as WireCodeReviewProgress,
+  type CodeReviewResult as WireCodeReviewResult,
+  type CodeReviewSeverity as WireCodeReviewSeverity,
+  type CodeReviewSnapshot as WireCodeReviewSnapshot,
+  type CodeReviewStatus as WireCodeReviewStatus,
+  type ReviewOutcome as WireReviewOutcome,
+  type StartCodeReviewBody as WireStartCodeReviewBody,
   type RevertWorkspaceChangeBody as WireRevertWorkspaceChangeBody,
   type SessionDigest as WireCodeSessionDigest,
   type UpdateNotice as WireCodeUpdateNotice,
@@ -1461,6 +1471,19 @@ export type CodeCheckpointRestoreResult = WireCodeCheckpointRestoreResult;
 export type CodeWorktreeChange = WireCodeWorktreeChange;
 /** Body of POST /code/workspaces/{id}/revert. */
 export type RevertCodeWorkspaceChangeBody = WireRevertWorkspaceChangeBody;
+/** Body of POST /code/workspaces/{id}/reviews: another engine reviews the changes. */
+export type StartCodeReviewBody = WireStartCodeReviewBody;
+/** One review of a workspace's changes by another engine. */
+export type CodeReviewSnapshot = WireCodeReviewSnapshot;
+export type CodeReviewStatus = WireCodeReviewStatus;
+export type CodeReviewProgress = WireCodeReviewProgress;
+export type CodeReviewFailure = WireCodeReviewFailure;
+export type CodeReviewFailureKind = WireCodeReviewFailureKind;
+export type CodeReviewResult = WireCodeReviewResult;
+export type CodeReviewFinding = WireCodeReviewFinding;
+export type CodeReviewSeverity = WireCodeReviewSeverity;
+/** How a review ended, as the transcript records it. */
+export type ReviewOutcome = WireReviewOutcome;
 export type CodeActionSnapshot = WireCodeActionSnapshot;
 export type PullRequestDigest = WirePullRequestDigest;
 export type PullRequestCheck = WirePullRequestCheck;

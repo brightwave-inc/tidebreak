@@ -533,6 +533,7 @@ bounded):
 | `TurnInterrupted` | usage up to the interruption, when the engine reports it |
 | `CheckpointRecorded` | turn id, diffstat |
 | `CheckpointRestored` | restore id, target (before a turn, or before an earlier restore), diffstat, the actor when it was not the owner, and a status: `started` before any file moves, then `completed`, `failed` (nothing changed), or `partial` (its Undo puts back what it replaced), with the reason for the last two. Journaled by the restore route, never by an engine |
+| `ReviewFinished` | review id, the reviewing engine and model, the turn reviewed (absent for the working tree), the outcome (`completed`, `failed`, `cancelled`, `timed_out`), and how many findings. Journaled by the review runner in the conversation the review was started from, never by an engine |
 | `HarnessNotice` | level, message — the visible-degradation channel |
 | `CredentialRefused` | provider and refusal message |
 
@@ -614,6 +615,9 @@ GET/POST        /code/workspaces/{id}/checkpoints/restore   ?turn= | ?restore= p
                                                      {target, expected_tree?} restore
 POST            /code/workspaces/{id}/revert         {path, turn_id?, hunk?}  undo a file or a hunk
 POST            /code/workspaces/{id}/discard        {paths, expected_tree?}  back to the last commit
+GET/POST        /code/workspaces/{id}/reviews        list, newest first, only the newest with its result; {session_id, harness, model?, turn_id?, instructions?} starts a read-only review
+GET             /code/workspaces/{id}/reviews/{review_id}   progress, then findings or why it failed
+POST            /code/workspaces/{id}/reviews/{review_id}/cancel
 GET             /code/workspaces/{id}/tree | /search | /blob   the file viewer; /blob carries a hash
 PUT             /code/workspaces/{id}/file           {path, content, base_hash}  save one text file
 POST            /code/workspaces/{id}/git/commit | /git/push | /git/pr   commit takes {message?, expected_tree?}
@@ -801,9 +805,76 @@ turn, unless the reader adds them to that message. A queued message that
 carries comments shows them as a count in the queue tray; its edit box
 edits only the text, and deleting it puts the comments back in the review.
 
-Each comment records who wrote it. Today that is always the person; a
-second engine's review pass can later fill the same pending review with its
-own findings.
+Each comment records who wrote it: the person, or an engine that reviewed
+the changes.
+
+### Review changes
+
+Review changes, in the diff's header and the workflow actions, asks another
+engine to review the workspace's changes, or one turn's, read-only
+(`code/review/`, server `code/review/`). The form starts on an engine that
+did not write the changes, shows the model, and runs nothing until Start
+review. The review reviews the changes as they are when it starts; later
+edits are not part of it.
+
+A review is one hidden turn of an engine session Tidebreak starts and
+discards. It has no session row and never takes the workspace's turn lock,
+so the agents in the workspace keep working while it runs. It stops after
+20 minutes, and a stop takes a few seconds while the engine winds down.
+Reviews live in memory: after a restart the server no longer knows one that
+was running, and the desktop says it stopped.
+
+Read-only holds in layers:
+
+- The engine loses its tools for writing files, running commands, and
+  reaching the network, whatever the person's own rules, hooks, or MCP
+  servers allow. Claude Code runs in plan mode with only Read, Grep, and
+  Glob (`--tools`), with Bash, Edit, Write, NotebookEdit, WebFetch, and
+  WebSearch also denied by name, no MCP servers, and the person's hooks off
+  (`disableAllHooks`); the rest of the person's settings, such as the env a
+  gateway endpoint needs, still apply. Codex runs in its read-only OS
+  sandbox, which also keeps commands off the network, with web search off
+  and each MCP server in the person's Codex config turned off by name; a
+  Codex that cannot list its servers is refused. opencode runs its plan
+  agent with session rules that deny every tool but reading, the person's
+  own MCP servers' tools and `webfetch` included, since opencode has no
+  switch that keeps a configured MCP server from loading. Grok CLI is
+  listed but not offered: it can't turn off network access. Its `read-only`
+  sandbox profile does not keep a command the person's own Grok rules allow
+  off the network on macOS, the MCP servers in its own config still load,
+  and its web search can't be turned off for `grok agent`. An engine with
+  neither a plan mode nor approvals Tidebreak can refuse is not offered
+  either.
+- Every approval the engine asks for is refused, with feedback to report the
+  change as a finding instead. The reviewer gets no connected apps, browser,
+  computer use, SSH agent, or forge credentials, and the repository's own
+  engine config stays unloaded.
+- The reviewer works in a disposable copy under the data folder, never in the
+  worktree: its own git repository with the reviewed files, uncommitted
+  changes included, and `HEAD` at the state before them. Links are copied as
+  plain files holding their target, so a write never follows one out. The
+  copy's git has no credential helper, hooks, or transport, and the
+  reviewer's git reads an empty global config and never prompts. A review
+  copies every file in the tree, including files a sparse checkout leaves
+  out, and a workspace over 200,000 files or 1 GB is refused before anything
+  runs.
+
+What a reviewer can read: whatever the person's account can read, as the
+coding engines can, with one exception. opencode's reviewer reads only its
+copy, since its rules deny reading outside the working directory. Claude
+Code confines reads to the working directory only in `--restricted` mode,
+which also drops the person's settings, so reviews do not use it. Codex's
+read-only sandbox allows reads everywhere. What leaves the machine: only
+what the engine sends its own model provider.
+
+The reviewer answers with findings in JSON, read strictly. A finding on lines
+the diff shows becomes a proposed comment by the reviewer, anchored like a
+person's; one on other lines becomes a comment above the files naming its
+file and lines. Nothing goes with a message until the person keeps or edits
+it. A kept finding reaches the agent as a note from the named engine to
+check against the code, not as the person's words or an instruction; one the
+person rewrote is theirs. A result carries at most 1 MiB of diff, and the
+review list carries only the newest review's result.
 
 ## Editing files
 

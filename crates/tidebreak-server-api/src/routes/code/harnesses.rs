@@ -277,6 +277,7 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
         Some(async move {
             let probe = code.probe(adapter.as_ref()).await;
             let caps = adapter.capabilities(&probe);
+            let review_blocked = code.review_blocker(adapter.as_ref(), &probe).await;
             let unrecognized_event_count = sessions
                 .iter()
                 .filter(|session| session.harness_kind == *kind)
@@ -341,6 +342,7 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
                 } else {
                     tidebreak_harness::sign_in_command(*kind)
                 },
+                review_blocked,
             }
         })
     }))

@@ -395,7 +395,20 @@ impl HarnessAdapter for GrokAdapter {
         )
     }
 
+    /// Grok has no read-only session to offer yet. Its `read-only` sandbox
+    /// profile keeps a command from writing, but not from reaching the
+    /// network on macOS, and `grok agent` can turn off neither its web
+    /// search nor the MCP servers in its own config. So a command the
+    /// person's own Grok rules allow, or one of their MCP tools, could send
+    /// what the session read anywhere.
+    async fn read_only_blocker(&self, _probe: &HarnessProbe) -> Option<String> {
+        Some(READ_ONLY_UNAVAILABLE.to_owned())
+    }
+
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
+        if spec.read_only {
+            return Err(HarnessError::Other(READ_ONLY_UNAVAILABLE.to_owned()));
+        }
         let Some(binary) = spec.binary.as_deref().filter(|path| path.is_absolute()) else {
             return Err(HarnessError::NotFound);
         };
@@ -406,6 +419,10 @@ impl HarnessAdapter for GrokAdapter {
         Ok(Box::new(GrokSession::new(spec, version)))
     }
 }
+
+/// Why Grok cannot run a read-only session ([`SessionSpec::read_only`]).
+pub const READ_ONLY_UNAVAILABLE: &str =
+    "Grok CLI can't review read-only yet: it can't turn off network access.";
 
 /// `grok models` — "You are logged in…" vs "You are not authenticated."
 /// Never reads tokens.
@@ -456,6 +473,61 @@ mod tests {
     use crate::HarnessEvent;
     use std::path::{Path, PathBuf};
     use tidebreak_core::PermissionMode;
+
+    struct Discard;
+
+    #[async_trait]
+    impl crate::HarnessEventSink for Discard {
+        async fn emit(&self, _event: HarnessEvent) {}
+    }
+
+    /// Grok cannot review: it can't turn off network access, so it has no
+    /// read-only session to offer. Asked, it says why; launched read-only
+    /// anyway, it refuses before starting anything.
+    #[tokio::test]
+    async fn grok_has_no_read_only_session_and_says_why() {
+        let probe = HarnessProbe {
+            found: true,
+            binary_path: Some(PathBuf::from("/usr/bin/grok")),
+            version: Some("1.0.40".into()),
+            authenticated: Some(true),
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: Vec::new(),
+            reported_efforts: None,
+        };
+        assert_eq!(
+            GrokAdapter.read_only_blocker(&probe).await.as_deref(),
+            Some("Grok CLI can't review read-only yet: it can't turn off network access.")
+        );
+        let spec = SessionSpec {
+            owner: tidebreak_core::OwnerId::local(),
+            session_id: tidebreak_core::SessionId::new(),
+            worktree: PathBuf::from("/workspace"),
+            allowed_read_roots: Vec::new(),
+            permission_mode: PermissionMode::Ask,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            resume_ref: None,
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            relay_key_env: None,
+            env: Vec::new(),
+            approval: None,
+            // A binary that would fail if anything tried to run it.
+            binary: Some(PathBuf::from("/nonexistent/grok")),
+            sink: std::sync::Arc::new(Discard),
+            browser: None,
+            native: None,
+            tool_bridge: None,
+            apps: None,
+            project_config: crate::ProjectConfig::Skip,
+            read_only: true,
+        };
+        let refused = GrokAdapter.launch(spec).await.err().expect("refused");
+        assert_eq!(refused.to_string(), READ_ONLY_UNAVAILABLE);
+    }
 
     #[test]
     fn image_read_fixture_keeps_pixels_out_of_the_journal_preview() {

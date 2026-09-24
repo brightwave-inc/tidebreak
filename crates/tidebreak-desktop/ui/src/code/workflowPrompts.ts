@@ -20,6 +20,7 @@ export const WORKFLOW_PROMPT_IDS = [
   "address_feedback",
   "update_branch",
   "resolve_conflicts",
+  "review_changes",
 ] as const;
 
 export type WorkflowPromptId = (typeof WORKFLOW_PROMPT_IDS)[number];
@@ -77,6 +78,11 @@ export const DEFAULT_WORKFLOW_PROMPTS: Record<WorkflowPromptId, string> = {
     "validation, commit if needed, and push the updated head. Do not merge the",
     "pull request.",
   ].join(" "),
+  // What another engine looks for when it reviews the changes. The server
+  // ships the same words as its default and adds the read-only rules, the
+  // diff, and the answer format around them.
+  review_changes:
+    "Find real problems in these changes: bugs, wrong logic, unhandled errors and edge cases, security issues, and code that does not do what it claims. Skip style a formatter or linter would catch, and do not praise the code.",
 };
 
 /** Uncustomized Fix checks wording when job logs are already on disk. */
@@ -146,6 +152,11 @@ export const WORKFLOW_PROMPT_FIELDS: readonly {
     id: "resolve_conflicts",
     label: "Resolve conflicts",
     hint: "{pr} is the pull request number. {base} is the base branch.",
+  },
+  {
+    id: "review_changes",
+    label: "Review changes",
+    hint: "What another engine looks for when it reviews the changes, read-only. Tidebreak adds the rules, the diff, and the answer format.",
   },
 ];
 

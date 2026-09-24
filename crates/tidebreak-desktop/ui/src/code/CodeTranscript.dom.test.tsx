@@ -1519,3 +1519,41 @@ it("keeps an answer failure visible after the request finishes", async () => {
     undefined,
   );
 });
+
+it("records a review compactly and opens the diff its findings are in", async () => {
+  const onOpenWorkspaceDiff = vi.fn();
+  const onOpenTurnDiff = vi.fn();
+  const review = (
+    turnId: string | null,
+    findings: number,
+  ): CodeTranscriptItem => ({
+    kind: "review",
+    id: `review:${turnId ?? "tree"}`,
+    reviewId: `rev-${turnId ?? "tree"}`,
+    harness: "codex",
+    model: "gpt-5.5",
+    turnId,
+    turnOrdinal: turnId ? 2 : null,
+    outcome: "completed",
+    findings,
+  });
+  render(
+    <CodeTranscript
+      items={[review(null, 3), review("t2", 1)]}
+      onOpenTurnDiff={onOpenTurnDiff}
+      onOpenWorkspaceDiff={onOpenWorkspaceDiff}
+    />,
+  );
+  const tree = screen.getByRole("group", {
+    name: "Codex CLI reviewed the working tree: 3 findings",
+  });
+  expect(within(tree).getByText("gpt-5.5")).toBeInTheDocument();
+  const user = userEvent.setup();
+  await user.click(within(tree).getByRole("button", { name: "Show in diff" }));
+  expect(onOpenWorkspaceDiff).toHaveBeenCalledTimes(1);
+  const turn = screen.getByRole("group", {
+    name: "Codex CLI reviewed turn 2: 1 finding",
+  });
+  await user.click(within(turn).getByRole("button", { name: "Show in diff" }));
+  expect(onOpenTurnDiff).toHaveBeenCalledWith("t2");
+});

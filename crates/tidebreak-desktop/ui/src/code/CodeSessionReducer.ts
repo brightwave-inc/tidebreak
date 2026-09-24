@@ -14,7 +14,9 @@ import type {
   CodeUsage,
   Diffstat,
   FileChangeKind,
+  HarnessKind,
   HarnessNoticeLevel,
+  ReviewOutcome,
   SequencedCodeEventFrame,
   ToolDetail,
   ToolOutcome,
@@ -173,6 +175,23 @@ export type CodeTranscriptItem =
       status: CheckpointRestoreStatus;
       /** Why a failed or partial restore stopped. */
       error: string | null;
+    }
+  | {
+      /**
+       * Another engine reviewed the workspace's changes, read-only, and the
+       * review ended. Its findings are comments on the diff, not rows here.
+       */
+      kind: "review";
+      id: string;
+      reviewId: string;
+      harness: HarnessKind;
+      model: string | null;
+      /** The turn it reviewed; null for the working tree. */
+      turnId: string | null;
+      /** That turn's ordinal, when the transcript knows it. */
+      turnOrdinal: number | null;
+      outcome: ReviewOutcome;
+      findings: number;
     };
 
 export type CodeSessionState = {
@@ -1292,6 +1311,36 @@ export function reduceCodeSessionEvent(
           ...state,
           items: insertBackgroundItem(state, framed, row),
           contentRevision: state.contentRevision + 1,
+        },
+        effects,
+      };
+    }
+
+    case "review_finished": {
+      // A review runs beside the conversation, never in a turn, so its row
+      // lands where the engine's own between-turn activity does. One row
+      // per review; a replayed frame changes nothing.
+      const id = `review:${event.review_id}`;
+      if (state.items.some((item) => item.id === id)) {
+        return { state, effects };
+      }
+      const row = {
+        kind: "review" as const,
+        id,
+        reviewId: event.review_id,
+        harness: event.harness,
+        model: event.model ?? null,
+        turnId: event.turn_id ?? null,
+        turnOrdinal: event.turn_id
+          ? (state.turnOrdinals.get(event.turn_id) ?? null)
+          : null,
+        outcome: event.outcome,
+        findings: event.findings,
+      };
+      return {
+        state: {
+          ...state,
+          items: insertBackgroundItem(state, framed, row),
         },
         effects,
       };

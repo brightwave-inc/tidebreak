@@ -103,12 +103,12 @@ pub use crate::code::types::{
     ApprovalSnapshot, CodeActionSnapshot, CodeCheckpointRestorePreview,
     CodeCheckpointRestoreResult, CodeCommitSnapshot, CodeFileChange, CodeProjectConfigEffect,
     CodeProjectConfigEffectKind, CodeProjectConfigFile, CodePushSnapshot, CodeRepoSnapshot,
-    CodeRepoTrust, CodeRepoTrustSnapshot, CodeRestoreAffectedTurn, CodeWatchSnapshot,
-    CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspaceGitState, CodeWorkspacePrSnapshot,
-    CodeWorkspaceSnapshot, HarnessAuthMode, HarnessDoctorEntry, HarnessDoctorReport, QueuedTurn,
-    QueuedTurnsSnapshot, RestoreCheckpointBody, SequencedEventFrame, SessionAccessSnapshot,
-    SessionDigest, SessionExternalOrigin, SessionSnapshot, TurnRewriteState, TurnSnapshot,
-    UpdateNotice,
+    CodeRepoTrust, CodeRepoTrustSnapshot, CodeRestoreAffectedTurn, CodeReviewSnapshot,
+    CodeWatchSnapshot, CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspaceGitState,
+    CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode, HarnessDoctorEntry,
+    HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, RestoreCheckpointBody,
+    SequencedEventFrame, SessionAccessSnapshot, SessionDigest, SessionExternalOrigin,
+    SessionSnapshot, TurnRewriteState, TurnSnapshot, UpdateNotice,
 };
 
 /// Guard sizes for the opaque strings a client draws from this surface.

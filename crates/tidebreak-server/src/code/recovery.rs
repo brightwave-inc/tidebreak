@@ -1298,6 +1298,7 @@ mod tests {
             tool_bridge: None,
             apps: None,
             project_config: tidebreak_harness::ProjectConfig::Skip,
+            read_only: false,
         })
         .await
         .unwrap();
@@ -1670,6 +1671,7 @@ mod tests {
                 tool_bridge: None,
                 apps: None,
                 project_config: tidebreak_harness::ProjectConfig::Skip,
+                read_only: false,
             })
             .await
             .unwrap();

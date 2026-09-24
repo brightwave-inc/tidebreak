@@ -440,6 +440,7 @@ impl CodeRuntime {
                 tool_bridge: None,
                 apps,
                 project_config,
+                read_only: false,
             };
             let mut attached = attached;
             let engine = match adapter.launch(spec).await {

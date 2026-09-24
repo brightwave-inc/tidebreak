@@ -738,6 +738,60 @@ impl ScopedCode {
     }
 
     // ------------------------------------------------------------------
+    // Review changes. Starting and stopping a review runs an engine on this
+    // machine, so it takes what commit and push take; reading one takes what
+    // reading the diff takes.
+    // ------------------------------------------------------------------
+
+    /// Ask another engine to review the workspace's changes, read-only. The
+    /// conversation it is started from must be one the caller may write to.
+    pub async fn start_review(
+        &self,
+        id: WorkspaceId,
+        body: super::types::StartCodeReviewBody,
+        permission_mode_ceiling: Option<tidebreak_core::PermissionMode>,
+    ) -> Result<super::types::CodeReviewSnapshot, ServerError> {
+        let workspace = self.require_workspace_management(id).await?;
+        let session_owner = self.session_owner_for_contribute(body.session_id).await?;
+        if session_owner != workspace.owner {
+            return Err(ServerError::not_found("code session not found"));
+        }
+        let owner = workspace.owner.clone();
+        self.runtime
+            .start_review(&owner, workspace, body, permission_mode_ceiling)
+            .await
+    }
+
+    /// The workspace's recent reviews, newest first.
+    pub async fn list_reviews(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<Vec<super::types::CodeReviewSnapshot>, ServerError> {
+        let owner = self.workspace_owner_for_read(id).await?;
+        Ok(self.runtime.list_reviews(&owner, id))
+    }
+
+    /// One review.
+    pub async fn get_review(
+        &self,
+        id: WorkspaceId,
+        review: tidebreak_core::CodeReviewId,
+    ) -> Result<super::types::CodeReviewSnapshot, ServerError> {
+        let owner = self.workspace_owner_for_read(id).await?;
+        self.runtime.get_review(&owner, id, review)
+    }
+
+    /// Stop a running review.
+    pub async fn cancel_review(
+        &self,
+        id: WorkspaceId,
+        review: tidebreak_core::CodeReviewId,
+    ) -> Result<super::types::CodeReviewSnapshot, ServerError> {
+        let owner = self.require_workspace_management(id).await?.owner;
+        self.runtime.cancel_review(&owner, id, review)
+    }
+
+    // ------------------------------------------------------------------
     // Undo in the worktree. The gate commit and push use: a principal who may
     // only view a shared session's workspace gets the answer a stranger gets.
     // ------------------------------------------------------------------
@@ -1797,6 +1851,16 @@ impl ScopedCode {
         adapter: &dyn tidebreak_harness::HarnessAdapter,
     ) -> tidebreak_harness::HarnessProbe {
         self.runtime.probe(adapter).await
+    }
+
+    /// Why this engine cannot review read-only on this machine, when it
+    /// cannot. See [`CodeRuntime::review_blocker`].
+    pub async fn review_blocker(
+        &self,
+        adapter: &dyn tidebreak_harness::HarnessAdapter,
+        probe: &tidebreak_harness::HarnessProbe,
+    ) -> Option<String> {
+        self.runtime.review_blocker(adapter, probe).await
     }
 
     pub fn pin_install_error(&self, kind: HarnessKind) -> Option<String> {

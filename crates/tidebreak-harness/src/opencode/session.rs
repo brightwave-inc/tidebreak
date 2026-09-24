@@ -387,8 +387,17 @@ pub(crate) fn compose_serve_plan(launch: ServeLaunch<'_>) -> Result<LaunchPlan, 
 /// Never composed as `--auto`. Plan selects the native `plan` agent
 /// (disallows edit tools). Ask parks bash/edit. Auto allows workspace
 /// edits and still asks for bash.
+///
+/// A read-only session ([`crate::SessionSpec::read_only`]) adds
+/// [`read_only_rules`]: everything denied but reading. The session's rules
+/// are evaluated after the agent's and the user's config, so a user's
+/// `"bash": "allow"` or MCP server does not hand anything back.
 #[must_use]
-pub(crate) fn session_create_body(mode: PermissionMode, model: Option<&str>) -> Value {
+pub(crate) fn session_create_body(
+    mode: PermissionMode,
+    model: Option<&str>,
+    read_only: bool,
+) -> Value {
     let mut body = match mode {
         PermissionMode::Plan => json!({ "agent": "plan" }),
         PermissionMode::Ask => json!({
@@ -426,7 +435,42 @@ pub(crate) fn session_create_body(mode: PermissionMode, model: Option<&str>) -> 
     if let Some(model) = model.and_then(session_model_field) {
         body["model"] = model;
     }
+    if read_only {
+        let rules = read_only_rules();
+        match body.get_mut("permission").and_then(Value::as_array_mut) {
+            Some(existing) => existing.extend(rules),
+            None => body["permission"] = Value::Array(rules),
+        }
+    }
     body
+}
+
+/// The permission names a read-only session keeps: reading files and
+/// searching them.
+const READ_ONLY_PERMISSIONS: [&str; 4] = ["read", "grep", "glob", "list"];
+
+/// A read-only session's rules, after every other: deny everything, then
+/// allow the read tools back, then deny `edit` and `bash` by name.
+///
+/// opencode's default rules allow every tool (`"*": "allow"`), the tools of
+/// the person's own MCP servers among them, and nothing keeps a configured
+/// MCP server from loading. So the rules deny by default rather than list
+/// what to deny: an MCP tool, `task`, `webfetch`, or a tool a later
+/// version adds matches only the leading `*` and is denied. The last rule
+/// that matches decides, which is what puts these after the agent's rules
+/// and the person's config.
+fn read_only_rules() -> Vec<Value> {
+    let mut rules = vec![json!({"permission": "*", "pattern": "*", "action": "deny"})];
+    rules.extend(
+        READ_ONLY_PERMISSIONS
+            .iter()
+            .map(|permission| json!({"permission": permission, "pattern": "*", "action": "allow"})),
+    );
+    rules.extend(
+        ["edit", "bash"]
+            .map(|permission| json!({"permission": permission, "pattern": "*", "action": "deny"})),
+    );
+    rules
 }
 
 /// `POST /session` model object. The captured 1.18.18 schema wants
@@ -788,7 +832,11 @@ impl OpencodeSession {
         }
         let path = "/session";
         let url = format!("{}{path}", self.base_url());
-        let body = session_create_body(self.spec.permission_mode, self.spec.model.as_deref());
+        let body = session_create_body(
+            self.spec.permission_mode,
+            self.spec.model.as_deref(),
+            self.spec.read_only,
+        );
         let query = self.directory_query();
         let (status, parsed) = self
             .http("POST", path, &url, Some(body), Some(query.as_slice()))
@@ -1179,6 +1227,7 @@ mod tests {
             tool_bridge: None,
             apps: None,
             project_config: crate::ProjectConfig::Load,
+            read_only: false,
         })
     }
 
@@ -1542,26 +1591,87 @@ mod tests {
         assert!(matches!(err, HarnessError::LaunchRejected(_)));
     }
 
+    /// How opencode decides a tool call under a ruleset: the last rule whose
+    /// permission and pattern match wins, and `*` matches anything.
+    fn decide(rules: &[Value], permission: &str) -> Option<String> {
+        rules
+            .iter()
+            .rev()
+            .find(|rule| rule["permission"] == "*" || rule["permission"] == permission)
+            .map(|rule| rule["action"].as_str().unwrap().to_owned())
+    }
+
+    /// A read-only session keeps the plan agent and ends its rules with
+    /// "deny everything but reading", so neither the agent's defaults, a
+    /// user's own `allow` rule, nor a user's MCP server hands a tool back.
+    /// Confirmed live against opencode 1.18.23 with a stub model: the
+    /// session offered only `glob`, `grep`, and `read`, and calls to `bash`,
+    /// `write`, and a user MCP server's tool failed as unavailable, where the
+    /// plan agent alone ran the MCP tool.
+    #[test]
+    fn a_read_only_session_denies_everything_but_reading_last() {
+        let body = session_create_body(PermissionMode::Plan, Some("model-gateway/glm-5.3"), true);
+        assert_eq!(body["agent"], "plan");
+        let rules = body["permission"].as_array().unwrap();
+        assert_eq!(
+            rules.first(),
+            Some(&json!({"permission": "*", "pattern": "*", "action": "deny"}))
+        );
+        for tool in ["read", "grep", "glob", "list"] {
+            assert_eq!(decide(rules, tool).as_deref(), Some("allow"), "{tool}");
+        }
+        // The person's MCP servers' tools are named `<server>_<tool>`.
+        for tool in [
+            "bash",
+            "edit",
+            "write",
+            "task",
+            "webfetch",
+            "filesystem_write_file",
+            "github_create_pull_request",
+        ] {
+            assert_eq!(decide(rules, tool).as_deref(), Some("deny"), "{tool}");
+        }
+
+        // After any rule the mode itself carries, and after a user's own
+        // allow rules, which opencode reads before the session's.
+        let ask = session_create_body(PermissionMode::Ask, None, true);
+        let mut with_user = vec![
+            json!({"permission": "*", "pattern": "*", "action": "allow"}),
+            json!({"permission": "bash", "pattern": "*", "action": "allow"}),
+        ];
+        with_user.extend(ask["permission"].as_array().unwrap().iter().cloned());
+        assert_eq!(decide(&with_user, "bash").as_deref(), Some("deny"));
+        assert_eq!(
+            decide(&with_user, "writer_write_marker").as_deref(),
+            Some("deny")
+        );
+        assert_eq!(decide(&with_user, "read").as_deref(), Some("allow"));
+
+        let plain = session_create_body(PermissionMode::Plan, None, false);
+        assert!(plain.get("permission").is_none());
+    }
+
     #[test]
     fn permission_mode_mapping_matches_0033() {
         assert_eq!(
-            session_create_body(PermissionMode::Plan, None)["agent"],
+            session_create_body(PermissionMode::Plan, None, false)["agent"],
             "plan"
         );
         assert_eq!(
-            session_create_body(PermissionMode::Ask, None)["agent"],
+            session_create_body(PermissionMode::Ask, None, false)["agent"],
             "build"
         );
         assert_eq!(
-            session_create_body(PermissionMode::Auto, None)["agent"],
+            session_create_body(PermissionMode::Auto, None, false)["agent"],
             "build"
         );
-        let ask = session_create_body(PermissionMode::Ask, None);
+        let ask = session_create_body(PermissionMode::Ask, None, false);
         let rules = ask["permission"].as_array().unwrap();
         assert!(rules
             .iter()
             .any(|rule| { rule["permission"] == "bash" && rule["action"] == "ask" }));
-        let auto = session_create_body(PermissionMode::Auto, None);
+        let auto = session_create_body(PermissionMode::Auto, None, false);
         let rules = auto["permission"].as_array().unwrap();
         assert!(rules
             .iter()
@@ -1569,7 +1679,7 @@ mod tests {
         assert!(rules
             .iter()
             .any(|rule| { rule["permission"] == "bash" && rule["action"] == "ask" }));
-        let allow = session_create_body(PermissionMode::Allow, None);
+        let allow = session_create_body(PermissionMode::Allow, None, false);
         assert_eq!(allow["agent"], "build");
         let rules = allow["permission"].as_array().unwrap();
         assert!(rules.iter().all(|rule| rule["action"] == "allow"));
@@ -1583,34 +1693,39 @@ mod tests {
 
     #[test]
     fn session_model_uses_provider_and_id() {
-        let slash = session_create_body(PermissionMode::Plan, Some("anthropic/claude-opus-5"));
+        let slash =
+            session_create_body(PermissionMode::Plan, Some("anthropic/claude-opus-5"), false);
         assert_eq!(slash["model"]["providerID"], "anthropic");
         assert_eq!(slash["model"]["id"], "claude-opus-5");
         assert!(slash["model"].get("modelID").is_none());
 
-        let bare = session_create_body(PermissionMode::Allow, Some("gpt-5.6-sol"));
+        let bare = session_create_body(PermissionMode::Allow, Some("gpt-5.6-sol"), false);
         assert_eq!(bare["model"]["providerID"], "openai");
         assert_eq!(bare["model"]["id"], "gpt-5.6-sol");
 
-        let grok = session_create_body(PermissionMode::Ask, Some("grok-4.5"));
+        let grok = session_create_body(PermissionMode::Ask, Some("grok-4.5"), false);
         assert_eq!(grok["model"]["providerID"], "xai");
         assert_eq!(grok["model"]["id"], "grok-4.5");
 
-        let gemini = session_create_body(PermissionMode::Plan, Some("gemini-3-pro"));
+        let gemini = session_create_body(PermissionMode::Plan, Some("gemini-3-pro"), false);
         assert_eq!(gemini["model"]["providerID"], "google");
 
-        let pickle = session_create_body(PermissionMode::Plan, Some("big-pickle"));
+        let pickle = session_create_body(PermissionMode::Plan, Some("big-pickle"), false);
         assert_eq!(pickle["model"]["providerID"], "opencode");
         assert_eq!(pickle["model"]["id"], "big-pickle");
 
-        let gateway =
-            session_create_body(PermissionMode::Plan, Some("model-gateway/claude-opus-5"));
+        let gateway = session_create_body(
+            PermissionMode::Plan,
+            Some("model-gateway/claude-opus-5"),
+            false,
+        );
         assert_eq!(gateway["model"]["providerID"], "model-gateway");
         assert_eq!(gateway["model"]["id"], "claude-opus-5");
 
         let fireworks = session_create_body(
             PermissionMode::Plan,
             Some("accounts/fireworks/models/deepseek-v4-pro"),
+            false,
         );
         assert_eq!(fireworks["model"]["providerID"], "fireworks-ai");
         assert_eq!(
@@ -1618,11 +1733,11 @@ mod tests {
             "accounts/fireworks/models/deepseek-v4-pro"
         );
 
-        let deepseek = session_create_body(PermissionMode::Plan, Some("deepseek-v4-pro"));
+        let deepseek = session_create_body(PermissionMode::Plan, Some("deepseek-v4-pro"), false);
         assert_eq!(deepseek["model"]["providerID"], "model-gateway");
         assert_eq!(deepseek["model"]["id"], "deepseek-v4-pro");
 
-        let unknown = session_create_body(PermissionMode::Plan, Some("mystery-weights"));
+        let unknown = session_create_body(PermissionMode::Plan, Some("mystery-weights"), false);
         assert!(unknown.get("model").is_none());
     }
 

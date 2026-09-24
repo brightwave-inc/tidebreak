@@ -543,6 +543,10 @@ mod tests {
         generate::collect_from::<crate::routes::code::SaveWorkspaceFileBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceFileSaved>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceDiff>(&cfg, &mut out);
+        // Review changes: the body that starts one, one review, and the list.
+        generate::collect_from::<crate::routes::code::types::StartCodeReviewBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::types::CodeReviewSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::types::CodeReviewList>(&cfg, &mut out);
         // Undo in the worktree: the restore preview and result, the revert
         // and discard bodies, and what either one changed.
         generate::collect_from::<crate::routes::code::types::CodeCheckpointRestorePreview>(

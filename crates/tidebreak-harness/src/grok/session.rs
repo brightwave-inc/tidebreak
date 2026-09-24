@@ -926,6 +926,7 @@ mod tests {
                 tool_bridge: None,
                 apps: None,
                 project_config: crate::ProjectConfig::Load,
+                read_only: false,
             },
             "1.0.5".into(),
         );
@@ -1613,6 +1614,7 @@ exit 0
                     tool_bridge: None,
                     apps: None,
                     project_config: crate::ProjectConfig::Load,
+                    read_only: false,
                 },
                 "1.0.5".into(),
             )

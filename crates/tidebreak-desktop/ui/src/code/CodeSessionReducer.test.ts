@@ -633,6 +633,57 @@ describe("hydrate then replay", () => {
     expect(again.state.contentRevision).toBe(state.contentRevision);
   });
 
+  it("records a review between turns once, naming the turn it read", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      SNAPSHOT_TURN,
+      { ...SNAPSHOT_TURN, id: "t2", ordinal: 2, user_input: "try again" },
+    ]);
+    const review: CodeEvent = {
+      type: "review_finished",
+      review_id: "rev-1",
+      harness: "codex",
+      model: "gpt-5.5",
+      turn_id: "t1",
+      outcome: "completed",
+      findings: 3,
+    };
+    let state = hydrated;
+    const replay: CodeEvent[] = [
+      { type: "turn_started", turn_id: "t1" },
+      { type: "turn_completed", usage: NO_USAGE },
+      review,
+      { type: "turn_started", turn_id: "t2" },
+      { type: "turn_completed", usage: NO_USAGE },
+    ];
+    replay.forEach((event, index) => {
+      state = reduceCodeSessionEvent(
+        state,
+        framed(index + 1, event, true),
+        deps(),
+      ).state;
+    });
+    expect(state.items.map((item) => item.kind)).toEqual([
+      "user",
+      "turn_boundary",
+      "review",
+      "user",
+      "turn_boundary",
+    ]);
+    expect(state.items[2]).toMatchObject({
+      kind: "review",
+      reviewId: "rev-1",
+      harness: "codex",
+      model: "gpt-5.5",
+      turnOrdinal: 1,
+      outcome: "completed",
+      findings: 3,
+    });
+    const again = reduceCodeSessionEvent(state, framed(9, review), deps());
+    expect(
+      again.state.items.filter((item) => item.kind === "review"),
+    ).toHaveLength(1);
+  });
+
   it("updates a restore row in place when the restore ends", () => {
     const started: CodeEvent = {
       type: "checkpoint_restored",

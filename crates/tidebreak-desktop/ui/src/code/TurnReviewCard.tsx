@@ -7,6 +7,7 @@ import {
   History,
   LogIn,
   MoreHorizontal,
+  ScanSearch,
   TriangleAlert,
 } from "lucide-react";
 
@@ -24,6 +25,7 @@ import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { openEngineSignIn } from "./EngineSignIn";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
+import { HARNESS_LABELS } from "./labels";
 import { STATUS_TEXT } from "./statusTone";
 
 /**
@@ -471,6 +473,74 @@ export function CheckpointRestoreRow({
       )}
     </SeamRow>
   );
+}
+
+/**
+ * The seam a review leaves: which engine read the changes, which changes,
+ * and what came of it. The findings are comments on the diff, so the row
+ * says how many and offers the diff, rather than repeating them.
+ */
+export function ReviewFinishedRow({
+  review,
+  onOpenDiff,
+}: {
+  review: Extract<CodeTranscriptItem, { kind: "review" }>;
+  /** Open the diff the review read, where its findings are. */
+  onOpenDiff?: (turnId: string | null) => void;
+}) {
+  const label = reviewRowLabel(review);
+  const failed = review.outcome === "failed" || review.outcome === "timed_out";
+  return (
+    <SeamRow label={label} tone={failed ? "warning" : "quiet"}>
+      {failed ? (
+        <TriangleAlert size={13} aria-hidden="true" />
+      ) : (
+        <ScanSearch size={13} aria-hidden="true" />
+      )}
+      <span>{label}</span>
+      {review.model && <span className="font-mono">{review.model}</span>}
+      {onOpenDiff && review.outcome === "completed" && review.findings > 0 && (
+        <button
+          type="button"
+          className={cn(
+            "text-muted-foreground hover:text-foreground ml-1 cursor-pointer rounded-sm font-medium underline-offset-2 hover:underline",
+            FOCUS_RING_TIGHT,
+            HOVER_TINT,
+          )}
+          onClick={() => onOpenDiff(review.turnId)}
+        >
+          Show in diff
+        </button>
+      )}
+    </SeamRow>
+  );
+}
+
+/** What a review row says: who reviewed what, and how it ended. */
+export function reviewRowLabel(
+  review: Pick<
+    Extract<CodeTranscriptItem, { kind: "review" }>,
+    "harness" | "turnId" | "turnOrdinal" | "outcome" | "findings"
+  >,
+): string {
+  const engine = HARNESS_LABELS[review.harness];
+  const what = review.turnId
+    ? review.turnOrdinal !== null
+      ? `turn ${review.turnOrdinal}`
+      : "a turn"
+    : "the working tree";
+  switch (review.outcome) {
+    case "completed":
+      return review.findings === 0
+        ? `${engine} reviewed ${what} and found nothing to change`
+        : `${engine} reviewed ${what}: ${review.findings} ${review.findings === 1 ? "finding" : "findings"}`;
+    case "failed":
+      return `${engine} could not finish reviewing ${what}`;
+    case "timed_out":
+      return `${engine} ran out of time reviewing ${what}`;
+    case "cancelled":
+      return `Stopped ${engine}'s review of ${what}`;
+  }
 }
 
 /** What a restore row says, by how far the restore got. */
