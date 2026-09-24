@@ -24,6 +24,9 @@ import { useVoiceInputStore } from "@/VoiceInputStore";
 import {
   discoveredAnthropicModels,
   harnessDoctor,
+  mcpDirectoryServer,
+  mcpDirectoryServers,
+  mcpSkippedRecord,
   providerInfoFixture,
 } from "./fixtures";
 
@@ -34,7 +37,11 @@ export type SettingsStoryState =
   | "disabled"
   | "docker-refused"
   | "empty"
-  | "failed";
+  | "failed"
+  /** Right after Tidebreak starts: a saved MCP server is still connecting. */
+  | "mcp-connecting"
+  /** A saved MCP record Tidebreak could not load sits beside the apps. */
+  | "mcp-skipped";
 
 type SettingsClientMethods = Pick<
   ApiClient,
@@ -68,6 +75,9 @@ type SettingsClientMethods = Pick<
   | "listMcpServers"
   | "putMcpServers"
   | "reconnectMcpServer"
+  | "getMcpDirectory"
+  | "addMcpDirectoryServer"
+  | "removeSkippedMcpServer"
   | "getGatewayStatus"
   | "getGatewayApps"
   | "listConsentStatements"
@@ -418,6 +428,7 @@ const connectedApps: ConnectedAppsInfo = {
       allow_loopback_http: false,
     },
   ],
+  skipped_mcp_servers: [],
 };
 
 const consentStatements: ConsentStatementSnapshot[] = [
@@ -514,7 +525,27 @@ function createSettingsStoryClient(
       : state === "docker-refused"
         ? dockerRefusedExec
         : configuredExec;
-  const servers = state === "managed" ? [gatewayServer] : [docsServer];
+  const servers =
+    state === "managed"
+      ? [gatewayServer]
+      : state === "mcp-connecting"
+        ? [{ ...docsServer, health: "initializing" as const, tool_count: 0 }]
+        : [docsServer];
+  const listing: ConnectedAppsInfo =
+    state === "empty"
+      ? { apps: [], skipped_mcp_servers: [] }
+      : state === "mcp-connecting"
+        ? {
+            ...connectedApps,
+            apps: connectedApps.apps.map((entry) =>
+              entry.kind === "mcp_server" && entry.name === "docs"
+                ? { ...entry, health: "initializing", tool_count: 0, tools: [] }
+                : entry,
+            ),
+          }
+        : state === "mcp-skipped"
+          ? { ...connectedApps, skipped_mcp_servers: [mcpSkippedRecord] }
+          : connectedApps;
 
   const methods: SettingsClientMethods = {
     getSettings: () => read(settings),
@@ -604,8 +635,7 @@ function createSettingsStoryClient(
         effective_root: root ?? "/Users/alex/.tidebreak/worktrees",
         default_root: "/Users/alex/.tidebreak/worktrees",
       }),
-    listConnectedApps: () =>
-      read(state === "empty" ? { apps: [] } : connectedApps),
+    listConnectedApps: () => read(listing),
     putRestConnectedApp: () => write(connectedApps),
     previewRestSpec: () =>
       write({
@@ -626,6 +656,21 @@ function createSettingsStoryClient(
     listMcpServers: () => read({ servers: state === "empty" ? [] : servers }),
     putMcpServers: () => write({ servers }),
     reconnectMcpServer: () => write({ servers }),
+    getMcpDirectory: () => read({ servers: mcpDirectoryServers }),
+    addMcpDirectoryServer: (id, start) => {
+      const entry =
+        mcpDirectoryServers.find((server) => server.id === id) ??
+        mcpDirectoryServers[0];
+      const added = start
+        ? mcpDirectoryServer(entry)
+        : mcpDirectoryServer(entry, {
+            enabled: false,
+            health: "disabled",
+            tool_count: 0,
+          });
+      return write({ name: entry.id, servers: [...servers, added] });
+    },
+    removeSkippedMcpServer: () => write(undefined),
     getGatewayStatus: () =>
       read({
         base_url: "https://gateway.example.test",

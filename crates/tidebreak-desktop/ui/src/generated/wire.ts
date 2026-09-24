@@ -2043,7 +2043,13 @@ export type ConnectedAppsInfo = {
  * MCP entries in the runtime's configuration order, then REST entries in
  * storage order (oldest first).
  */
-apps: Array<ConnectedAppInfo>, };
+apps: Array<ConnectedAppInfo>,
+/**
+ * Saved MCP server records Tidebreak could not load, with why. They stay
+ * on file, unused, until removed with
+ * `DELETE /connected-apps/skipped/{id}`.
+ */
+skipped_mcp_servers: Array<McpSkippedServer>, };
 
 /**
  * The durable identity a revocation names.
@@ -3482,6 +3488,74 @@ tested_on: string,
 notes: string, };
 
 /**
+ * `GET /mcp/directory`: every directory server, in the data file's order.
+ */
+export type McpDirectory = { servers: Array<McpDirectoryEntry>, };
+
+/**
+ * Body of `POST /mcp/directory/{id}/add`.
+ */
+export type McpDirectoryAdd = {
+/**
+ * Whether to connect the server once it is saved. `false` saves it
+ * turned off, so it sends nothing until someone turns it on in Connected
+ * apps. Settings asks with a switch before it adds a server that reads a
+ * token, because the first connect sends that token to the vendor's host.
+ */
+start: boolean, };
+
+/**
+ * `POST /mcp/directory/{id}/add` answer: the name the server was saved under
+ * and the configuration after the add.
+ */
+export type McpDirectoryAdded = {
+/**
+ * The added server's name: the directory id, or a free variant of it.
+ * When a configured server already had the entry's URL, its name.
+ */
+name: string,
+/**
+ * Every configured server, as `GET /mcp/servers` lists them.
+ */
+servers: Array<McpServerInfo>, };
+
+/**
+ * One directory server, as Settings lists it.
+ */
+export type McpDirectoryEntry = {
+/**
+ * Stable id. Adding the server names it, and the added server is named
+ * after it.
+ */
+id: string,
+/**
+ * The vendor's name for the server.
+ */
+name: string,
+/**
+ * The endpoint, exactly as the vendor's documentation gives it.
+ */
+url: string,
+/**
+ * One sentence on what the server lets you do.
+ */
+description: string, sign_in: McpDirectorySignIn,
+/**
+ * The vendor page that publishes `url`.
+ */
+docs_url: string,
+/**
+ * The curated-list entry for this server, when Tidebreak has driven it
+ * end to end. `null` otherwise, and Settings then shows no tier for it.
+ */
+curated: McpCuration | null, };
+
+/**
+ * How a directory server signs in.
+ */
+export type McpDirectorySignIn = { "kind": "oauth" } | { "kind": "token", variable: string, } | { "kind": "none" };
+
+/**
  * Renderer-safe connection lifecycle.
  */
 export type McpHealth = "initializing" | "healthy" | "degraded" | "reconnecting" | "disabled";
@@ -3669,6 +3743,29 @@ gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean,
 plugin: string | null, };
 
 export type McpServersInfo = { servers: Array<McpServerInfo>, };
+
+/**
+ * A saved MCP server record Tidebreak could not load.
+ *
+ * Its definition does not decode, it fails validation, or its stored
+ * environment values could not move into the credential store. The record
+ * stays on file, unused: a save keeps it, and removing it is an explicit
+ * action. Its tools never mount, and a grant that binds its id stays stale.
+ */
+export type McpSkippedServer = {
+/**
+ * The connected-app record id, which removing the record names.
+ */
+id: ConnectedAppId,
+/**
+ * The record's saved name.
+ */
+name: string,
+/**
+ * Why Tidebreak did not load it, as a sentence. Names fields and
+ * environment variable names, never a value.
+ */
+reason: string, };
 
 /**
  * Where the sandboxed iframe should load one view from, valid once.

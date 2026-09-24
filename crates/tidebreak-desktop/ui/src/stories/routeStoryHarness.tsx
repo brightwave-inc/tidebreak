@@ -38,7 +38,7 @@ import { useProjectListStore } from "@/ProjectListStore";
 import { useChatsSectionState } from "@/sidebar/ChatsSection";
 import { useUiStore } from "@/UiStore";
 import { useVoiceInputStore } from "@/VoiceInputStore";
-import { harnessDoctor } from "./fixtures";
+import { harnessDoctor, mcpDirectoryServers } from "./fixtures";
 import {
   storyModels,
   storyProviders,
@@ -721,6 +721,7 @@ const routeConnectedApps = {
       allow_loopback_http: false,
     },
   ],
+  skipped_mcp_servers: [],
 } satisfies ConnectedAppsInfo;
 
 type RouteClientMethods = Pick<
@@ -760,6 +761,9 @@ type RouteClientMethods = Pick<
   | "listMcpServers"
   | "putMcpServers"
   | "reconnectMcpServer"
+  | "getMcpDirectory"
+  | "addMcpDirectoryServer"
+  | "removeSkippedMcpServer"
   | "getGatewayStatus"
   | "gatewaySignIn"
   | "gatewaySignOut"
@@ -919,6 +923,12 @@ export function storyClient(
     listMcpServers: async () => ({ servers: [routeMcpServer] }),
     putMcpServers: async () => ({ servers: [routeMcpServer] }),
     reconnectMcpServer: async () => ({ servers: [routeMcpServer] }),
+    getMcpDirectory: async () => ({ servers: mcpDirectoryServers }),
+    addMcpDirectoryServer: async (id) => ({
+      name: id,
+      servers: [routeMcpServer],
+    }),
+    removeSkippedMcpServer: async () => {},
     getGatewayStatus: async () => ({
       base_url: "https://gateway.example.test",
       signed_in: true,

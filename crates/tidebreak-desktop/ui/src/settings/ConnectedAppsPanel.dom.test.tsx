@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   render,
   screen,
@@ -81,6 +82,7 @@ const listing: ConnectedAppsInfo = {
       allow_loopback_http: false,
     },
   ],
+  skipped_mcp_servers: [],
 };
 
 function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
@@ -93,6 +95,8 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
     listMcpServers: vi.fn().mockResolvedValue({ servers: [docsServer] }),
     getGatewayStatus: vi.fn().mockResolvedValue({ signed_in: false }),
     getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
+    getMcpDirectory: vi.fn().mockResolvedValue({ servers: [] }),
+    removeSkippedMcpServer: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as unknown as ApiClient;
 }
@@ -373,5 +377,101 @@ describe("ConnectedAppsPanel", () => {
       }),
     );
     expect(screen.getByRole("button", { name: /^Save$/ })).toBeEnabled();
+  });
+
+  it("lists a saved MCP record that could not load, and removes it once confirmed", async () => {
+    const skipped = {
+      id: "0d3c9b1e-7f10-4a8e-9d51-6b2f0c4e8a17",
+      name: "research_notes",
+      reason:
+        'It has a setting this version of Tidebreak does not know, "transport". A newer version of Tidebreak may have saved it.',
+    };
+    const removeSkippedMcpServer = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <ConnectedAppsPanel
+        client={api({
+          listConnectedApps: vi.fn().mockResolvedValue({
+            ...listing,
+            skipped_mcp_servers: [skipped],
+          }),
+          removeSkippedMcpServer,
+        })}
+        managed={false}
+      />,
+    );
+
+    const list = await appsList();
+    const entry = within(list).getByText("research_notes").closest("li");
+    if (!entry) throw new Error("no entry for the skipped record");
+    expect(within(entry).getByText("Could not load")).toBeInTheDocument();
+    expect(within(entry).getByText(/"transport"/)).toBeInTheDocument();
+
+    // Removing is destructive, so it asks first; Cancel changes nothing.
+    await user.click(
+      within(entry).getByRole("button", { name: "Remove research_notes" }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    expect(
+      within(dialog).getByText("Remove research_notes?"),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(removeSkippedMcpServer).not.toHaveBeenCalled();
+
+    await user.click(
+      within(entry).getByRole("button", { name: "Remove research_notes" }),
+    );
+    await user.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", {
+        name: "Remove",
+      }),
+    );
+    await waitFor(() =>
+      expect(removeSkippedMcpServer).toHaveBeenCalledWith(skipped.id),
+    );
+    await waitFor(() =>
+      expect(within(list).queryByText("research_notes")).toBeNull(),
+    );
+  });
+
+  it("reads the list again while a saved server connects, then stops", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const connecting: ConnectedAppsInfo = {
+        ...listing,
+        apps: listing.apps.map((entry) =>
+          entry.kind === "mcp_server" && entry.name === "docs"
+            ? { ...entry, health: "initializing", tool_count: 0, tools: [] }
+            : entry,
+        ),
+      };
+      const listConnectedApps = vi
+        .fn()
+        .mockResolvedValueOnce(connecting)
+        .mockResolvedValue(listing);
+      render(
+        <ConnectedAppsPanel
+          client={api({ listConnectedApps })}
+          managed={false}
+        />,
+      );
+
+      const list = await appsList();
+      expect(within(list).getByText("Connecting…")).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_100);
+      });
+      await waitFor(() =>
+        expect(within(list).queryByText("Connecting…")).toBeNull(),
+      );
+      expect(within(list).getByText("3 tools")).toBeInTheDocument();
+      const reads = listConnectedApps.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000);
+      });
+      expect(listConnectedApps).toHaveBeenCalledTimes(reads);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -69,6 +69,7 @@ const EXECUTION_HEADING: &str = "## Code execution";
 const DOCUMENT_SKILLS_HEADING: &str = "## Document skills";
 const DELEGATION_HEADING: &str = "## Background delegation";
 const MCP_HEADING: &str = "## External MCP tools";
+const CONNECTING_APPS_HEADING: &str = "## Connected apps still connecting";
 const COMPUTER_USE_HEADING: &str = "## Computer use";
 const MEMORY_HEADING: &str = "## Memory";
 
@@ -770,6 +771,31 @@ fn push_section<S: AsRef<str>>(prompt: &mut String, heading: &str, lines: &[S]) 
         }
         prompt.push_str(line.as_ref());
     }
+}
+
+/// Name the connected apps whose tools this turn lacks because they were
+/// still making their first connection when it started, right after
+/// Tidebreak did. Without this the model reads a missing tool as a missing
+/// app. Appended last, and only in that window, so it leaves every other
+/// turn's prompt, and its cached prefix, as it was.
+///
+/// Names are configured MCP namespaces, which validation holds to ASCII
+/// letters, digits, `_`, and `-`, so they cannot forge a prompt line.
+pub(crate) fn append_connecting_apps(prompt: &mut String, servers: &[String]) {
+    if servers.is_empty() {
+        return;
+    }
+    push_section(
+        prompt,
+        CONNECTING_APPS_HEADING,
+        &[
+            format!(
+                "- These connected apps were still connecting when this turn started, so their tools are not available in it: {}.",
+                servers.join(", ")
+            ),
+            "- If the user asks for one of them, say it is still connecting and that its tools will be available in a later message. Do not say the app is not connected or does not exist.".to_owned(),
+        ],
+    );
 }
 
 #[cfg(test)]

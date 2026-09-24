@@ -205,6 +205,22 @@ export const ConnectedAppsLoopbackHttpConsent: Story = {
   args: { panel: "connected-apps", state: "empty" },
 };
 
+/** A saved MCP record Tidebreak could not load: its name, why, and Remove. */
+export const ConnectedAppsSkippedRecord: Story = {
+  args: { panel: "connected-apps", state: "mcp-skipped" },
+};
+
+export const ConnectedAppsSkippedRecordCompact: Story = {
+  args: { panel: "connected-apps", state: "mcp-skipped" },
+  globals: { viewport: { value: "compact", isRotated: false } },
+};
+
+/** Right after Tidebreak starts: a saved server is still connecting, and
+ * both its app entry and its editor row say so. */
+export const ConnectedAppsServerConnecting: Story = {
+  args: { panel: "connected-apps", state: "mcp-connecting" },
+};
+
 export const PermissionsConfigured: Story = {
   args: { panel: "permissions" },
 };

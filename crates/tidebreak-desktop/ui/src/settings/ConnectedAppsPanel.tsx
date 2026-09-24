@@ -13,6 +13,7 @@ import {
   type ApiClient,
   type ConnectedAppInfo,
   type CredentialPlacement,
+  type McpSkippedServer,
   type RestCredentialUpdate,
   type SpecDiscoveryInfo,
   type SpecPreviewInfo,
@@ -30,7 +31,9 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { McpHealthChip, McpPanel, McpTierChip } from "./McpPanel";
+import { useConfirm } from "@/components/ConfirmDialog";
+import { McpHealthChip, McpPanel } from "./McpPanel";
+import { McpTierChip } from "./McpTierChip";
 import {
   SettingsError,
   SettingsField,
@@ -140,6 +143,10 @@ function looksLikeMcpEndpoint(urlText: string): boolean {
  * starts unselected and the user picks; at or under the bound, everything
  * starts selected — the same whole-document outcome as before. */
 const MAX_SELECTABLE_OPERATIONS = 256;
+
+/** How often the listing is read while an MCP server is still connecting.
+ * Every connection attempt is bounded, so this ends on its own. */
+const CONNECTING_POLL_MS = 2_000;
 
 function defaultSelection(preview: SpecPreviewInfo): string[] {
   return preview.operations.length <= MAX_SELECTABLE_OPERATIONS
@@ -295,6 +302,56 @@ function McpAppEntry({
             {reconnecting === entry.name ? "Reconnecting…" : "Reconnect"}
           </Button>
         )}
+    </li>
+  );
+}
+
+/**
+ * A saved MCP server record Tidebreak could not load: its name, why, and
+ * Remove. It lists beside the apps because it is still a record on file,
+ * even though none of its tools mount.
+ */
+function SkippedMcpEntry({
+  record,
+  busy,
+  removing,
+  onRemove,
+}: {
+  record: McpSkippedServer;
+  busy: boolean;
+  removing: boolean;
+  onRemove: () => void;
+}) {
+  return (
+    <li className="flex flex-col gap-1 rounded-md border px-3 py-2">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <p className="text-sm font-bold">{record.name}</p>
+        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+          <span aria-hidden className="text-warning">
+            ●
+          </span>
+          Could not load
+        </span>
+      </div>
+      <p className="text-xs break-words text-muted-foreground">
+        {record.reason}
+      </p>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="self-start"
+        aria-label={`Remove ${record.name}`}
+        disabled={busy}
+        onClick={onRemove}
+      >
+        {removing ? (
+          <Spinner aria-hidden className="size-3.5" />
+        ) : (
+          <Trash2 size={14} />
+        )}
+        {removing ? "Removing…" : "Remove"}
+      </Button>
     </li>
   );
 }
@@ -462,6 +519,7 @@ export function ConnectedAppsPanel({
   managed?: boolean;
 }) {
   const [apps, setApps] = useState<ConnectedAppInfo[]>([]);
+  const [skipped, setSkipped] = useState<McpSkippedServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -471,6 +529,7 @@ export function ConnectedAppsPanel({
   const [discovering, setDiscovering] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   useEffect(() => {
     let cancelled = false;
@@ -479,6 +538,7 @@ export function ConnectedAppsPanel({
       .then((info) => {
         if (cancelled) return;
         setApps(info.apps);
+        setSkipped(info.skipped_mcp_servers);
         setListError(null);
         setLoading(false);
       })
@@ -491,6 +551,35 @@ export function ConnectedAppsPanel({
       cancelled = true;
     };
   }, [client]);
+
+  // Right after Tidebreak starts, saved MCP servers are still connecting.
+  // Read the listing again until every entry has settled, so each chip
+  // turns without a manual refresh.
+  const connecting = apps.some(
+    (entry) =>
+      entry.kind === "mcp_server" &&
+      (entry.health === "initializing" || entry.health === "reconnecting"),
+  );
+  useEffect(() => {
+    if (!connecting) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      client
+        .listConnectedApps()
+        .then((info) => {
+          if (cancelled) return;
+          setApps(info.apps);
+          setSkipped(info.skipped_mcp_servers);
+        })
+        .catch(() => {
+          // Keep the last entries; the next read tries again.
+        });
+    }, CONNECTING_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [client, connecting]);
 
   function update(change: Partial<Draft>) {
     setDraft((current) =>
@@ -686,6 +775,7 @@ export function ConnectedAppsPanel({
         allow_loopback_http: draft.allowLoopbackHttp,
       });
       setApps(result.apps);
+      setSkipped(result.skipped_mcp_servers);
       setDraft(null);
       toast.success(`Saved ${name}`);
     } catch (err) {
@@ -709,10 +799,37 @@ export function ConnectedAppsPanel({
     try {
       const info = await client.listConnectedApps();
       setApps(info.apps);
+      setSkipped(info.skipped_mcp_servers);
     } catch {
       // Keep the last-known entries; the reconnect error (if any) stands.
     } finally {
       setReconnecting(null);
+    }
+  }
+
+  /** Delete a saved MCP record Tidebreak could not load, after the person
+   * confirms: the record goes, with what was stored under it. */
+  async function removeSkipped(record: McpSkippedServer) {
+    const accepted = await confirm({
+      title: `Remove ${record.name}?`,
+      description:
+        "Tidebreak deletes this saved server and the credentials stored with it. You cannot undo this.",
+      confirmLabel: "Remove",
+      destructive: true,
+    });
+    if (!accepted) return;
+    setDeleting(record.id);
+    setListError(null);
+    try {
+      await client.removeSkippedMcpServer(record.id);
+      setSkipped((current) =>
+        current.filter((entry) => entry.id !== record.id),
+      );
+      toast.success(`Removed ${record.name}`);
+    } catch (err) {
+      setListError(errorMessage(err));
+    } finally {
+      setDeleting(null);
     }
   }
 
@@ -1086,7 +1203,7 @@ export function ConnectedAppsPanel({
               )}
             </div>
             <Card className="gap-4 border bg-transparent p-4">
-              {apps.length === 0 ? (
+              {apps.length === 0 && skipped.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   {managed
                     ? "No apps connected."
@@ -1094,6 +1211,15 @@ export function ConnectedAppsPanel({
                 </p>
               ) : (
                 <ul aria-label="Connected apps" className="flex flex-col gap-2">
+                  {skipped.map((record) => (
+                    <SkippedMcpEntry
+                      key={record.id}
+                      record={record}
+                      busy={busy}
+                      removing={deleting === record.id}
+                      onRemove={() => void removeSkipped(record)}
+                    />
+                  ))}
                   {apps.map((entry) =>
                     entry.kind === "mcp_server" ? (
                       <McpAppEntry
@@ -1144,6 +1270,7 @@ export function ConnectedAppsPanel({
         MCP tools are always sensitive and keep Tidebreak's existing approval
         boundary.
       </p>
+      {confirmDialog}
     </SettingsPanel>
   );
 }

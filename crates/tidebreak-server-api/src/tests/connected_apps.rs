@@ -1065,3 +1065,323 @@ async fn loopback_http_rest_app_requires_explicit_consent() {
     assert_eq!(entry["base_url"], json!("http://127.0.0.1:23373/v0"));
     assert_eq!(entry["allow_loopback_http"], json!(true));
 }
+
+async fn send(router: &Router, bearer: &str, method: &str, uri: &str) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// A saved MCP record the runtime could not load is listed on its own, with
+/// its name and why, and Remove deletes it. Only a skipped record goes that
+/// way: an unknown id is a 404, not a delete of some other record.
+#[tokio::test]
+async fn a_skipped_mcp_record_is_listed_with_its_reason_and_can_be_removed() {
+    let (router, bearer, state, _dir) = connected_apps_test_app().await;
+    let now = chrono::Utc::now();
+    let corrupt = tidebreak_core::connected_app::ConnectedApp {
+        id: ConnectedAppId::new(),
+        name: "corrupt".to_string(),
+        kind: ConnectedAppKind::McpServer,
+        definition: json!({"name": "corrupt", "command": "/bin/tool", "transport": "stdio"}),
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .store
+        .replace_connected_apps(ConnectedAppKind::McpServer, std::slice::from_ref(&corrupt))
+        .await
+        .unwrap();
+    state
+        .mcp
+        .initialize(crate::mcp_config::ConfiguredMcpServers::default())
+        .await
+        .unwrap()
+        .connect()
+        .await;
+
+    let listing: serde_json::Value =
+        serde_json::from_str(&raw_body(get_listing(&router, &bearer).await).await).unwrap();
+    assert_eq!(listing["apps"], json!([]));
+    let skipped = listing["skipped_mcp_servers"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["id"], json!(corrupt.id));
+    assert_eq!(skipped[0]["name"], json!("corrupt"));
+    assert!(skipped[0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("\"transport\""));
+
+    let other = ConnectedAppId::new();
+    assert_eq!(
+        send(
+            &router,
+            &bearer,
+            "DELETE",
+            &format!("/connected-apps/skipped/{other}")
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let uri = format!("/connected-apps/skipped/{}", corrupt.id);
+    assert_eq!(
+        send(&router, &bearer, "DELETE", &uri).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert!(state.store.list_connected_apps().await.unwrap().is_empty());
+    let listing: serde_json::Value =
+        serde_json::from_str(&raw_body(get_listing(&router, &bearer).await).await).unwrap();
+    assert_eq!(listing["skipped_mcp_servers"], json!([]));
+}
+
+/// The directory lists sourced servers with no tier the curated list did not
+/// grant. Adding an id the directory does not hold is a 404. An add must say
+/// whether to connect, and one that says no saves the server turned off
+/// without reaching its host. A managed profile refuses the add before
+/// anything connects.
+#[tokio::test]
+async fn the_mcp_directory_lists_servers_and_refuses_unknown_or_locked_adds() {
+    let (router, bearer, state, _dir) = connected_apps_test_app().await;
+    let directory = send(&router, &bearer, "GET", "/mcp/directory").await;
+    assert_eq!(directory.status(), StatusCode::OK);
+    let directory: serde_json::Value = serde_json::from_str(&raw_body(directory).await).unwrap();
+    let servers = directory["servers"].as_array().unwrap();
+    assert!(servers.len() >= 15, "{directory}");
+    let linear = servers
+        .iter()
+        .find(|server| server["id"] == "linear")
+        .expect("Linear is in the directory");
+    assert_eq!(linear["url"], json!("https://mcp.linear.app/mcp"));
+    assert_eq!(linear["sign_in"], json!({"kind": "oauth"}));
+    assert_eq!(linear["docs_url"], json!("https://linear.app/docs/mcp"));
+    assert_eq!(linear["curated"], json!(null));
+
+    let start = json!({"start": false});
+    assert_eq!(
+        post_body(&router, &bearer, "/mcp/directory/not-listed/add", &start)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post_body(&router, &bearer, "/mcp/directory/github/add", &json!({}))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let added = post_body(&router, &bearer, "/mcp/directory/github/add", &start).await;
+    assert_eq!(added.status(), StatusCode::OK);
+    let added: serde_json::Value = serde_json::from_str(&raw_body(added).await).unwrap();
+    assert_eq!(added["name"], json!("github"));
+    let github = &added["servers"][0];
+    assert_eq!(github["enabled"], json!(false));
+    assert_eq!(github["health"], json!("disabled"));
+    assert_eq!(
+        github["bearer_token_env"],
+        json!("GITHUB_PERSONAL_ACCESS_TOKEN")
+    );
+
+    crate::managed_policy::provision(&*state.provisioned_policy, "https://corp.gateway").unwrap();
+    let refused = post_body(
+        &router,
+        &bearer,
+        "/mcp/directory/linear/add",
+        &json!({"start": true}),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(refused).await).unwrap();
+    assert_eq!(body["kind"], json!("managed_profile"));
+    let names: Vec<String> = state
+        .mcp
+        .info()
+        .await
+        .servers
+        .into_iter()
+        .map(|server| server.definition.name)
+        .collect();
+    assert_eq!(names, ["github"]);
+}
+
+async fn post_body(
+    router: &Router,
+    bearer: &str,
+    uri: &str,
+    body: &serde_json::Value,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("authorization", bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// An HTTP MCP server with one `lookup` tool that answers nothing until
+/// `release` turns true.
+async fn serve_held_http_mcp(release: tokio::sync::watch::Receiver<bool>) -> std::net::SocketAddr {
+    use axum::routing::post;
+
+    let app = axum::Router::new().route(
+        "/mcp",
+        post(move |body: String| {
+            let mut release = release.clone();
+            async move {
+                let _ = release.wait_for(|released| *released).await;
+                let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let id = request.get("id").cloned().unwrap_or_default();
+                let result = match request["method"].as_str().unwrap_or_default() {
+                    "initialize" => json!({
+                        "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "held-fixture", "version": "1"}
+                    }),
+                    "tools/list" => json!({
+                        "tools": [{"name": "lookup", "inputSchema": {"type": "object"}}]
+                    }),
+                    _ => json!({}),
+                };
+                (
+                    [("content-type", "application/json")],
+                    json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    address
+}
+
+/// A turn on Tidebreak's own engine that starts while a saved server is
+/// still making its first connection waits no longer than the boot
+/// deadline, then tells the model which app is still connecting, so it does
+/// not tell the person the app is missing. Once the server is up, the next
+/// turn carries no such note.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_during_boot_tells_the_model_which_apps_are_still_connecting() {
+    const HEADING: &str = "## Connected apps still connecting";
+    let recorder = super::memory::SystemPromptRecorder::default();
+    let (dir, store) = temp_db_store("connecting-apps.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(recorder.clone()))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let (release, held) = tokio::sync::watch::channel(false);
+    let address = serve_held_http_mcp(held).await;
+    let now = chrono::Utc::now();
+    store
+        .replace_connected_apps(
+            ConnectedAppKind::McpServer,
+            &[tidebreak_core::connected_app::ConnectedApp {
+                id: ConnectedAppId::new(),
+                name: "slow".to_string(),
+                kind: ConnectedAppKind::McpServer,
+                definition: json!({"name": "slow", "url": format!("http://{address}/mcp")}),
+                created_at: now,
+                updated_at: now,
+            }],
+        )
+        .await
+        .unwrap();
+    let boot = state
+        .mcp
+        .initialize(crate::mcp_config::ConfiguredMcpServers::default())
+        .await
+        .unwrap();
+    tokio::spawn(boot.connect());
+    let worker = engine::internal::leg::LegDriver::new(
+        state.store.clone(),
+        state.resolver.clone(),
+        state.secrets.clone(),
+        state.provisioned_policy.clone(),
+        state.os_policy.clone(),
+        state.tools.clone(),
+        state.approvals.clone(),
+        state.events.clone(),
+        state.active_turns.clone(),
+        state.turn_job_wake.clone(),
+        state.agent_run_wake.clone(),
+        state.queued_turn_wake.clone(),
+        state.agent_config.clone(),
+        None,
+        engine::internal::leg::LegDriverConfig::default(),
+    )
+    .with_mcp_runtime(state.mcp.clone());
+    tokio::spawn(worker.run());
+    let router = app(state.clone());
+    let bearer = format!("Bearer {}", state.token);
+
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "look it up in slow").await,
+        StatusCode::ACCEPTED
+    );
+    let first = nth_prompt(&recorder, 0).await;
+    assert!(first.contains(HEADING), "{first}");
+    assert!(
+        first.contains("so their tools are not available in it: slow."),
+        "{first}"
+    );
+
+    release.send(true).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while state.mcp.info().await.servers[0].health != crate::mcp_config::McpHealth::Healthy {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the server did not come up once it answered"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    super::memory::wait_for_turns(&store, chat.id, 1).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "try again").await,
+        StatusCode::ACCEPTED
+    );
+    let second = nth_prompt(&recorder, 1).await;
+    assert!(!second.contains(HEADING), "{second}");
+}
+
+/// The system prompt of the `turn`th request the recorder saw, waiting for
+/// it to arrive.
+async fn nth_prompt(recorder: &super::memory::SystemPromptRecorder, turn: usize) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(prompt) = recorder.prompts.lock().unwrap().get(turn) {
+            return prompt.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "turn {turn} never reached the model"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

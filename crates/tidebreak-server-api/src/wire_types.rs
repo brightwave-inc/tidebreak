@@ -455,6 +455,11 @@ mod tests {
         // The Connected apps settings listing: per-kind health/catalog
         // projections and credential *status* — never definitions or values.
         generate::collect_from::<crate::routes::ConnectedAppsInfo>(&cfg, &mut out);
+        // The directory of remote MCP servers Settings offers to add, the body
+        // that adds one, and the answer.
+        generate::collect_from::<crate::mcp_directory::McpDirectory>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::McpDirectoryAdd>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::McpDirectoryAdded>(&cfg, &mut out);
         // The spec-preview response: what a document declares, for the REST
         // form's operation picker.
         generate::collect_from::<crate::routes::SpecPreviewInfo>(&cfg, &mut out);

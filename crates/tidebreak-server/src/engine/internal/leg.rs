@@ -1223,10 +1223,16 @@ impl LegDriver {
                 turn.id
             )));
         }
-        let tools = self
-            .mcp
-            .as_ref()
-            .map_or_else(|| self.tools.clone(), |mcp| mcp.snapshot());
+        // Right after boot, saved MCP servers may still be connecting. The
+        // snapshot waits for them until one deadline measured from boot, then
+        // runs with what is up; the turn's context names the rest.
+        let (tools, connecting_apps) = match &self.mcp {
+            Some(mcp) => {
+                let view = mcp.tools_after_boot().await;
+                (view.registry, view.connecting)
+            }
+            None => (self.tools.clone(), Vec::new()),
+        };
         // Session-scoped tools (the code session's native computer-use
         // channel) join the process-wide surface for this turn only.
         let tools = if session_tools.is_empty() {
@@ -1506,6 +1512,9 @@ impl LegDriver {
         if let Some(prompt) = surface.agent_config.system_prompt.as_mut() {
             crate::code::channel_preferences::append_instructions(prompt, &channel_instructions);
             standing_instructions.append_to(prompt);
+            if surface.agent_config.tools_supported {
+                crate::foreground_prompt::append_connecting_apps(prompt, &connecting_apps);
+            }
         }
         if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
             tracing::debug!(

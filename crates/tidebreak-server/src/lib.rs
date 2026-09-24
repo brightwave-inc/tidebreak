@@ -61,6 +61,7 @@ pub mod logging;
 pub mod managed_policy;
 pub mod mcp_config;
 pub mod mcp_curated;
+pub mod mcp_directory;
 pub mod mcp_oauth_runtime;
 /// Trusted decision about what imported bytes actually are, made from the
 /// bytes rather than from whoever named them.
@@ -422,6 +423,8 @@ pub struct Server {
     _empty_chat_pruner: AbortTask,
     _approval_judge_worker: AbortTask,
     _memory_sweep: AbortTask,
+    /// The saved MCP servers' first connections after boot.
+    _mcp_boot: AbortTask,
     _mcp_supervisor: AbortTask,
     _gateway_model_sync: AbortTask,
     _store_ownership: store_ownership::StoreOwnership,
@@ -626,6 +629,7 @@ impl Server {
         self._empty_chat_pruner.abort();
         self._approval_judge_worker.abort();
         self._memory_sweep.abort();
+        self._mcp_boot.abort();
         self._mcp_supervisor.abort();
         self._gateway_model_sync.abort();
 
@@ -645,6 +649,7 @@ impl Server {
         self._empty_chat_pruner.wait().await;
         self._approval_judge_worker.wait().await;
         self._memory_sweep.wait().await;
+        self._mcp_boot.wait().await;
         self._mcp_supervisor.wait().await;
         self._gateway_model_sync.wait().await;
         self.worker_health.mark_all_stopped();
@@ -1602,10 +1607,11 @@ async fn bind_inner(
             state.store.clone(),
             state.config.plugin_data_dir(),
         )));
-    state.mcp.initialize(mcp_servers).await?;
-    // A no-op when `initialize` already derived the slice; the safety net for
-    // the paths that return early (a managed profile ignoring its boot file).
-    state.mcp.reconcile_plugin_servers().await;
+    // Loads and publishes the saved servers as connecting, with no network
+    // wait; their connections start once the listener is bound, below. A
+    // saved record that cannot load is skipped with its reason rather than
+    // failing boot.
+    let mcp_boot = state.mcp.initialize(mcp_servers).await?;
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();
     let local_import_token = state.local_import_token.clone();
@@ -1822,6 +1828,12 @@ async fn bind_inner(
     // start so a connection lost during boot cannot leave a duplicate runtime
     // alive beside the process that acquires the released lease.
     store_ownership.verify().await?;
+    // The saved MCP servers connect in the background, each publishing its
+    // tools as it comes up, so a slow or unreachable server never holds the
+    // port closed. A turn that starts first waits briefly for them; see
+    // `McpRuntime::snapshot_after_boot`. Started before code recovery so the
+    // engines it relaunches find the servers as far along as possible.
+    let mcp_boot = tokio::spawn(mcp_boot.connect());
     // Publish the loopback base and take the code-mode recovery pass, then run
     // it in the background. It has to come after the bind — a session
     // re-attached before the address is known comes back with no approval
@@ -1971,6 +1983,7 @@ async fn bind_inner(
         _empty_chat_pruner: AbortTask(empty_chat_pruner),
         _approval_judge_worker: AbortTask(approval_judge_worker),
         _memory_sweep: AbortTask(memory_sweep_worker),
+        _mcp_boot: AbortTask(mcp_boot),
         _mcp_supervisor: AbortTask(mcp_supervisor),
         _gateway_model_sync: AbortTask(gateway_model_sync),
         _store_ownership: store_ownership,

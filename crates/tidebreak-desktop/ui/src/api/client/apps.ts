@@ -14,6 +14,9 @@ import {
   type GatewayStatus,
   type ManagedPolicy,
   type McpAppPayload,
+  type McpDirectory,
+  type McpDirectoryAdd,
+  type McpDirectoryAdded,
   type McpOAuthStatus,
   type McpServerDefinition,
   type McpServersInfo,
@@ -94,6 +97,37 @@ export function withAppsApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
       return this.json(`/connected-apps/rest/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: this.headers(),
+      });
+    }
+
+    /** Delete one saved MCP server record Tidebreak could not load. */
+    removeSkippedMcpServer(id: string): Promise<void> {
+      return this.json(`/connected-apps/skipped/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: this.headers(),
+      });
+    }
+
+    /** The remote MCP servers Settings offers to add. */
+    getMcpDirectory(): Promise<McpDirectory> {
+      return this.json("/mcp/directory", { headers: this.headers() });
+    }
+
+    /**
+     * Save one directory server, leaving the configured servers alone. With
+     * `start`, the server connects too, and one that asks for an OAuth
+     * sign-in comes back as "Sign in required"; start the sign-in with
+     * `connectMcpServer`. Without it, the server is saved turned off.
+     */
+    addMcpDirectoryServer(
+      id: string,
+      start: boolean,
+    ): Promise<McpDirectoryAdded> {
+      const body: McpDirectoryAdd = { start };
+      return this.json(`/mcp/directory/${encodeURIComponent(id)}/add`, {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify(body),
       });
     }
 

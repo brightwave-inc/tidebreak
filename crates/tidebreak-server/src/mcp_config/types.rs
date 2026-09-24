@@ -34,6 +34,13 @@ pub(super) const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
 pub(super) const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
+/// The longest one MCP Apps view prefetch may take before the server's tools
+/// publish without it.
+pub(super) const VIEW_PREFETCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// The longest a turn that starts while saved servers are still connecting
+/// waits for them. After it, the turn runs with the servers that are up; the
+/// rest join later turns as they connect.
+pub(super) const BOOT_TOOLS_WAIT: Duration = Duration::from_secs(3);
 
 /// Why the supervisor stopped retrying a server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -511,34 +518,7 @@ impl McpServerDefinition {
         oauth: Option<&OAuthAccess>,
     ) -> Result<(McpClient, HashMap<String, UiViewDocument>)> {
         let client = self.connect(gateway, env, oauth).await?;
-        let uris: HashSet<String> = client
-            .tools()
-            .filter_map(|spec| client.ui_resource_uri(&spec.name))
-            .map(str::to_string)
-            .collect();
-        let mut views = HashMap::new();
-        for uri in uris {
-            let Ok(content) = client.read_resource(&uri).await else {
-                continue;
-            };
-            // MCP Apps views are HTML text; a binary body has no sandbox
-            // story, and a non-HTML mime must not be served as a document.
-            let Some(html) = content.text else { continue };
-            if !content
-                .mime_type
-                .as_deref()
-                .is_none_or(|mime| mime.starts_with("text/html"))
-            {
-                continue;
-            }
-            views.insert(
-                uri,
-                UiViewDocument {
-                    mime_type: content.mime_type,
-                    html,
-                },
-            );
-        }
+        let views = prefetch_views(&client, VIEW_PREFETCH_TIMEOUT).await;
         Ok((client, views))
     }
 
@@ -553,6 +533,51 @@ impl McpServerDefinition {
             ))
         })
     }
+}
+
+/// Fetch every MCP Apps view the connected server declared, all at once, each
+/// bounded by `per_view`.
+///
+/// A view that does not arrive in time is left out, like one that fails: its
+/// transcript card degrades to a reconnect hint and the server's tools are
+/// unaffected. The bound is what keeps one slow view from holding a server's
+/// tools back, because the tools publish only after this returns. A stdio
+/// session answers one request at a time, so on that transport the views
+/// share the bound rather than each getting its own.
+pub(super) async fn prefetch_views(
+    client: &McpClient,
+    per_view: Duration,
+) -> HashMap<String, UiViewDocument> {
+    let uris: HashSet<String> = client
+        .tools()
+        .filter_map(|spec| client.ui_resource_uri(&spec.name))
+        .map(str::to_string)
+        .collect();
+    let fetched = futures::future::join_all(uris.into_iter().map(|uri| async move {
+        let content = tokio::time::timeout(per_view, client.read_resource(&uri))
+            .await
+            .ok()?
+            .ok()?;
+        // MCP Apps views are HTML text; a binary body has no sandbox story,
+        // and a non-HTML mime must not be served as a document.
+        let html = content.text?;
+        if !content
+            .mime_type
+            .as_deref()
+            .is_none_or(|mime| mime.starts_with("text/html"))
+        {
+            return None;
+        }
+        Some((
+            uri,
+            UiViewDocument {
+                mime_type: content.mime_type,
+                html,
+            },
+        ))
+    }))
+    .await;
+    fetched.into_iter().flatten().collect()
 }
 
 /// Admit a plugin-declared HTTP endpoint before any connection is opened.
@@ -778,6 +803,32 @@ pub enum McpReplaceOutcome {
     Replaced(McpServersInfo),
     /// Managed policy refused these manual servers. Nothing changed.
     RefusedManual(Vec<String>),
+}
+
+/// What adding one server did.
+pub enum McpAddOutcome {
+    /// The server is saved under `name`, or a configured server already had
+    /// its URL and `name` is that one. `info` is the configuration after it.
+    Added { name: String, info: McpServersInfo },
+    /// Managed policy refused the server. Nothing changed.
+    RefusedManual,
+}
+
+/// A saved MCP server record Tidebreak could not load.
+///
+/// Its definition does not decode, it fails validation, or its stored
+/// environment values could not move into the credential store. The record
+/// stays on file, unused: a save keeps it, and removing it is an explicit
+/// action. Its tools never mount, and a grant that binds its id stays stale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct McpSkippedServer {
+    /// The connected-app record id, which removing the record names.
+    pub id: ConnectedAppId,
+    /// The record's saved name.
+    pub name: String,
+    /// Why Tidebreak did not load it, as a sentence. Names fields and
+    /// environment variable names, never a value.
+    pub reason: String,
 }
 
 /// Renderer-safe connection lifecycle.

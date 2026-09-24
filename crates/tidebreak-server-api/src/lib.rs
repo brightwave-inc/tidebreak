@@ -19,10 +19,10 @@ pub(crate) use core::{
     agent_control_tools, agent_run_scratch_reaper, approvals, auth, chat_titling, chatgpt_runtime,
     code, connected_apps, diagnostics, document_decode, engine, error, event_projection,
     exec_write_snapshot, extract, gateway_drafts, gateway_runtime, image_attachment, instructions,
-    managed_policy, mcp_config, mcp_curated, mcp_oauth_runtime, memory_sweep, model_discovery,
-    model_registry, model_roles, obo_gateway, openapi_discovery, plugin_install, plugin_state,
-    principal, providers, runtime_settings, scoped_memory, scoped_store, server_version, state,
-    ui_bundle, view_frames,
+    managed_policy, mcp_config, mcp_curated, mcp_directory, mcp_oauth_runtime, memory_sweep,
+    model_discovery, model_registry, model_roles, obo_gateway, openapi_discovery, plugin_install,
+    plugin_state, principal, providers, runtime_settings, scoped_memory, scoped_store,
+    server_version, state, ui_bundle, view_frames,
 };
 #[cfg(test)]
 pub(crate) use core::{
@@ -327,6 +327,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::post_mcp_server_disconnect),
         )
         .route(
+            "/mcp/directory/{id}/add",
+            post(routes::post_mcp_directory_add),
+        )
+        .route(
             "/plugins/install",
             post(routes::post_plugin_install).layer(DefaultBodyLimit::max(
                 plugin_install::MAX_PLUGIN_INSTALL_BODY_BYTES,
@@ -354,6 +358,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/connected-apps/rest/spec-discovery",
             post(routes::post_rest_spec_discovery),
+        )
+        .route(
+            "/connected-apps/skipped/{id}",
+            delete(routes::delete_skipped_mcp_server),
         )
         .route("/gateway/sign-in", post(routes::post_gateway_sign_in))
         .route("/gateway/sign-out", post(routes::post_gateway_sign_out))
@@ -708,6 +716,7 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_CODE_EXECUTION_CONFIG_BODY_BYTES)),
         )
         .route("/mcp/servers", get(routes::get_mcp_servers))
+        .route("/mcp/directory", get(routes::get_mcp_directory))
         .route("/connected-apps", get(routes::get_connected_apps))
         // The installed skill/plugin catalog and its enable flags.
         .route("/plugins", get(routes::get_plugins))
@@ -1336,7 +1345,9 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/code/mcp/connected-apps",
-            post(routes::code::connected_apps),
+            // POST carries the engine's requests; GET is the event stream
+            // that tells it when to list its tools again.
+            post(routes::code::connected_apps).get(routes::code::connected_apps_events),
         )
         .route_layer(axum::middleware::from_fn(auth::require_loopback_peer))
         .with_state(frame_state);

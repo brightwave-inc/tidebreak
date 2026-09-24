@@ -296,6 +296,76 @@ async fn auto_mount_suffixes_a_name_a_manual_server_already_took() {
     );
 }
 
+/// A saved mount Tidebreak could not load still mounts its endpoint, and a
+/// skipped record still holds its name. Auto-mount mounts neither the
+/// endpoint again nor a server under that name, and the endpoint it can
+/// mount still lands.
+#[tokio::test]
+async fn auto_mount_leaves_skipped_records_their_endpoint_and_name() {
+    let (runtime, store, _directory) = test_runtime().await;
+    let now = chrono::Utc::now();
+    let record = |name: &str, definition: serde_json::Value| ConnectedApp {
+        id: ConnectedAppId::new(),
+        name: name.to_string(),
+        kind: ConnectedAppKind::McpServer,
+        definition,
+        created_at: now,
+        updated_at: now,
+    };
+    // A mount of the docs endpoint, written by a newer build.
+    let mount = record(
+        "docs",
+        serde_json::json!({
+            "name": "docs",
+            "gateway_endpoint": "docs",
+            "transport": "streamable_http"
+        }),
+    );
+    // Another newer record, under the name the tools endpoint would take.
+    let named = record(
+        "tools",
+        serde_json::json!({
+            "name": "tools",
+            "command": "/bin/tools",
+            "transport": "stdio"
+        }),
+    );
+    store
+        .replace_connected_apps(ConnectedAppKind::McpServer, &[mount, named])
+        .await
+        .unwrap();
+    runtime
+        .initialize(ConfiguredMcpServers::default())
+        .await
+        .unwrap()
+        .connect()
+        .await;
+
+    assert!(runtime
+        .auto_mount_gateway_endpoints(&["docs".to_string(), "tools".to_string()])
+        .await
+        .unwrap());
+    let info = runtime.info().await;
+    let mounted: Vec<(&str, Option<&str>)> = info
+        .servers
+        .iter()
+        .map(|server| {
+            (
+                server.definition.name.as_str(),
+                server.definition.gateway_endpoint.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(mounted, [("tools_2", Some("tools"))]);
+    let skipped: Vec<String> = runtime
+        .skipped_servers()
+        .await
+        .into_iter()
+        .map(|skipped| skipped.name)
+        .collect();
+    assert_eq!(skipped, ["docs", "tools"]);
+}
+
 #[test]
 fn parses_a_bounded_stdio_server_configuration() {
     let config = parse(
@@ -1197,7 +1267,9 @@ async fn managed_policy_forces_manual_servers_down_and_ignores_the_boot_file() {
     runtime
         .initialize(ConfiguredMcpServers::default())
         .await
-        .unwrap();
+        .unwrap()
+        .connect()
+        .await;
     let info = runtime.info().await;
     assert_eq!(info.servers[0].health, McpHealth::Disabled);
     assert_eq!(
@@ -1230,7 +1302,7 @@ async fn managed_policy_forces_manual_servers_down_and_ignores_the_boot_file() {
     )
     .unwrap();
     let boot = parse(r#"{"servers":[{"name":"docs","command":"/bin/docs"}]}"#).unwrap();
-    runtime.initialize(boot).await.unwrap();
+    runtime.initialize(boot).await.unwrap().connect().await;
     assert!(runtime.info().await.servers.is_empty());
     assert!(store.list_connected_apps().await.unwrap().is_empty());
 }
@@ -1264,7 +1336,9 @@ async fn allow_local_mcp_scopes_the_lockdown_to_remote_transports() {
     runtime
         .initialize(ConfiguredMcpServers::default())
         .await
-        .unwrap();
+        .unwrap()
+        .connect()
+        .await;
     let info = runtime.info().await;
     assert_eq!(info.servers[0].health, McpHealth::Degraded);
     assert_ne!(
@@ -1501,7 +1575,9 @@ async fn a_legacy_record_migrates_its_cleartext_values_without_moving_the_finger
     runtime
         .initialize(ConfiguredMcpServers::default())
         .await
-        .unwrap();
+        .unwrap()
+        .connect()
+        .await;
 
     let record = &saved_records(&store).await[0];
     assert_eq!(record.id, id, "the record keeps its identity");
@@ -2891,4 +2967,764 @@ async fn a_static_bearer_server_never_offers_a_sign_in() {
         "{error}"
     );
     assert!(runtime.info().await.servers.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Boot: saved servers publish without a network wait and connect in the
+// background, and a saved record that cannot load is skipped, not fatal.
+// ---------------------------------------------------------------------------
+
+/// A Streamable HTTP MCP server with one tool that answers nothing until
+/// `release` turns true, so a connection to it waits as long as a test wants.
+async fn serve_held_http_mcp(
+    tool: &'static str,
+    release: tokio::sync::watch::Receiver<bool>,
+) -> std::net::SocketAddr {
+    use axum::routing::post;
+
+    let app = axum::Router::new().route(
+        "/mcp",
+        post(move |body: String| {
+            let mut release = release.clone();
+            async move {
+                let _ = release.wait_for(|released| *released).await;
+                let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let id = request.get("id").cloned().unwrap_or_default();
+                let result = match request["method"].as_str().unwrap_or_default() {
+                    "initialize" => serde_json::json!({
+                        "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "held-fixture", "version": "1"}
+                    }),
+                    "tools/list" => serde_json::json!({
+                        "tools": [{
+                            "name": tool,
+                            "description": "Look something up",
+                            "inputSchema": {"type": "object"}
+                        }]
+                    }),
+                    _ => serde_json::json!({}),
+                };
+                (
+                    [("content-type", "application/json")],
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    address
+}
+
+/// The listed server named `name`.
+fn listed<'a>(info: &'a McpServersInfo, name: &str) -> &'a McpServerInfo {
+    info.servers
+        .iter()
+        .find(|server| server.definition.name == name)
+        .unwrap_or_else(|| panic!("{name} is listed"))
+}
+
+/// Poll `info` until `done` holds for the whole list.
+async fn servers_when(
+    runtime: &McpRuntime,
+    done: impl Fn(&McpServersInfo) -> bool,
+) -> McpServersInfo {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let info = runtime.info().await;
+        if done(&info) {
+            return info;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the servers did not settle: {:?}",
+            info.servers
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A saved server that is slow to answer holds up neither boot nor the
+/// server beside it. `initialize` publishes both as connecting without
+/// touching the network, each publishes its tools the moment it is up, and
+/// work that starts meanwhile waits a few seconds at most. The wait is one
+/// deadline measured from boot, not a fresh wait for each caller: once it
+/// passes, nothing waits, and each caller learns which server is still
+/// connecting.
+#[tokio::test]
+async fn a_slow_saved_server_holds_up_neither_boot_nor_its_neighbors() {
+    let (release_slow, held) = tokio::sync::watch::channel(false);
+    let slow = serve_held_http_mcp("slow_lookup", held).await;
+    let (_open, open) = tokio::sync::watch::channel(true);
+    let fast = serve_held_http_mcp("fast_lookup", open).await;
+    let (runtime, store, _directory) = test_runtime().await;
+    seed_records(
+        &store,
+        &[
+            http_definition("slow", &format!("http://{slow}/mcp")),
+            http_definition("fast", &format!("http://{fast}/mcp")),
+        ],
+    )
+    .await;
+
+    let boot = tokio::time::timeout(
+        Duration::from_secs(5),
+        runtime.initialize(ConfiguredMcpServers::default()),
+    )
+    .await
+    .expect("loading the saved servers waits on no server")
+    .unwrap();
+    let info = runtime.info().await;
+    assert!(
+        info.servers
+            .iter()
+            .all(|server| server.health == McpHealth::Initializing),
+        "{:?}",
+        info.servers
+    );
+    assert!(runtime.snapshot().get("mcp__fast__fast_lookup").is_none());
+
+    let connecting = tokio::spawn(boot.connect());
+    let info = servers_when(&runtime, |info| {
+        listed(info, "fast").health == McpHealth::Healthy
+    })
+    .await;
+    assert_eq!(listed(&info, "slow").health, McpHealth::Initializing);
+    assert!(runtime.snapshot().get("mcp__fast__fast_lookup").is_some());
+
+    // Work that starts now waits for the slow server, but not for long.
+    let started = std::time::Instant::now();
+    let view = runtime.tools_after_boot().await;
+    assert!(
+        started.elapsed() < BOOT_TOOLS_WAIT + Duration::from_secs(2),
+        "a turn waited {:?} on a server that never answered",
+        started.elapsed()
+    );
+    assert!(view.registry.get("mcp__fast__fast_lookup").is_some());
+    assert!(view.registry.get("mcp__slow__slow_lookup").is_none());
+    assert_eq!(view.connecting, ["slow"]);
+
+    // The deadline has passed, so the next caller does not wait again.
+    let started = std::time::Instant::now();
+    let view = runtime.tools_after_boot().await;
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "a second caller waited {:?} after the boot deadline passed",
+        started.elapsed()
+    );
+    assert_eq!(view.connecting, ["slow"]);
+    let before = view.fingerprint;
+    assert_eq!(*runtime.tool_changes().borrow(), before);
+
+    release_slow.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(15), connecting)
+        .await
+        .expect("boot connections settle once the server answers")
+        .unwrap();
+    let started = std::time::Instant::now();
+    let view = runtime.tools_after_boot().await;
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(view.registry.get("mcp__slow__slow_lookup").is_some());
+    assert!(view.connecting.is_empty());
+    // The change reached anyone watching for one.
+    assert_ne!(view.fingerprint, before);
+    assert_eq!(*runtime.tool_changes().borrow(), view.fingerprint);
+    assert_eq!(
+        listed(&runtime.info().await, "slow").health,
+        McpHealth::Healthy
+    );
+}
+
+/// The gateway's apps reach `create_app`'s roster while a saved server is
+/// still connecting after boot, and a server that connects later keeps them.
+/// The roster read used to wait for every boot connection, and a connection
+/// that landed after an add wrote the roster without the gateway's apps.
+#[tokio::test]
+async fn the_gateway_roster_arrives_before_a_slow_server_and_stays() {
+    struct CreateApp;
+
+    #[async_trait::async_trait]
+    impl tidebreak_core::Tool for CreateApp {
+        fn spec(&self) -> tidebreak_core::ToolSpec {
+            tidebreak_core::ToolSpec {
+                name: tidebreak_core::local_app::CREATE_APP_TOOL.into(),
+                description: "Create an app.".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        fn approval_class(&self) -> tidebreak_core::ApprovalClass {
+            tidebreak_core::ApprovalClass::Sensitive
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &tidebreak_core::ToolCtx,
+            _args: serde_json::Value,
+        ) -> Result<tidebreak_core::ToolOutput> {
+            Ok(tidebreak_core::ToolOutput::text(""))
+        }
+    }
+
+    struct RosterGateway;
+
+    #[async_trait::async_trait]
+    impl GatewayEndpoints for RosterGateway {
+        async fn endpoint(&self, _slug: &str) -> Result<GatewayEndpointAccess> {
+            Err(AgentError::SignInRequired(
+                "no gateway session is stored".to_string(),
+            ))
+        }
+
+        async fn entitled_app_catalogs(&self) -> Vec<GatewayRosterApp> {
+            vec![GatewayRosterApp {
+                id: "app-incident".to_string(),
+                name: "Incident API".to_string(),
+                operation_ids: vec!["listIncidents".to_string()],
+            }]
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("mcp.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let runtime = Arc::new(McpRuntime::new(
+        Arc::new(ToolRegistry::new().with(Box::new(CreateApp))),
+        store.clone(),
+        Arc::new(TestSecrets::default()),
+        Arc::new(RosterGateway),
+        Arc::new(crate::managed_policy::ProvisionedPolicyFile::in_data_dir(
+            directory.path(),
+        )),
+        Arc::new(crate::managed_policy::NoOsPolicy),
+    ));
+    let roster = |runtime: &McpRuntime| {
+        runtime
+            .snapshot()
+            .specs()
+            .into_iter()
+            .find(|spec| spec.name == tidebreak_core::local_app::CREATE_APP_TOOL)
+            .expect("create_app is registered")
+            .description
+    };
+    let (release_slow, held) = tokio::sync::watch::channel(false);
+    let slow = serve_held_http_mcp("slow_lookup", held).await;
+    seed_records(
+        &store,
+        &[http_definition("slow", &format!("http://{slow}/mcp"))],
+    )
+    .await;
+
+    let boot = runtime
+        .initialize(ConfiguredMcpServers::default())
+        .await
+        .unwrap();
+    let connecting = tokio::spawn(boot.connect());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !roster(&runtime).contains("app-incident") {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the gateway roster waited for the slow server: {}",
+            roster(&runtime)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        listed(&runtime.info().await, "slow").health,
+        McpHealth::Initializing
+    );
+
+    // An add publishes while the slow server is still connecting.
+    let mut later = http_definition("later", "https://mcp.example.test/mcp");
+    later.enabled = false;
+    runtime
+        .add_server(later, ManualLockdown::Open)
+        .await
+        .unwrap();
+    release_slow.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(15), connecting)
+        .await
+        .expect("boot connections settle once the server answers")
+        .unwrap();
+    assert_eq!(
+        listed(&runtime.info().await, "slow").health,
+        McpHealth::Healthy
+    );
+    assert!(
+        roster(&runtime).contains("app-incident"),
+        "a later connection dropped the gateway roster: {}",
+        roster(&runtime)
+    );
+}
+
+/// A saved record that does not decode, or decodes but fails validation,
+/// used to fail boot. Now it is skipped with a reason that quotes no value,
+/// the other servers load, and the record stays on file: a save writes it
+/// back unchanged, its name stays taken, and only removing it deletes it,
+/// with what was stored under its id.
+#[tokio::test]
+async fn a_saved_record_that_cannot_load_is_skipped_and_kept_on_file() {
+    let (runtime, store, _directory) = test_runtime().await;
+    let now = chrono::Utc::now();
+    let record = |name: &str, definition: serde_json::Value| ConnectedApp {
+        id: ConnectedAppId::new(),
+        name: name.to_string(),
+        kind: ConnectedAppKind::McpServer,
+        definition,
+        created_at: now,
+        updated_at: now,
+    };
+    let good = record(
+        "docs",
+        serde_json::to_value(disabled_definition("docs", "/bin/docs")).unwrap(),
+    );
+    // Written by a newer build: a setting this one does not know.
+    let newer = record(
+        "newer",
+        serde_json::json!({
+            "name": "newer",
+            "url": "https://mcp.example.test/mcp",
+            "transport": "streamable_http"
+        }),
+    );
+    // A value of the wrong type, which must never reach the reason.
+    let mangled = record(
+        "mangled",
+        serde_json::json!({"name": "mangled", "command": "/bin/tool", "args": "--token=do-not-echo"}),
+    );
+    // Decodes, but names two transports at once.
+    let invalid = record(
+        "invalid",
+        serde_json::json!({
+            "name": "invalid",
+            "command": "/bin/tool",
+            "url": "https://mcp.example.test/mcp"
+        }),
+    );
+    store
+        .replace_connected_apps(
+            ConnectedAppKind::McpServer,
+            &[good, newer.clone(), mangled.clone(), invalid.clone()],
+        )
+        .await
+        .unwrap();
+    runtime
+        .secrets()
+        .set_secret(&env_secret_key(newer.id), r#"{"TOKEN":"stored"}"#)
+        .await
+        .unwrap();
+
+    runtime
+        .initialize(ConfiguredMcpServers::default())
+        .await
+        .expect("a record that cannot load does not fail boot")
+        .connect()
+        .await;
+
+    let info = runtime.info().await;
+    assert_eq!(info.servers.len(), 1);
+    assert_eq!(info.servers[0].definition.name, "docs");
+    let skipped = runtime.skipped_servers().await;
+    let names: Vec<&str> = skipped
+        .iter()
+        .map(|skipped| skipped.name.as_str())
+        .collect();
+    assert_eq!(names, ["newer", "mangled", "invalid"]);
+    assert_eq!(skipped[0].id, newer.id);
+    assert!(
+        skipped[0].reason.contains("\"transport\""),
+        "{}",
+        skipped[0].reason
+    );
+    assert!(
+        !skipped[1].reason.contains("do-not-echo"),
+        "{}",
+        skipped[1].reason
+    );
+    assert!(
+        skipped[2]
+            .reason
+            .contains("must configure exactly one of command, url, or gateway endpoint"),
+        "{}",
+        skipped[2].reason
+    );
+
+    // A save writes the skipped records back exactly as they were.
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![
+                disabled_definition("docs", "/bin/docs"),
+                disabled_definition("other", "/bin/other"),
+            ],
+        })
+        .await
+        .unwrap();
+    let saved = saved_records(&store).await;
+    for kept in [&newer, &mangled, &invalid] {
+        let stored = saved
+            .iter()
+            .find(|stored| stored.id == kept.id)
+            .unwrap_or_else(|| panic!("a save deleted the skipped record {}", kept.name));
+        assert_eq!(stored.name, kept.name);
+        assert_eq!(stored.definition, kept.definition);
+    }
+
+    // Its name stays taken until the record goes.
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![disabled_definition("newer", "/bin/newer")],
+        })
+        .await
+        .expect_err("a skipped record still holds its name")
+        .to_string();
+    assert!(error.contains("remove it under Connected apps"), "{error}");
+
+    assert!(runtime.remove_skipped(newer.id).await.unwrap());
+    assert!(!runtime.remove_skipped(newer.id).await.unwrap());
+    assert!(saved_records(&store)
+        .await
+        .iter()
+        .all(|stored| stored.id != newer.id));
+    assert!(runtime
+        .secrets()
+        .get_secret(&env_secret_key(newer.id))
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(runtime.skipped_servers().await.len(), 2);
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![disabled_definition("newer", "/bin/newer")],
+        })
+        .await
+        .expect("the name is free once the record is removed");
+}
+
+/// A secret store that refuses every write, as a locked or denied keychain
+/// does.
+#[derive(Default)]
+struct RefusingSecrets(TestSecrets);
+
+#[async_trait::async_trait]
+impl SecretProvider for RefusingSecrets {
+    async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+        self.0.get_secret(key).await
+    }
+    async fn set_secret(&self, _key: &str, _value: &str) -> Result<()> {
+        Err(AgentError::msg("the keychain refused the write"))
+    }
+    async fn delete_secret(&self, key: &str) -> Result<()> {
+        self.0.delete_secret(key).await
+    }
+}
+
+/// A record from before environment values moved into the credential store
+/// migrates at boot. When the store refuses the values, that failure used to
+/// stop boot. Now the one server is skipped rather than started without its
+/// credentials, its record keeps the values for the next boot, and the other
+/// servers load.
+#[tokio::test]
+async fn a_legacy_record_that_cannot_migrate_is_skipped_not_fatal() {
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("mcp.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let runtime = Arc::new(McpRuntime::new(
+        Arc::new(ToolRegistry::new()),
+        store.clone(),
+        Arc::new(RefusingSecrets::default()),
+        Arc::new(NoGateway),
+        Arc::new(crate::managed_policy::ProvisionedPolicyFile::in_data_dir(
+            directory.path(),
+        )),
+        Arc::new(crate::managed_policy::NoOsPolicy),
+    ));
+    let now = chrono::Utc::now();
+    let legacy = ConnectedApp {
+        id: ConnectedAppId::new(),
+        name: "legacy".to_string(),
+        kind: ConnectedAppKind::McpServer,
+        definition: serde_json::json!({
+            "name": "legacy",
+            "command": "/bin/legacy",
+            "env": {"LEGACY_TOKEN": "cleartext-value"},
+            "enabled": false,
+        }),
+        created_at: now,
+        updated_at: now,
+    };
+    let current = ConnectedApp {
+        id: ConnectedAppId::new(),
+        name: "docs".to_string(),
+        kind: ConnectedAppKind::McpServer,
+        definition: serde_json::to_value(disabled_definition("docs", "/bin/docs")).unwrap(),
+        created_at: now,
+        updated_at: now,
+    };
+    store
+        .replace_connected_apps(ConnectedAppKind::McpServer, &[legacy.clone(), current])
+        .await
+        .unwrap();
+
+    runtime
+        .initialize(ConfiguredMcpServers::default())
+        .await
+        .expect("a refused migration does not fail boot")
+        .connect()
+        .await;
+
+    let info = runtime.info().await;
+    assert_eq!(info.servers.len(), 1);
+    assert_eq!(info.servers[0].definition.name, "docs");
+    let skipped = runtime.skipped_servers().await;
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].name, "legacy");
+    assert!(
+        skipped[0].reason.contains("credential store"),
+        "{}",
+        skipped[0].reason
+    );
+    let stored = saved_records(&store)
+        .await
+        .into_iter()
+        .find(|stored| stored.id == legacy.id)
+        .expect("the record stays on file");
+    assert_eq!(
+        stored.definition, legacy.definition,
+        "the record keeps its values for the next boot"
+    );
+}
+
+/// One MCP Apps view that never arrives holds a server's tools back for the
+/// prefetch bound at most, rather than for the request timeout.
+#[tokio::test]
+async fn a_view_that_never_arrives_is_left_out_within_the_bound() {
+    use axum::routing::post;
+
+    async fn handler(body: String) -> ([(&'static str, &'static str); 1], String) {
+        let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let id = request.get("id").cloned().unwrap_or_default();
+        let result = match request["method"].as_str().unwrap_or_default() {
+            "initialize" => serde_json::json!({
+                "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "views-fixture", "version": "1"}
+            }),
+            "tools/list" => serde_json::json!({
+                "tools": [
+                    {
+                        "name": "stuck",
+                        "inputSchema": {"type": "object"},
+                        "_meta": {"ui": {"resourceUri": "ui://fixture/stuck.html"}}
+                    },
+                    {
+                        "name": "quick",
+                        "inputSchema": {"type": "object"},
+                        "_meta": {"ui": {"resourceUri": "ui://fixture/quick.html"}}
+                    }
+                ]
+            }),
+            "resources/read" if request["params"]["uri"] == "ui://fixture/stuck.html" => {
+                std::future::pending::<()>().await;
+                unreachable!("a pending future never resolves")
+            }
+            "resources/read" => serde_json::json!({
+                "contents": [{
+                    "uri": request["params"]["uri"],
+                    "mimeType": "text/html",
+                    "text": "<html>quick</html>"
+                }]
+            }),
+            _ => serde_json::json!({}),
+        };
+        (
+            [("content-type", "application/json")],
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+        )
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().route("/mcp", post(handler)))
+            .await
+            .unwrap();
+    });
+    let client = tidebreak_mcp::McpClient::connect_http_with_timeouts(
+        "views",
+        &format!("http://{address}/mcp"),
+        None,
+        Duration::from_secs(10),
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let views = super::types::prefetch_views(&client, Duration::from_millis(300)).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a stuck view held the prefetch for {:?}",
+        started.elapsed()
+    );
+    assert!(!views.contains_key("ui://fixture/stuck.html"));
+}
+
+/// Adding a server connects only it. A configured server that is down fails
+/// a save, which connects every server again, but it neither blocks an add
+/// nor is reconnected by one. The same endpoint added twice stays one server,
+/// a taken name gets a free variant, and managed policy refuses the add.
+#[tokio::test]
+async fn adding_a_server_connects_only_the_new_one() {
+    let (_open, open) = tokio::sync::watch::channel(true);
+    let docs = serve_held_http_mcp("lookup", open.clone()).await;
+    let more = serve_held_http_mcp("search", open).await;
+    let (runtime, store, _directory) = test_runtime().await;
+    let mut broken = disabled_definition("broken", "/nonexistent/tidebreak-test-mcp");
+    broken.enabled = true;
+    let definitions = vec![broken];
+    runtime
+        .replace_permissive(definitions.clone(), ids_for(&definitions))
+        .await;
+    let epoch = runtime.state.lock().await.servers["broken"].epoch;
+
+    let McpAddOutcome::Added { name, info } = runtime
+        .add_server(
+            http_definition("docs", &format!("http://{docs}/mcp")),
+            ManualLockdown::Open,
+        )
+        .await
+        .expect("a server that is down elsewhere does not block the add")
+    else {
+        panic!("an open profile admits the add");
+    };
+    assert_eq!(name, "docs");
+    assert_eq!(listed(&info, "docs").health, McpHealth::Healthy);
+    assert_eq!(listed(&info, "broken").health, McpHealth::Degraded);
+    assert_eq!(
+        runtime.state.lock().await.servers["broken"].epoch,
+        epoch,
+        "the add did not reconnect the other server"
+    );
+    assert!(runtime.snapshot().get("mcp__docs__lookup").is_some());
+    let saved: Vec<String> = saved_records(&store)
+        .await
+        .into_iter()
+        .map(|record| record.name)
+        .collect();
+    assert_eq!(saved, ["broken", "docs"]);
+
+    let McpAddOutcome::Added { name, .. } = runtime
+        .add_server(
+            http_definition("docs_again", &format!("http://{docs}/mcp/")),
+            ManualLockdown::Open,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("an open profile admits the add");
+    };
+    assert_eq!(name, "docs", "the endpoint is already configured");
+    assert_eq!(saved_records(&store).await.len(), 2);
+
+    let McpAddOutcome::Added { name, .. } = runtime
+        .add_server(
+            http_definition("docs", &format!("http://{more}/mcp")),
+            ManualLockdown::Open,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("an open profile admits the add");
+    };
+    assert_eq!(name, "docs_2");
+
+    let refused = runtime
+        .add_server(
+            http_definition("locked", "https://mcp.example.test/mcp"),
+            ManualLockdown::AllManual,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(refused, McpAddOutcome::RefusedManual));
+    assert_eq!(saved_records(&store).await.len(), 3);
+}
+
+/// A server added from the directory that asks for an OAuth sign-in is saved
+/// with "sign in required" and parked, so the existing sign-in flow takes it
+/// from there. One whose sign-in Tidebreak can never complete saves nothing.
+#[tokio::test]
+async fn an_added_server_that_asks_for_a_sign_in_saves_and_signs_in() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let fake = FakeOAuthServer::approving().await;
+    let (runtime, store, _directory) = oauth_test_runtime().await;
+    let McpAddOutcome::Added { name, info } = runtime
+        .add_server(
+            http_definition("vercel", &fake.mcp_url()),
+            ManualLockdown::Open,
+        )
+        .await
+        .expect("a server that asks for a sign-in saves")
+    else {
+        panic!("an open profile admits the add");
+    };
+    let server = listed(&info, &name);
+    assert_eq!(server.health, McpHealth::Degraded);
+    assert_eq!(oauth_state(server), Some(McpOAuthState::NotConnected));
+    assert_eq!(
+        parked(&runtime, &name).await,
+        Some(ReconnectPark::Authorization)
+    );
+    assert_eq!(saved_records(&store).await.len(), 1);
+
+    let status = runtime.oauth_connect(&name).await.unwrap();
+    complete_browser_sign_in(&status.pending_authorization_url.unwrap()).await;
+    info_when(&runtime, |server| server.health == McpHealth::Healthy).await;
+
+    let unsupported = FakeOAuthServer::serve(FakeOAuthOptions {
+        registration: false,
+        ..FakeOAuthOptions::default()
+    })
+    .await;
+    let error = match runtime
+        .add_server(
+            http_definition("legacy", &unsupported.mcp_url()),
+            ManualLockdown::Open,
+        )
+        .await
+    {
+        Ok(_) => panic!("a sign-in Tidebreak cannot complete refuses the add"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("dynamic client registration"), "{error}");
+    assert_eq!(saved_records(&store).await.len(), 1);
+}
+
+/// Each directory entry saves a definition that passes the same validation a
+/// settings save applies, so an add never fails on the entry itself.
+#[test]
+fn every_directory_server_saves_a_valid_definition() {
+    let definitions: Vec<McpServerDefinition> = crate::mcp_directory::directory()
+        .servers
+        .iter()
+        .map(|entry| entry.definition())
+        .collect();
+    assert!(!definitions.is_empty());
+    validate_servers(&definitions).unwrap();
 }

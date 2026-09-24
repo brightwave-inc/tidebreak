@@ -5,7 +5,7 @@ import {
   HttpError,
   type ApiClient,
   type GatewayApps,
-  type McpCuration,
+  type McpDirectoryEntry,
   type McpHealth,
   type McpOAuthStatus,
   type McpServerDefinition,
@@ -20,6 +20,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { hostMachineLabel } from "@/remoteMachine";
 import { attachedRemotely } from "@/host";
 import { openInBrowser } from "@/openInBrowser";
+import { McpDirectoryList } from "./McpDirectory";
+import { McpTierChip } from "./McpTierChip";
 import {
   SettingsError,
   SettingsField,
@@ -43,8 +45,9 @@ const MOUNT_REFRESH_MS = 15_000;
  * to 127, so the mount name is derived, not the slug itself. Mount identity
  * is always the `gateway_endpoint` field, never the name. */
 const MAX_NAMESPACE_BYTES = 32;
-/** How often the list is read while a sign-in waits on the browser. The
- * server gives up on its own after five minutes, so this ends too. */
+/** How often the list is read while a sign-in waits on the browser, or while
+ * a saved server is still connecting. The server gives up on a sign-in after
+ * five minutes and bounds every connection attempt, so this ends too. */
 const SIGN_IN_POLL_MS = 2_000;
 
 type McpImportSummary = McpImportResult & { fileName: string };
@@ -220,17 +223,27 @@ const REMOTE_SIGN_IN =
   "This window is attached to another machine. The sign-in page returns to the machine that runs this server, so the sign-in has to finish in a browser on that machine.";
 
 /**
- * What a configured server's status line says. A server that is not
- * connected because it waits on an OAuth sign-in says so, and why, instead of
- * reading as a failed connection; one that just signed in says it is
- * connecting; any other server reads from its health. Attached to another
- * machine (`remote`), the sign-in states say plainly that the sign-in has to
- * finish on that machine.
+ * What a configured server's status line says. A saved server still making
+ * its first connection, as every saved server is right after Tidebreak
+ * starts, says it is connecting. A server that is not connected because it
+ * waits on an OAuth sign-in says so, and why, instead of reading as a failed
+ * connection; one that just signed in says it is connecting; any other server
+ * reads from its health. Attached to another machine (`remote`), the sign-in
+ * states say plainly that the sign-in has to finish on that machine. `saved`
+ * tells a saved server from an unsaved row, which also reads `initializing`.
  */
 export function mcpServerStatus(
   server: McpServerInfo,
-  { remote = false }: { remote?: boolean } = {},
+  { remote = false, saved = false }: { remote?: boolean; saved?: boolean } = {},
 ): McpServerStatus {
+  if (saved && server.health === "initializing") {
+    return {
+      tone: "neutral",
+      label: "Connecting",
+      description:
+        "Tidebreak is connecting to this server. Its tools reach new turns once it is up.",
+    };
+  }
   const oauth = oauthStatusOf(server);
   if (oauth?.state === "connected" && server.health === "reconnecting") {
     return {
@@ -310,6 +323,7 @@ export function McpServerSummary({
   busy = false,
   disabled = false,
   remote = false,
+  saved = false,
   onConnect,
   onDisconnect,
   onCancel,
@@ -319,6 +333,8 @@ export function McpServerSummary({
   disabled?: boolean;
   /** Whether this window is attached to another machine. */
   remote?: boolean;
+  /** Whether the row is a saved server rather than an unsaved edit. */
+  saved?: boolean;
   onConnect?: () => void;
   onDisconnect?: () => void;
   onCancel?: () => void;
@@ -326,7 +342,7 @@ export function McpServerSummary({
   const oauth = oauthStatusOf(server);
   return (
     <>
-      <SettingsStatus {...mcpServerStatus(server, { remote })} />
+      <SettingsStatus {...mcpServerStatus(server, { remote, saved })} />
       <div className="flex flex-wrap items-center gap-2">
         <McpTierChip curated={server.curated} />
         {oauth ? (
@@ -356,32 +372,6 @@ function settling(health: McpHealth): boolean {
 function oauthStatusOf(server: McpServerInfo): McpOAuthStatus | null {
   if (transportOf(server) !== "http") return null;
   return server.oauth_status ?? null;
-}
-
-/**
- * The two-tier honesty label: "Tested" for a server on the curated list,
- * "Community" for everything else. A label only — both tiers mount, connect,
- * and call identically. The server decides the tier from the *saved*
- * definition, so an unsaved edit keeps the previous row's label until Save.
- */
-export function McpTierChip({ curated }: { curated: McpCuration | null }) {
-  const tested = curated !== null;
-  return (
-    <span
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs ${
-        tested
-          ? "border-success-border/40 text-success-foreground"
-          : "text-muted-foreground"
-      }`}
-      title={
-        tested
-          ? `${curated.display_name} — exercised end to end on ${curated.tested_on}. ${curated.notes}`
-          : "Not on Tidebreak's tested list. It still mounts and runs; we have not driven this server ourselves."
-      }
-    >
-      {tested ? "Tested" : "Community"}
-    </span>
-  );
 }
 
 function transportOf(server: McpServerInfo): Transport {
@@ -519,10 +509,26 @@ export function McpPanel({
   // The servers whose sign-in was waiting at the last read, so the read that
   // sees one connect can say so.
   const signingInRef = useRef(new Set<string>());
+  // The names the last authoritative list held. A row with one of them is a
+  // saved server, so `initializing` there means connecting, not unsaved.
+  const [savedNames, setSavedNames] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  // The directory of remote servers: `null` while it loads.
+  const [directory, setDirectory] = useState<McpDirectoryEntry[] | null>(null);
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
+  // The directory entry being added, and why the last add failed.
+  const [adding, setAdding] = useState<string | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
 
   function markDirty(value: boolean) {
     dirtyRef.current = value;
     setDirty(value);
+  }
+
+  /** Note which servers an authoritative list says are saved. */
+  function rememberSaved(fresh: McpServerInfo[]) {
+    setSavedNames(new Set(fresh.map((server) => server.name)));
   }
 
   /** Install a fresh, authoritative server list: wholesale when nothing is
@@ -532,6 +538,7 @@ export function McpPanel({
    * keep the reader's unsaved edits and refresh only their projection, so a
    * sign-in that finishes mid-edit still shows. */
   function adoptServers(fresh: McpServerInfo[]) {
+    rememberSaved(fresh);
     setServers((current) => {
       // Reading the ref inside the updater is sound where a transition
       // detector would not be: it only reads, so a StrictMode double-invoke
@@ -620,6 +627,25 @@ export function McpPanel({
     };
   }, [client, signedIn]);
 
+  // The directory is static data the server compiles in, so one read per
+  // visit is enough. A managed profile locks remote servers a person adds,
+  // so it gets no directory.
+  useEffect(() => {
+    if (managed) return;
+    let cancelled = false;
+    client
+      .getMcpDirectory()
+      .then((result) => {
+        if (!cancelled) setDirectory(result.servers);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setDirectoryError(errorMessage(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, managed]);
+
   // The one reader of the server list: the initial load, the Retry
   // affordance, and — while a gateway session exists — a steady cadence, so
   // a mount that degrades after the first read doesn't keep a stale healthy
@@ -673,6 +699,7 @@ export function McpPanel({
       // Supersede any in-flight background read; this list is fresher.
       requestRef.current += 1;
       setServers(result.servers);
+      rememberSaved(result.servers);
       setServersKnown(true);
       setListError(null);
       markDirty(false);
@@ -770,12 +797,14 @@ export function McpPanel({
       const result = await client.reconnectMcpServer(name);
       requestRef.current += 1;
       setServers(result.servers);
+      rememberSaved(result.servers);
     } catch (err) {
       setError(errorMessage(err));
       try {
         const result = await client.listMcpServers();
         requestRef.current += 1;
         setServers(result.servers);
+        rememberSaved(result.servers);
       } catch {
         // Preserve the reconnect error; reopening Settings performs a full load.
       }
@@ -880,29 +909,79 @@ export function McpPanel({
     await refreshServers();
   }
 
-  // While a sign-in waits on the browser, and while the server reconnects
-  // after one, read the list often enough that coming back from the browser
-  // shows the result without a manual refresh.
-  const signingIn = servers.some(
+  /** Add one directory server, then start its sign-in when it asks for one.
+   * The add saves only that server, so unsaved edits stay unsaved: the new
+   * row joins the draft, and the next save keeps it. Without `start`, the
+   * server is saved turned off and nothing connects. */
+  async function addFromDirectory(entry: McpDirectoryEntry, start: boolean) {
+    setAdding(entry.id);
+    setAddError(null);
+    let signIn: string | null = null;
+    try {
+      const result = await client.addMcpDirectoryServer(entry.id, start);
+      // Supersede any in-flight background read; this list is fresher.
+      requestRef.current += 1;
+      rememberSaved(result.servers);
+      const added = result.servers.find(
+        (server) => server.name === result.name,
+      );
+      if (!dirtyRef.current) {
+        setServers(result.servers);
+      } else if (added !== undefined) {
+        setServers((current) =>
+          current.some((server) => server.name === added.name)
+            ? current
+            : [...current, added],
+        );
+      }
+      setServersKnown(true);
+      setListError(null);
+      // A window attached to another machine cannot finish a sign-in, so it
+      // leaves Connect to the row, which says where the sign-in has to run.
+      if (
+        added?.oauth_status?.state === "not_connected" &&
+        !attachedRemotely()
+      ) {
+        signIn = result.name;
+      } else if (!start) {
+        toast.success(`Added ${entry.name}, turned off`);
+      } else {
+        toast.success(`Added ${entry.name}`);
+      }
+    } catch (err) {
+      setAddError(`Could not add ${entry.name}: ${errorMessage(err)}`);
+    } finally {
+      setAdding(null);
+    }
+    if (signIn !== null) await connectOauth(signIn);
+  }
+
+  // While a sign-in waits on the browser, while the server reconnects after
+  // one, and while a saved server makes its first connection after
+  // Tidebreak starts, read the list often enough that each row settles on
+  // its own, without a manual refresh.
+  const following = servers.some(
     (server) =>
       server.oauth_status?.state === "authorizing" ||
-      (server.oauth_status?.state === "connected" && settling(server.health)),
+      (server.oauth_status?.state === "connected" && settling(server.health)) ||
+      (savedNames.has(server.name) && settling(server.health)),
   );
   useEffect(() => {
-    if (!signingIn) return;
+    if (!following) return;
     const timer = window.setInterval(
       () => void refreshServers(),
       SIGN_IN_POLL_MS,
     );
     return () => window.clearInterval(timer);
     // refreshServers reads only refs, the client, and state setters.
-  }, [client, signingIn]);
+  }, [client, following]);
 
   const working =
     saving ||
     importing ||
     reconnecting !== null ||
     oauthWorking !== null ||
+    adding !== null ||
     mounting;
 
   const entitledSlugs = new Set(
@@ -1094,6 +1173,16 @@ export function McpPanel({
         <p className="text-sm text-muted-foreground">Loading MCP servers…</p>
       ) : (
         <>
+          <McpDirectoryList
+            servers={directory}
+            configured={servers}
+            adding={adding}
+            disabled={working}
+            loadError={directoryError}
+            addError={addError}
+            onAdd={(entry, start) => void addFromDirectory(entry, start)}
+          />
+
           <SettingsSection
             title="Import configuration"
             description="Add servers from a Tidebreak, Claude, Cursor, Windsurf, or VS Code JSON file, or paste that JSON here. Imported servers stay unsaved until you review them and save."
@@ -1181,6 +1270,7 @@ export function McpPanel({
                   busy={oauthWorking === server.name}
                   disabled={working && oauthWorking !== server.name}
                   remote={attachedRemotely()}
+                  saved={savedNames.has(server.name)}
                   onConnect={() => void connectOauth(server.name)}
                   onDisconnect={() => void disconnectOauth(server.name)}
                   onCancel={() => void cancelOauth(server.name)}
