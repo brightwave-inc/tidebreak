@@ -41,7 +41,9 @@ export type SettingsStoryState =
   /** Right after Tidebreak starts: a saved MCP server is still connecting. */
   | "mcp-connecting"
   /** A saved MCP record Tidebreak could not load sits beside the apps. */
-  | "mcp-skipped";
+  | "mcp-skipped"
+  /** Many connected-app rows, for list density. */
+  | "many";
 
 type SettingsClientMethods = Pick<
   ApiClient,
@@ -545,6 +547,26 @@ function createSettingsStoryClient(
           }
         : state === "mcp-skipped"
           ? { ...connectedApps, skipped_mcp_servers: [mcpSkippedRecord] }
+          : state === "many"
+            ? {
+                apps: [
+                  ...connectedApps.apps,
+                  ...Array.from({ length: 8 }, (_, index) => ({
+                    kind: "rest_api" as const,
+                    id: `app-rest-${index}`,
+                    name: `REST ${index + 1}`,
+                    base_url: `https://api.example.test/v${index + 1}`,
+                    operation_count: index + 1,
+                    document_sha256: "ab".repeat(32),
+                    credential_status: "configured" as const,
+                    placement: "bearer" as const,
+                    updated_at: "2026-08-20T12:00:00Z",
+                    used_by_app_count: 0,
+                    allow_loopback_http: false,
+                  })),
+                ],
+                skipped_mcp_servers: [],
+              }
           : connectedApps;
 
   const methods: SettingsClientMethods = {

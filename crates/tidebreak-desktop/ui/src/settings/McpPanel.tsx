@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
-import { ExternalLink, Plus, RefreshCw, Trash2, Upload } from "lucide-react";
+import {
+  CircleAlert,
+  ExternalLink,
+  Plus,
+  RefreshCw,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import {
   HttpError,
   type ApiClient,
@@ -12,6 +19,14 @@ import {
   type McpServerInfo,
 } from "../api";
 import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -1052,7 +1067,7 @@ export function McpPanel({
             configured connections.
           </p>
         )}
-        {listError !== null && (
+        {listError !== null && endpointSlugs.length > 0 && (
           <div className="flex items-center justify-between gap-4">
             <SettingsError>
               Could not read the MCP server list: {listError}
@@ -1071,8 +1086,16 @@ export function McpPanel({
             </Button>
           </div>
         )}
-        {loading ? (
+        {loading && !serversKnown ? (
           <p className="text-sm text-muted-foreground">Loading endpoints…</p>
+        ) : listError !== null && !serversKnown && endpointSlugs.length === 0 ? (
+          <McpLoadFailure
+            error={listError}
+            onRetry={() => {
+              setError(null);
+              setRefreshNonce((nonce) => nonce + 1);
+            }}
+          />
         ) : endpointSlugs.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No gateway endpoints are granted to your teams.
@@ -1169,9 +1192,17 @@ export function McpPanel({
       busy={loading || working}
     >
       {endpointsSection}
-      {loading ? (
+      {loading && !serversKnown ? (
         <p className="text-sm text-muted-foreground">Loading MCP servers…</p>
-      ) : (
+      ) : listError !== null && !serversKnown && !endpointsVisible ? (
+        <McpLoadFailure
+          error={listError}
+          onRetry={() => {
+            setError(null);
+            setRefreshNonce((nonce) => nonce + 1);
+          }}
+        />
+      ) : listError !== null && !serversKnown ? null : (
         <>
           <McpDirectoryList
             servers={directory}
@@ -1249,7 +1280,7 @@ export function McpPanel({
           </SettingsSection>
 
           {servers.length === 0 && (
-            <SettingsSection>
+            <SettingsSection title="Configured servers">
               <p className="text-sm text-muted-foreground">
                 No MCP servers configured. Add one to make its tools available
                 to new conversations.
@@ -1574,7 +1605,7 @@ export function McpPanel({
           </p>
         </>
       )}
-      {fallbackListError}
+      {serversKnown && fallbackListError}
       {error && <SettingsError>{error}</SettingsError>}
     </McpKindSection>
   );
@@ -1656,6 +1687,31 @@ function secretsByServer(
  * — the page title, column, and rhythm belong to the surrounding
  * `SettingsPanel` — while `aria-busy` still scopes this kind's own work.
  */
+function McpLoadFailure({
+  error,
+  onRetry,
+}: {
+  error: string;
+  onRetry: () => void;
+}) {
+  return (
+    <Empty className="min-h-80 border" role="alert">
+      <EmptyHeader>
+        <EmptyMedia variant="icon" className="text-critical">
+          <CircleAlert />
+        </EmptyMedia>
+        <EmptyTitle>MCP servers could not load</EmptyTitle>
+        <EmptyDescription>{error}</EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <Button variant="outline" size="sm" onClick={onRetry}>
+          Try again
+        </Button>
+      </EmptyContent>
+    </Empty>
+  );
+}
+
 function McpKindSection({
   description,
   busy,

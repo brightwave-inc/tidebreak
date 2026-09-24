@@ -893,14 +893,11 @@ function MachineSections({
               <Laptop
                 size={16}
                 aria-hidden
-                className={remote ? "text-muted-foreground" : "text-icon-green"}
+                className="text-muted-foreground"
               />
-              <span
-                className={
-                  remote ? "text-muted-foreground line-through" : undefined
-                }
-              >
+              <span className={remote ? "text-muted-foreground" : undefined}>
                 {hostAuthorityLabel(authority)}
+                {remote ? " · Not available here" : null}
               </span>
             </li>
           ))}

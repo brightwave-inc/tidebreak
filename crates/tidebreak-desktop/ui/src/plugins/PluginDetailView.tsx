@@ -5,7 +5,6 @@ import type { ReactNode } from "react";
 import type { PluginSkillInfo } from "@/api";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
 import { paneHeaderDragRegion } from "@/WindowDragStrip";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
@@ -190,12 +189,10 @@ export function PluginDetailView({
                         None derived
                       </span>
                     ) : (
-                      <span className="flex flex-wrap gap-1.5">
-                        {plugin.capabilities.map((capability) => (
-                          <Badge key={capability} variant="outline" size="sm">
-                            {capabilityLabel(capability)}
-                          </Badge>
-                        ))}
+                      <span className="text-muted-foreground">
+                        {plugin.capabilities
+                          .map((capability) => capabilityLabel(capability))
+                          .join(" · ")}
                       </span>
                     )}
                   </InfoRow>

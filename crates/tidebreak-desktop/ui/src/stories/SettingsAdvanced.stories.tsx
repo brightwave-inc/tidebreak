@@ -179,6 +179,10 @@ export const ConnectedAppsEmpty: Story = {
   args: { panel: "connected-apps", state: "empty" },
 };
 
+export const ConnectedAppsManyRows: Story = {
+  args: { panel: "connected-apps", state: "many" },
+};
+
 export const ConnectedAppsMcpImportSummary: Story = {
   args: { panel: "connected-apps", state: "empty" },
 };

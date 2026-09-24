@@ -3,6 +3,8 @@ import { toast } from "sonner";
 import {
   ChevronDown,
   ChevronRight,
+  CircleAlert,
+  Ellipsis,
   Pencil,
   Plus,
   RefreshCw,
@@ -25,8 +27,21 @@ import {
   NoPublicDocumentGuidance,
 } from "./OpenApiDiscovery";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Spinner } from "@/components/ui/spinner";
-import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -241,67 +256,103 @@ function McpAppEntry({
     entry.health !== "healthy" &&
     entry.health !== "initializing" &&
     entry.health !== "reconnecting";
+  const reconnectingThis = reconnecting === entry.name;
+  const showReconnect =
+    !managed &&
+    unhealthy &&
+    entry.health !== "initializing" &&
+    entry.health !== "disabled";
+  const reconnectInMenu =
+    !managed &&
+    !showReconnect &&
+    entry.health !== "initializing" &&
+    entry.health !== "disabled";
   return (
-    <li className="flex flex-col gap-1 rounded-md border px-3 py-2">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <p className="text-sm font-bold">{mcpTitle(entry)}</p>
-        <McpHealthChip health={entry.health} />
-        <McpTierChip curated={entry.curated} />
-        {entry.gateway_endpoint !== null && (
-          <span className="text-xs text-muted-foreground">
-            · via your organization's gateway
-          </span>
+    <li className="flex items-start justify-between gap-4 py-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <p className="text-sm font-bold">{mcpTitle(entry)}</p>
+          <McpHealthChip health={entry.health} />
+        </div>
+        <p className="text-xs text-muted-foreground">
+          <McpTierChip curated={entry.curated} />
+          {entry.gateway_endpoint !== null
+            ? " · via your organization's gateway"
+            : null}
+        </p>
+        {!detailInAdvanced && unhealthy && entry.diagnostic !== null && (
+          <p className="text-xs text-muted-foreground break-words">
+            {entry.diagnostic}
+          </p>
+        )}
+        {entry.tools.length > 0 && (
+          <>
+            <button
+              type="button"
+              className="flex items-center gap-1 self-start text-xs text-muted-foreground hover:text-foreground"
+              aria-expanded={open}
+              onClick={() => setOpen((current) => !current)}
+            >
+              {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              {entry.tools.length} tool{entry.tools.length === 1 ? "" : "s"}
+            </button>
+            {open && (
+              <ul className="flex flex-col gap-0.5 pl-4">
+                {entry.tools.map((tool) => (
+                  <li key={tool} className="font-mono text-xs">
+                    {tool}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+        {entry.used_by_app_count > 0 && (
+          <p className="text-xs text-muted-foreground">
+            {usedByLabel(entry.used_by_app_count)}
+          </p>
         )}
       </div>
-      {!detailInAdvanced && unhealthy && entry.diagnostic !== null && (
-        <p className="text-xs text-muted-foreground break-words">
-          {entry.diagnostic}
-        </p>
-      )}
-      {entry.tools.length > 0 && (
-        <>
-          <button
-            type="button"
-            className="flex items-center gap-1 self-start text-xs text-muted-foreground hover:text-foreground"
-            aria-expanded={open}
-            onClick={() => setOpen((current) => !current)}
-          >
-            {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-            {entry.tools.length} tool{entry.tools.length === 1 ? "" : "s"}
-          </button>
-          {open && (
-            <ul className="flex flex-col gap-0.5 pl-4">
-              {entry.tools.map((tool) => (
-                <li key={tool} className="font-mono text-xs">
-                  {tool}
-                </li>
-              ))}
-            </ul>
+      {!managed && (showReconnect || reconnectInMenu) && (
+        <div className="flex shrink-0 items-start gap-1">
+          {showReconnect && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={() => onReconnect(entry.name)}
+            >
+              <RefreshCw size={14} />
+              {reconnectingThis ? "Reconnecting…" : "Reconnect"}
+            </Button>
           )}
-        </>
+          {reconnectInMenu && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  disabled={busy}
+                  aria-label={`Actions for ${mcpTitle(entry)}`}
+                >
+                  <Ellipsis />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  disabled={busy}
+                  onSelect={() => onReconnect(entry.name)}
+                >
+                  <RefreshCw />
+                  {reconnectingThis ? "Reconnecting…" : "Reconnect"}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+        </div>
       )}
-      {entry.used_by_app_count > 0 && (
-        <p className="text-xs text-muted-foreground">
-          {usedByLabel(entry.used_by_app_count)}
-        </p>
-      )}
-      {/* No endpoint indirection on an unmanaged profile, so the reconnect
-          action rides the entry itself. */}
-      {!managed &&
-        entry.health !== "initializing" &&
-        entry.health !== "disabled" && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="self-start"
-            disabled={busy}
-            onClick={() => onReconnect(entry.name)}
-          >
-            <RefreshCw size={14} />
-            {reconnecting === entry.name ? "Reconnecting…" : "Reconnect"}
-          </Button>
-        )}
     </li>
   );
 }
@@ -323,24 +374,26 @@ function SkippedMcpEntry({
   onRemove: () => void;
 }) {
   return (
-    <li className="flex flex-col gap-1 rounded-md border px-3 py-2">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <p className="text-sm font-bold">{record.name}</p>
-        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-          <span aria-hidden className="text-warning">
-            ●
+    <li className="flex items-start justify-between gap-4 py-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <p className="text-sm font-bold">{record.name}</p>
+          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+            <span aria-hidden className="text-warning">
+              ●
+            </span>
+            Could not load
           </span>
-          Could not load
-        </span>
+        </div>
+        <p className="text-xs break-words text-muted-foreground">
+          {record.reason}
+        </p>
       </div>
-      <p className="text-xs break-words text-muted-foreground">
-        {record.reason}
-      </p>
       <Button
         type="button"
         variant="outline"
         size="sm"
-        className="self-start"
+        className="shrink-0"
         aria-label={`Remove ${record.name}`}
         disabled={busy}
         onClick={onRemove}
@@ -521,7 +574,10 @@ export function ConnectedAppsPanel({
   const [apps, setApps] = useState<ConnectedAppInfo[]>([]);
   const [skipped, setSkipped] = useState<McpSkippedServer[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -533,24 +589,27 @@ export function ConnectedAppsPanel({
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
     client
       .listConnectedApps()
       .then((info) => {
         if (cancelled) return;
         setApps(info.apps);
         setSkipped(info.skipped_mcp_servers);
+        setLoadError(null);
         setListError(null);
+        setLoaded(true);
         setLoading(false);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setListError(errorMessage(err));
+        setLoadError(errorMessage(err));
         setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, refreshNonce]);
 
   // Right after Tidebreak starts, saved MCP servers are still connecting.
   // Read the listing again until every entry has settled, so each chip
@@ -849,7 +908,7 @@ export function ConnectedAppsPanel({
   const restRow = (entry: RestEntry) => (
     <li
       key={entry.id}
-      className="flex items-center justify-between gap-4 rounded-md border px-3 py-2"
+      className="flex items-start justify-between gap-4 py-3"
     >
       <div className="min-w-0 flex-1">
         <p className="text-sm font-bold">{entry.name}</p>
@@ -864,7 +923,7 @@ export function ConnectedAppsPanel({
         )}
       </div>
       {!managed && (
-        <div className="flex gap-2">
+        <div className="flex shrink-0 items-start gap-1">
           <Button
             variant="outline"
             size="sm"
@@ -1178,93 +1237,96 @@ export function ConnectedAppsPanel({
   const busy =
     saving || previewing || deleting !== null || reconnecting !== null;
 
+  const loadFailed = loadError !== null && !loaded;
+
   return (
     <SettingsPanel
       title="Connected apps"
       description="The apps this profile can reach — through your organization's gateway, local MCP servers, and REST APIs — bound by local apps with your consent."
       busy={loading || busy}
     >
-      {loading ? (
+      {loading && !loaded ? (
         <p className="text-sm text-muted-foreground">Loading connected apps…</p>
+      ) : loadFailed ? (
+        <ConnectedAppsLoadFailure
+          error={loadError}
+          onRetry={() => setRefreshNonce((nonce) => nonce + 1)}
+        />
       ) : (
         <>
-          <section className="flex flex-col gap-4">
-            <div className="flex flex-col gap-1">
-              <h2 className="text-lg font-semibold">Apps</h2>
+          {listError && <SettingsError>{listError}</SettingsError>}
+          <SettingsSection
+            title="Apps"
+            description="Each entry is one connected app. Expand it to see the tools it makes available."
+          >
+            {managed && (
               <p className="text-sm text-muted-foreground">
-                Each entry is one connected app. Expand it to see the tools it
-                makes available.
+                REST connected apps are managed by your organization's gateway;
+                there is nothing to configure here.
               </p>
-              {managed && (
-                <p className="text-sm text-muted-foreground">
-                  REST connected apps are managed by your organization's
-                  gateway; there is nothing to configure here.
-                </p>
-              )}
-            </div>
-            <Card className="gap-4 border bg-transparent p-4">
-              {apps.length === 0 && skipped.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  {managed
-                    ? "No apps connected."
-                    : "No apps connected. Add a REST API here, or configure MCP servers in the editor below."}
-                </p>
-              ) : (
-                <ul aria-label="Connected apps" className="flex flex-col gap-2">
-                  {skipped.map((record) => (
-                    <SkippedMcpEntry
-                      key={record.id}
-                      record={record}
+            )}
+            {apps.length === 0 && skipped.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                {managed
+                  ? "No apps connected."
+                  : "No apps connected. Add a REST API here, or configure MCP servers in the editor below."}
+              </p>
+            ) : (
+              <ul
+                aria-label="Connected apps"
+                className="divide-y divide-border"
+              >
+                {skipped.map((record) => (
+                  <SkippedMcpEntry
+                    key={record.id}
+                    record={record}
+                    busy={busy}
+                    removing={deleting === record.id}
+                    onRemove={() => void removeSkipped(record)}
+                  />
+                ))}
+                {apps.map((entry) =>
+                  entry.kind === "mcp_server" ? (
+                    <McpAppEntry
+                      key={entry.id}
+                      entry={entry}
+                      managed={managed}
                       busy={busy}
-                      removing={deleting === record.id}
-                      onRemove={() => void removeSkipped(record)}
+                      reconnecting={reconnecting}
+                      onReconnect={(name) => void reconnectEntry(name)}
                     />
-                  ))}
-                  {apps.map((entry) =>
-                    entry.kind === "mcp_server" ? (
-                      <McpAppEntry
-                        key={entry.id}
-                        entry={entry}
-                        managed={managed}
-                        busy={busy}
-                        reconnecting={reconnecting}
-                        onReconnect={(name) => void reconnectEntry(name)}
-                      />
-                    ) : (
-                      restRow(entry)
-                    ),
-                  )}
-                </ul>
-              )}
-              {!managed && draft === null && (
-                <div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => {
-                      setFormError(null);
-                      setDraft(draftFor(null));
-                    }}
-                  >
-                    <Plus size={14} /> Add REST API
-                  </Button>
-                </div>
-              )}
-            </Card>
-          </section>
+                  ) : (
+                    restRow(entry)
+                  ),
+                )}
+              </ul>
+            )}
+            {!managed && draft === null && (
+              <div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => {
+                    setFormError(null);
+                    setDraft(draftFor(null));
+                  }}
+                >
+                  <Plus size={14} /> Add REST API
+                </Button>
+              </div>
+            )}
+          </SettingsSection>
 
           {!managed && editor}
+
+          {managed ? (
+            <AdvancedSection client={client} />
+          ) : (
+            <McpPanel client={client} managed={false} />
+          )}
         </>
       )}
-
-      {managed ? (
-        <AdvancedSection client={client} />
-      ) : (
-        <McpPanel client={client} managed={false} />
-      )}
-
-      {listError && <SettingsError>{listError}</SettingsError>}
 
       <p className="text-sm text-muted-foreground">
         MCP tools are always sensitive and keep Tidebreak's existing approval
@@ -1272,5 +1334,30 @@ export function ConnectedAppsPanel({
       </p>
       {confirmDialog}
     </SettingsPanel>
+  );
+}
+
+function ConnectedAppsLoadFailure({
+  error,
+  onRetry,
+}: {
+  error: string;
+  onRetry: () => void;
+}) {
+  return (
+    <Empty className="min-h-80 border" role="alert">
+      <EmptyHeader>
+        <EmptyMedia variant="icon" className="text-critical">
+          <CircleAlert />
+        </EmptyMedia>
+        <EmptyTitle>Connected apps could not load</EmptyTitle>
+        <EmptyDescription>{error}</EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <Button variant="outline" size="sm" onClick={onRetry}>
+          Try again
+        </Button>
+      </EmptyContent>
+    </Empty>
   );
 }

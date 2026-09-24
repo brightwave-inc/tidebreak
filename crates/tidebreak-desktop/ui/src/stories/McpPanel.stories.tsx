@@ -68,6 +68,36 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
+export const Empty: Story = {
+  args: { client: stubClient([]) },
+};
+
+export const LoadFailure: Story = {
+  args: {
+    client: {
+      ...stubClient([]),
+      listMcpServers: async () => {
+        throw new Error("MCP servers could not be loaded.");
+      },
+    } as ApiClient,
+  },
+};
+
+export const ManyServers: Story = {
+  args: {
+    client: stubClient(
+      Array.from({ length: 8 }, (_, index) =>
+        stdioServer({
+          name: `server_${index + 1}`,
+          health: index === 3 ? "degraded" : "healthy",
+          diagnostic:
+            index === 3 ? "The process exited before it answered." : null,
+        }),
+      ),
+    ),
+  },
+};
+
 export const StdioResolvedCommand: Story = {
   args: { client: stubClient([stdioServer()]) },
 };
