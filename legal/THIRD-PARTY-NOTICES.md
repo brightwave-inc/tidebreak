@@ -1052,7 +1052,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/niklak/dom_query
 - License text: `LICENSE` ([L-8f8eade124ab](#l-8f8eade124ab))
 
-### dom_smoothie 0.18.1
+### dom_smoothie 0.18.2
 
 - License: `MIT`
 - Repository: https://github.com/niklak/dom_smoothie
