@@ -1,4 +1,8 @@
-import type { McpOAuthStatus } from "@/generated/wire";
+import type {
+  McpOAuthStatus,
+  MessageSearchHit,
+  MessageSearchIndexing,
+} from "@/generated/wire";
 import type {
   Attention,
   CodeDeliveryPullRequestDetail,
@@ -2805,4 +2809,102 @@ export const mcpSkippedRecord: McpSkippedServer = {
   name: "research_notes",
   reason:
     'It has a setting this version of Tidebreak does not know, "transport". A newer version of Tidebreak may have saved it.',
+};
+
+/** When the message search fixtures were said, and the "now" stories fix. */
+export const messageSearchNow = new Date("2026-09-24T15:00:00Z");
+
+/**
+ * A search hit whose ranges mark every case-insensitive occurrence of
+ * `word` in `snippet`, the way the server marks its matches.
+ */
+export function messageSearchHit(
+  snippet: string,
+  word: string,
+  overrides: Partial<MessageSearchHit> = {},
+): MessageSearchHit {
+  const ranges: MessageSearchHit["ranges"] = [];
+  const lower = snippet.toLowerCase();
+  const needle = word.toLowerCase();
+  for (
+    let at = lower.indexOf(needle);
+    at >= 0;
+    at = lower.indexOf(needle, at + needle.length)
+  ) {
+    ranges.push({ start: at, end: at + needle.length });
+  }
+  return {
+    kind: "chat",
+    session_id: "0199a0f2-0000-7000-8000-000000000001",
+    title: "Harbour pricing notes",
+    turn_id: "0199a0f2-0000-7000-8000-00000000a001",
+    message_id: "0199a0f2-0000-7000-8000-00000000b001",
+    source: "user",
+    snippet,
+    ranges,
+    created_at: "2026-09-24T12:10:00Z",
+    archived: false,
+    ...overrides,
+  };
+}
+
+/** What searching "harbour" finds across chats and code sessions. */
+export const messageSearchHits: MessageSearchHit[] = [
+  messageSearchHit(
+    "Can you draft the harbour pricing page? Keep the tiers the same as last quarter.",
+    "harbour",
+  ),
+  messageSearchHit(
+    "…the Harbour plan moves to annual billing, and the monthly price stays where it was.",
+    "harbour",
+    {
+      source: "assistant",
+      message_id: "0199a0f2-0000-7000-8000-00000000b002",
+      created_at: "2026-09-24T12:10:30Z",
+    },
+  ),
+  messageSearchHit("rg -n harbourPricing src/pricing", "harbour", {
+    kind: "code",
+    session_id: "0199a0f2-0000-7000-8000-000000000002",
+    workspace_id: "0199a0f2-0000-7000-8000-00000000c001",
+    title: "fix-harbour-rounding",
+    source: "tool",
+    message_id: undefined,
+    event_seq: 412,
+    created_at: "2026-09-23T09:00:00Z",
+  }),
+];
+
+/** A hit from a conversation that was archived, which stays searchable. */
+export const archivedMessageSearchHit = messageSearchHit(
+  "Moved the harbour launch notes into the Q3 archive.",
+  "harbour",
+  {
+    session_id: "0199a0f2-0000-7000-8000-000000000003",
+    title: "Q3 launch retro",
+    message_id: "0199a0f2-0000-7000-8000-00000000b003",
+    created_at: "2026-07-02T10:00:00Z",
+    archived: true,
+  },
+);
+
+/** A hit whose snippet was cut on both sides and runs to the length cap. */
+export const longSnippetMessageSearchHit = messageSearchHit(
+  "…we compared every harbour fee schedule against the operator filings from the last three seasons, and the harbour dues line up except for the overnight berth surcharge, which the port authority raised twice without a notice in the harbour bulletin…",
+  "harbour",
+  {
+    session_id: "0199a0f2-0000-7000-8000-000000000004",
+    title:
+      "A conversation whose title is long enough to be cut off at the edge of the palette row",
+    source: "assistant",
+    message_id: "0199a0f2-0000-7000-8000-00000000b004",
+    created_at: "2026-09-20T08:00:00Z",
+  },
+);
+
+/** The index caught up with every conversation. */
+export const messageSearchIndexed: MessageSearchIndexing = {
+  complete: true,
+  pending_conversations: 0,
+  failed_conversations: 0,
 };

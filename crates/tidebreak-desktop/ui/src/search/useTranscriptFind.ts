@@ -105,6 +105,10 @@ export function useTranscriptFind({
   const [state, setState] = useState<TranscriptFindState>(IDLE);
   const revealRef = useRef(onReveal);
   revealRef.current = onReveal;
+  // Read when a search goes out, so a fresh client object per render does
+  // not restart the search.
+  const clientRef = useRef(client);
+  clientRef.current = client;
   const words = query.trim();
 
   useEffect(() => {
@@ -115,7 +119,12 @@ export function useTranscriptFind({
     setState((current) => ({ ...current, status: "loading", error: null }));
     const controller = new AbortController();
     const timer = globalThis.setTimeout(() => {
-      findInConversation(client, sessionId, words, controller.signal).then(
+      findInConversation(
+        clientRef.current,
+        sessionId,
+        words,
+        controller.signal,
+      ).then(
         (found) => {
           if (controller.signal.aborted) return;
           const position = found.matches.length > 0 ? 0 : -1;
@@ -146,7 +155,7 @@ export function useTranscriptFind({
       globalThis.clearTimeout(timer);
       controller.abort();
     };
-  }, [client, sessionId, open, words, delayMs]);
+  }, [sessionId, open, words, delayMs]);
 
   // A different conversation starts the find over.
   useEffect(() => {

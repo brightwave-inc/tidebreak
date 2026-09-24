@@ -141,4 +141,19 @@ describe("a long transcript", () => {
     await user.click(showEarlier()!);
     expect(viewport.scrollTop).toBe(150 + 5 * 100);
   });
+
+  it("reaches back to the turn of a message a search points at", () => {
+    // The transcript holds the turn but its window starts after it, which
+    // is where a search result for an older message lands.
+    const messages = turns(TRANSCRIPT_TURNS_SHOWN * 2);
+    const { rerender, container } = render(list(messages));
+    expect(screen.queryByText("Answer 3")).toBeNull();
+
+    rerender(list(messages, { revealMessageId: "a3" }));
+    const answer = container.querySelector('[data-message-id="a3"]');
+    expect(answer).toHaveTextContent("Answer 3");
+    // The window opens at the turn that holds it, not at the very start.
+    expect(screen.queryByText("Question 2")).toBeNull();
+    expect(screen.getByText("Question 3")).toBeInTheDocument();
+  });
 });

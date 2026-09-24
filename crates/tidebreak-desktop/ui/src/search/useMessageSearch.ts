@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ApiClient } from "../api";
 import type {
@@ -65,16 +65,21 @@ export function useMessageSearch(
   const active =
     client !== null && enabled && words.length >= MIN_MESSAGE_QUERY_CHARS;
   const [state, setState] = useState<MessageSearchState>(IDLE_MESSAGE_SEARCH);
+  // Read when a search goes out, so a caller that hands a fresh client
+  // object each render does not restart the search on every render.
+  const clientRef = useRef(client);
+  clientRef.current = client;
 
   useEffect(() => {
-    if (!active || client === null) {
+    const current = clientRef.current;
+    if (!active || current === null) {
       setState(IDLE_MESSAGE_SEARCH);
       return;
     }
-    setState((current) => ({ ...current, status: "loading", error: null }));
+    setState((previous) => ({ ...previous, status: "loading", error: null }));
     const controller = new AbortController();
     const timer = globalThis.setTimeout(() => {
-      client
+      current
         .searchMessages({ q: words, limit, sessionId }, controller.signal)
         .then(
           (page) => {
@@ -102,7 +107,7 @@ export function useMessageSearch(
       globalThis.clearTimeout(timer);
       controller.abort();
     };
-  }, [active, client, words, limit, sessionId, delayMs]);
+  }, [active, words, limit, sessionId, delayMs]);
 
   return active ? state : IDLE_MESSAGE_SEARCH;
 }

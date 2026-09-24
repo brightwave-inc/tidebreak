@@ -100,15 +100,16 @@ export function useFindBar({
     };
   }, [open, scrollElement, words]);
 
+  const { setQuery } = find;
   const close = useCallback(() => {
     setOpen(false);
-    find.setQuery("");
+    setQuery("");
     clearHighlight(FIND_HIGHLIGHT);
     clearHighlight(FOCUSED_HIGHLIGHT);
     const target = returnFocus.current;
     returnFocus.current = null;
     if (target?.isConnected) target.focus();
-  }, [find]);
+  }, [setQuery]);
 
   return { open, close, activate, inputRef, ...find };
 }
