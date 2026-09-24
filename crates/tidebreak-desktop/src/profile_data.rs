@@ -243,15 +243,20 @@ async fn save_response(
 /// authority (decision 27). Then, in order:
 ///
 /// 1. Every agent stops. If one will not, nothing is deleted.
-/// 2. The embedded server, its workers, and the code runtime's sweeps stop,
-///    so nothing refreshes a token or writes a file from here on. If they do
-///    not stop in time, nothing is deleted.
+/// 2. The embedded server stops: its listener, its workers, the code
+///    runtime's sweeps, and every stdio MCP server with each process it
+///    started. If it does not stop in time, nothing is deleted. A request
+///    still running after the stop's short grace, or a download already
+///    under way, such as an engine install or an update, can still write
+///    into the folders; step 5 covers that.
 /// 3. The keychain items go. If one will not, nothing else is deleted.
 /// 4. The code browsers close, and their website data stores, the data,
 ///    cache, settings, and log folders, and the app window's own website
-///    data go. A failure here does not stop the rest.
-/// 5. The keychain items go again, and once more right before the exit, in
-///    case anything wrote one back.
+///    data go. A failure here does not stop the rest. The keychain items go
+///    again, in case anything wrote one back.
+/// 5. Right before the exit, after the dialog below if there is one, the
+///    folders and the keychain items go once more, taking anything written
+///    since step 4.
 ///
 /// The process then exits at once, without the usual quit path, whose
 /// window-state save would write a new file into the folder it just removed.
@@ -347,7 +352,13 @@ pub(crate) async fn delete_all_data(
         }
         report_leftovers(&app, &failures).await;
     }
-    // The dialog above waits for the person; erase once more after it.
+    // A request past the stop's grace, a download under way, or anything
+    // during the dialog's wait may have written since. Remove the folders
+    // and the keys once more; the process exits right after, so nothing
+    // writes again.
+    for failure in remove_profile_folders(&folders) {
+        eprintln!("tidebreak-desktop: delete all data, final pass: {failure}");
+    }
     let _ = tidebreak_server::secret_rehome::erase_secret_keys(&keychain, &keys).await;
     std::process::exit(0);
 }
@@ -411,15 +422,18 @@ fn legacy_worktree_count(data: &Path) -> usize {
 ///
 /// The keychain items it erases are the app's own profile's. The command line
 /// uses that profile, data and keys, unless `TIDEBREAK_DATA_DIR` names another
-/// folder, and a profile in another folder keeps its own keychain items
-/// (decision 56).
+/// folder. A profile in another folder has keychain items of its own (decision
+/// 56), but until `tidebreak rehome-secrets` copies its keys into them, they
+/// are still in the app's bundle item, which this erases.
 fn delete_all_data_message(legacy_worktrees: usize) -> String {
     let mut message = String::from(
         "Tidebreak stops every agent, deletes every conversation, memory, setting, attachment, \
          output, and log, and the backups in the Tidebreak data folder, removes your keys from \
          the keychain, and quits. Backups you saved elsewhere stay. This cannot be undone.\n\nThe tidebreak command line works on this same data \
          and these keys unless you point it at another folder, so its default profile goes too. \
-         Profiles in other folders keep their data and keys.",
+         Profiles in other folders keep their data. They keep their keys only after tidebreak \
+         rehome-secrets has copied them out of the app's keychain item. Until then, those keys \
+         are deleted too.",
     );
     if legacy_worktrees == 0 {
         message.push_str("\n\nCode worktrees in ~/Tidebreak and your repositories stay.");
@@ -637,7 +651,13 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("Profiles in other folders keep"),
+            message.contains("Profiles in other folders keep their data."),
+            "{message}"
+        );
+        // A profile that has not copied its keys out still keeps them in the
+        // app's item, which goes.
+        assert!(
+            message.contains("keep their keys only after tidebreak rehome-secrets"),
             "{message}"
         );
         let message = delete_all_data_message(0);

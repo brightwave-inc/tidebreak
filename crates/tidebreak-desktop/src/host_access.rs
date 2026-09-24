@@ -144,9 +144,10 @@ impl HostAccess {
             .map_err(|_| "server stop handle was initialized more than once".to_owned())
     }
 
-    /// Stop the embedded server's accept loop and every worker for good, for
-    /// Delete all data. Nothing in this process writes to the profile
-    /// afterwards except what the caller does next. Waits at most
+    /// Stop the embedded server's accept loop, every worker, and every stdio
+    /// MCP server for good, for Delete all data. A request past the stop's
+    /// grace or a download under way can still write, so the caller removes
+    /// its folders again right before it exits. Waits at most
     /// [`SERVER_STOP_DEADLINE`]; an error says the workers did not stop.
     pub(crate) async fn stop_server(&self) -> Result<(), String> {
         let Some(stop) = self.server_stop.get() else {

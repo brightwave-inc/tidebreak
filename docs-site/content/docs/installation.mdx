@@ -161,11 +161,19 @@ To remove the data and your keys in one step, use **Delete all data** in
 agent, deletes the application data, cache, and log directories, the code
 browser's website data, and this installation's keychain items, and quits.
 The `tidebreak` command line works on the app's data and keys unless
-`TIDEBREAK_DATA_DIR` names another folder, so its default profile goes too; a
-profile in another folder keeps its own data and keys. It leaves the worktrees
-in `~/Tidebreak` and your repositories alone. Worktrees from before version 0.59
-live inside the data directory, and the system dialog says so when it finds
-any.
+`TIDEBREAK_DATA_DIR` names another folder, so its default profile goes too. A
+profile in another folder keeps its data. It keeps its keys only after
+`tidebreak rehome-secrets` has copied them into the profile's own keychain
+entry. Until then they are in the app's entry, and Delete all data removes
+them too. To keep them, run this for each such profile first:
+
+```sh
+TIDEBREAK_DATA_DIR=/path/to/profile tidebreak rehome-secrets
+```
+
+Delete all data leaves the worktrees in `~/Tidebreak` and your repositories
+alone. Worktrees from before version 0.59 live inside the data directory, and
+the system dialog says so when it finds any.
 
 On macOS:
 
