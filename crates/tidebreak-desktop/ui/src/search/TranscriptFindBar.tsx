@@ -39,6 +39,12 @@ export const TranscriptFindBar = forwardRef<
   const countId = useId();
 
   function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    // Enter and Escape also finish or cancel an IME composition. A key that
+    // does belongs to the composition, as it does in the composer; Safari
+    // marks the Enter that commits one with key code 229 instead.
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+      return;
+    }
     if (event.key === "Enter") {
       event.preventDefault();
       if (event.shiftKey) onNewer();

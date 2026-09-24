@@ -2,6 +2,7 @@
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   renderHook,
   screen,
@@ -165,6 +166,18 @@ describe("the find bar", () => {
     expect(props.onNewer).toHaveBeenCalledTimes(1);
     await userEvent.keyboard("{Escape}");
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves Enter and Escape to an IME composition in progress", () => {
+    const props = mount();
+    const field = screen.getByRole("textbox", { name: "Find in conversation" });
+    fireEvent.keyDown(field, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 229 });
+    fireEvent.keyDown(field, { key: "Escape", isComposing: true });
+    expect(props.onOlder).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(props.onOlder).toHaveBeenCalledTimes(1);
   });
 
   it("names its controls, and disables the steps with nothing to step to", () => {
