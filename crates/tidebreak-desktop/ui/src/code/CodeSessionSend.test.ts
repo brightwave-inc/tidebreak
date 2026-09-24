@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ApiClient } from "../api/client";
+import { HttpError, type ApiClient } from "../api/client";
+import type { SequencedCodeEventFrame } from "../api/types";
 import { useComposerDrafts } from "../ComposerDrafts";
 import { holdComposerImages } from "../useImageAttachments";
 import { createCodeSessionStore } from "./CodeSessionStore";
 import {
+  SessionStartedUnsent,
   sendCodeComposer,
   submitAcceptedTurn,
   useCodeComposerStatus,
@@ -86,12 +88,14 @@ describe("retry after a failed submit", () => {
 });
 
 describe("accepted turn after the socket already painted", () => {
-  it("inserts the prompt above the streamed assistant reply", async () => {
+  const deps = {
+    nextId: () => "streamed",
+    now: () => "2026-08-15T12:00:02.000Z",
+  };
+
+  /** The socket delivers a whole turn before the send's answer lands. */
+  function socketFirst(end: SequencedCodeEventFrame["event"]) {
     const store = createCodeSessionStore();
-    const deps = {
-      nextId: () => "streamed",
-      now: () => "2026-08-15T12:00:02.000Z",
-    };
     store
       .getState()
       .applyEvents(
@@ -104,27 +108,26 @@ describe("accepted turn after the socket already painted", () => {
         [{ seq: 2, event: { type: "assistant_delta", text: "README.md" } }],
         deps,
       );
-    store.getState().applyEvents(
-      [
-        {
-          seq: 3,
-          event: {
-            type: "turn_completed",
-            usage: {
-              input_tokens: 1,
-              output_tokens: 1,
-              cache_read_input_tokens: 0,
-              cache_creation_input_tokens: 0,
-              context_tokens: 0,
-            },
-          },
-        },
-      ],
-      deps,
-    );
+    store.getState().applyEvents([{ seq: 3, event: end }], deps);
+    return store;
+  }
+
+  // The server answers once the turn is accepted, so the answer says
+  // `running` even when the turn has ended by the time it lands.
+  it("inserts the prompt above the streamed reply and keeps the turn ended", async () => {
+    const store = socketFirst({
+      type: "turn_completed",
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        context_tokens: 0,
+      },
+    });
     await submitAcceptedTurn(store.getState().update, async () => ({
       kind: "ran" as const,
-      turn: { ...TURN, status: "completed" as const },
+      turn: TURN,
     }));
     expect(store.getState().items.map((item) => item.kind)).toEqual([
       "user",
@@ -136,6 +139,32 @@ describe("accepted turn after the socket already painted", () => {
       turnId: "turn-1",
       text: "list the files",
     });
+    expect(store.getState()).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+    });
+    expect(store.getState().lifecycle).not.toBe("running");
+  });
+
+  it("does not reopen a turn that failed before its answer landed", async () => {
+    const store = socketFirst({
+      type: "turn_failed",
+      error: { message: "the engine exited before it answered" },
+    });
+    await submitAcceptedTurn(store.getState().update, async () => ({
+      kind: "ran" as const,
+      turn: TURN,
+    }));
+    expect(store.getState().items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "turn-1",
+      status: "failed",
+    });
+    expect(store.getState()).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+    });
+    expect(store.getState().lifecycle).not.toBe("running");
   });
 });
 
@@ -217,6 +246,8 @@ describe("sendCodeComposer", () => {
     expect(state.drafts["sess-new"]).toBeFalsy();
     expect(state.attachments["ws-1"]).toBeUndefined();
     expect(state.attachments["sess-new"]).toBeUndefined();
+    // The turn carries the image now, so its local preview is let go.
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:preview");
   });
 
   it("leaves the draft where it was typed when the session cannot start", async () => {
@@ -255,7 +286,7 @@ describe("sendCodeComposer", () => {
       key: "ws-1",
       session: async () => "sess-new",
       send: async () => {
-        throw new Error("engine crashed on spawn");
+        throw new HttpError(409, "engine crashed on spawn", "engine_failed");
       },
     });
 
@@ -264,13 +295,110 @@ describe("sendCodeComposer", () => {
     expect(state.drafts["ws-1"]).toBeUndefined();
     expect(state.drafts["sess-new"]).toBe("look at this");
     expect(state.attachments["sess-new"]?.pastedTexts).toEqual([pasted]);
-    // Already published to this session, so a retry sends it as it is.
+    // Already published to this session, so a retry sends it as it is, and
+    // its chip keeps the thumbnail it had.
     expect(state.attachments["sess-new"]?.images).toEqual([
-      expect.objectContaining({ status: "ready", attachmentId: BLOB }),
+      expect.objectContaining({
+        status: "ready",
+        attachmentId: BLOB,
+        previewUrl: "blob:preview",
+      }),
     ]);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
     expect(useCodeComposerStatus.getState().byKey["sess-new"]).toEqual({
       sending: false,
       notice: "engine crashed on spawn",
+    });
+  });
+
+  it("moves the words to the new session's composer when the page left before the send", async () => {
+    startDraft("ws-1");
+    const send = vi.fn();
+    const notice =
+      "The session started, but this message was not sent. Send it when you are ready.";
+
+    const sent = await sendCodeComposer({
+      client,
+      key: "ws-1",
+      session: async () => {
+        throw new SessionStartedUnsent("sess-new", notice);
+      },
+      send,
+    });
+
+    expect(sent).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    expect(uploadImageAttachment).not.toHaveBeenCalled();
+    const state = useComposerDrafts.getState();
+    expect(state.drafts["ws-1"]).toBeUndefined();
+    expect(state.attachments["ws-1"]).toBeUndefined();
+    // The session exists: its composer holds the message, image included.
+    expect(state.drafts["sess-new"]).toBe("look at this");
+    expect(state.attachments["sess-new"]?.pastedTexts).toEqual([pasted]);
+    expect(state.attachments["sess-new"]?.images).toEqual([
+      expect.objectContaining({ status: "held", previewUrl: "blob:preview" }),
+    ]);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    expect(useCodeComposerStatus.getState().byKey["sess-new"]).toEqual({
+      sending: false,
+      notice,
+    });
+    expect(useCodeComposerStatus.getState().byKey["ws-1"]).toBeUndefined();
+  });
+
+  describe("when the answer is lost", () => {
+    const sentText =
+      "look at this\n\n<pasted_text>\na long paste\n</pasted_text>";
+
+    /** The session's record after the send, as the server would list it. */
+    function listing(turns: { id: string; user_input: string }[]) {
+      return {
+        listCodeSessionTurns: vi.fn(async () =>
+          turns.map((turn) => ({ ...TURN, session_id: "sess-1", ...turn })),
+        ),
+        listCodeQueuedTurns: vi.fn(async () => ({ queued: [], paused: false })),
+      } as unknown as ApiClient;
+    }
+
+    it("keeps the message out of the composer when the server took it", async () => {
+      startDraft("sess-1");
+
+      const sent = await sendCodeComposer({
+        client: listing([{ id: "turn-9", user_input: sentText }]),
+        key: "sess-1",
+        session: "sess-1",
+        send: async () => {
+          throw new TypeError("Failed to fetch");
+        },
+      });
+
+      // Putting it back would invite a second copy of the same turn.
+      expect(sent).toBe(true);
+      const state = useComposerDrafts.getState();
+      expect(state.drafts["sess-1"]).toBeFalsy();
+      expect(state.attachments["sess-1"]).toBeUndefined();
+      expect(useCodeComposerStatus.getState().byKey["sess-1"]).toBeUndefined();
+    });
+
+    it("puts the message back when the server has no turn for it", async () => {
+      startDraft("sess-1");
+
+      const sent = await sendCodeComposer({
+        client: listing([{ id: "turn-8", user_input: "an earlier message" }]),
+        key: "sess-1",
+        session: "sess-1",
+        send: async () => {
+          throw new TypeError("Failed to fetch");
+        },
+      });
+
+      expect(sent).toBe(false);
+      expect(useComposerDrafts.getState().drafts["sess-1"]).toBe(
+        "look at this",
+      );
+      expect(useCodeComposerStatus.getState().byKey["sess-1"]?.notice).toBe(
+        "Failed to fetch",
+      );
     });
   });
 

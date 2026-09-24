@@ -11,10 +11,12 @@ import {
 } from "../PastedText";
 import { useRefreshSignals } from "../RefreshSignals";
 import {
-  forgetComposerImages,
+  detachImageBacking,
   holdComposerImages,
   moveComposerDraft,
   publishHeldImages,
+  reattachImageBacking,
+  releaseDetachedBacking,
 } from "../useImageAttachments";
 import { applyAcceptedTurn, type CodeSessionState } from "./CodeSessionReducer";
 import { peekCodeSession } from "./CodeSessionRegistry";
@@ -142,6 +144,24 @@ function setSending(key: string, sending: boolean, notice: string | null) {
   useCodeComposerStatus.getState().set(key, { sending, notice });
 }
 
+/**
+ * A session was created for a message that was then not sent: the page that
+ * started it went away, or the connection changed, before the send.
+ *
+ * The session exists, so the message belongs in its composer, not back on
+ * the surface that started it. `sendCodeComposer` moves it there, with this
+ * error's message as the composer's notice.
+ */
+export class SessionStartedUnsent extends Error {
+  constructor(
+    readonly sessionId: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "SessionStartedUnsent";
+  }
+}
+
 /** Why a send did not go, in the words the composer shows. */
 export function codeSendFailure(error: unknown): string {
   if (error instanceof HttpError && error.kind === "queue_full") {
@@ -237,6 +257,14 @@ export async function sendCodeComposer(input: {
     try {
       sessionId = await input.session();
     } catch (error) {
+      if (error instanceof SessionStartedUnsent) {
+        // The session exists but the send did not go. Its composer holds the
+        // message, which is where the reader finds the session next time.
+        moveComposerDraft(key, error.sessionId);
+        useCodeComposerStatus.getState().move(key, error.sessionId);
+        setSending(error.sessionId, false, error.message);
+        return false;
+      }
       // No session, so nothing moved: the draft is where it was typed.
       setSending(key, false, codeSendFailure(error));
       return false;
@@ -273,6 +301,10 @@ export async function sendCodeComposer(input: {
   const sentImages: readonly ImageAttachment[] =
     state.attachments[key]?.images ?? [];
   const attachments = turnImages(sentImages);
+  const knownTurns = knownTurnIds(sessionId);
+  // The previews and files step aside with the message, so emptying the
+  // strip does not hand them back and a refused send restores live chips.
+  const backing = detachImageBacking(key);
   state.setDraft(key, "");
   state.setPastedTexts(key, []);
   state.setImages(key, []);
@@ -283,16 +315,80 @@ export async function sendCodeComposer(input: {
       attachments.length > 0 ? attachments : undefined,
     );
   } catch (error) {
-    restoreComposer(key, sentDraft, sentPasted, sentImages);
-    setSending(key, false, codeSendFailure(error));
-    return false;
+    if (
+      !answerMayBeLost(error) ||
+      !(await sentDespiteLostAnswer(
+        input.client,
+        sessionId,
+        message,
+        knownTurns,
+      ))
+    ) {
+      restoreComposer(key, sentDraft, sentPasted, sentImages);
+      reattachImageBacking(key, backing);
+      setSending(key, false, codeSendFailure(error));
+      return false;
+    }
   }
-  forgetComposerImages(
-    key,
-    sentImages.map((item) => item.id),
-  );
+  releaseDetachedBacking(backing);
   setSending(key, false, null);
   return true;
+}
+
+/**
+ * Whether a failed send might have reached the server anyway.
+ *
+ * A refusal is an answer: the server said no. A dropped connection, or a
+ * gateway that gave up while the server worked, loses the answer and leaves
+ * the send's fate open.
+ */
+function answerMayBeLost(error: unknown): boolean {
+  return !(error instanceof HttpError) || GATEWAY_STATUSES.has(error.status);
+}
+
+/** Statuses a gateway answers with when it stops waiting for the server. */
+const GATEWAY_STATUSES = new Set([502, 503, 504]);
+
+/** The turns a session's open transcript already shows. */
+function knownTurnIds(sessionId: string): ReadonlySet<string> {
+  const state = peekCodeSession(sessionId)?.store.getState();
+  const known = new Set<string>(state?.turnOrdinals.keys() ?? []);
+  for (const item of state?.items ?? []) {
+    if (item.kind === "user" && item.turnId) known.add(item.turnId);
+  }
+  return known;
+}
+
+/**
+ * Whether a send whose answer never came reached the server anyway.
+ *
+ * The server answers once it has accepted the turn, so a connection that
+ * drops in between loses the answer, not the message. Putting the message
+ * back then invites a second copy of the same turn. The session's record
+ * settles it: a turn the transcript did not show before the send, or a
+ * queued message, with the same words.
+ */
+async function sentDespiteLostAnswer(
+  client: Pick<ApiClient, "listCodeSessionTurns" | "listCodeQueuedTurns">,
+  sessionId: string,
+  message: string,
+  knownTurns: ReadonlySet<string>,
+): Promise<boolean> {
+  const sent = message.trim();
+  try {
+    const [turns, queue] = await Promise.all([
+      client.listCodeSessionTurns(sessionId),
+      client.listCodeQueuedTurns(sessionId),
+    ]);
+    return (
+      turns.some(
+        (turn) => !knownTurns.has(turn.id) && turn.user_input === sent,
+      ) || queue.queued.some((row) => row.message === sent)
+    );
+  } catch {
+    // Unreachable still: say it did not go, and let the reader decide.
+    return false;
+  }
 }
 
 /** The published images a turn names, deduplicated by blob, in chip order. */

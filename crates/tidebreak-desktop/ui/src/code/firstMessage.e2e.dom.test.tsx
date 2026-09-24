@@ -72,6 +72,14 @@ const IMAGE_ID = "6b0c7a52-1f3e-4b8f-9a55-2d4e0c1f7a90";
 
 const recorded: RecordedRequest[] = [];
 let uploadedFile: Blob | null = null;
+/** Holds the session create's answer until a test lets it go. */
+let createGate: Promise<void> | null = null;
+/** The session, once the create has made it. */
+let createdSession: Record<string, unknown> | null = null;
+/** Turns the server has accepted, as its list route answers them. */
+const acceptedTurns: Record<string, unknown>[] = [];
+/** Drop the connection after the server accepts a turn, before it answers. */
+let loseTurnAnswer = false;
 
 /** The ids this test mints, as the fixture names them. */
 function normalize(value: string): string {
@@ -113,7 +121,13 @@ async function serve(
     });
   }
   if (method === "GET" && path === `/code/workspaces/${WORKSPACE}/sessions`) {
-    return json(200, []);
+    return json(200, createdSession ? [createdSession] : []);
+  }
+  if (method === "GET" && path === `/sessions/${SESSION}/turns`) {
+    return json(200, acceptedTurns);
+  }
+  if (method === "GET" && path === `/sessions/${SESSION}/queued`) {
+    return json(200, { queued: [], paused: false });
   }
   if (method === "GET" && path === `/code/repos/${REPO}`) {
     return json(200, {
@@ -131,28 +145,33 @@ async function serve(
   }
   if (method === "POST" && path === `/code/workspaces/${WORKSPACE}/sessions`) {
     const body = JSON.parse(String(init?.body));
-    return json(201, {
+    if (createGate) await createGate;
+    createdSession = {
       ...codeSession,
       id: SESSION,
       workspace_id: WORKSPACE,
       permission_mode: body.permission_mode,
       lifecycle: "idle",
       attention: { state: { type: "idle" }, source: "lifecycle" },
-    });
+    };
+    return json(201, createdSession);
   }
   if (method === "POST" && path === `/sessions/${SESSION}/turns`) {
     const body = JSON.parse(String(init?.body));
     // Answered on acceptance: the turn is still running.
-    return json(202, {
+    const turn = {
       id: "turn-first-message",
       session_id: SESSION,
       ordinal: 1,
       status: "running",
       fast_mode: false,
-      user_input: body.message,
+      user_input: body.message.trim(),
       attachments: [],
       started_at: "2026-09-23T12:00:00.000Z",
-    });
+    };
+    acceptedTurns.push(turn);
+    if (loseTurnAnswer) throw new TypeError("Failed to fetch");
+    return json(202, turn);
   }
   return json(404, { error: `no route for ${method} ${path}` });
 }
@@ -315,6 +334,10 @@ function imageFile(): File {
 beforeEach(() => {
   recorded.length = 0;
   uploadedFile = null;
+  createGate = null;
+  createdSession = null;
+  acceptedTurns.length = 0;
+  loseTurnAnswer = false;
   vi.stubGlobal("fetch", vi.fn(serve));
   vi.stubGlobal("XMLHttpRequest", RecordingXhr);
   URL.createObjectURL = vi.fn((): string => "blob:first-message");
@@ -381,4 +404,69 @@ it("sends a restored draft, pasted text, and an image as a new workspace's first
   expect(screen.queryByText("Pasted text")).toBeNull();
   expect(screen.queryByLabelText("Attached images")).toBeNull();
   expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("moves a first message to the new agent's composer when the page closes before it is sent", async () => {
+  const client = new ApiClient(BASE_URL, "token");
+  const box = await renderSurface(client);
+  fireEvent.change(box, { target: { value: fixture.draft } });
+  fireEvent(
+    box,
+    createEvent.paste(box, { clipboardData: { files: [imageFile()] } }),
+  );
+  expect(screen.getByLabelText("Attached images")).toBeInTheDocument();
+
+  let finishCreate = () => {};
+  createGate = new Promise((resolve) => {
+    finishCreate = resolve;
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  });
+  await waitFor(() => expect(recorded).toHaveLength(1));
+
+  // The reader leaves the workspace while its first agent is created.
+  cleanup();
+  await act(async () => finishCreate());
+  await waitFor(() =>
+    expect(useComposerDrafts.getState().drafts[SESSION]).toBe(fixture.draft),
+  );
+  // Nothing was published or sent for a page that is gone.
+  expect(recorded.map((request) => request.path)).toEqual([
+    "/code/workspaces/{workspace}/sessions",
+  ]);
+  expect(useComposerDrafts.getState().drafts[WORKSPACE]).toBeUndefined();
+
+  // Back on the workspace, the new agent's composer holds the message.
+  await renderSurface(client);
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+      fixture.draft,
+    ),
+  );
+  expect(screen.getByLabelText("Attached images")).toBeInTheDocument();
+  expect(screen.getByText(/this message was not sent/)).toBeInTheDocument();
+});
+
+it("keeps a first message the server took when its answer never arrives", async () => {
+  loseTurnAnswer = true;
+  const client = new ApiClient(BASE_URL, "token");
+  const box = await renderSurface(client);
+  fireEvent.change(box, { target: { value: fixture.draft } });
+
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  });
+  await waitFor(() => expect(acceptedTurns).toHaveLength(1));
+
+  // The turn exists, so the message stays sent: putting it back would invite
+  // a second copy of the same first turn.
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(""),
+  );
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(useComposerDrafts.getState().drafts[SESSION]).toBeFalsy();
+  expect(
+    recorded.filter((request) => request.path === "/sessions/{session}/turns"),
+  ).toHaveLength(1);
 });

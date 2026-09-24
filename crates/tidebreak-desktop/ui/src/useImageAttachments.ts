@@ -310,6 +310,47 @@ export function moveComposerDraft(from: string, to: string): void {
   useComposerDrafts.getState().moveDraft(from, to);
 }
 
+/** The bytes behind one composer's chips, held aside while a send runs. */
+export type DetachedImageBacking = ImageBacking;
+
+/**
+ * Take the bytes behind a composer's chips out of it, so emptying the strip
+ * for a send does not hand the previews back.
+ *
+ * A refused send puts them back with {@link reattachImageBacking}, and its
+ * chips come back with their thumbnails. An accepted one lets them go with
+ * {@link releaseDetachedBacking}.
+ */
+export function detachImageBacking(
+  draftKey: string,
+): DetachedImageBacking | null {
+  const backing = backingByChat.get(draftKey) ?? null;
+  backingByChat.delete(draftKey);
+  return backing;
+}
+
+/** Put bytes taken by {@link detachImageBacking} back under a composer. */
+export function reattachImageBacking(
+  draftKey: string,
+  backing: DetachedImageBacking | null,
+): void {
+  if (!backing) return;
+  const target = backingFor(draftKey);
+  for (const [id, file] of backing.files) target.files.set(id, file);
+  for (const [id, controller] of backing.aborts)
+    target.aborts.set(id, controller);
+  for (const [id, url] of backing.previews) target.previews.set(id, url);
+}
+
+/** Hand back the previews and uploads of bytes a sent turn carried. */
+export function releaseDetachedBacking(
+  backing: DetachedImageBacking | null,
+): void {
+  if (!backing) return;
+  for (const controller of backing.aborts.values()) controller.abort();
+  for (const url of backing.previews.values()) URL.revokeObjectURL(url);
+}
+
 function addFiles(
   draftKey: string,
   files: readonly File[],

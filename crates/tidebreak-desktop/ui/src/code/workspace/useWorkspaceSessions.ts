@@ -24,6 +24,7 @@ import { workspaceCodeSessions } from "../parsers";
 import { isPutAway } from "../workspaceCards";
 import { toast } from "sonner";
 import { useCodeCatalogStore } from "../CodeCatalogStore";
+import { SessionStartedUnsent } from "../CodeSessionSend";
 import { useCodeUiStore } from "../CodeUiStore";
 import { confirmRepositoryTrust } from "../RepositoryTrustStore";
 import { useConversationDigests } from "../CodeUpdatesStore";
@@ -324,11 +325,6 @@ export function useWorkspaceSessions({
         }
         throw err;
       }
-      if (!isCurrent()) {
-        throw new Error(
-          "The Code connection changed after the session was created. Send the message again.",
-        );
-      }
 
       // A fork's transcript rides the first message. Keep its chip beside
       // that message until a turn carries it, in case the send is refused.
@@ -338,6 +334,16 @@ export function useWorkspaceSessions({
           sessionId: created.id,
           forkSource: startedWithFork,
         });
+      }
+      if (!isCurrent()) {
+        // The session exists, so the message moves to its composer rather
+        // than back to a start surface for an agent that is already there.
+        throw new SessionStartedUnsent(
+          created.id,
+          clientRef.current === startedWithClient
+            ? "The session started, but this message was not sent. Send it when you are ready."
+            : "The Code connection changed after the session was created. Send the message again.",
+        );
       }
       if (conversations.length === 0) catalog.rememberSession(created);
       setSessions((current) =>

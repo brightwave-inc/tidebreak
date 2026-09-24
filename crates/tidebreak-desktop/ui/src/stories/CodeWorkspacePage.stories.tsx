@@ -9,7 +9,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
-import type { ApiClient } from "@/api/client";
+import { HttpError, type ApiClient } from "@/api/client";
 import type {
   CodeRepoSnapshot,
   CodeForkTranscript,
@@ -926,7 +926,11 @@ function storyClient(
     forkCodeSession: async () => forkSource,
     submitCodeTurn: async (_sessionId: string, message: string) => {
       if (firstTurnFails) {
-        throw new Error("The harness stopped before it accepted the message.");
+        throw new HttpError(
+          409,
+          "The harness stopped before it accepted the message.",
+          "harness_failed",
+        );
       }
       return {
         kind: "ran",
