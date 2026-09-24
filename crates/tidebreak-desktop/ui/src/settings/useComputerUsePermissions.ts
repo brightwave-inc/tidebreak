@@ -17,7 +17,7 @@ export type PermissionErrorKind =
  * What went wrong, in the words of the surface it went wrong on.
  *
  * `refreshable` is whether the caller draws a Refresh button. Settings does,
- * so its copy sends the reader to it; the setup dialog re-reads on window
+ * so its copy sends the reader to it; the permission ask re-reads on window
  * focus instead and must not name a control that is not there.
  */
 export function permissionErrorMessage(
