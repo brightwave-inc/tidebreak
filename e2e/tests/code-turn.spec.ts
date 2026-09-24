@@ -50,8 +50,14 @@ test("a code turn shows its reply and the diff it made", async ({
     .getByRole("button", { name: "Review this turn's changes" })
     .click();
   const diff = main.getByRole("tabpanel", { name: "Turn diff" });
+  await expect(diff).toContainText(/This turn\s*1 file\s*\+1\s*−0/);
   await expect(diff.getByRole("heading", { name: "hello.txt" })).toBeVisible();
-  await expect(diff).toContainText("+hello from the scripted engine");
+  await expect(
+    diff.getByRole("button", {
+      name: "Revert the change at line 1 of hello.txt",
+    }),
+  ).toBeVisible();
+  await expect(diff).toContainText("hello from the scripted engine");
   await expect(page.getByRole("tab", { name: /Source control/ })).toContainText(
     "1",
   );
