@@ -273,7 +273,9 @@ The line numbers are how a reader comments. Where the diff takes comments,
 each number is a button in one roving tab stop: arrows move, Shift extends,
 Enter opens the editor under the lines. A diff that takes no comments draws
 plain numbers and makes the region itself focusable. Pending comments are
-cards under their last line, bordered, never shadowed.
+cards under their last line, bordered, never shadowed. A comment whose code
+changed sits at the top of the file with its quote and a warning-toned
+Outdated pill; it never moves onto whatever now sits at its old number.
 
 ### Live labels
 
