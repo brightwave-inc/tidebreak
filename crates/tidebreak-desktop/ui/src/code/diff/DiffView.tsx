@@ -1,6 +1,7 @@
 import {
   createContext,
   memo,
+  startTransition,
   useCallback,
   useContext,
   useEffect,
@@ -49,7 +50,7 @@ import {
  */
 
 /** Rows per chunk: a screenful several times over, cheap to render in a frame. */
-export const DIFF_CHUNK_ROWS = 160;
+export const DIFF_CHUNK_ROWS = 120;
 /** Chunks mounted on the first render, before the rest arrive frame by frame. */
 const FIRST_CHUNKS = 1;
 /**
@@ -139,8 +140,12 @@ function useProgressiveCount(total: number, resetKey: unknown): number {
   const count = state.key === resetKey ? state.count : FIRST_CHUNKS;
   useEffect(() => {
     if (count >= total) return;
+    // A transition, so React renders the next chunk in slices that yield
+    // to input and paint instead of in one task.
     const frame = window.requestAnimationFrame(() =>
-      setState({ key: resetKey, count: count + CHUNKS_PER_FRAME }),
+      startTransition(() =>
+        setState({ key: resetKey, count: count + CHUNKS_PER_FRAME }),
+      ),
     );
     return () => window.cancelAnimationFrame(frame);
   }, [count, total, resetKey]);
@@ -199,7 +204,9 @@ function useChunkSyntax(
     if (!syntax || !ready || missingKey === "") return;
     return scheduleIdle(() => {
       for (const hunk of missingKey.split(",")) syntax.compute(Number(hunk));
-      setVersion((current) => current + 1);
+      // Many chunks can finish in one idle period; as a transition their
+      // redraws render in slices rather than as one long task.
+      startTransition(() => setVersion((current) => current + 1));
     });
   }, [syntax, ready, missingKey]);
   return version;
