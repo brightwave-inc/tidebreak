@@ -42,8 +42,8 @@ tidebreak-backup.json lists what it holds and what it leaves out.
 
 It leaves out your keys, which stay in this computer's keychain. On another
 computer, enter them again in Settings. It also leaves out logs, downloaded
-engine tools, earlier backups, working files, and worktrees from before
-version 0.59, which are Git checkouts.
+engine tools, earlier backups, working files, the state of running sessions,
+and worktrees from before version 0.59, which are Git checkouts.
 
 To restore it, quit Tidebreak and rename your data folder. Do not delete it.
 Create an empty folder with the old name and extract this archive into it.
@@ -53,9 +53,10 @@ still want, then open Tidebreak.
 
 /// Top-level entries of the data folder a backup leaves out: the live
 /// database, which the archive holds as a consistent copy instead, earlier
-/// backups, logs, engine tools a feature downloads again, and files that only
-/// mean something to the process that wrote them.
-const BACKUP_SKIPS: [&str; 15] = [
+/// backups, logs, engine tools a feature downloads again, the capability
+/// tokens and plugin state of running sessions, and files that only mean
+/// something to the process that wrote them.
+const BACKUP_SKIPS: [&str; 18] = [
     DATABASE_FILE,
     "tidebreak.db-wal",
     "tidebreak.db-shm",
@@ -71,6 +72,9 @@ const BACKUP_SKIPS: [&str; 15] = [
     "computer-use-control",
     "running.json",
     "listen.json",
+    "native-caps",
+    "browser-caps",
+    "plugin-data",
 ];
 /// Inside `code/`, the worktrees from before version 0.59. They are Git
 /// checkouts; Git is what backs them up.
@@ -83,13 +87,14 @@ const BACKUP_CONTENTS: [&str; 2] = [
     "the rest of the data folder, except what excludes names",
 ];
 /// What a backup's manifest says it leaves out.
-const BACKUP_EXCLUDES: [&str; 7] = [
+const BACKUP_EXCLUDES: [&str; 8] = [
     "keys, which stay in the keychain",
     "logs/ and boot-failures.log",
     "tools/, which a feature downloads again",
     "backups/",
     "scratch/<conversation>/ working files, except outputs/",
     "code/worktrees/, worktrees from before version 0.59",
+    "native-caps/, browser-caps/, and plugin-data/, which belong to running sessions",
     "lock files and files that describe the running app",
 ];
 
@@ -273,7 +278,7 @@ struct BackupManifest {
     created_at: DateTime<Utc>,
     tidebreak_version: &'static str,
     contents: [&'static str; 2],
-    excludes: [&'static str; 7],
+    excludes: [&'static str; 8],
 }
 
 /// Build a backup of the SQLite profile in `data_dir` whose database file is
@@ -408,11 +413,27 @@ fn append_file<W: Write>(tar: &mut tar::Builder<W>, path: &Path, name: &Path) ->
     let metadata = file.metadata()?;
     let mut header = tar::Header::new_gnu();
     header.set_metadata(&metadata);
-    header.set_mode(0o600);
+    header.set_mode(archived_mode(&metadata));
     header.set_size(metadata.len());
     header.set_cksum();
     tar.append_data(&mut header, name, file.take(metadata.len()))?;
     Ok(true)
+}
+
+/// The mode a file keeps in the archive: readable by its owner only, and
+/// executable by its owner when it was executable, so a skill's script still
+/// runs after a restore.
+fn archived_mode(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o111 != 0 {
+            return 0o700;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = metadata;
+    0o600
 }
 
 /// The names in `dir`, sorted. A missing folder has none.
@@ -870,14 +891,22 @@ mod tests {
     }
 
     fn archive_entries(archive: BackupArchive) -> Vec<(String, Vec<u8>)> {
+        archive_entries_with_modes(archive)
+            .into_iter()
+            .map(|(name, bytes, _)| (name, bytes))
+            .collect()
+    }
+
+    fn archive_entries_with_modes(archive: BackupArchive) -> Vec<(String, Vec<u8>, u32)> {
         let mut reader = tar::Archive::new(flate2::read::GzDecoder::new(archive.file));
         let mut entries = Vec::new();
         for entry in reader.entries().unwrap() {
             let mut entry = entry.unwrap();
             let name = entry.path().unwrap().display().to_string();
+            let mode = entry.header().mode().unwrap();
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes).unwrap();
-            entries.push((name, bytes));
+            entries.push((name, bytes, mode));
         }
         entries
     }
@@ -918,6 +947,10 @@ mod tests {
         write(&root.join("code/worktrees/repo/ws-1/README.md"), 22);
         write(&root.join("tidebreak.lock"), 23);
         write(&root.join("running.json"), 24);
+        // Live capability tokens and plugin state stay out too.
+        write(&root.join("native-caps/session-1"), 25);
+        write(&root.join("browser-caps/session-1"), 26);
+        write(&root.join("plugin-data/notes/state.json"), 27);
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("logs"), root.join("blobs/escape")).unwrap();
 
@@ -970,6 +1003,36 @@ mod tests {
                 "pre-migration-0.1.0-20260101T000000Z.db"
             )]
         );
+    }
+
+    /// A skill's script keeps its execute bit through a backup, so it still
+    /// runs after a restore. Everything stays readable by its owner only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_backup_keeps_a_script_executable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let database = root.join(DATABASE_FILE);
+        let _store =
+            tidebreak_core::DbStore::connect(&format!("sqlite://{}?mode=rwc", database.display()))
+                .await
+                .unwrap();
+        let script = root.join("skills/report/scripts/build.sh");
+        write(&script, 12);
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let notes = root.join("skills/report/SKILL.md");
+        write(&notes, 13);
+        std::fs::set_permissions(&notes, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let archive = build_backup(&database, root).await.unwrap();
+        let modes: std::collections::BTreeMap<String, u32> = archive_entries_with_modes(archive)
+            .into_iter()
+            .map(|(name, _, mode)| (name, mode))
+            .collect();
+        assert_eq!(modes["skills/report/scripts/build.sh"], 0o700);
+        assert_eq!(modes["skills/report/SKILL.md"], 0o600);
     }
 
     fn conversation(title: Option<&str>) -> ExportedConversation {
