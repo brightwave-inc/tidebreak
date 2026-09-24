@@ -735,6 +735,10 @@ body {
     width: 100%;
   }
 
+  .welcome-prompt {
+    min-height: 5.25rem;
+  }
+
   @media (max-width: 720px) {
     .welcome {
       gap: 1.5rem;
@@ -756,22 +760,71 @@ body {
 
   @media (max-height: 560px) {
     .welcome {
-      gap: 1rem;
-      padding-block: 0.5rem;
+      gap: 0.65rem;
+      padding-block: 0.25rem;
     }
 
     .welcome-mark {
       display: none;
     }
 
-    .welcome-prompts {
-      grid-template-columns: minmax(0, 1fr);
-      gap: 0.45rem;
+    .welcome .welcome-copy h2 {
+      font-size: var(--text-lg);
+      line-height: 1.25;
+      letter-spacing: -0.02em;
     }
 
-    .welcome-prompts button {
-      min-height: 0;
-      padding-block: 0.5rem;
+    .welcome .welcome-copy p {
+      display: none;
+    }
+
+    .welcome-prompts {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0.3rem;
+    }
+
+    .welcome-prompt {
+      min-height: 2.25rem;
+      height: 2.25rem;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0 0.75rem;
+    }
+
+    .welcome-prompt-icon {
+      width: 1rem;
+      height: 1rem;
+      background: transparent;
+      box-shadow: none;
+      border-radius: 0;
+    }
+
+    .welcome-prompt-icon svg {
+      width: 1rem;
+      height: 1rem;
+    }
+
+    .welcome-prompt-copy {
+      display: flex;
+      flex-direction: row;
+      align-items: baseline;
+      gap: 0.5rem;
+      padding-top: 0;
+    }
+
+    .welcome-prompt-title {
+      flex-shrink: 0;
+    }
+
+    .welcome-prompt-desc {
+      margin-top: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .welcome-prompt-go {
+      display: none;
     }
   }
 

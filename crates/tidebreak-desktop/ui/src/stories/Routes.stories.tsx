@@ -259,8 +259,10 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
+/** Home at 1280 × 800: two-column starter cards, full intro. */
 export const HomeDesktop: Story = {};
 
+/** Home at 720 × 480: compact starter rows so every opener sits above the composer. */
 export const HomeMinimumWindow: Story = {
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
 };

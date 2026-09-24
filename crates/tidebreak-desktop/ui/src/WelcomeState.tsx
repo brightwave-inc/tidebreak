@@ -94,7 +94,7 @@ export function promptTitle(name: string): string {
 }
 
 const CARD_CLASS =
-  "group flex min-h-[5.25rem] items-start gap-3 rounded-xl bg-muted/35 px-4 py-3.5 text-left text-sm text-foreground ring-1 ring-inset ring-border-subtle transition-[transform,background-color,box-shadow] duration-200 hover:-translate-y-0.5 hover:bg-muted/60 hover:shadow-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/25 active:translate-y-0";
+  "welcome-prompt group flex items-start gap-3 rounded-xl bg-muted/35 px-4 py-3.5 text-left text-sm text-foreground ring-1 ring-inset ring-border-subtle transition-[transform,background-color,box-shadow] duration-200 hover:-translate-y-0.5 hover:bg-muted/60 hover:shadow-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/25 active:translate-y-0";
 
 function PromptCard({
   icon: Icon,
@@ -116,20 +116,22 @@ function PromptCard({
       data-first-task-target={first ? "starter-choice" : undefined}
       onClick={onClick}
     >
-      <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-background text-muted-foreground shadow-[inset_0_0_0_1px_var(--border-subtle)] transition-colors duration-200 group-hover:text-foreground">
+      <span className="welcome-prompt-icon grid size-8 shrink-0 place-items-center rounded-lg bg-background text-muted-foreground shadow-[inset_0_0_0_1px_var(--border-subtle)] transition-colors duration-200 group-hover:text-foreground">
         <Icon size={17} strokeWidth={1.75} />
       </span>
-      <span className="min-w-0 flex-1 pt-0.5">
-        <span className="block font-medium tracking-[-0.01em]">{label}</span>
+      <span className="welcome-prompt-copy min-w-0 flex-1 pt-0.5">
+        <span className="welcome-prompt-title block font-medium tracking-[-0.01em]">
+          {label}
+        </span>
         {description && (
-          <span className="mt-0.5 block text-xs leading-5 font-normal text-muted-foreground">
+          <span className="welcome-prompt-desc mt-0.5 block text-xs leading-5 font-normal text-muted-foreground">
             {description}
           </span>
         )}
       </span>
       <ArrowUpRight
         aria-hidden="true"
-        className="mt-1 size-4 shrink-0 text-muted-foreground/45 transition-[color,transform] duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-foreground"
+        className="welcome-prompt-go mt-1 size-4 shrink-0 text-muted-foreground/45 transition-[color,transform] duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-foreground"
       />
     </button>
   );
