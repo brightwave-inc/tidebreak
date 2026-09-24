@@ -540,6 +540,31 @@ async fn code_sessions_index_what_was_said_and_never_journal_keys() {
         .unwrap();
     assert_eq!(archive.matches.len(), 1);
     assert_eq!(archive.matches[0].preview, "All green.");
+
+    // Rebuilding the session from its rows, as the backfill does, reaches the
+    // index the live writes did: a call's final arguments, once.
+    let live = index_rows(&store, session_id).await;
+    assert!(store
+        .set_chat_memory_incognito(session_id, true)
+        .await
+        .unwrap());
+    assert_eq!(index_rows(&store, session_id).await, 0);
+    assert!(store
+        .set_chat_memory_incognito(session_id, false)
+        .await
+        .unwrap());
+    assert_eq!(index_rows(&store, session_id).await, live);
+    assert!(search(&store, &owner, "partial").await.hits.is_empty());
+    expect(
+        &search(&store, &owner, "complete").await,
+        MessageSearchSource::Tool,
+        Some(seqs[6]),
+    );
+    expect(
+        &search(&store, &owner, "nextest").await,
+        MessageSearchSource::Tool,
+        Some(seqs[4]),
+    );
 }
 
 #[tokio::test]

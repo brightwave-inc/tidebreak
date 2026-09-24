@@ -268,10 +268,8 @@ async fn write_batch(
     let mut rows = Vec::with_capacity(batch.len());
     let mut mints = Vec::new();
     // What the message index reads, per session, in sequence order.
-    let mut journaled: HashMap<
-        SessionId,
-        Vec<(i64, &serde_json::Value, chrono::DateTime<chrono::Utc>)>,
-    > = HashMap::new();
+    let mut journaled: HashMap<SessionId, Vec<super::super::message_search::JournaledEvent<'_>>> =
+        HashMap::new();
     for pending in batch {
         let append = &pending.append;
         let fence = fences

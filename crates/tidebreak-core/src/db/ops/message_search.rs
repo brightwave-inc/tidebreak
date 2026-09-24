@@ -421,15 +421,19 @@ pub(in crate::db) fn indexed_event_type(event: &serde_json::Value) -> bool {
         .is_some_and(|kind| INDEXED_EVENT_TYPES.contains(&kind))
 }
 
+/// One event as it was just journaled: its sequence number, its stored JSON,
+/// and when it was written.
+pub(in crate::db) type JournaledEvent<'a> = (i64, &'a serde_json::Value, DateTime<Utc>);
+
 /// Index the searchable events among `events`, just journaled for one
-/// session: `(seq, event, created_at)` in sequence order.
+/// session, in sequence order.
 ///
 /// A tool call's piece is replaced by each later event that restates what it
 /// acted on, so the index holds the call's final arguments once.
 pub(in crate::db) async fn index_code_events_on<C>(
     conn: &C,
     session_id: SessionId,
-    events: &[(i64, &serde_json::Value, DateTime<Utc>)],
+    events: &[JournaledEvent<'_>],
 ) -> Result<()>
 where
     C: ConnectionTrait,
@@ -831,22 +835,19 @@ where
         values.push(value);
         placeholder(backend, values.len())
     };
-    let (from, matches) = match backend {
-        DbBackend::Postgres => (
-            "\"message_search\"".to_owned(),
-            format!(
-                "\"message_search\".\"search_vector\" @@ CAST({} AS tsquery)",
-                next(&mut values, terms.tsquery().into())
-            ),
+    // SQLite answers the match once, as a list of row ids, and the rows are
+    // then read newest first. Joined directly, the planner can walk the
+    // recency index and probe FTS5 for each row, which restarts the whole
+    // match for every row a prefix query visits.
+    let matches = match backend {
+        DbBackend::Postgres => format!(
+            "\"message_search\".\"search_vector\" @@ CAST({} AS tsquery)",
+            next(&mut values, terms.tsquery().into())
         ),
-        _ => (
-            "\"message_search_fts\" JOIN \"message_search\" \
-             ON \"message_search\".\"id\" = \"message_search_fts\".rowid"
-                .to_owned(),
-            format!(
-                "\"message_search_fts\" MATCH {}",
-                next(&mut values, terms.fts5_match().into())
-            ),
+        _ => format!(
+            "\"message_search\".\"id\" IN (SELECT rowid FROM \"message_search_fts\" \
+             WHERE \"message_search_fts\" MATCH {})",
+            next(&mut values, terms.fts5_match().into())
         ),
     };
     let workspace_join = match scope {
@@ -903,7 +904,7 @@ where
          CASE WHEN \"session\".\"archived_at\" IS NULL AND \"code_workspace\".\"archived_at\" IS NULL \
               THEN 0 ELSE 1 END AS \"archived\", \
          \"code_workspace\".\"title\" AS \"workspace_title\" \
-         FROM {from} \
+         FROM \"message_search\" \
          JOIN \"session\" ON \"session\".\"id\" = \"message_search\".\"session_id\" \
          {workspace_join} \"code_workspace\" ON \"code_workspace\".\"id\" = \"session\".\"workspace_id\" \
          WHERE {} \

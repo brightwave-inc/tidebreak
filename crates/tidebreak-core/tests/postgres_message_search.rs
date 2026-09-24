@@ -406,6 +406,23 @@ async fn postgres_code_search_matches_what_was_said_and_never_journal_keys() {
     assert_eq!(archive.matches.len(), 1);
     assert_eq!(archive.matches[0].preview, "Renamed it to Overview.");
 
+    // Rebuilding the session from its rows, as the backfill does, finds the
+    // same things the live writes indexed.
+    assert!(store
+        .set_chat_memory_incognito(session_id, true)
+        .await
+        .unwrap());
+    assert!(search(&store, &owner, "overview").await.hits.is_empty());
+    assert!(store
+        .set_chat_memory_incognito(session_id, false)
+        .await
+        .unwrap());
+    let page = search(&store, &owner, "panel.rs").await;
+    assert_eq!(page.hits.len(), 1);
+    assert_eq!(page.hits[0].event_seq, Some(seqs[1]));
+    assert_eq!(search(&store, &owner, "uberblick").await.hits.len(), 1);
+    assert_eq!(search(&store, &owner, "overview").await.hits.len(), 1);
+
     store.close().await.unwrap();
     drop_database(&url, &name).await;
 }
