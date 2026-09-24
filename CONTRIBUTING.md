@@ -29,6 +29,10 @@ scripts/dev.sh
 # the Storybook dev server. Arguments are forwarded to `pnpm storybook`.
 scripts/storybook.sh
 
+# Drive the real UI against a scripted debug server in Chromium (needs
+# Docker). Arguments are forwarded to `playwright test`.
+scripts/e2e.sh
+
 # Build everything
 cargo build --workspace
 
@@ -125,6 +129,24 @@ Short version: `cd crates/tidebreak-desktop && pnpm --dir ui install && cargo ta
 dev`, or run the React UI in a browser against `tidebreak serve` via
 `ui/.env.local`. Start that `serve` with `TIDEBREAK_DATA_DIR` set: without it,
 `serve` uses the dev app's data and cannot run beside the dev app.
+
+### End-to-end flows
+
+To run the Playwright flows the CI `end-to-end` lane runs, use one command:
+
+```sh
+scripts/e2e.sh
+```
+
+It builds the debug server with the self-host features and the desktop
+renderer, then boots a fresh machine for each flow in `e2e/tests`. Each
+machine serves the renderer from its own origin, the way a hosted machine does
+([decision 82](docs/decisions/0082-the-hosted-machine-serves-the-renderer.md)),
+and plays the scripted provider and coding engine instead of a model, so no
+flow reaches the network. PostgreSQL and an S3 gateway run in throwaway Docker
+containers that the run removes. Add `--headed` to watch the browser, or name
+a spec to run one flow. A failed flow leaves its Playwright trace and the
+server's logs in `e2e/test-results`.
 
 ## Commit and PR conventions
 
