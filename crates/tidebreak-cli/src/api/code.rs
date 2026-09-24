@@ -838,6 +838,9 @@ mod tests {
                 "harness_doctor" => round_trip::<HarnessDoctorReport>(name, value),
                 "workspace_files" => round_trip::<CodeWorkspaceFiles>(name, value),
                 "workspace_diff" => round_trip::<CodeWorkspaceDiff>(name, value),
+                "code_review" => {
+                    round_trip::<tidebreak_server::wire::CodeReviewSnapshot>(name, value)
+                }
                 "checkpoint_restore_preview" => {
                     round_trip::<CodeCheckpointRestorePreview>(name, value)
                 }

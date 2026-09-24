@@ -381,7 +381,7 @@ impl CodeRuntime {
     }
 
     /// Resolve and validate the executable before persisting a machine session.
-    async fn prepare_session_harness(
+    pub(in crate::code) async fn prepare_session_harness(
         &self,
         harness: HarnessKind,
         adapter: &dyn HarnessAdapter,

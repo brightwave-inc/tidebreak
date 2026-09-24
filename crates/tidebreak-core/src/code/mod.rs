@@ -20,7 +20,7 @@ pub use caps::{CapLevel, HarnessCaps, HarnessCommand, HarnessTier};
 pub use event::{
     ApprovalDecisionKind, BoundedError, CheckpointHint, CheckpointRestoreStatus,
     CheckpointRestoreTarget, CredentialRefusalReason, Diffstat, Event, FileChangeKind,
-    HarnessNoticeLevel, InternalApprovalRequest, SequencedEvent, SessionTreeChild,
+    HarnessNoticeLevel, InternalApprovalRequest, ReviewOutcome, SequencedEvent, SessionTreeChild,
     SessionTreeChildStatus, SessionTreeWait, ToolDetail, ToolOutcome, TurnUsage,
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
@@ -140,6 +140,11 @@ code_id_type!(
     /// Identifies one checkpoint restore, and the worktree state saved just
     /// before it so that the restore can be undone.
     CodeRestoreId
+);
+code_id_type!(
+    /// Identifies one read-only review of a workspace's changes by an engine
+    /// that did not write them.
+    CodeReviewId
 );
 
 /// Which release of an external engine Tidebreak installs and drives.

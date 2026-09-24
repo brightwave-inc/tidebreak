@@ -562,6 +562,75 @@
     }
   },
   {
+    "kind": "code_review",
+    "name": "code review",
+    "value": {
+      "finished_at": "2025-09-01T04:18:40Z",
+      "harness": "codex",
+      "id": "00000000-0000-0000-0000-000000000061",
+      "model": "gpt-5.5",
+      "permission_mode": "plan",
+      "progress": {
+        "files_read": 4,
+        "refused": 1,
+        "tool_calls": 7
+      },
+      "result": {
+        "diff": "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+        "findings": [
+          {
+            "end_line": 1,
+            "explanation": "Say why the limit moved, or keep it.",
+            "path": "README.md",
+            "severity": "high",
+            "start_line": 1,
+            "title": "The limit doubled without a reason"
+          }
+        ],
+        "rejected": 1,
+        "summary": "One bug in the retry loop.",
+        "unplaced": [
+          {
+            "end_line": 42,
+            "explanation": "Nothing calls it any more.",
+            "path": "src/queue.rs",
+            "severity": "low",
+            "start_line": 40,
+            "title": "An unchanged helper could go"
+          }
+        ]
+      },
+      "session_id": "00000000-0000-0000-0000-000000000003",
+      "started_at": "2025-09-01T04:16:40Z",
+      "status": "completed",
+      "workspace_id": "00000000-0000-0000-0000-000000000002"
+    }
+  },
+  {
+    "kind": "code_review",
+    "name": "failed code review",
+    "value": {
+      "failure": {
+        "kind": "rate_limited",
+        "message": "Grok CLI hit a rate or usage limit. Try again later, or pick another engine."
+      },
+      "finished_at": "2025-09-01T04:20:10Z",
+      "harness": "grok",
+      "id": "00000000-0000-0000-0000-000000000062",
+      "permission_mode": "ask",
+      "progress": {
+        "files_read": 0,
+        "refused": 0,
+        "tool_calls": 0
+      },
+      "session_id": "00000000-0000-0000-0000-000000000003",
+      "started_at": "2025-09-01T04:20:00Z",
+      "status": "failed",
+      "turn_id": "00000000-0000-0000-0000-000000000004",
+      "workspace_id": "00000000-0000-0000-0000-000000000002"
+    }
+  },
+  {
     "kind": "approval",
     "name": "pending approval",
     "value": {
@@ -1355,6 +1424,21 @@
         "type": "checkpoint_restored"
       },
       "seq": 68
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: review_finished",
+    "value": {
+      "event": {
+        "findings": 2,
+        "harness": "codex",
+        "model": "gpt-5.5",
+        "outcome": "completed",
+        "review_id": "00000000-0000-0000-0000-000000000061",
+        "type": "review_finished"
+      },
+      "seq": 69
     }
   },
   {

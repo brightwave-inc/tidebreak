@@ -129,6 +129,9 @@ impl CodeRuntime {
 
     pub async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
         self.ensure_stall_sweep();
+        // A review copy left by a process that stopped mid-review has no
+        // review to finish it; nothing running now is touched.
+        crate::code::review::sweep_copies(&self.data_dir, &self.reviews);
         let mut actions = Vec::new();
         let mut recovery_owners = list_sessions_all_owners(&self.db)
             .await?

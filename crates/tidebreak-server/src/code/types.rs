@@ -1970,6 +1970,192 @@ pub struct CodeWorktreeChange {
     pub paths: Vec<String>,
 }
 
+/// Body of `POST /code/workspaces/{id}/reviews`: ask another engine to review
+/// the workspace's changes, read-only.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct StartCodeReviewBody {
+    /// The conversation the review is started from. The review is recorded
+    /// in its transcript when it ends.
+    pub session_id: tidebreak_core::SessionId,
+    /// The engine that reviews.
+    pub harness: HarnessKind,
+    /// The engine's model, when the person picked one. Absent for the
+    /// engine's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    /// The turn whose changes to review. Absent for the working tree against
+    /// its base branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_id: Option<TurnId>,
+    /// What the reviewer looks for, when the person changed it in Settings.
+    /// Tidebreak adds the read-only rules, the diff, and the answer format
+    /// around it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub instructions: Option<String>,
+}
+
+/// Where a review stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeReviewStatus {
+    /// Copying the changes, or the reviewer is reading them.
+    Running,
+    /// The reviewer answered. `result` holds what it found.
+    Completed,
+    /// The reviewer could not run, or stopped with an error. `failure` says
+    /// why.
+    Failed,
+    /// The person stopped the review.
+    Cancelled,
+    /// The review ran past its time limit and was stopped.
+    TimedOut,
+}
+
+impl CodeReviewStatus {
+    /// Whether the review has ended.
+    #[must_use]
+    pub const fn is_finished(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
+/// Why a review could not finish, as a class a client picks its remedy by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeReviewFailureKind {
+    /// The engine is not installed on this machine.
+    NotInstalled,
+    /// The engine is not signed in, or its credentials were refused.
+    SignedOut,
+    /// The engine's provider refused for rate or usage limits.
+    RateLimited,
+    /// The review ran past its time limit.
+    TimedOut,
+    /// Anything else: the engine failed, or answered nothing.
+    Failed,
+}
+
+/// Why a review ended without findings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeReviewFailure {
+    pub kind: CodeReviewFailureKind,
+    /// A sentence for the person, with the engine's own words when it gave
+    /// any. Bounded.
+    pub message: String,
+}
+
+/// What the reviewer is doing, for the progress line.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeReviewProgress {
+    /// Tool calls the reviewer made.
+    pub tool_calls: u32,
+    /// Distinct files it opened.
+    pub files_read: u32,
+    /// Requests to change something that Tidebreak refused.
+    pub refused: u32,
+    /// The latest step, such as "Reading src/queue.ts". Absent before the
+    /// reviewer starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub activity: Option<String>,
+}
+
+/// How much a finding matters, as the reviewer judged it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeReviewSeverity {
+    /// A bug or a security problem that must be fixed.
+    High,
+    /// A problem worth fixing.
+    Medium,
+    /// A minor improvement.
+    Low,
+}
+
+/// One problem the reviewer found, on lines of the new side of the diff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeReviewFinding {
+    /// The file, as the diff names it.
+    pub path: String,
+    /// First line, numbered in the file after the changes.
+    pub start_line: u32,
+    /// Last line, the same as `start_line` for one line.
+    pub end_line: u32,
+    pub severity: CodeReviewSeverity,
+    /// One line, bounded.
+    pub title: String,
+    /// What is wrong and what to do about it. Bounded.
+    pub explanation: String,
+}
+
+/// What a completed review found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeReviewResult {
+    /// The reviewer's overall view, when it gave one. Bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub summary: Option<String>,
+    /// Findings on lines the diff shows, ready to become line comments.
+    pub findings: Vec<CodeReviewFinding>,
+    /// Valid findings on lines the diff does not show.
+    pub unplaced: Vec<CodeReviewFinding>,
+    /// Entries in the answer that were not valid findings and were left out.
+    pub rejected: u32,
+    /// The reviewer's answer as it wrote it, when it could not be read as
+    /// findings. Bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub raw_text: Option<String>,
+    /// The reviewed diff of each file a finding in `findings` is on, as git
+    /// printed it, so a client anchors each finding to the lines it quotes.
+    pub diff: String,
+}
+
+/// One review of a workspace's changes by another engine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeReviewSnapshot {
+    pub id: tidebreak_core::CodeReviewId,
+    pub workspace_id: WorkspaceId,
+    /// The conversation the review was started from.
+    pub session_id: tidebreak_core::SessionId,
+    /// The engine that reviews.
+    pub harness: HarnessKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    /// The turn whose changes are reviewed. Absent for the working tree
+    /// against its base branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_id: Option<TurnId>,
+    /// The permission mode the reviewer ran in: `plan`, or `ask` with every
+    /// request refused for an engine that has no plan mode.
+    pub permission_mode: PermissionMode,
+    pub status: CodeReviewStatus,
+    pub progress: CodeReviewProgress,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure: Option<CodeReviewFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub result: Option<CodeReviewResult>,
+}
+
+/// `GET /code/workspaces/{id}/reviews`: the workspace's recent reviews,
+/// newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeReviewList {
+    pub reviews: Vec<CodeReviewSnapshot>,
+}
+
 /// One parked or decided engine approval.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct ApprovalSnapshot {

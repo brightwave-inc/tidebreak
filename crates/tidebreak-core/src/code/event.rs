@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{
-    ApprovalId, ApprovalKind, CodeRestoreId, ExecutionLocation, HarnessKind, SessionId, TurnId,
-    WorkspaceId,
+    ApprovalId, ApprovalKind, CodeRestoreId, CodeReviewId, ExecutionLocation, HarnessKind,
+    SessionId, TurnId, WorkspaceId,
 };
 use crate::approval::{GrantScope, ToolApprovalKind};
 use crate::error::AgentErrorInfo;
@@ -905,6 +905,29 @@ pub enum Event {
         #[ts(optional)]
         error: Option<String>,
     },
+    /// Another engine reviewed the workspace's changes, read-only, and the
+    /// review ended. Journaled by the review runner in the conversation the
+    /// review was started from, never by an engine; the findings themselves
+    /// travel as pending line comments, not on this row.
+    ReviewFinished {
+        /// Names the review.
+        review_id: CodeReviewId,
+        /// The engine that reviewed.
+        harness: HarnessKind,
+        /// The model it reviewed with, when one was chosen.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        model: Option<String>,
+        /// The turn whose changes it reviewed; absent for the working tree
+        /// against its base branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        turn_id: Option<TurnId>,
+        /// How the review ended.
+        outcome: ReviewOutcome,
+        /// How many findings it returned. Zero unless it completed.
+        findings: u32,
+    },
     /// Visible degradation or an engine-native notice.
     HarnessNotice {
         /// Severity.
@@ -980,6 +1003,20 @@ pub enum Event {
         /// What the engine did.
         event: Box<Event>,
     },
+}
+
+/// How a review by another engine ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewOutcome {
+    /// The reviewer answered; its findings, if any, are pending comments.
+    Completed,
+    /// The reviewer could not run, or stopped with an error.
+    Failed,
+    /// The person stopped the review.
+    Cancelled,
+    /// The review ran past its time limit and was stopped.
+    TimedOut,
 }
 
 /// Whether to omit a defaulted `false` flag from a journal row.
@@ -1215,6 +1252,7 @@ mod tests {
             Event::SessionTree { .. } => 26,
             Event::BackgroundActivity { .. } => 27,
             Event::CheckpointRestored { .. } => 28,
+            Event::ReviewFinished { .. } => 29,
         }
     }
 
@@ -1387,6 +1425,14 @@ mod tests {
                 actor: None,
                 status: CheckpointRestoreStatus::Partial,
                 error: Some("git stopped partway".into()),
+            },
+            Event::ReviewFinished {
+                review_id: CodeReviewId(id(8)),
+                harness: HarnessKind::Codex,
+                model: Some("gpt-5.5".into()),
+                turn_id: Some(TurnId(id(1))),
+                outcome: ReviewOutcome::Completed,
+                findings: 3,
             },
         ]
     }

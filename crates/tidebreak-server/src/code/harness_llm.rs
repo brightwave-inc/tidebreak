@@ -277,6 +277,42 @@ impl HarnessLlmRelay {
         key
     }
 
+    /// Mint a key for a review's engine: inference on behalf of the
+    /// conversation the review was started from, which is whose gateway and
+    /// subscription pay for it. The conversation keeps its own key; this one
+    /// lives beside it until [`Self::revoke_key`].
+    pub(crate) fn issue_for_review(
+        &self,
+        owner: &OwnerId,
+        session: SessionId,
+        reviewer: tidebreak_core::HarnessKind,
+        probe: &tidebreak_harness::HarnessProbe,
+    ) -> String {
+        let key = generate_key();
+        let entry = RelayEntry {
+            subject: HarnessLlmSubject {
+                owner: owner.clone(),
+                session,
+            },
+            harness: HarnessIdentity::from_probe(session, reviewer, probe),
+        };
+        self.state
+            .lock()
+            .expect("harness llm registry")
+            .keys
+            .insert(key.clone(), entry);
+        key
+    }
+
+    /// Revoke one key a review borrowed. Idempotent.
+    pub(crate) fn revoke_key(&self, key: &str) {
+        self.state
+            .lock()
+            .expect("harness llm registry")
+            .keys
+            .remove(key);
+    }
+
     /// Revoke the key for `session_id`. Idempotent.
     pub fn revoke(&self, session_id: SessionId) {
         let mut state = self.state.lock().expect("harness llm registry");

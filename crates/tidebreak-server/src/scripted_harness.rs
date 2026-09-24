@@ -161,6 +161,8 @@ pub struct ScriptedAdapter {
     /// Whether each launch was told to load the repository's own engine
     /// config.
     launched_project_configs: Arc<std::sync::Mutex<Vec<tidebreak_harness::ProjectConfig>>>,
+    /// Working directory and permission mode each launch was handed.
+    launched_sessions: Arc<std::sync::Mutex<Vec<(PathBuf, PermissionMode)>>>,
     /// Files to materialize in the worktree at the start of each turn.
     writes: Vec<ScriptedWrite>,
     /// Sleep once at the start of each turn, so a caller can observe Running
@@ -211,6 +213,7 @@ impl ScriptedAdapter {
             launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
             launched_apps: Arc::new(std::sync::Mutex::new(Vec::new())),
             launched_project_configs: Arc::new(std::sync::Mutex::new(Vec::new())),
+            launched_sessions: Arc::new(std::sync::Mutex::new(Vec::new())),
             authenticated: Arc::new(std::sync::Mutex::new(Some(true))),
             writes: Vec::new(),
             turn_delay: Duration::ZERO,
@@ -250,6 +253,37 @@ impl ScriptedAdapter {
             .lock()
             .expect("scripted launches")
             .clone()
+    }
+
+    /// The working directory and permission mode each launched session was
+    /// given, in order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn launched_sessions(&self) -> Vec<(PathBuf, PermissionMode)> {
+        self.launched_sessions
+            .lock()
+            .expect("scripted launches")
+            .clone()
+    }
+
+    /// Write these files into the session's working directory at the start
+    /// of each turn, the way an engine that edits does.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_writes(mut self, writes: &[(&str, &str)]) -> Self {
+        self.writes = writes
+            .iter()
+            .map(|(path, contents)| ScriptedWrite {
+                path: (*path).to_owned(),
+                contents: (*contents).to_owned(),
+            })
+            .collect();
+        self
+    }
+
+    /// Sleep this long at the start of each turn, before the script plays.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_turn_delay(mut self, delay: Duration) -> Self {
+        self.turn_delay = delay;
+        self
     }
 
     /// Fails every turn the way an engine does once it has lost the session
@@ -553,6 +587,10 @@ impl HarnessAdapter for ScriptedAdapter {
             .lock()
             .expect("scripted launches")
             .push(spec.project_config);
+        self.launched_sessions
+            .lock()
+            .expect("scripted launches")
+            .push((spec.worktree.clone(), spec.permission_mode));
         Ok(Box::new(ScriptedSession {
             sink: spec.sink,
             events: self.events.clone(),

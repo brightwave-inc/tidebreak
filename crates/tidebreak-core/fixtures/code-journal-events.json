@@ -194,5 +194,14 @@
     },
     "status": "partial",
     "error": "git stopped partway"
+  },
+  {
+    "type": "review_finished",
+    "review_id": "00000000-0000-0000-0000-000000000008",
+    "harness": "codex",
+    "model": "gpt-5.5",
+    "turn_id": "00000000-0000-0000-0000-000000000001",
+    "outcome": "completed",
+    "findings": 3
   }
 ]

@@ -533,6 +533,7 @@ bounded):
 | `TurnInterrupted` | usage up to the interruption, when the engine reports it |
 | `CheckpointRecorded` | turn id, diffstat |
 | `CheckpointRestored` | restore id, target (before a turn, or before an earlier restore), diffstat, the actor when it was not the owner, and a status: `started` before any file moves, then `completed`, `failed` (nothing changed), or `partial` (its Undo puts back what it replaced), with the reason for the last two. Journaled by the restore route, never by an engine |
+| `ReviewFinished` | review id, the reviewing engine and model, the turn reviewed (absent for the working tree), the outcome (`completed`, `failed`, `cancelled`, `timed_out`), and how many findings. Journaled by the review runner in the conversation the review was started from, never by an engine |
 | `HarnessNotice` | level, message — the visible-degradation channel |
 | `CredentialRefused` | provider and refusal message |
 
@@ -614,6 +615,9 @@ GET/POST        /code/workspaces/{id}/checkpoints/restore   ?turn= | ?restore= p
                                                      {target, expected_tree?} restore
 POST            /code/workspaces/{id}/revert         {path, turn_id?, hunk?}  undo a file or a hunk
 POST            /code/workspaces/{id}/discard        {paths, expected_tree?}  back to the last commit
+GET/POST        /code/workspaces/{id}/reviews        list; {session_id, harness, model?, turn_id?, instructions?} starts a read-only review
+GET             /code/workspaces/{id}/reviews/{review_id}   progress, then findings or why it failed
+POST            /code/workspaces/{id}/reviews/{review_id}/cancel
 GET             /code/workspaces/{id}/tree | /search | /blob   the file viewer; /blob carries a hash
 PUT             /code/workspaces/{id}/file           {path, content, base_hash}  save one text file
 POST            /code/workspaces/{id}/git/commit | /git/push | /git/pr   commit takes {message?, expected_tree?}

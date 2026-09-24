@@ -289,7 +289,7 @@ pub struct CodeRuntime {
     /// Per-session engine inference relay on a gateway-authenticated hosted
     /// machine (decision 71). `None` everywhere else: a machine whose engines
     /// carry their own provider credentials keeps using them.
-    harness_llm: Option<Arc<super::harness_llm::HarnessLlmRelay>>,
+    pub(in crate::code) harness_llm: Option<Arc<super::harness_llm::HarnessLlmRelay>>,
     /// Managed-policy-aware gateway catalog on a local machine. Hosted
     /// machines use `harness_llm` because their catalog belongs to the caller.
     gateway_runtime: Option<Arc<crate::gateway_runtime::GatewayRuntime>>,
@@ -347,6 +347,9 @@ pub struct CodeRuntime {
     /// A worker takes the workspace's lock for the length of a turn, so a
     /// sibling's turn starts after this one ends. See record 55.
     worktree_turns: Mutex<HashMap<WorkspaceId, Arc<tokio::sync::Mutex<()>>>>,
+    /// Reviews of workspaces' changes by another engine, running and recent.
+    /// They never take a worktree's turn lock: a reviewer works in a copy.
+    pub reviews: super::review::ReviewRegistry,
     /// Workspaces whose digest was requested recently, with the owner each
     /// belongs to: the hot tier the refresher walks (decision 66). Shared by
     /// handle so the post-turn fact detector marks its own pushes hot.
@@ -615,6 +618,7 @@ impl CodeRuntime {
             workspace_lifecycles: Mutex::new(HashMap::new()),
             workspace_creations: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
+            reviews: super::review::ReviewRegistry::default(),
             hot_prs: super::pr_refresh::HotPullRequests::default(),
             delivery_nudges: DeliveryNudgeDebounce::default(),
             host_gate: super::pr_fetch::HostGate::default(),
@@ -796,6 +800,7 @@ impl CodeRuntime {
             workspace_lifecycles: Mutex::new(HashMap::new()),
             workspace_creations: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
+            reviews: super::review::ReviewRegistry::default(),
             hot_prs: super::pr_refresh::HotPullRequests::default(),
             delivery_nudges: DeliveryNudgeDebounce::default(),
             host_gate: super::pr_fetch::HostGate::default(),
@@ -1123,7 +1128,7 @@ fn parse_turn_media_type(value: &str) -> Option<tidebreak_core::ImageMediaType> 
     }
 }
 
-fn map_checkpoint(err: CheckpointError) -> ServerError {
+pub(in crate::code) fn map_checkpoint(err: CheckpointError) -> ServerError {
     match err {
         CheckpointError::User(message) => {
             if message.contains("not found") || message.contains("gone") {
