@@ -1145,6 +1145,28 @@ checkpoint_ref?: string,
 diffstat?: Diffstat, };
 
 /**
+ * How far a checkpoint restore got.
+ *
+ * A restore is journaled twice: `started` before any file moves, so its
+ * Undo is reachable even if the machine stops mid-restore, and once more
+ * with how it ended.
+ */
+export type CheckpointRestoreStatus = "started" | "completed" | "failed" | "partial";
+
+/**
+ * The earlier state a checkpoint restore puts a workspace's worktree back to.
+ */
+export type CheckpointRestoreTarget = { "kind": "before_turn",
+/**
+ * The turn whose changes, and everything after them, are undone.
+ */
+turn_id: TurnId, } | { "kind": "before_restore",
+/**
+ * The restore being undone.
+ */
+restore_id: CodeRestoreId, };
+
+/**
  * A small, human-scale position inside a cited document.
  *
  * Validation is intentionally loose. A page or line that does not exist still
@@ -1238,6 +1260,53 @@ export type CodeCheckLogsSnapshot = {
  * Head the logs were read against, when the host reported one.
  */
 head_sha?: string, logs: Array<CodeCheckLog>, errors: Array<CodeCheckLogError>, };
+
+/**
+ * What a checkpoint restore would undo, read before anything moves.
+ *
+ * `files` lists everything that changed since the target state, whoever
+ * changed it: later turns, other sessions, and edits made by hand.
+ */
+export type CodeCheckpointRestorePreview = { target: CheckpointRestoreTarget,
+/**
+ * The session whose transcript records the restore.
+ */
+session_id: SessionId, files: Array<CodeFileChange>, truncated: boolean, stat: Diffstat,
+/**
+ * The worktree's state now. Send it back as the restore's
+ * `expected_tree`, so the restore refuses to run over changes this
+ * preview did not list.
+ */
+current_tree: string,
+/**
+ * Files the restore would overwrite or remove although no snapshot holds
+ * them, so no undo could bring them back: ignored files mostly. While
+ * any are listed, the restore answers `409 restore_blocked`.
+ */
+blocked: Array<string>,
+/**
+ * Turns the restore also undoes that the target does not already imply:
+ * other agents' turns in a shared workspace, and for an undo, every turn
+ * since the restore. Oldest first.
+ */
+affected_turns: Array<CodeRestoreAffectedTurn>, };
+
+/**
+ * A checkpoint restore that landed.
+ */
+export type CodeCheckpointRestoreResult = {
+/**
+ * Restoring `before_restore` with this id undoes the restore.
+ */
+restore_id: CodeRestoreId, target: CheckpointRestoreTarget,
+/**
+ * The session whose transcript records the restore.
+ */
+session_id: SessionId,
+/**
+ * What the restore changed, from the replaced state to the restored one.
+ */
+files: Array<CodeFileChange>, truncated: boolean, stat: Diffstat, };
 
 /**
  * Remembered clone destination plus observed `gh` status.
@@ -1503,7 +1572,13 @@ relation?: CodePullRequestRelation, };
 /**
  * One changed path in a workspace or turn file list.
  */
-export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: number, deletions: number, previous_path?: string, };
+export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: number, deletions: number, previous_path?: string,
+/**
+ * The file also differs from the last commit, so a discard has
+ * something to throw away. Only the workspace list sets it; a turn's
+ * list is history and omits it.
+ */
+uncommitted?: boolean, };
 
 /**
  * Body of `POST /sessions/{id}/fork`. An absent body forks at the
@@ -1751,6 +1826,25 @@ export type CodeRepoTrustSnapshot = { repo_id: RepoId, trust: CodeRepoTrust,
 files: Array<CodeProjectConfigFile>, };
 
 /**
+ * One turn a restore undoes beyond its target.
+ */
+export type CodeRestoreAffectedTurn = { session_id: SessionId, turn_id: TurnId,
+/**
+ * The turn's number within its session.
+ */
+ordinal: number,
+/**
+ * The engine that ran it, so a confirmation can name the agent.
+ */
+harness_kind: HarnessKind, };
+
+/**
+ * Identifies one checkpoint restore, and the worktree state saved just
+ * before it so that the restore can be undone.
+ */
+export type CodeRestoreId = string;
+
+/**
  * Whether the request creates a child session or continues an existing one.
  */
 export type CodeSessionOperation = "create" | "continue";
@@ -1892,7 +1986,13 @@ export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: bool
 /**
  * When the checkpoint named by `revision_ref` was pushed.
  */
-revision_saved_at?: string, };
+revision_saved_at?: string,
+/**
+ * The snapshot tree this workspace list was read from. Send it back as a
+ * commit's or a discard's `expected_tree`, so neither runs over changes
+ * the list did not show. Absent for a turn's list and for a sandbox.
+ */
+worktree_tree?: string, };
 
 /**
  * Local Git facts, separate from the hosted pull request lifecycle.
@@ -2012,6 +2112,11 @@ export type CodeWorkspaceTree = { paths: Array<string>, truncated: boolean, revi
  * When the checkpoint named by `revision_ref` was pushed.
  */
 revision_saved_at?: string, };
+
+/**
+ * The files a revert or a discard changed.
+ */
+export type CodeWorktreeChange = { paths: Array<string>, };
 
 /**
  * Where new worktrees land: `GET`/`PUT /code/worktree-root`.
@@ -2415,6 +2520,25 @@ deletions: number,
 truncated: boolean, };
 
 /**
+ * Body of `POST /code/workspaces/{id}/discard`: put these files back to the
+ * last commit.
+ */
+export type DiscardWorkspaceChangesBody = {
+/**
+ * Each path as the Changes list names it: a renamed file's row names
+ * both its paths. Tidebreak touches only these paths, and leaves alone
+ * a named path with nothing uncommitted. When none has anything to
+ * discard, the request answers `409 no_change`.
+ */
+paths: Array<string>,
+/**
+ * The `worktree_tree` of the file list the person reviewed. A named
+ * file that changed since answers `409 worktree_changed`, and nothing
+ * is discarded.
+ */
+expected_tree?: string, };
+
+/**
  * One chat model a provider reported.
  *
  * A field the provider's listing does not report is absent rather than
@@ -2738,7 +2862,32 @@ turn_id: TurnId,
 /**
  * Bounded diffstat.
  */
-diffstat: Diffstat, } | { "type": "harness_notice",
+diffstat: Diffstat, } | { "type": "checkpoint_restored",
+/**
+ * Names this restore and the state saved just before it.
+ */
+restore_id: CodeRestoreId,
+/**
+ * The state the worktree went back to.
+ */
+target: CheckpointRestoreTarget,
+/**
+ * What the restore changes in the worktree, from the state it
+ * replaces to the state it restores.
+ */
+diffstat: Diffstat,
+/**
+ * Who restored, when it was not the session's owner.
+ */
+actor?: TurnActor,
+/**
+ * How far the restore got.
+ */
+status: CheckpointRestoreStatus,
+/**
+ * Why a `failed` or `partial` restore stopped, bounded.
+ */
+error?: string, } | { "type": "harness_notice",
 /**
  * Severity.
  */
@@ -5381,6 +5530,17 @@ export type ResolveCodeDeliveryRepositoriesBody = { repositories: Array<string>,
 export type RestCredentialStatus = "none" | "configured" | "missing";
 
 /**
+ * Body of `POST /code/workspaces/{id}/checkpoints/restore`.
+ */
+export type RestoreCheckpointBody = { target: CheckpointRestoreTarget,
+/**
+ * The `current_tree` of the preview the person confirmed. When the
+ * worktree has moved since, the restore answers `409 worktree_changed`
+ * and changes nothing.
+ */
+expected_tree?: string, };
+
+/**
  * One thing a call surfaced.
  *
  * Three fields because a row reads as three: what it is, where it came from,
@@ -5494,6 +5654,40 @@ export type RetryTurnBody = {
  * ambiguous retries.
  */
 new_turn_id: TurnId, };
+
+/**
+ * One hunk of a file's diff, as the diff view showed it.
+ */
+export type RevertHunk = {
+/**
+ * Zero-based position of the hunk in the file's diff.
+ */
+index: number,
+/**
+ * The hunk's lines from its `@@` line through its last line, joined with
+ * newlines. The revert answers `409 diff_changed` when the hunk it finds
+ * differs.
+ */
+text: string, };
+
+/**
+ * Body of `POST /code/workspaces/{id}/revert`: undo one file's change, or
+ * one hunk of it, in the diff the person is reading.
+ */
+export type RevertWorkspaceChangeBody = {
+/**
+ * The turn whose diff the person is reading. Absent for the workspace
+ * against its base.
+ */
+turn_id?: TurnId,
+/**
+ * The file as the diff names it.
+ */
+path: string,
+/**
+ * One hunk of the file. Absent to revert the whole file.
+ */
+hunk?: RevertHunk, };
 
 /**
  * Why a root appears in one conversation's exact ordered projection.
