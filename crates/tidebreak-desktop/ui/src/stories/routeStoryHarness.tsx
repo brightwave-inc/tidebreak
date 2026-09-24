@@ -1151,6 +1151,7 @@ export function resetRouteStoryStores({
   useUiStore.setState({
     sidebarCollapsed,
     sidebarWidth,
+    sidebarOverlayOpen: false,
     modelMenuNotConnectedCollapsed: false,
     activeTurnSendMode: "queue",
   });

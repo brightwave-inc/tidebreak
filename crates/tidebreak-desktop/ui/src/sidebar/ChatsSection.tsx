@@ -21,6 +21,7 @@ import {
 } from "@/chatListGroups";
 import { useChatListStore } from "@/ChatListStore";
 import { useProjectListStore } from "@/ProjectListStore";
+import { PanelLoading } from "@/components/PanelLoading";
 import { SearchInput } from "@/components/SearchInput";
 import {
   DropdownMenu,
@@ -157,6 +158,7 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
     archiveChat,
   } = useApp();
   const chats = useChatListStore((state) => state.chats);
+  const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
   const projects = useProjectListStore((state) => state.projects);
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
@@ -288,66 +290,72 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
           className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2"
           aria-label="Work list"
         >
-          {groups.map((group, index) => {
-            const { rows, hidden } = visibleGroupRows(
-              group,
-              showAllOlder,
-              activeChatId,
-            );
-            return (
-              <ChatGroup
-                key={group.key}
-                label={group.label}
-                first={index === 0}
-              >
-                {rows.map((chat) => (
-                  <RecentChatRow
-                    key={chat.id}
-                    chat={chat}
-                    active={chat.id === activeChatId}
-                    needsAttention={chatIdsWithPendingPrompts.has(chat.id)}
-                    renaming={renamingChatId === chat.id}
-                    renameDraft={renameChatDraft}
-                    savingTitle={savingTitle}
-                    mutating={deletingChatId !== null || creatingChat}
-                    projects={projects}
-                    onRenameDraftChange={setRenameDraft}
-                    onOpen={() =>
-                      void navigate({
-                        to: "/c/$chatId",
-                        params: { chatId: chat.id },
-                      })
-                    }
-                    onStartRename={() => startRename(chat)}
-                    onCommitRename={() => commitRename(chat)}
-                    onCancelRename={cancelRename}
-                    onMoveToProject={(projectId) =>
-                      moveChatToProject(chat, projectId)
-                    }
-                    onTogglePin={() => togglePinChat(chat)}
-                    onArchive={() => archiveChat(chat)}
-                    onDelete={() => deleteChat(chat)}
-                  />
-                ))}
-                {group.key === "older" && hidden > 0 && (
-                  <ShowMoreButton onClick={() => setShowAllOlder(true)}>
-                    Show {hidden} more
-                  </ShowMoreButton>
-                )}
-                {group.key === "older" &&
-                  showAllOlder &&
-                  group.chats.length > OLDER_PREVIEW_ROWS && (
-                    <ShowMoreButton onClick={() => setShowAllOlder(false)}>
-                      Show fewer
-                    </ShowMoreButton>
-                  )}
-              </ChatGroup>
-            );
-          })}
-          {listed.length === 0 && query.trim() && (
-            <p className="px-2 py-1 text-xs text-muted-foreground">
-              No work title contains that.
-            </p>
+          {!chatsLoaded ? (
+            <PanelLoading variant="list" label="Loading work" rows={8} />
+          ) : (
+            <>
+              {groups.map((group, index) => {
+                const { rows, hidden } = visibleGroupRows(
+                  group,
+                  showAllOlder,
+                  activeChatId,
+                );
+                return (
+                  <ChatGroup
+                    key={group.key}
+                    label={group.label}
+                    first={index === 0}
+                  >
+                    {rows.map((chat) => (
+                      <RecentChatRow
+                        key={chat.id}
+                        chat={chat}
+                        active={chat.id === activeChatId}
+                        needsAttention={chatIdsWithPendingPrompts.has(chat.id)}
+                        renaming={renamingChatId === chat.id}
+                        renameDraft={renameChatDraft}
+                        savingTitle={savingTitle}
+                        mutating={deletingChatId !== null || creatingChat}
+                        projects={projects}
+                        onRenameDraftChange={setRenameDraft}
+                        onOpen={() =>
+                          void navigate({
+                            to: "/c/$chatId",
+                            params: { chatId: chat.id },
+                          })
+                        }
+                        onStartRename={() => startRename(chat)}
+                        onCommitRename={() => commitRename(chat)}
+                        onCancelRename={cancelRename}
+                        onMoveToProject={(projectId) =>
+                          moveChatToProject(chat, projectId)
+                        }
+                        onTogglePin={() => togglePinChat(chat)}
+                        onArchive={() => archiveChat(chat)}
+                        onDelete={() => deleteChat(chat)}
+                      />
+                    ))}
+                    {group.key === "older" && hidden > 0 && (
+                      <ShowMoreButton onClick={() => setShowAllOlder(true)}>
+                        Show {hidden} more
+                      </ShowMoreButton>
+                    )}
+                    {group.key === "older" &&
+                      showAllOlder &&
+                      group.chats.length > OLDER_PREVIEW_ROWS && (
+                        <ShowMoreButton onClick={() => setShowAllOlder(false)}>
+                          Show fewer
+                        </ShowMoreButton>
+                      )}
+                  </ChatGroup>
+                );
+              })}
+              {listed.length === 0 && query.trim() && (
+                <p className="px-2 py-1 text-xs text-muted-foreground">
+                  No work title contains that.
+                </p>
+              )}
+            </>
           )}
         </div>
       )}

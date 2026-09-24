@@ -486,7 +486,7 @@ export function HomeRoute({
           <h1 className="sr-only" tabIndex={-1}>
             Home
           </h1>
-          <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
+          <div className="relative flex min-h-0 flex-1 justify-center overflow-y-auto">
             <PaneDragBand />
             {/* The same null state an empty conversation shows: home is where a
               chat starts, so it greets the same way. Picking a starter prompt
@@ -495,30 +495,32 @@ export function HomeRoute({
               without another click. Home's starters come from the installed
               prompt library when it has any; otherwise the built-in openers
               stand. */}
-            <WelcomeState
-              onSelectPrompt={(prompt, options) => {
-                setDraft(prompt);
-                if (options?.enableInternet) {
-                  newChat.setNetworkPolicy({ mode: "open" });
+            <div className="my-auto w-full">
+              <WelcomeState
+                onSelectPrompt={(prompt, options) => {
+                  setDraft(prompt);
+                  if (options?.enableInternet) {
+                    newChat.setNetworkPolicy({ mode: "open" });
+                  }
+                  voice.resetInputUsed();
+                }}
+                executionConfigClient={client}
+                promptLibrary={promptLibrary}
+                heading={
+                  walkthroughAvailable ? "Welcome to Tidebreak" : undefined
                 }
-                voice.resetInputUsed();
-              }}
-              executionConfigClient={client}
-              promptLibrary={promptLibrary}
-              heading={
-                walkthroughAvailable ? "Welcome to Tidebreak" : undefined
-              }
-              description={
-                walkthroughAvailable
-                  ? "Choose how the agent works, add what it needs, and start with a real task."
-                  : undefined
-              }
-              onStartWalkthrough={
-                walkthroughAvailable && !walkthroughOpen
-                  ? () => setWalkthroughOpen(true)
-                  : undefined
-              }
-            />
+                description={
+                  walkthroughAvailable
+                    ? "Choose how the agent works, add what it needs, and start with a real task."
+                    : undefined
+                }
+                onStartWalkthrough={
+                  walkthroughAvailable && !walkthroughOpen
+                    ? () => setWalkthroughOpen(true)
+                    : undefined
+                }
+              />
+            </div>
           </div>
 
           <div className="z-10 mx-auto w-full max-w-3xl pb-2">

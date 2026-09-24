@@ -6,7 +6,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 import { useState } from "react";
 
 import type {
@@ -207,11 +207,36 @@ export const Failure: Story = {
   },
 };
 
-export const VersionHistoryOpen: Story = {};
+export const VersionHistoryOpen: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Version history" }),
+    );
+    await waitFor(() =>
+      expect(canvas.getByText("Current version")).toBeVisible(),
+    );
+  },
+};
 
-export const HistoricalRevision: Story = {};
+export const HistoricalRevision: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Version history" }),
+    );
+    await userEvent.click(await canvas.findByRole("button", { name: /v1/ }));
+    await canvas.findByText(/Viewing v1/);
+  },
+};
 
-export const EditMode: Story = {};
+export const EditMode: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole("button", { name: "Edit" }));
+    await canvas.findByRole("textbox", { name: /Edit / });
+  },
+};
 
 export const EditConflict: Story = {
   args: {
@@ -221,6 +246,14 @@ export const EditConflict: Story = {
         currentRevisionId: "revision-4",
       }),
     }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole("button", { name: "Edit" }));
+    const editor = await canvas.findByRole("textbox", { name: /Edit / });
+    await userEvent.type(editor, " extra note");
+    await userEvent.click(canvas.getByRole("button", { name: "Save" }));
+    await canvas.findByRole("alert");
   },
 };
 
