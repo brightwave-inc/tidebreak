@@ -52,7 +52,7 @@ fn every_json_document_carries_its_schema_version() {
         .expect("chat create names the chat")
         .to_owned();
 
-    let cases: [(&[&str], &[&str]); 9] = [
+    let cases: [(&[&str], &[&str]); 10] = [
         (&["chat", "list", "--output-format", "json"], &["chats"]),
         (
             &["provider", "list", "--output-format", "json"],
@@ -77,6 +77,10 @@ fn every_json_document_carries_its_schema_version() {
         ),
         (&["code", "repo", "list", "--json"], &["repos"]),
         (&["folder", "list", "--output-format", "json"], &["grants"]),
+        (
+            &["data", "show", "--output-format", "json"],
+            &["data_dir", "usage", "total_bytes"],
+        ),
     ];
     for (args, keys) in cases {
         let document = document(&data, args);

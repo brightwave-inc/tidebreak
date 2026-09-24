@@ -31,7 +31,7 @@ const MAX_WEBSITE_HOST_CHARS: usize = 253;
 /// Tidebreak store so an application update does not discard its cookies.
 /// Once adopted, the manifest permanently retires this bootstrap identity and
 /// reset allocates a fresh UUID instead of selecting it again.
-const INITIAL_LOCAL_DATA_STORE_IDENTIFIER: [u8; 16] = [
+pub(crate) const INITIAL_LOCAL_DATA_STORE_IDENTIFIER: [u8; 16] = [
     0x74, 0x69, 0x64, 0x65, 0x62, 0x72, 0x65, 0x61, 0x6b, 0x2d, 0x62, 0x72, 0x6f, 0x77, 0x73, 0x65,
 ];
 

@@ -49,6 +49,10 @@
 //! `/code/*` routes the desktop uses. `--json` (or `--output-format json`)
 //! writes one object, or NDJSON for `code run` and `code watch`. See [`code`].
 //!
+//! `tidebreak data show|backup|export` reports where the profile lives and how
+//! much disk it uses, writes a backup archive of it, and exports its
+//! conversations as Markdown or JSON, through the server's `/data` routes.
+//!
 //! `tidebreak diagnostics snapshot|metrics|export` reads bounded process
 //! measurements and local log tails from the same server. The export is a ZIP
 //! for performance investigations; the exporter does not read conversations,
@@ -124,6 +128,7 @@ mod code;
 mod compatibility;
 mod computer_use;
 mod connect;
+mod data;
 mod diagnostics;
 mod event_stream;
 mod folder;
@@ -389,6 +394,16 @@ async fn run() -> Result<i32> {
                 usage_error("diagnostics accepts snapshot, metrics, or export");
             };
             diagnostics::run(command, server_flags.resolve()?)
+                .await
+                .map(|()| 0)
+        }
+        Some(command) if command == OsStr::new("data") => {
+            set_usage_family(Family::Data);
+            let (command, format) = match data::parse(text_args(args)) {
+                Ok(parsed) => parsed,
+                Err(message) => usage_error(&message),
+            };
+            data::run(command, format, server_flags.resolve()?)
                 .await
                 .map(|()| 0)
         }

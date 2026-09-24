@@ -8,6 +8,7 @@ import type {
   ExportedMcpServer,
   WorkspaceConfigAction,
   WorkspaceConfigApplyRequest,
+  WorkspaceConfigApplyResult,
   WorkspaceConfigDecision,
   WorkspaceConfigDocument,
   WorkspaceConfigPreview,
@@ -31,7 +32,7 @@ import {
   pickWorkspaceConfig,
   saveWorkspaceConfig,
 } from "@/host";
-import { SettingsError, SettingsSection } from "./primitives";
+import { SettingsError, SettingsSection, SettingsStatus } from "./primitives";
 
 type ConfigClient = Pick<
   ApiClient,
@@ -49,6 +50,11 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
   const [actions, setActions] = useState<Record<string, WorkspaceConfigAction>>(
     {},
   );
+  // Rows whose choice the person made themselves. An entry that needs a path
+  // follows its path otherwise: Skip while the path is empty, Add once it is
+  // filled in.
+  const [chosen, setChosen] = useState<Record<string, boolean>>({});
+  const [result, setResult] = useState<WorkspaceConfigApplyResult | null>(null);
   const [remaps, setRemaps] = useState<Record<string, Record<string, string>>>(
     {},
   );
@@ -115,9 +121,11 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
         nextActions[entryKey(entry)] = entry.status === "new" ? "add" : "skip";
       }
       setActions(nextActions);
+      setChosen({});
       setRemaps({});
       setStarts({});
       setApplyError(null);
+      setResult(null);
       setPreview({ document, entries: result.entries });
     } catch (caught) {
       const message = friendlyErrorMessage(
@@ -149,6 +157,17 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
     fileRef.current?.click();
   }
 
+  /** The action an entry imports with, as the dialog shows it. */
+  function actionFor(
+    entry: WorkspaceConfigPreviewEntry,
+  ): WorkspaceConfigAction {
+    const key = entryKey(entry);
+    const action = actions[key] ?? "skip";
+    if (entry.status !== "needs_remap") return action;
+    if (!remapComplete(entry, remaps[key])) return "skip";
+    return chosen[key] ? action : "add";
+  }
+
   async function applyImport() {
     if (!preview) return;
     setApplying(true);
@@ -161,7 +180,7 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
           const decision: WorkspaceConfigDecision = {
             section: entry.section,
             key: entry.key,
-            action: actions[key] ?? "skip",
+            action: actionFor(entry),
             remaps: filledRemaps(remaps[key]),
           };
           // A server that runs a command or sends a credential starts only
@@ -174,10 +193,9 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
           return decision;
         }),
       };
-      const result = await client.applyWorkspaceConfig(body);
-      toast.success(
-        `Imported ${result.applied} ${result.applied === 1 ? "item" : "items"}; skipped ${result.skipped}.`,
-      );
+      const applied = await client.applyWorkspaceConfig(body);
+      toast.success(appliedSummary(applied));
+      setResult(applied);
       setPreview(null);
     } catch (caught) {
       const message = friendlyErrorMessage(
@@ -230,6 +248,13 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
             }}
           />
         </div>
+        {result && (
+          <SettingsStatus
+            tone="ready"
+            label="Import finished"
+            description={appliedSummary(result)}
+          />
+        )}
         {error && <SettingsError>{error}</SettingsError>}
       </SettingsSection>
       <Dialog
@@ -258,15 +283,19 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
                   key={entryKey(entry)}
                   entry={entry}
                   document={preview.document}
-                  action={actions[entryKey(entry)] ?? "skip"}
+                  action={actionFor(entry)}
                   remap={remaps[entryKey(entry)] ?? {}}
                   start={starts[entryKey(entry)] === true}
-                  onAction={(next) =>
+                  onAction={(next) => {
                     setActions((current) => ({
                       ...current,
                       [entryKey(entry)]: next,
-                    }))
-                  }
+                    }));
+                    setChosen((current) => ({
+                      ...current,
+                      [entryKey(entry)]: true,
+                    }));
+                  }}
                   onRemap={(field, value) =>
                     setRemaps((current) => ({
                       ...current,
@@ -286,7 +315,13 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
               ))}
             </ul>
           )}
-          {applyError && <SettingsError>{applyError}</SettingsError>}
+          {applyError && (
+            <SettingsStatus
+              tone="critical"
+              label="The import failed"
+              description={sentenceCase(applyError)}
+            />
+          )}
           <DialogFooter>
             <Button
               type="button"
@@ -311,6 +346,28 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
 
 function entryKey(entry: WorkspaceConfigPreviewEntry): string {
   return `${entry.section}:${entry.key}`;
+}
+
+/** Whether every field an entry needs on this machine has a value. */
+function remapComplete(
+  entry: WorkspaceConfigPreviewEntry,
+  remap: Record<string, string> | undefined,
+): boolean {
+  return (entry.remap_fields ?? []).every(
+    (field) => (remap?.[field] ?? "").trim() !== "",
+  );
+}
+
+/** A server message, which starts lowercase, as a sentence. */
+function sentenceCase(message: string): string {
+  return message.charAt(0).toUpperCase() + message.slice(1);
+}
+
+function appliedSummary(result: WorkspaceConfigApplyResult): string {
+  const imported = `Imported ${result.applied} ${result.applied === 1 ? "entry" : "entries"}`;
+  return result.skipped > 0
+    ? `${imported} and skipped ${result.skipped}.`
+    : `${imported}.`;
 }
 
 /** Remap fields the person filled in. A blank one means "not remapped". */
@@ -453,6 +510,13 @@ const CHOICE_LABEL: Record<WorkspaceConfigAction, string> = {
   replace: "Replace",
 };
 
+/** What a missing remap is called in a sentence. */
+const REMAP_NOUN: Record<string, string> = {
+  command: "command",
+  cwd: "working directory",
+  root_path: "path",
+};
+
 const REMAP_LABEL: Record<string, string> = {
   command: "Command on this machine",
   cwd: "Working directory on this machine",
@@ -491,6 +555,14 @@ function PreviewRow({
   const sent = server ? sentVariables(server) : [];
   const waits = server !== undefined && waitsForStart(server);
   const offersStart = waits && server?.enabled === true && action !== "skip";
+  // An entry that needs a path on this machine stays on Skip until it has
+  // one: importing it without the path would fail the whole import.
+  const missing =
+    entry.status === "needs_remap" && !remapComplete(entry, remap)
+      ? (entry.remap_fields ?? []).filter(
+          (field) => (remap[field] ?? "").trim() === "",
+        )
+      : [];
   return (
     <li className="rounded-lg border p-3">
       <p className="text-sm font-medium break-all">{title}</p>
@@ -530,12 +602,20 @@ function PreviewRow({
             size="sm"
             variant={action === choice ? "default" : "outline"}
             aria-pressed={action === choice}
+            disabled={choice !== "skip" && missing.length > 0}
             onClick={() => onAction(choice)}
           >
             {CHOICE_LABEL[choice]}
           </Button>
         ))}
       </div>
+      {missing.length > 0 && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Skipped until you enter the{" "}
+          {missing.map((field) => REMAP_NOUN[field] ?? field).join(" and ")} on
+          this machine below.
+        </p>
+      )}
       {offersStart && (
         <div className="mt-3 flex items-start gap-2">
           <Switch

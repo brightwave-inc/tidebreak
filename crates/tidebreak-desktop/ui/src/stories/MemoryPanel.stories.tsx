@@ -45,6 +45,25 @@ const pnpm: MemoryRecord = {
   },
 };
 
+/** A line the person forgot: kept out of every conversation, not deleted. */
+const forgottenBranches: MemoryRecord = {
+  ...pnpm,
+  id: "3f19d0d5-8f46-4f57-a35a-000000000014",
+  status: "archived",
+  title: "When naming branches",
+  body: "Prefix them with the ticket number.",
+  updated_at: "2026-09-18T11:00:00Z",
+};
+
+const forgottenStandup: MemoryRecord = {
+  ...tables,
+  id: "3f19d0d5-8f46-4f57-a35a-000000000015",
+  status: "archived",
+  title: "When writing the weekly update",
+  body: "Lead with blockers, then shipped work, then next week.",
+  updated_at: "2026-09-15T16:20:00Z",
+};
+
 function digestFor(records: MemoryRecord[], byteCap = 8192) {
   const markdown = records
     .map((record) => `- ${record.updated_at.slice(0, 10)} — ${record.title}`)
@@ -107,6 +126,14 @@ function stubClient(
           : record,
       );
       return rows.find((record) => record.id === id)!;
+    },
+    deleteMemoryRecord: async (id: string) => {
+      rows = rows.filter((record) => record.id !== id);
+    },
+    deleteAllMemoryRecords: async () => {
+      const deleted = rows.length;
+      rows = [];
+      return { deleted };
     },
     updateMemoryRecord: async (
       id: string,
@@ -187,4 +214,39 @@ export const Editing: Story = {
 /** The backend read failed; retry is the only action. */
 export const LoadFailed: Story = {
   args: { client: stubClient([], { fail: true }) },
+};
+
+/** Forgotten lines stay collapsed below what Tidebreak knows. */
+export const WithForgotten: Story = {
+  args: {
+    client: stubClient([tables, pnpm, forgottenBranches, forgottenStandup]),
+  },
+};
+
+/** The forgotten list open, each line with Restore and Delete. */
+export const ForgottenOpen: Story = {
+  args: {
+    client: stubClient([tables, pnpm, forgottenBranches, forgottenStandup]),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Show 2 forgotten records" }),
+    );
+  },
+};
+
+/** Only forgotten lines are left: the list and Delete everything remain. */
+export const OnlyForgotten: Story = {
+  args: { client: stubClient([forgottenBranches]) },
+};
+
+/** Delete asks first, and says the record goes with its history. */
+export const DeleteConfirmation: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const deletes = await canvas.findAllByRole("button", { name: "Delete" });
+    await userEvent.click(deletes[0]);
+    await within(canvasElement.ownerDocument.body).findByRole("alertdialog");
+  },
 };

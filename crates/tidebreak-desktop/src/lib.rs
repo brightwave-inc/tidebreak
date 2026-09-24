@@ -70,6 +70,7 @@ mod office_install;
 mod office_pdf;
 #[cfg(target_os = "macos")]
 mod office_sandbox;
+mod profile_data;
 mod quit;
 mod remote;
 mod skill_import;
@@ -932,6 +933,10 @@ pub fn run() {
             workspace_config::save_workspace_config,
             workspace_config::pick_workspace_config,
             workspace_config::apply_native_workspace_config,
+            profile_data::reveal_data_directory,
+            profile_data::save_profile_backup,
+            profile_data::save_conversation_export,
+            profile_data::delete_all_data,
             office_pdf::convert_office_to_pdf,
             office_install::install_presentation_converter,
             office_install::cancel_presentation_converter_install,
@@ -1220,6 +1225,10 @@ async fn boot_server(
     // Let restart-to-update park sessions at a safe point before installing.
     app.state::<host_access::HostAccess>()
         .initialize_update_quiesce(server.update_quiesce())?;
+    // Let Delete all data stop the server and its workers before it deletes
+    // the folders they write into.
+    app.state::<host_access::HostAccess>()
+        .initialize_server_stop(server.stop_handle())?;
     let base_url = format!("http://{}", server.local_addr());
     let token = server.token().to_string();
     let executor_token = server.client_executor_token().to_string();

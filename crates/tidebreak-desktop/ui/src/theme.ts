@@ -3,7 +3,7 @@ import { useSyncExternalStore } from "react";
 export type ThemeMode = "light" | "dark" | "system";
 export type ResolvedTheme = "light" | "dark";
 
-const STORAGE_KEY = "tidebreak-theme";
+export const STORAGE_KEY = "tidebreak-theme";
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
 export function isThemeMode(value: unknown): value is ThemeMode {

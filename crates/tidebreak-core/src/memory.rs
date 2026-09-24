@@ -195,6 +195,9 @@ impl MemoryStatus {
     }
 
     /// Whether `next` follows the persisted lifecycle.
+    ///
+    /// `Archived → Active` is a restore: a person takes back a record they
+    /// forgot, or one a merge superseded.
     #[must_use]
     pub fn can_transition_to(self, next: Self) -> bool {
         self == next
@@ -207,6 +210,7 @@ impl MemoryStatus {
                     Self::Proposed,
                     Self::Active | Self::Rejected | Self::Archived
                 ) | (Self::Active, Self::Archived)
+                    | (Self::Archived, Self::Active)
             )
     }
 }
@@ -843,6 +847,23 @@ pub trait MemoryBackend: Send + Sync {
 
     /// Hard-delete one record and every revision.
     async fn delete(&self, owner: &OwnerId, id: MemoryRecordId) -> MemoryResult<bool>;
+
+    /// Hard-delete every record the owner has, in every scope and every
+    /// status, with every revision. Returns the ids it deleted, so a caller
+    /// can remove any copy it derived from them.
+    ///
+    /// The default deletes one record at a time. A backend that can do it in
+    /// one transaction should.
+    async fn delete_all(&self, owner: &OwnerId) -> MemoryResult<Vec<MemoryRecordId>> {
+        let records = self.list(owner, MemoryListFilter::default()).await?;
+        let mut deleted = Vec::with_capacity(records.len());
+        for record in records {
+            if self.delete(owner, record.id).await? {
+                deleted.push(record.id);
+            }
+        }
+        Ok(deleted)
+    }
 
     /// Search complete markdown bodies and retrieval titles in process.
     async fn search(

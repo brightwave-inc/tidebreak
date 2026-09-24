@@ -1870,6 +1870,175 @@ async fn delete_managed_profile(
     }
 }
 
+/// Close every code browser, then remove every website data store WebKit
+/// keeps for this app, for Delete all data. Answers what it could not
+/// remove, one line each; it goes on past a failure.
+///
+/// The browser profile manifest goes with the data folder, and a fresh
+/// profile adopts the initial local store again, so a store left behind would
+/// bring its sign-ins back on the next launch. A store WebKit will not let go
+/// of is emptied instead. The default store, which the app's own window and
+/// the browsers on macOS 13 and earlier share, goes with
+/// [`remove_default_website_data`].
+#[cfg(target_os = "macos")]
+pub(crate) async fn remove_all_browser_data(app: &AppHandle) -> Vec<String> {
+    let profiles = app.state::<BrowserProfileStore>();
+    let _lifecycle = profiles.lock_lifecycle().await;
+    let mut failures = Vec::new();
+    if let Err(error) = close_every_browser(app).await {
+        failures.push(format!("the code browsers: {error}"));
+    }
+    if macos_major_version() < 14 {
+        return failures;
+    }
+    let present = match app.fetch_data_store_identifiers().await {
+        Ok(present) => present,
+        Err(error) => {
+            failures.push(format!(
+                "the code browser's website data under ~/Library/WebKit: {}",
+                browser_error(error)
+            ));
+            return failures;
+        }
+    };
+    for identifier in stores_to_remove(present) {
+        let removed =
+            remove_profile_data_when_released(|| remove_named_browser_profile(app, identifier))
+                .await;
+        let Err(error) = removed else {
+            continue;
+        };
+        if remove_every_origin(app, Some(identifier)).await.is_err() {
+            failures.push(format!(
+                "the code browser's website data store {} under ~/Library/WebKit: {error}",
+                uuid::Uuid::from_bytes(identifier)
+            ));
+        }
+    }
+    failures
+}
+
+/// Code browsers keep their website data inside the data folder here, so
+/// deleting the folder deletes it.
+#[cfg(not(target_os = "macos"))]
+pub(crate) async fn remove_all_browser_data(_app: &AppHandle) -> Vec<String> {
+    Vec::new()
+}
+
+/// Remove all the website data in the default store, for Delete all data:
+/// the app's own window keeps its storage there, and so do the browsers on
+/// macOS 13 and earlier.
+#[cfg(target_os = "macos")]
+pub(crate) async fn remove_default_website_data(app: &AppHandle) -> Result<(), String> {
+    remove_every_origin(app, None).await
+}
+
+/// The window's website data lives inside the data folder here, so deleting
+/// the folder deletes it.
+#[cfg(not(target_os = "macos"))]
+pub(crate) async fn remove_default_website_data(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+/// Remove every kind of website data a store holds, for every origin: the
+/// store named `identifier`, or the default store when that is `None`.
+///
+/// `fetchDataRecordsOfTypes:` lists only http, https, and file origins, so
+/// removing record by record would leave the window's own
+/// `tauri://localhost` storage behind. Removing everything modified since the
+/// distant past takes every origin.
+#[cfg(target_os = "macos")]
+async fn remove_every_origin(app: &AppHandle, identifier: Option<[u8; 16]>) -> Result<(), String> {
+    use std::sync::{Arc, Mutex};
+
+    use block2::RcBlock;
+    use objc2::{class, msg_send, rc::Retained, runtime::AnyObject, MainThreadMarker};
+    use objc2_foundation::NSUUID;
+    use objc2_web_kit::WKWebsiteDataStore;
+
+    let (sender, receiver) = oneshot::channel::<Result<(), String>>();
+    let sender = Arc::new(Mutex::new(Some(sender)));
+    let callback_sender = Arc::clone(&sender);
+    app.run_on_main_thread(move || {
+        let Some(mtm) = MainThreadMarker::new() else {
+            if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
+                let _ = sender.send(Err(
+                    "removing website data requires the main thread".to_owned()
+                ));
+            }
+            return;
+        };
+        unsafe {
+            let store: Retained<WKWebsiteDataStore> = match identifier {
+                None => WKWebsiteDataStore::defaultDataStore(mtm),
+                Some(identifier) => {
+                    let identifier = NSUUID::from_bytes(identifier);
+                    msg_send![class!(WKWebsiteDataStore), dataStoreForIdentifier: &*identifier]
+                }
+            };
+            let data_types = WKWebsiteDataStore::allWebsiteDataTypes(mtm);
+            let since: Retained<AnyObject> = msg_send![class!(NSDate), distantPast];
+            let removed = RcBlock::new(move || {
+                if let Some(sender) = callback_sender
+                    .lock()
+                    .ok()
+                    .and_then(|mut sender| sender.take())
+                {
+                    let _ = sender.send(Ok(()));
+                }
+            });
+            let _: () = msg_send![
+                &*store,
+                removeDataOfTypes: &*data_types,
+                modifiedSince: &*since,
+                completionHandler: &*removed
+            ];
+        }
+    })
+    .map_err(browser_error)?;
+
+    tokio::time::timeout(PROFILE_CLOSE_TIMEOUT, receiver)
+        .await
+        .map_err(|_| "removing website data timed out".to_owned())?
+        .map_err(|_| "removing website data was interrupted".to_owned())?
+}
+
+/// The data stores Delete all data removes: every one WebKit reports for this
+/// app, each once. The browser profile manifest is not the list, because a
+/// store outlives a lost manifest and the initial local store is adopted
+/// again by the next profile.
+#[cfg(any(target_os = "macos", test))]
+fn stores_to_remove(mut present: Vec<[u8; 16]>) -> Vec<[u8; 16]> {
+    present.sort_unstable();
+    present.dedup();
+    present
+}
+
+/// Close every code browser webview and wait until they are gone.
+#[cfg(target_os = "macos")]
+async fn close_every_browser(app: &AppHandle) -> Result<(), String> {
+    let labels: Vec<String> = app
+        .webviews()
+        .into_keys()
+        .filter(|label| label.starts_with(BROWSER_LABEL_PREFIX))
+        .collect();
+    for label in &labels {
+        if let Some(webview) = app.get_webview(label) {
+            close_browser_webview(&webview)?;
+        }
+    }
+    let deadline = tokio::time::Instant::now() + PROFILE_CLOSE_TIMEOUT;
+    loop {
+        if labels.iter().all(|label| app.get_webview(label).is_none()) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("the code browsers did not close in time".to_owned());
+        }
+        tokio::time::sleep(PROFILE_CLOSE_POLL_INTERVAL).await;
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Eq, PartialEq)]
 enum BrowserProfileRemovalError {
@@ -2946,6 +3115,18 @@ mod tests {
         assert!(snapshot.document_epoch.is_none());
         assert!(snapshot.controller.is_none());
         assert!(snapshot.agent_access.is_none());
+    }
+
+    #[test]
+    fn delete_all_data_removes_every_store_webkit_reports_once() {
+        let initial = crate::browser_profile::INITIAL_LOCAL_DATA_STORE_IDENTIFIER;
+        let named = [3_u8; 16];
+        let unknown_to_the_manifest = [7_u8; 16];
+        let removed = stores_to_remove(vec![named, initial, unknown_to_the_manifest, named]);
+        assert_eq!(removed.len(), 3, "{removed:?}");
+        for store in [initial, named, unknown_to_the_manifest] {
+            assert!(removed.contains(&store), "{store:?} stays behind");
+        }
     }
 
     #[test]

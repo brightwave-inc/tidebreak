@@ -28,6 +28,50 @@ use super::validation::{
     failure_diagnostic, failure_park, validate_server, validate_servers, validation_reason,
 };
 
+/// What a replacement wrote to the credential store, as it wrote it, so one
+/// that fails puts back exactly that.
+#[derive(Default)]
+pub(super) struct CredentialJournal {
+    entries: BTreeMap<String, JournalEntry>,
+}
+
+/// One key a replacement wrote.
+struct JournalEntry {
+    /// The server the key belongs to.
+    server: String,
+    /// The value just before the replacement first wrote the key, or `None`
+    /// for no entry.
+    before: Option<String>,
+    /// What the replacement wrote last, or `None` for a delete.
+    written: Option<String>,
+}
+
+impl CredentialJournal {
+    /// Record a write. A key written twice keeps its first `before`.
+    pub(super) fn record(
+        &mut self,
+        server: &str,
+        key: &str,
+        before: Option<String>,
+        written: Option<String>,
+    ) {
+        self.entries
+            .entry(key.to_owned())
+            .and_modify(|entry| entry.written = written.clone())
+            .or_insert(JournalEntry {
+                server: server.to_owned(),
+                before,
+                written,
+            });
+    }
+}
+
+/// What a failed MCP replacement's error says when a stored credential it
+/// changed could not be put back, followed by the servers', so the caller
+/// does not say nothing changed.
+pub const CREDENTIALS_NOT_RESTORED: &str =
+    "could not put back the saved environment values or sign-ins";
+
 /// One connection attempt's outcome, with what it taught the runtime about
 /// OAuth.
 type ConnectAttempt = (
@@ -467,32 +511,28 @@ impl McpRuntime {
     /// name kept without a new value keeps the one already stored. Records
     /// that no longer exist have their entry deleted, so removing a server
     /// takes its credentials with it.
+    ///
+    /// With a `journal`, every write is recorded there as it happens.
     async fn commit_env_values(
         &self,
         definitions: &mut [McpServerDefinition],
         ids: &BTreeMap<String, ConnectedAppId>,
+        mut journal: Option<&mut CredentialJournal>,
     ) -> Result<()> {
-        let live: HashSet<ConnectedAppId> = ids.values().copied().collect();
-        let stale: Vec<ConnectedAppId> = {
-            let state = self.state.lock().await;
-            state
-                .ids
-                .values()
-                .copied()
-                .filter(|id| !live.contains(id))
-                .collect()
-        };
-        for id in stale {
+        for (name, id) in self.stale_apps(ids).await {
             // Best effort: a leftover entry is unreachable (nothing
             // references the id) and a failure here must not fail the save.
-            let _ = self.secrets.delete_secret(&env_secret_key(id)).await;
+            let _ = self
+                .write_credential(journal.as_deref_mut(), &name, &env_secret_key(id), None)
+                .await;
         }
         for definition in definitions {
             let Some(id) = ids.get(&definition.name).copied() else {
                 definition.env_values.clear();
                 continue;
             };
-            self.commit_env_value(definition, id).await?;
+            self.commit_env_value(definition, id, journal.as_deref_mut())
+                .await?;
         }
         Ok(())
     }
@@ -504,19 +544,62 @@ impl McpRuntime {
         &self,
         definition: &mut McpServerDefinition,
         id: ConnectedAppId,
+        journal: Option<&mut CredentialJournal>,
     ) -> Result<()> {
         let mut values = self.stored_env(id).await;
         values.append(&mut definition.env_values);
         values.retain(|name, _| definition.env.contains(name));
         let key = env_secret_key(id);
         if values.is_empty() {
-            let _ = self.secrets.delete_secret(&key).await;
+            let _ = self
+                .write_credential(journal, &definition.name, &key, None)
+                .await;
             return Ok(());
         }
         let encoded = serde_json::to_string(&values).map_err(|error| {
             AgentError::config(format!("could not encode MCP environment values: {error}"))
         })?;
-        self.secrets.set_secret(&key, &encoded).await
+        self.write_credential(journal, &definition.name, &key, Some(&encoded))
+            .await
+    }
+
+    /// The configured servers a replacement over `ids` drops, by name.
+    async fn stale_apps(
+        &self,
+        ids: &BTreeMap<String, ConnectedAppId>,
+    ) -> Vec<(String, ConnectedAppId)> {
+        let live: HashSet<ConnectedAppId> = ids.values().copied().collect();
+        let state = self.state.lock().await;
+        state
+            .ids
+            .iter()
+            .filter(|(_, id)| !live.contains(id))
+            .map(|(name, id)| (name.clone(), *id))
+            .collect()
+    }
+
+    /// Set `key` to `value`, or delete it for `None`. With a `journal`, the
+    /// value just before the write is read first and both are recorded under
+    /// `server`, so a failed replacement can put back exactly what it wrote.
+    async fn write_credential(
+        &self,
+        journal: Option<&mut CredentialJournal>,
+        server: &str,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<()> {
+        let before = match journal {
+            Some(_) => Some(self.secrets.get_secret(key).await?),
+            None => None,
+        };
+        let written = match value {
+            Some(value) => self.secrets.set_secret(key, value).await,
+            None => self.secrets.delete_secret(key).await,
+        };
+        if let (Some(journal), Some(before)) = (journal, before) {
+            journal.record(server, key, before, value.map(str::to_owned));
+        }
+        written
     }
 
     /// The gateway resolver MCP dispatch rides on — exposed so tests can pin
@@ -717,7 +800,10 @@ impl McpRuntime {
                      that limit."
                 )),
                 Ok(mut definition) if !definition.env_values.is_empty() => {
-                    match self.commit_env_value(&mut definition, record.id).await {
+                    match self
+                        .commit_env_value(&mut definition, record.id, None)
+                        .await
+                    {
                         Ok(()) => {
                             migrated.push(record.name.clone());
                             Ok(definition)
@@ -851,7 +937,8 @@ impl McpRuntime {
                     let state = self.state.lock().await;
                     (state.definitions.clone(), state.ids.clone())
                 };
-                self.reconcile_oauth_sessions(&definitions, &ids).await;
+                self.reconcile_oauth_sessions(&definitions, &ids, None)
+                    .await;
                 join_all(
                     servers
                         .iter()
@@ -1373,24 +1460,17 @@ impl McpRuntime {
     /// effort, like the environment cleanup beside it: a failed delete leaves
     /// a session that [`live_oauth_connection`](super::types) still refuses to
     /// present, because it checks the URL on every load.
+    ///
+    /// With a `journal`, every delete is recorded there as it happens.
     async fn reconcile_oauth_sessions(
         &self,
         definitions: &[McpServerDefinition],
         ids: &BTreeMap<String, ConnectedAppId>,
+        mut journal: Option<&mut CredentialJournal>,
     ) {
-        let live: HashSet<ConnectedAppId> = ids.values().copied().collect();
-        let stale: Vec<ConnectedAppId> = {
-            let state = self.state.lock().await;
-            state
-                .ids
-                .values()
-                .copied()
-                .filter(|id| !live.contains(id))
-                .collect()
-        };
-        for id in stale {
-            let _ = McpOAuthCredentialVault::new(self.secrets.clone(), id)
-                .clear_all()
+        for (name, id) in self.stale_apps(ids).await {
+            let _ = self
+                .clear_oauth_session(journal.as_deref_mut(), &name, id)
                 .await;
         }
         for definition in definitions {
@@ -1407,7 +1487,10 @@ impl McpRuntime {
                 Err(_) => false,
             };
             if !bound {
-                if let Err(error) = vault.clear_all().await {
+                if let Err(error) = self
+                    .clear_oauth_session(journal.as_deref_mut(), &definition.name, id)
+                    .await
+                {
                     tracing::warn!(
                         server = %definition.name,
                         "could not clear an MCP OAuth session for a changed server: {error}"
@@ -1415,6 +1498,31 @@ impl McpRuntime {
                 }
             }
         }
+    }
+
+    /// Remove one server's OAuth tokens and then its registration, as
+    /// [`McpOAuthCredentialVault::clear_all`] does, recording each delete in
+    /// `journal` when there is one.
+    async fn clear_oauth_session(
+        &self,
+        mut journal: Option<&mut CredentialJournal>,
+        server: &str,
+        id: ConnectedAppId,
+    ) -> Result<()> {
+        self.write_credential(
+            journal.as_deref_mut(),
+            server,
+            &crate::connectors::oauth_token_secret_key(id),
+            None,
+        )
+        .await?;
+        self.write_credential(
+            journal,
+            server,
+            &crate::connectors::oauth_client_secret_key(id),
+            None,
+        )
+        .await
     }
 
     /// The bare mounted tool names of every connected server, by namespace —
@@ -1682,7 +1790,7 @@ impl McpRuntime {
 
     async fn replace_strict(
         &self,
-        mut definitions: Vec<McpServerDefinition>,
+        definitions: Vec<McpServerDefinition>,
         persist: bool,
     ) -> Result<()> {
         validate_servers(&definitions)?;
@@ -1719,15 +1827,96 @@ impl McpRuntime {
                 })
                 .collect()
         };
+        // Every credential this replacement writes is recorded as it is
+        // written. One that fails puts back exactly those, and nothing newer.
+        let mut journal = CredentialJournal::default();
+        match self
+            .apply_strict(definitions, ids, persist, skipped, &mut journal)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.restore_credentials(journal, error).await),
+        }
+    }
+
+    /// Put back what a failed replacement wrote, and return its error.
+    ///
+    /// A key goes back to its value from just before the replacement wrote
+    /// it, and only while it still holds what the replacement wrote. A key
+    /// that holds something else changed afterwards, for example when a
+    /// connection refreshed a token, which under refresh-token rotation
+    /// spends the old one, or a sign-in finished. That key stays as it is.
+    ///
+    /// When a credential cannot be put back, the error names its servers and
+    /// says so with [`CREDENTIALS_NOT_RESTORED`], so no caller reports that
+    /// nothing changed.
+    pub(super) async fn restore_credentials(
+        &self,
+        journal: CredentialJournal,
+        error: AgentError,
+    ) -> AgentError {
+        let mut failed: BTreeSet<String> = BTreeSet::new();
+        for (key, entry) in journal.entries {
+            let current = match self.secrets.get_secret(&key).await {
+                Ok(current) => current,
+                Err(read_error) => {
+                    tracing::warn!(
+                        server = %entry.server,
+                        %read_error,
+                        "could not read an MCP credential after a failed replacement"
+                    );
+                    failed.insert(entry.server);
+                    continue;
+                }
+            };
+            if current != entry.written || current == entry.before {
+                continue;
+            }
+            let restored = match &entry.before {
+                Some(value) => self.secrets.set_secret(&key, value).await,
+                None => self.secrets.delete_secret(&key).await,
+            };
+            if let Err(restore_error) = restored {
+                tracing::warn!(
+                    server = %entry.server,
+                    %restore_error,
+                    "could not put back an MCP credential after a failed replacement"
+                );
+                failed.insert(entry.server);
+            }
+        }
+        if failed.is_empty() {
+            return error;
+        }
+        let message = match &error {
+            AgentError::Config(message) => message.clone(),
+            other => other.to_string(),
+        };
+        let servers = failed.into_iter().collect::<Vec<_>>().join(", ");
+        AgentError::config(format!(
+            "{message} Tidebreak {CREDENTIALS_NOT_RESTORED} of {servers}."
+        ))
+    }
+
+    async fn apply_strict(
+        &self,
+        mut definitions: Vec<McpServerDefinition>,
+        ids: BTreeMap<String, ConnectedAppId>,
+        persist: bool,
+        skipped: Vec<SkippedRecord>,
+        journal: &mut CredentialJournal,
+    ) -> Result<()> {
         // Before anything connects, so the children below see the environment
         // this replacement declares rather than the previous one's. A boot
         // file's values land in the same store under the same derived key:
         // one resolution path, and the file stops being a second home for
         // credentials.
-        self.commit_env_values(&mut definitions, &ids).await?;
+        self.commit_env_values(&mut definitions, &ids, Some(&mut *journal))
+            .await?;
         // Before anything connects, so no connection below can present a
         // session issued for a URL this replacement no longer names.
-        self.reconcile_oauth_sessions(&definitions, &ids).await;
+        self.reconcile_oauth_sessions(&definitions, &ids, Some(journal))
+            .await;
         let configured = definitions;
         // Plugin-sourced servers ride along the same connection pass but are
         // never part of what is persisted or validated as a candidate: they
@@ -2431,6 +2620,10 @@ impl McpRuntime {
                 return;
             }
         };
+        // A replacement reads the stored sign-ins before it writes and puts
+        // back what it changed if it fails. Storing this session inside one
+        // would let that restore erase it, so the store waits for it to end.
+        let mutation = self.mutation.lock().await;
         if !self.sign_in_is_current(&sign_in) {
             return;
         }
@@ -2501,6 +2694,7 @@ impl McpRuntime {
             }
         }
         drop(state);
+        drop(mutation);
         // The reconnect runs as its own task: a newer Connect aborts this one,
         // and an abort mid-reconnect would leave the server showing
         // `reconnecting`.
@@ -2658,6 +2852,10 @@ impl McpRuntime {
     /// Clear a server's stored OAuth session and drop its live connection.
     /// Stops a sign-in that still waits on the browser.
     pub async fn oauth_disconnect(&self, name: &str) -> Result<McpOAuthStatus> {
+        // A replacement reads the stored sign-ins before it writes and puts
+        // back what it changed if it fails. A Disconnect inside one could be
+        // undone by that restore, so it waits for the replacement to end.
+        let mutation = self.mutation.lock().await;
         let Some((id, _url)) = self.signing_in_server(name).await? else {
             return Ok(McpOAuthStatus::failed(
                 McpOAuthState::Unsupported,
@@ -2678,6 +2876,7 @@ impl McpRuntime {
         McpOAuthCredentialVault::new(self.secrets.clone(), id)
             .clear_all()
             .await?;
+        drop(mutation);
         let _ = self.reconnect(name).await;
         Ok(McpOAuthStatus::not_connected())
     }
@@ -2947,6 +3146,27 @@ impl McpRuntime {
                     })
             })
             .collect()
+    }
+
+    /// Kill every stdio server, together with each process it started, for
+    /// good. The server stop calls this once the boot and the supervisor
+    /// can no longer connect one, so Delete all data removes folders no MCP
+    /// server can write into again. A server over HTTP has no process here.
+    /// Holds the mutation lock, so a settings save in flight finishes first
+    /// and its servers are killed too.
+    pub async fn kill_stdio_servers(&self) {
+        let _mutation = self.mutation.lock().await;
+        let clients: Vec<McpClient> = {
+            let state = self.state.lock().await;
+            state
+                .servers
+                .values()
+                .filter_map(|server| server.client.clone())
+                .collect()
+        };
+        for client in clients {
+            client.kill().await;
+        }
     }
 
     /// A sign-in stored a new model-gateway session. Servers parked for want

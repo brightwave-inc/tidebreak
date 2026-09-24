@@ -50,6 +50,9 @@ export_deliverable: writes an output revision to a destination chosen in the nat
 save_chat_debug_bundle: writes the untruncated debug bundle to a file chosen in the native save dialog.
 save_workspace_config: writes a portable workspace configuration to a file chosen in the native save dialog.
 pick_workspace_config: opens a portable workspace configuration through the native file dialog.
+save_profile_backup: asks the native save dialog where a backup goes and streams POST /data/backup there; the archive itself is the server's.
+save_conversation_export: asks the native save dialog where an export goes and streams POST /data/export there; the export itself is the server's.
+reveal_data_directory: opens this computer's data folder in its file manager; a headless server cannot open desktop UI.
 copy_chat_debug_bundle: returns the clipboard-sized bundle on the same user gesture the webview requires for a clipboard write.
 import_skills: opens the native folder picker and copies validated local skill packages into this desktop profile.
 
@@ -62,6 +65,9 @@ resolve_folder_access_request: carries the user's in-turn folder decision into t
 resolve_output_writeback_request: executes the approved write into a connected host folder, which only the desktop-side broker can reach.
 put_native_mcp_servers: shows the OS-native local-command warning and uses the host-only executor credential to save an approved configuration.
 apply_native_workspace_config: shows the same OS-native local-command warning for an import that would start local MCP commands, and uses the host-only executor credential to apply the approved import.
+
+# Deleting this computer's profile
+delete_all_data: asks in a native dialog, stops the server and its workers, removes this channel's keychain items, the code browser's website data, and the app's own folders, then quits the process so nothing writes into a half-deleted profile; keychain plumbing, WebKit data stores, and the app's lifecycle are the shell's.
 
 # Gateway pairing, which no HTTP route may reach (docs/gateway-boundary.md)
 leave_provisioned_gateway: deletes this computer's provisioned gateway policy through the embedded server's pairing handle; policy writes are deliberately kept off every HTTP route.

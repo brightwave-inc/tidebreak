@@ -3,7 +3,7 @@
 use axum::extract::Query;
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tidebreak_core::{
     MemoryAuthor, MemoryEvidence, MemoryIngestRequest, MemoryLink, MemoryListFilter, MemoryOrigin,
     MemoryProvenance, MemoryRecord, MemoryRecordId, MemoryRecordUpdate, MemoryScope,
@@ -247,17 +247,45 @@ pub async fn set_record_status(
 }
 
 /// `DELETE /memory/records/{id}` — hard-delete one record and its revisions.
+///
+/// The record also leaves every code session's materialized memory folder
+/// right away. A conversation already running keeps the digest its prompt
+/// was built with until its next boundary (decision 68); a new one never
+/// sees the record.
 pub async fn delete_record(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
     memory: ScopedMemory,
     Path(id): Path<MemoryRecordId>,
 ) -> Result<StatusCode, ServerError> {
     if memory.delete(id).await? {
+        crate::code::memory::purge_materialized_records(&state.config.data_dir, &[id]).await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ServerError::not_found(format!(
             "memory record {id} not found"
         )))
     }
+}
+
+/// Answer of `DELETE /memory/records`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MemoryDeleteAllResult {
+    /// How many records were deleted, forgotten ones included.
+    pub deleted: usize,
+}
+
+/// `DELETE /memory/records` — hard-delete every record the caller has, in
+/// every scope and status, with its revisions, and take them out of every
+/// materialized memory folder.
+pub async fn delete_all_records(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    memory: ScopedMemory,
+) -> Result<Json<MemoryDeleteAllResult>, ServerError> {
+    let deleted = memory.delete_all().await?;
+    crate::code::memory::purge_materialized_records(&state.config.data_dir, &deleted).await;
+    Ok(Json(MemoryDeleteAllResult {
+        deleted: deleted.len(),
+    }))
 }
 
 /// `GET /memory/search` — search full titles and bodies.

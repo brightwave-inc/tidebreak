@@ -96,3 +96,47 @@ it.each([
   await user.click(await screen.findByRole("button", { name: button }));
   await waitFor(() => expect(screen.getByText(expected)).toBeVisible());
 });
+
+function TypedConfirmationHarness() {
+  const { confirm, dialog } = useConfirm();
+  const [result, setResult] = useState<boolean | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() =>
+          void confirm({
+            title: "Delete all data?",
+            confirmLabel: "Delete all data",
+            destructive: true,
+            requireText: "delete all data",
+          }).then(setResult)
+        }
+      >
+        Ask
+      </button>
+      {result !== null && <output>{String(result)}</output>}
+      {dialog}
+    </>
+  );
+}
+
+it("keeps a typed confirmation disabled until the exact phrase is typed", async () => {
+  const user = userEvent.setup();
+  render(<TypedConfirmationHarness />);
+
+  await user.click(screen.getByRole("button", { name: "Ask" }));
+  const confirmButton = await screen.findByRole("button", {
+    name: "Delete all data",
+  });
+  expect(confirmButton).toBeDisabled();
+
+  const field = screen.getByLabelText("Type delete all data to confirm.");
+  await user.type(field, "delete all");
+  expect(confirmButton).toBeDisabled();
+  await user.type(field, " data");
+  expect(confirmButton).toBeEnabled();
+
+  await user.click(confirmButton);
+  await waitFor(() => expect(screen.getByText("true")).toBeVisible());
+});

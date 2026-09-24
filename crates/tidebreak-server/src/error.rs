@@ -120,6 +120,14 @@ impl ServerError {
         &self.info.message
     }
 
+    /// The same error, status, and kind, with a different message. For a
+    /// route that adds what the error means for the request as a whole.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.info.message = message.into();
+        self
+    }
+
     /// A `409 Conflict` for a request that clashes with current state (e.g. a
     /// turn is already running for the chat).
     pub fn conflict(message: impl Into<String>) -> Self {

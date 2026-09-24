@@ -88,6 +88,83 @@ pub(crate) async fn copy_before_migrating(
     Ok(copy)
 }
 
+/// Copy the live SQLite database at `source` into `target`, a file that must
+/// not exist yet.
+///
+/// The copy runs `VACUUM INTO` on a separate read-only connection. SQLite
+/// reads the whole database inside one read transaction, so the copy is a
+/// consistent snapshot even while turns keep writing, and in WAL mode that
+/// reader never blocks the store's writer. Copying the file itself would not
+/// be: a live database is the file plus its write-ahead log, and a file copy
+/// can catch a page halfway through a checkpoint.
+///
+/// The copy is checked with `PRAGMA quick_check` before this returns. A copy
+/// that fails either step is removed.
+pub async fn snapshot_sqlite(source: &Path, target: &Path) -> Result<()> {
+    let source_url = format!("sqlite://{}?mode=ro", source.display());
+    let target_text = target.to_str().ok_or_else(|| {
+        AgentError::Store(
+            "the backup path is not valid UTF-8, which SQLite needs to write it".to_owned(),
+        )
+    })?;
+    // `VACUUM INTO` would also accept an empty file, and a failed copy removes
+    // its target. Refusing any existing path keeps that removal to a file this
+    // call created.
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err(AgentError::Store(format!(
+            "could not copy the database: {} already exists",
+            target.display()
+        )));
+    }
+    let copied = async {
+        let conn = connect_single(&source_url).await?;
+        let copied = conn
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "VACUUM INTO ?",
+                [target_text.to_owned().into()],
+            ))
+            .await
+            .map(|_| ())
+            .map_err(|error| AgentError::Store(format!("could not copy the database: {error}")));
+        let _ = conn.close().await;
+        copied?;
+        let check = connect_single(&format!("sqlite://{}?mode=ro", target.display())).await?;
+        let verdict = check
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "PRAGMA quick_check",
+            ))
+            .await
+            .map_err(|error| AgentError::Store(format!("could not check the copy: {error}")))?
+            .and_then(|row| row.try_get_by_index::<String>(0).ok());
+        let _ = check.close().await;
+        match verdict.as_deref() {
+            Some("ok") => Ok(()),
+            other => Err(AgentError::Store(format!(
+                "the copy of the database failed its integrity check: {}",
+                other.unwrap_or("no answer")
+            ))),
+        }
+    }
+    .await;
+    if copied.is_err() {
+        let _ = std::fs::remove_file(target);
+    }
+    copied
+}
+
+async fn connect_single(url: &str) -> Result<DatabaseConnection> {
+    let mut options = sea_orm::ConnectOptions::new(url.to_owned());
+    options
+        .max_connections(1)
+        .min_connections(1)
+        .sqlx_logging(false);
+    sea_orm::Database::connect(options)
+        .await
+        .map_err(|error| AgentError::Store(format!("could not open the database: {error}")))
+}
+
 fn copy_failed(backups: &Path, cause: &str) -> AgentError {
     AgentError::Store(format!(
         "Tidebreak could not save a backup of this profile in {} before updating it, so it \

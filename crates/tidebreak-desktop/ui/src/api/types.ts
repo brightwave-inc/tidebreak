@@ -1511,3 +1511,14 @@ export type HarnessKind = WireHarnessKind;
 export type HarnessTier = WireHarnessTier;
 export type HarnessCaps = WireHarnessCaps;
 export type CapLevel = WireCapLevel;
+
+/** Settings → Data and privacy: the profile overview and the export request. */
+export type {
+  ConversationExportFormat,
+  ConversationExportRequest,
+  DataCategory,
+  DataOverview,
+  DataStorage,
+  DataUsage,
+  MemoryDeleteAllResult,
+} from "../generated/wire";

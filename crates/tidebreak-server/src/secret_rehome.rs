@@ -35,8 +35,8 @@ use crate::web_search::WebSearchProviderKind;
 use tidebreak_code_execution::{DAYTONA_CREDENTIAL_KEY, E2B_CREDENTIAL_KEY};
 use tidebreak_core::connected_app::ConnectedAppKind;
 use tidebreak_core::{
-    AbsorbOutcome, BundledSecretProvider, RehomeItemOutcome, Result, Store, BUNDLE_KEY,
-    DESKTOP_REMOTE_MACHINE_TOKEN_KEY,
+    AbsorbOutcome, BundledSecretProvider, RehomeItemOutcome, Result, SecretProvider, Store,
+    BUNDLE_KEY, DESKTOP_REMOTE_MACHINE_TOKEN_KEY,
 };
 
 use crate::connectors::{CHATGPT_SECRET_KEY, GATEWAY_SECRET_KEY};
@@ -161,6 +161,41 @@ pub async fn rehome_secrets(
     secrets: &BundledSecretProvider,
 ) -> Result<Vec<(String, RehomeOutcome)>> {
     Ok(rehome_keys(secrets, stored_secret_keys(store).await?).await)
+}
+
+/// Every keychain item a credential of this profile may sit in, for Delete
+/// all data: each per-key item (each key [`stored_secret_keys`] names, and
+/// each MCP server's sign-in), then the bundle item that holds the rest.
+///
+/// Read from the store, so a caller that deletes the store takes this list
+/// first and can erase the same items again once nothing else runs.
+pub async fn erasable_secret_keys(store: &dyn Store) -> Result<Vec<String>> {
+    let mut keys = stored_secret_keys(store).await?;
+    for record in store.list_connected_apps().await? {
+        if record.kind == ConnectedAppKind::McpServer {
+            keys.push(crate::connectors::oauth_client_secret_key(record.id));
+            keys.push(crate::connectors::oauth_token_secret_key(record.id));
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys.push(BUNDLE_KEY.to_owned());
+    Ok(keys)
+}
+
+/// Delete `keys` from `keychain`, in order.
+///
+/// `keychain` is the raw store, not the bundle wrapper, so this deletes items
+/// rather than keys inside one. A key with nothing stored is not an error.
+/// The first failure stops the pass and names the key, so the caller can stop
+/// before it deletes anything else.
+pub async fn erase_secret_keys(keychain: &dyn SecretProvider, keys: &[String]) -> Result<()> {
+    for key in keys {
+        keychain.delete_secret(key).await.map_err(|error| {
+            tidebreak_core::AgentError::Secret(format!("could not remove {key}: {error}"))
+        })?;
+    }
+    Ok(())
 }
 
 /// The pass itself, over an already-enumerated key list.
@@ -532,6 +567,53 @@ mod tests {
 
         let keys = stored_secret_keys(&store).await.unwrap();
         assert!(keys.contains(&expected), "{keys:?}");
+    }
+
+    /// Delete all data removes every item a credential can sit in: a leftover
+    /// per-key item, an MCP server's sign-in, and the bundle itself, which is
+    /// the one item that holds everything once a profile has migrated.
+    #[tokio::test]
+    async fn erasing_removes_every_item_a_credential_can_sit_in() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = tidebreak_core::DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("erase.db").display()
+        ))
+        .await
+        .unwrap();
+        let now = chrono::Utc::now();
+        let record = tidebreak_core::connected_app::ConnectedApp {
+            id: tidebreak_core::id::ConnectedAppId::new(),
+            name: "docs".to_string(),
+            kind: ConnectedAppKind::McpServer,
+            definition: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        };
+        let sign_in = crate::connectors::oauth_token_secret_key(record.id);
+        store
+            .replace_connected_apps(ConnectedAppKind::McpServer, &[record])
+            .await
+            .unwrap();
+        let keychain = Arc::new(RecordingSecrets::default());
+        let leftover = ProviderKind::Anthropic.credential_key();
+        keychain.set_secret(&leftover, "left-behind").await.unwrap();
+        keychain.set_secret(&sign_in, "signed-in").await.unwrap();
+        bundled(keychain.clone())
+            .set_secret(&ProviderKind::Openai.credential_key(), "bundled")
+            .await
+            .unwrap();
+        assert_eq!(keychain.item_keys().len(), 3);
+
+        let keys = erasable_secret_keys(&store).await.unwrap();
+        erase_secret_keys(keychain.as_ref(), &keys).await.unwrap();
+
+        assert_eq!(keychain.item_keys(), Vec::<String>::new());
+        assert_eq!(
+            keychain.ops.lock().unwrap().last().cloned(),
+            Some(format!("delete {BUNDLE_KEY}")),
+            "the bundle goes last, after every item that could shadow it"
+        );
     }
 
     /// Re-homing is idempotent. The second pass finds nothing left to sweep

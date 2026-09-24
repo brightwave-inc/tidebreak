@@ -27,6 +27,10 @@ tokio = { workspace = true }
 # keychain / agent-loop machinery — hence default-features = false.
 tidebreak-core = { path = "../tidebreak-core", default-features = false }
 
+[target.'cfg(unix)'.dependencies]
+# killpg, to end a stdio server together with the processes it started.
+libc = { workspace = true }
+
 [dev-dependencies]
 axum = { workspace = true }
 chrono = { workspace = true }

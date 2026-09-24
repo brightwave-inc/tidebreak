@@ -3,7 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 import { hasNativeHost } from "./host";
 
-const ZOOM_KEY = "tidebreak.zoom";
+export const ZOOM_KEY = "tidebreak.zoom";
 
 /**
  * The scales the interface offers.

@@ -174,6 +174,39 @@ impl ScopedCode {
             .await
     }
 
+    /// Check a repository and resolve its registration without writing it.
+    pub async fn prepare_repo_registration(
+        &self,
+        root_path: std::path::PathBuf,
+        metadata: RepoRegistration,
+    ) -> Result<CodeRepo, ServerError> {
+        self.runtime
+            .prepare_repo_registration(&self.owner, root_path, metadata)
+            .await
+    }
+
+    /// Write one import's repositories together, or none of them.
+    pub async fn import_repos(
+        &self,
+        added: &[CodeRepo],
+        replaced: &[CodeRepo],
+    ) -> Result<(), ServerError> {
+        self.runtime
+            .import_repos(&self.owner, added, replaced)
+            .await
+    }
+
+    /// Undo an import's repository writes.
+    pub async fn revert_repo_import(
+        &self,
+        added: &[RepoId],
+        previous: &[CodeRepo],
+    ) -> Result<(), ServerError> {
+        self.runtime
+            .revert_repo_import(&self.owner, added, previous)
+            .await
+    }
+
     pub async fn list_repos(&self) -> Result<Vec<CodeRepo>, ServerError> {
         self.runtime.list_repos(&self.owner).await
     }

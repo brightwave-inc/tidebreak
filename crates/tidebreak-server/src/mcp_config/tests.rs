@@ -95,6 +95,44 @@ impl SecretProvider for TestSecrets {
         Ok(())
     }
 }
+/// [`TestSecrets`] with one armed write: deleting `trigger` first writes
+/// `value` under `target`, the way a live connection that refreshes its
+/// token in the middle of a replacement does.
+#[derive(Default)]
+struct HookedSecrets {
+    inner: TestSecrets,
+    hook: std::sync::Mutex<Option<(String, String, String)>>,
+}
+
+impl HookedSecrets {
+    fn arm(&self, trigger: String, target: String, value: String) {
+        *self.hook.lock().unwrap() = Some((trigger, target, value));
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretProvider for HookedSecrets {
+    async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+        self.inner.get_secret(key).await
+    }
+    async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+        self.inner.set_secret(key, value).await
+    }
+    async fn delete_secret(&self, key: &str) -> Result<()> {
+        let fired = {
+            let mut hook = self.hook.lock().unwrap();
+            match hook.as_ref() {
+                Some((trigger, _, _)) if trigger == key => hook.take(),
+                _ => None,
+            }
+        };
+        if let Some((_, target, value)) = fired {
+            self.inner.set_secret(&target, &value).await?;
+        }
+        self.inner.delete_secret(key).await
+    }
+}
+
 #[async_trait::async_trait]
 impl GatewayEndpoints for NoGateway {
     async fn endpoint(&self, _slug: &str) -> Result<GatewayEndpointAccess> {
@@ -178,6 +216,14 @@ async fn test_runtime_with(
     gateway: Arc<dyn GatewayEndpoints>,
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
 ) -> (Arc<McpRuntime>, Arc<dyn Store>, tempfile::TempDir) {
+    test_runtime_with_secrets(gateway, os_policy, Arc::new(TestSecrets::default())).await
+}
+
+async fn test_runtime_with_secrets(
+    gateway: Arc<dyn GatewayEndpoints>,
+    os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    secrets: Arc<dyn SecretProvider>,
+) -> (Arc<McpRuntime>, Arc<dyn Store>, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
@@ -191,7 +237,7 @@ async fn test_runtime_with(
         Arc::new(McpRuntime::new(
             Arc::new(ToolRegistry::new()),
             store.clone(),
-            Arc::new(TestSecrets::default()),
+            secrets,
             gateway,
             Arc::new(crate::managed_policy::ProvisionedPolicyFile::in_data_dir(
                 directory.path(),
@@ -1477,6 +1523,68 @@ async fn environment_values_reach_the_secret_store_and_nothing_else() {
     assert_eq!(secret, format!(r#"{{"DOCS_TOKEN":"{VALUE}"}}"#));
 }
 
+/// A replacement whose server fails to start changes no stored credential:
+/// not the environment values it would rewrite or drop, and not the sign-in
+/// it would clear. The import route says nothing changed on this promise.
+#[tokio::test]
+async fn a_replacement_that_fails_to_start_leaves_stored_credentials_alone() {
+    let (runtime, store, _directory) = test_runtime().await;
+    let mut docs = disabled_definition("docs", "/bin/docs");
+    docs.env.insert("DOCS_TOKEN".to_string());
+    docs.env_values
+        .insert("DOCS_TOKEN".to_string(), "first".to_string());
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![docs.clone()],
+        })
+        .await
+        .unwrap();
+    let id = saved_records(&store).await[0].id;
+    let secrets = runtime.secrets();
+    let client_key = crate::connectors::oauth_client_secret_key(id);
+    let token_key = crate::connectors::oauth_token_secret_key(id);
+    secrets
+        .set_secret(&client_key, "registration-placeholder")
+        .await
+        .unwrap();
+    secrets
+        .set_secret(&token_key, "session-placeholder")
+        .await
+        .unwrap();
+
+    let mut rewritten = docs.clone();
+    rewritten
+        .env_values
+        .insert("DOCS_TOKEN".to_string(), "second".to_string());
+    let dead = http_definition("dead", "http://127.0.0.1:1/mcp");
+    // One candidate rewrites the stored value; the other drops the server.
+    for servers in [vec![rewritten, dead.clone()], vec![dead]] {
+        let error = runtime
+            .replace(McpServersConfig { servers })
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("failed to start"), "{error}");
+        assert!(!error.to_string().contains(CREDENTIALS_NOT_RESTORED));
+        assert_eq!(
+            runtime
+                .stored_env(id)
+                .await
+                .get("DOCS_TOKEN")
+                .map(String::as_str),
+            Some("first")
+        );
+        assert_eq!(
+            secrets.get_secret(&client_key).await.unwrap().as_deref(),
+            Some("registration-placeholder")
+        );
+        assert_eq!(
+            secrets.get_secret(&token_key).await.unwrap().as_deref(),
+            Some("session-placeholder")
+        );
+    }
+}
+
 /// A save that leaves a value blank keeps the stored one; dropping the
 /// name takes the value with it. Without this, editing any other field of
 /// a server would silently wipe its credentials.
@@ -2024,6 +2132,8 @@ struct FakeOAuthServer {
     refresh_resources: std::sync::Mutex<Vec<String>>,
     /// When not zero, the status the token endpoint answers a refresh with.
     refresh_status: std::sync::atomic::AtomicU16,
+    /// Whether a refresh issues a new refresh token, spending the old one.
+    rotate_refresh: std::sync::atomic::AtomicBool,
     /// When not zero, the status the authorization-server metadata answers.
     metadata_status: std::sync::atomic::AtomicU16,
     /// How long an authorized `initialize` takes, in milliseconds.
@@ -2046,6 +2156,7 @@ impl FakeOAuthServer {
             tool_call_bearers: Default::default(),
             refresh_resources: Default::default(),
             refresh_status: Default::default(),
+            rotate_refresh: Default::default(),
             metadata_status: Default::default(),
             initialize_delay_ms: Default::default(),
         });
@@ -2267,6 +2378,19 @@ impl FakeOAuthServer {
                 .lock()
                 .unwrap()
                 .push(form.get("resource").cloned().unwrap_or_default());
+            if server
+                .rotate_refresh
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return axum::Json(serde_json::json!({
+                    "access_token": server.access_token,
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "refresh_token": "fake-refresh-token-rotated",
+                    "scope": "projects:read"
+                }))
+                .into_response();
+            }
             return tokens.into_response();
         }
         assert_eq!(form["grant_type"], "authorization_code");
@@ -2723,6 +2847,208 @@ async fn a_token_service_outage_keeps_the_session_and_retries() {
     runtime.reconnect("vercel").await.unwrap();
     assert_eq!(runtime.info().await.servers[0].health, McpHealth::Healthy);
     assert_eq!(*fake.refresh_resources.lock().unwrap(), [fake.mcp_url()]);
+}
+
+/// Review finding: a failed replacement put back the session its own
+/// connection had just refreshed. Under refresh-token rotation the token it
+/// put back was already spent, which signed the person out while the import
+/// said nothing changed. A key that holds something newer than the
+/// replacement's own write now stays.
+#[tokio::test]
+async fn a_failed_replacement_keeps_the_session_its_connection_refreshed() {
+    let fake = FakeOAuthServer::approving().await;
+    let (runtime, store, _directory) = oauth_test_runtime().await;
+    sign_in_to(&runtime, "vercel", &fake).await;
+    let id = saved_records(&store).await[0].id;
+    let vault = crate::connectors::McpOAuthCredentialVault::new(runtime.secrets(), id);
+    // Age the access token so the replacement's connection must refresh it.
+    let mut credentials = vault.load().await.unwrap().unwrap();
+    credentials.expires_at_unix = 1;
+    vault.save(&credentials).await.unwrap();
+    fake.rotate_refresh
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![
+                http_definition("vercel", &fake.mcp_url()),
+                http_definition("dead", "http://127.0.0.1:1/mcp"),
+            ],
+        })
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("failed to start"), "{error}");
+    assert_eq!(fake.refresh_resources.lock().unwrap().len(), 1);
+    assert_eq!(
+        vault
+            .load()
+            .await
+            .unwrap()
+            .unwrap()
+            .refresh_token
+            .as_deref(),
+        Some("fake-refresh-token-rotated")
+    );
+}
+
+/// Review finding: a live connection refreshed its token while a
+/// replacement was reconciling sign-ins, before the replacement connected
+/// anything. The replacement read what it had written only after that, so it
+/// took the rotated token for its own write, and when it failed it put the
+/// spent token back. It now records each write from its own values as it
+/// makes it, and a key it never wrote stays as the live connection left it.
+#[tokio::test]
+async fn a_token_a_live_connection_rotates_during_reconcile_survives_a_failed_replacement() {
+    let fake = FakeOAuthServer::approving().await;
+    let secrets = Arc::new(HookedSecrets::default());
+    let (runtime, store, _directory) = test_runtime_with_secrets(
+        Arc::new(NoGateway),
+        Arc::new(crate::managed_policy::NoOsPolicy),
+        secrets.clone(),
+    )
+    .await;
+    runtime.admit_loopback_oauth_for_tests();
+    sign_in_to(&runtime, "vercel", &fake).await;
+    // A server the replacement below drops, so reconcile clears its sign-in.
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![
+                http_definition("vercel", &fake.mcp_url()),
+                disabled_definition("gone", "/bin/gone"),
+            ],
+        })
+        .await
+        .unwrap();
+    let records = saved_records(&store).await;
+    let id_of = |name: &str| {
+        records
+            .iter()
+            .find(|record| record.name == name)
+            .map(|record| record.id)
+            .unwrap()
+    };
+    let (vercel, gone) = (id_of("vercel"), id_of("gone"));
+    let rotated = serde_json::to_string(&crate::connectors::McpOAuthCredentials {
+        access_token: fake.access_token.clone(),
+        refresh_token: Some("rotated-by-a-live-connection".to_string()),
+        expires_at_unix: u64::MAX / 2,
+        scope: None,
+    })
+    .unwrap();
+    // The rotation lands while reconcile clears the dropped server's
+    // sign-in: after the replacement wrote the environment values, before
+    // it connects anything.
+    secrets.arm(
+        crate::connectors::oauth_token_secret_key(gone),
+        crate::connectors::oauth_token_secret_key(vercel),
+        rotated,
+    );
+
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![
+                http_definition("vercel", &fake.mcp_url()),
+                http_definition("dead", "http://127.0.0.1:1/mcp"),
+            ],
+        })
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("failed to start"), "{error}");
+    assert!(secrets.hook.lock().unwrap().is_none(), "the rotation ran");
+    let vault = crate::connectors::McpOAuthCredentialVault::new(runtime.secrets(), vercel);
+    assert_eq!(
+        vault
+            .load()
+            .await
+            .unwrap()
+            .unwrap()
+            .refresh_token
+            .as_deref(),
+        Some("rotated-by-a-live-connection")
+    );
+}
+
+/// A failed replacement that cannot put a credential back says which
+/// server's, so the import's result says exactly what changed.
+#[tokio::test]
+async fn a_credential_that_cannot_be_put_back_names_its_server() {
+    let (runtime, store, _directory) = test_runtime().await;
+    let mut docs = disabled_definition("docs", "/bin/docs");
+    docs.env.insert("DOCS_TOKEN".to_string());
+    docs.env_values
+        .insert("DOCS_TOKEN".to_string(), "first".to_string());
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![docs.clone()],
+        })
+        .await
+        .unwrap();
+    let id = saved_records(&store).await[0].id;
+    let mut journal = CredentialJournal::default();
+    // The replacement wrote "second", and something else changed it since:
+    // nothing to put back, and nothing to report.
+    journal.record(
+        "docs",
+        &env_secret_key(id),
+        Some("{\"DOCS_TOKEN\":\"first\"}".to_string()),
+        Some("{\"DOCS_TOKEN\":\"second\"}".to_string()),
+    );
+    let kept = runtime
+        .restore_credentials(
+            journal,
+            AgentError::config("external MCP server x failed to start"),
+        )
+        .await;
+    assert!(
+        !kept.to_string().contains(CREDENTIALS_NOT_RESTORED),
+        "{kept}"
+    );
+
+    let failing = Arc::new(FailingWrites);
+    let (runtime, _store, _directory) = test_runtime_with_secrets(
+        Arc::new(NoGateway),
+        Arc::new(crate::managed_policy::NoOsPolicy),
+        failing.clone(),
+    )
+    .await;
+    let mut journal = CredentialJournal::default();
+    journal.record("docs", "mcp.docs.env_v1", Some("before".to_string()), None);
+    let error = runtime
+        .restore_credentials(
+            journal,
+            AgentError::config("external MCP server x failed to start"),
+        )
+        .await
+        .to_string();
+    assert!(error.contains(CREDENTIALS_NOT_RESTORED), "{error}");
+    assert!(error.ends_with("of docs."), "{error}");
+    assert!(
+        !error.contains("configuration error: configuration error"),
+        "{error}"
+    );
+}
+
+/// A secret store that reads nothing and refuses every write.
+#[derive(Default)]
+struct FailingWrites;
+
+#[async_trait::async_trait]
+impl SecretProvider for FailingWrites {
+    async fn get_secret(&self, _key: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    async fn set_secret(&self, _key: &str, _value: &str) -> Result<()> {
+        Err(AgentError::Secret(
+            "the keychain refused the write".to_string(),
+        ))
+    }
+    async fn delete_secret(&self, _key: &str) -> Result<()> {
+        Err(AgentError::Secret(
+            "the keychain refused the delete".to_string(),
+        ))
+    }
 }
 
 /// Finding: a sign-in service outage read as "Sign-in not supported" and
@@ -3727,4 +4053,56 @@ fn every_directory_server_saves_a_valid_definition() {
         .collect();
     assert!(!definitions.is_empty());
     validate_servers(&definitions).unwrap();
+}
+
+/// Review finding: a stdio server outlived the server stop, so Delete all
+/// data could remove a folder that a server, or a helper it started, then
+/// wrote back into. The stop now kills every stdio server with each process
+/// it started.
+#[tokio::test]
+async fn killing_the_stdio_servers_stops_every_process_they_started() {
+    let (runtime, _store, directory) = test_runtime().await;
+    let log = directory.path().join("writes.log");
+    // Answers initialize (id 1) and tools/list (id 2) in the order the
+    // client sends them, after starting a helper that keeps writing.
+    let script = format!(
+        r#"( while true; do echo tick >> '{log}'; /bin/sleep 0.02; done ) &
+read _initialize
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"{version}","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"writer","version":"1"}}}}}}'
+read _initialized
+read _list
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[]}}}}'
+while read _line; do :; done
+"#,
+        log = log.display(),
+        version = tidebreak_mcp::PROTOCOL_VERSION,
+    );
+    let mut definition = disabled_definition("writer", "/bin/sh");
+    definition.args = vec!["-c".to_string(), script];
+    definition.enabled = true;
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while std::fs::metadata(&log).map_or(0, |metadata| metadata.len()) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the helper never wrote"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    runtime.kill_stdio_servers().await;
+    // Give a stray writer time to show itself.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let settled = std::fs::read(&log).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        settled.len(),
+        std::fs::read(&log).unwrap().len(),
+        "something wrote after the kill"
+    );
 }

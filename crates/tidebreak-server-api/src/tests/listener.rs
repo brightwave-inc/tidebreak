@@ -53,6 +53,41 @@ async fn serve_answers_over_a_real_socket() {
     assert_eq!(authed.json::<Vec<Chat>>().await.unwrap(), vec![]);
 }
 
+/// Delete all data stops the server before it deletes the folders it writes
+/// into. A stop closes the listener, and a connection the client kept alive
+/// accepts no more requests, so nothing can start new work over it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_server_takes_no_more_requests() {
+    KeychainSecretProvider::use_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let server = bind(Config::desktop(dir.path())).await.unwrap();
+    let addr = server.local_addr();
+    let stop = server.stop_handle();
+    let serving = tokio::spawn(async move { server.serve().await });
+
+    let client = reqwest::Client::new();
+    let health = client
+        .get(format!("http://{addr}/healthz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), reqwest::StatusCode::OK);
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), stop.stop())
+        .await
+        .expect("the server and its workers stop");
+    tokio::time::timeout(std::time::Duration::from_secs(5), serving)
+        .await
+        .expect("serve returns once stopped")
+        .unwrap()
+        .unwrap();
+    assert!(client
+        .get(format!("http://{addr}/healthz"))
+        .send()
+        .await
+        .is_err());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cors_preflight_allows_localhost_origin() {
     KeychainSecretProvider::use_mock();

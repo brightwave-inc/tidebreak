@@ -90,6 +90,7 @@ pub mod plugin_install;
 pub mod plugin_mcp;
 pub mod plugin_state;
 pub mod principal;
+pub mod profile_data;
 #[doc(hidden)]
 pub mod provider;
 pub mod providers;
@@ -139,6 +140,7 @@ mod scripted_provider;
 /// Rewriting stored credentials so the running binary owns their keychain items.
 pub mod secret_rehome;
 /// The version handshake: what a server reports, and whether a client reads it.
+mod server_stop;
 pub mod server_version;
 mod source_tools;
 pub(crate) mod stack;
@@ -333,6 +335,7 @@ pub use pairing::{
     register_replacing_pairing, DeprovisionTarget, PairingError, PairingHandle,
     PendingRegistration,
 };
+pub use server_stop::ServerStop;
 pub use state::{AppState, LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
 pub use tidebreak_sandbox_runtime::DurableOperationStore;
 pub use update_quiesce::{QuitProgress, UpdateQuiesce};
@@ -402,6 +405,9 @@ pub struct Server {
     /// Brings live work to a restart-safe point before an update replaces
     /// the bundle; see `update_quiesce`.
     update_quiesce: update_quiesce::UpdateQuiesce,
+    /// Stops the accept loop and every worker below for good; see
+    /// [`ServerStop`].
+    stop: ServerStop,
     listener: Option<TcpListener>,
     router: Option<Router>,
     /// What each supervised worker below is doing. Shutdown tells it first,
@@ -587,6 +593,12 @@ impl Server {
         self.update_quiesce.clone()
     }
 
+    /// The handle that stops this server's accept loop and every worker, for
+    /// an embedder about to delete the data they work on.
+    pub fn stop_handle(&self) -> ServerStop {
+        self.stop.clone()
+    }
+
     /// A wake for one native executor loop.
     ///
     /// It fires when client-executed work may have become pending, so an
@@ -595,7 +607,9 @@ impl Server {
         self.client_execution_wake.clone()
     }
 
-    /// Run the accept loop until the process exits.
+    /// Run the accept loop until the process exits, or until
+    /// [`ServerStop::stop`] asks it to end. Either way the workers stop
+    /// before this returns.
     pub async fn serve(mut self) -> Result<()> {
         let listener = self
             .listener
@@ -605,22 +619,14 @@ impl Server {
             .router
             .take()
             .expect("a bound server keeps its router until serve");
+        let stop = self.stop.clone();
         let result = match &mut self._store_ownership {
-            store_ownership::StoreOwnership::Local => axum::serve(
-                listener,
-                router.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .map_err(|error| AgentError::msg(format!("server error: {error}"))),
+            store_ownership::StoreOwnership::Local => serve_until_stopped(listener, router, stop)
+                .await
+                .map_err(|error| AgentError::msg(format!("server error: {error}"))),
             #[cfg(feature = "postgres")]
             store_ownership::StoreOwnership::Postgres(ownership) => {
-                let server = async move {
-                    axum::serve(
-                        listener,
-                        router.into_make_service_with_connect_info::<SocketAddr>(),
-                    )
-                    .await
-                };
+                let server = serve_until_stopped(listener, router, stop);
                 tokio::pin!(server);
                 tokio::select! {
                     result = &mut server => {
@@ -633,11 +639,13 @@ impl Server {
             }
         };
         self.stop_workers().await;
+        self.stop.mark_stopped();
         result
     }
 
     async fn stop_workers(&mut self) {
         self.worker_health.begin_shutdown();
+        self.update_quiesce.stop_code_sweeps();
         self._queued_turn_promoter.abort();
         self._code_recovery.abort();
         self._turn_worker.abort();
@@ -677,7 +685,46 @@ impl Server {
         self._mcp_boot.wait().await;
         self._mcp_supervisor.wait().await;
         self._gateway_model_sync.wait().await;
+        // The boot and the supervisor are gone, so nothing connects a server
+        // again: no MCP server, and nothing one started, writes after this.
+        self.mcp.kill_stdio_servers().await;
         self.worker_health.mark_all_stopped();
+    }
+}
+
+/// How long a stopped server waits for its open connections to finish the
+/// requests they are serving before it lets them go. An event stream never
+/// finishes, so this bounds the wait.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Serve until the process ends, or until `stop` is asked for. A stop closes
+/// the listener at once and asks every open connection to finish the request
+/// it is serving and accept no other, so a kept-alive connection cannot start
+/// new work; after [`STOP_GRACE`] the rest are let go.
+async fn serve_until_stopped(
+    listener: TcpListener,
+    router: Router,
+    stop: ServerStop,
+) -> std::io::Result<()> {
+    let signal = {
+        let stop = stop.clone();
+        async move { stop.requested().await }
+    };
+    let server = async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(signal)
+        .await
+    };
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result,
+        () = async {
+            stop.requested().await;
+            tokio::time::sleep(STOP_GRACE).await;
+        } => Ok(()),
     }
 }
 
@@ -1991,6 +2038,7 @@ async fn bind_inner(
             quiesce_store,
             quiesce_events,
         ),
+        stop: ServerStop::new(),
         listener: Some(listener),
         router: Some(router),
         worker_health,

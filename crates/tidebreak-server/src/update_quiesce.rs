@@ -287,6 +287,14 @@ impl UpdateQuiesce {
         code.and(chat)
     }
 
+    /// Stop the code runtime's background sweeps for good: watches,
+    /// triggers, pull-request reconciles and refreshes, recovery, stalls, and
+    /// remote sessions. For a server that is stopping before its data is
+    /// deleted.
+    pub(crate) fn stop_code_sweeps(&self) {
+        self.code.stop_sweeps();
+    }
+
     /// Release a quit's hold after the person cancelled a quit that was
     /// waiting for a safe point. Turn admission reopens unless an update is
     /// quiescing too, whose hold stays in force.

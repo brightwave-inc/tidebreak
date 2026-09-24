@@ -634,3 +634,207 @@ async fn entities_set_kind(store: &crate::db::DbStore, id: MemoryRecordId, kind:
         .await
         .unwrap();
 }
+
+async fn change_status(
+    store: &crate::db::DbStore,
+    owner: &OwnerId,
+    id: MemoryRecordId,
+    status: MemoryStatus,
+) -> MemoryRecord {
+    let current = store.get(owner, id).await.unwrap().unwrap();
+    store
+        .set_status(
+            owner,
+            MemoryStatusChange {
+                id,
+                expected_revision: current.revision,
+                status,
+            },
+        )
+        .await
+        .unwrap()
+        .record
+}
+
+/// Forget archives; Restore brings the same record back into the digest,
+/// with a revision for each step.
+#[tokio::test]
+async fn a_forgotten_record_comes_back_on_restore() {
+    let (_directory, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let record = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Active,
+        "When naming branches",
+        "Prefix them with the ticket number.",
+        1,
+    );
+    store.put(&owner, record.clone()).await.unwrap();
+    change_status(&store, &owner, record.id, MemoryStatus::Archived).await;
+
+    let restored = change_status(&store, &owner, record.id, MemoryStatus::Active).await;
+
+    assert_eq!(restored.status, MemoryStatus::Active);
+    assert_eq!(restored.revision, 3);
+    let digest = store
+        .assemble_context(&owner, MemoryScope::Personal)
+        .await
+        .unwrap();
+    assert!(digest.markdown.contains("When naming branches"));
+    assert_eq!(
+        store
+            .revision_history(&owner, record.id)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+/// A source a merge superseded can be restored on its own. The restore drops
+/// its pointer to the merge and leaves the merge active, where activating a
+/// proposal would have archived its sources again.
+#[tokio::test]
+async fn restoring_a_superseded_source_leaves_the_merge_alone() {
+    let (_directory, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let source = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Active,
+        "When running checks",
+        "Run tests before publishing.",
+        3,
+    );
+    store.put(&owner, source.clone()).await.unwrap();
+    let mut merge = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Proposed,
+        "When running focused checks",
+        "Run formatting and focused tests before publishing.",
+        4,
+    );
+    merge.links = vec![MemoryLink {
+        record_id: source.id,
+        relation: MemoryLinkRelation::Supersedes,
+    }];
+    store.put(&owner, merge.clone()).await.unwrap();
+    change_status(&store, &owner, merge.id, MemoryStatus::Active).await;
+    assert_eq!(
+        store
+            .get(&owner, source.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .superseded_by,
+        Some(merge.id)
+    );
+
+    let restored = change_status(&store, &owner, source.id, MemoryStatus::Active).await;
+
+    assert_eq!(restored.status, MemoryStatus::Active);
+    assert_eq!(restored.superseded_by, None);
+    assert_eq!(
+        store.get(&owner, merge.id).await.unwrap().unwrap().status,
+        MemoryStatus::Active
+    );
+}
+
+/// Delete everything removes every record the owner has, forgotten ones and
+/// their revisions included, and nothing another owner has.
+/// The bytes on disk under `directory` that belong to the database: the file
+/// and its write-ahead log.
+fn database_bytes(directory: &std::path::Path) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for name in ["test.db", "test.db-wal"] {
+        if let Ok(file) = std::fs::read(directory.join(name)) {
+            bytes.extend(file);
+        }
+    }
+    bytes
+}
+
+fn contains(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
+}
+
+/// Deleting a memory overwrites it on disk. Without that, the text stays in
+/// the database's free pages and its write-ahead log, where anyone who reads
+/// the file finds it after the record is gone.
+#[tokio::test]
+async fn a_deleted_memory_leaves_no_copy_in_the_database_file() {
+    const ONE: &str = "heron-quartz-marker-one";
+    const EVERY: &str = "heron-quartz-marker-every";
+    let (directory, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let one = user_record(MemoryScope::Personal, MemoryStatus::Active, ONE, ONE, 1);
+    let every = user_record(MemoryScope::Personal, MemoryStatus::Active, EVERY, EVERY, 2);
+    store.put(&owner, one.clone()).await.unwrap();
+    store.put(&owner, every.clone()).await.unwrap();
+    assert!(contains(&database_bytes(directory.path()), ONE));
+
+    assert!(store.delete(&owner, one.id).await.unwrap());
+    assert!(!contains(&database_bytes(directory.path()), ONE));
+
+    store.delete_all(&owner).await.unwrap();
+    assert!(!contains(&database_bytes(directory.path()), EVERY));
+}
+
+#[tokio::test]
+async fn delete_all_removes_one_owners_records_and_revisions() {
+    let (_directory, store) = temp_store().await;
+    let alice = OwnerId::new("user:alice").unwrap();
+    let bob = OwnerId::new("user:bob").unwrap();
+    let active = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Active,
+        "Active",
+        "Kept in the digest.",
+        1,
+    );
+    let forgotten = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Active,
+        "Forgotten",
+        "Archived before the delete.",
+        2,
+    );
+    let theirs = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Active,
+        "Someone else's",
+        "Not alice's to delete.",
+        3,
+    );
+    store.put(&alice, active.clone()).await.unwrap();
+    store.put(&alice, forgotten.clone()).await.unwrap();
+    change_status(&store, &alice, forgotten.id, MemoryStatus::Archived).await;
+    store.put(&bob, theirs.clone()).await.unwrap();
+
+    let mut deleted = store.delete_all(&alice).await.unwrap();
+    deleted.sort_by_key(|id| id.0);
+    let mut expected = vec![active.id, forgotten.id];
+    expected.sort_by_key(|id| id.0);
+
+    assert_eq!(deleted, expected);
+    assert!(store
+        .list(&alice, MemoryListFilter::default())
+        .await
+        .unwrap()
+        .is_empty());
+    for id in [active.id, forgotten.id] {
+        assert!(store.revision_history(&alice, id).await.unwrap().is_empty());
+    }
+    assert!(store
+        .assemble_context(&alice, MemoryScope::Personal)
+        .await
+        .unwrap()
+        .markdown
+        .is_empty());
+    assert!(store.get(&bob, theirs.id).await.unwrap().is_some());
+    assert_eq!(
+        store.revision_history(&bob, theirs.id).await.unwrap().len(),
+        1
+    );
+}
