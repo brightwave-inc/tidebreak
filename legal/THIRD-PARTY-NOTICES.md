@@ -5263,12 +5263,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/guseggert/duke-sheets.git
 - License text: not distributed with this package
 
-### @embedpdf/core 2.15.0
+### @embedpdf/core 2.15.1
 
 - License: `MIT`
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/engines 2.15.0
+### @embedpdf/engines 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
@@ -5316,103 +5316,103 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-16483c18cd37](#l-16483c18cd37))
 
-### @embedpdf/models 2.15.0
+### @embedpdf/models 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-93d703157b58](#l-93d703157b58))
 
-### @embedpdf/pdfium 2.15.0
+### @embedpdf/pdfium 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-93d703157b58](#l-93d703157b58)), `LICENSE.pdfium` ([L-442a6ee9dead](#l-442a6ee9dead))
 
-### @embedpdf/plugin-document-manager 2.15.0
+### @embedpdf/plugin-document-manager 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/plugin-interaction-manager 2.15.0
+### @embedpdf/plugin-interaction-manager 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/plugin-render 2.15.0
+### @embedpdf/plugin-render 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/plugin-rotate 2.15.0
+### @embedpdf/plugin-rotate 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/plugin-scroll 2.15.0
+### @embedpdf/plugin-scroll 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/plugin-search 2.15.0
+### @embedpdf/plugin-search 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/plugin-selection 2.15.0
+### @embedpdf/plugin-selection 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/plugin-thumbnail 2.15.0
+### @embedpdf/plugin-thumbnail 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/plugin-tiling 2.15.0
+### @embedpdf/plugin-tiling 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/plugin-viewport 2.15.0
+### @embedpdf/plugin-viewport 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/plugin-zoom 2.15.0
+### @embedpdf/plugin-zoom 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @embedpdf/utils 2.15.0
+### @embedpdf/utils 2.15.1
 
 - License: `MIT`
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @extend-ai/react-docx 0.9.1
+### @extend-ai/react-docx 0.9.2
 
 - License: `MIT`
 - Repository: https://github.com/extend-hq/react-docx.git
 - License text: `LICENSE` ([L-24fdfac792e0](#l-24fdfac792e0))
 
-### @extend-ai/react-pptx 0.2.0
+### @extend-ai/react-pptx 0.2.1
 
 - License: `MIT`
 - Repository: https://github.com/extend-hq/react-pptx.git
 - License text: `LICENSE` ([L-89aba894e358](#l-89aba894e358))
 
-### @extend-ai/react-xlsx 0.16.4
+### @extend-ai/react-xlsx 0.16.5
 
 - License: `MIT`
 - Repository: git+https://github.com/extend-hq/react-xlsx.git
@@ -5868,13 +5868,13 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/sveltejs/acorn-typescript.git
 - License text: `LICENSE.md` ([L-fda6af299ef7](#l-fda6af299ef7))
 
-### @tanstack/history 1.162.3
+### @tanstack/history 1.162.4
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/react-router 1.170.35
+### @tanstack/react-router 1.170.38
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
@@ -5886,13 +5886,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/TanStack/store.git
 - License text: `LICENSE` ([L-d71ca6db0f8b](#l-d71ca6db0f8b))
 
-### @tanstack/react-virtual 3.14.12
+### @tanstack/react-virtual 3.14.13
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/virtual.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/router-core 1.171.29
+### @tanstack/router-core 1.171.32
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
@@ -5910,7 +5910,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/TanStack/virtual.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/virtual-core 3.17.8
+### @tanstack/virtual-core 3.17.11
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/virtual.git
@@ -6844,25 +6844,25 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/acornjs/acorn.git
 - License text: `LICENSE` ([L-cdf8603d8d39](#l-cdf8603d8d39))
 
-### ag-charts-types 14.1.0
+### ag-charts-types 14.2.0
 
 - License: `MIT`
 - Repository: https://github.com/ag-grid/ag-charts.git
 - License text: `LICENSE.txt` ([L-ee9d26385e34](#l-ee9d26385e34))
 
-### ag-grid-community 36.1.0
+### ag-grid-community 36.2.0
 
 - License: `MIT`
 - Repository: https://github.com/ag-grid/ag-grid.git
 - License text: `LICENSE.txt` ([L-ee9d26385e34](#l-ee9d26385e34))
 
-### ag-grid-react 36.1.0
+### ag-grid-react 36.2.0
 
 - License: `MIT`
 - Repository: https://github.com/ag-grid/ag-grid.git
 - License text: `LICENSE.txt` ([L-ee9d26385e34](#l-ee9d26385e34))
 
-### ag-stack 36.1.0
+### ag-stack 36.2.0
 
 - License: `MIT`
 - Repository: https://github.com/ag-grid/ag-grid.git
@@ -7240,7 +7240,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/101arrowz/fflate
 - License text: `LICENSE` ([L-0a1df3a083d0](#l-0a1df3a083d0))
 
-### framer-motion 13.2.0
+### framer-motion 13.4.0
 
 - License: `MIT`
 - Repository: https://github.com/motiondivision/motion/
@@ -7516,7 +7516,7 @@ License identifiers named across all declared expressions:
 - Repository: wooorm/lowlight
 - License text: `license` ([L-ea559213e0e9](#l-ea559213e0e9))
 
-### lucide-react 1.45.0
+### lucide-react 1.47.0
 
 - License: `ISC`
 - Repository: https://github.com/lucide-icons/lucide.git
@@ -7816,19 +7816,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/microsoft/monaco-editor
 - License text: `LICENSE` ([L-806766baa900](#l-806766baa900))
 
-### motion 13.2.0
+### motion 13.4.0
 
 - License: `MIT`
 - Repository: https://github.com/motiondivision/motion
 - License text: `LICENSE.md` ([L-bb59eb35f694](#l-bb59eb35f694))
 
-### motion-dom 13.2.0
+### motion-dom 13.3.0
 
 - License: `MIT`
 - Repository: https://github.com/motiondivision/motion
 - License text: `LICENSE.md` ([L-bb59eb35f694](#l-bb59eb35f694))
 
-### motion-utils 13.0.0
+### motion-utils 13.3.0
 
 - License: `MIT`
 - Repository: https://github.com/motiondivision/motion
@@ -7918,7 +7918,7 @@ License identifiers named across all declared expressions:
 - Repository: alexeyraspopov/picocolors
 - License text: `LICENSE` ([L-fa11af88c78d](#l-fa11af88c78d))
 
-### plotly.js-dist-min 4.1.0
+### plotly.js-dist-min 4.1.1
 
 - License: `MIT`
 - Repository: git+https://github.com/plotly/plotly.js.git
@@ -8014,7 +8014,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/theKashey/react-remove-scroll-bar
 - License text: not distributed with this package
 
-### react-resizable-panels 4.12.4
+### react-resizable-panels 4.13.1
 
 - License: `MIT`
 - Repository: https://github.com/bvaughn/react-resizable-panels.git
