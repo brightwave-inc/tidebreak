@@ -10,6 +10,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { focusOwnsFind } from "../search/transcriptFind";
 import { TerminalPane } from "./TerminalPane";
 
 const written: string[] = [];
@@ -183,6 +184,18 @@ async function rejectWrite(
 }
 
 describe("TerminalPane", () => {
+  it("keeps Cmd+F from the conversation's find bar while it has focus", async () => {
+    render(<TerminalPane client={clientWith()} workspaceId="ws-1" />);
+    await expectReady();
+    // xterm takes focus on a text field inside the host.
+    const field = document.createElement("textarea");
+    screen.getByTestId("terminal-host").append(field);
+    field.focus();
+    expect(focusOwnsFind()).toBe(true);
+    field.blur();
+    expect(focusOwnsFind()).toBe(false);
+  });
+
   it("disposes the renderer when the pane unmounts", async () => {
     const client = clientWith();
     const { unmount } = render(

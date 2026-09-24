@@ -50,3 +50,17 @@ export const useTranscriptFindStore = create<TranscriptFindStore>(
     },
   }),
 );
+
+/**
+ * Whether the focused element answers Cmd+F with a find of its own, so the
+ * shell leaves the key to it: Monaco's find widget inside a file, and any
+ * pane marked `data-owns-find`, such as the terminal with its find bar.
+ */
+export function focusOwnsFind(
+  active: Element | null = document.activeElement,
+): boolean {
+  return (
+    active instanceof Element &&
+    active.closest(".monaco-editor, [data-owns-find]") !== null
+  );
+}

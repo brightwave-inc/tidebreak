@@ -838,6 +838,9 @@ export function TerminalPane({
     <div
       className="flex min-h-0 flex-1 flex-col overflow-hidden"
       data-testid="terminal-pane"
+      // Cmd+F here opens the terminal's own find bar, so the shell leaves the
+      // key to the pane.
+      data-owns-find
     >
       {!hideHeader && (
         <header className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2">

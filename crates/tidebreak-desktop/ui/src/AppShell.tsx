@@ -127,7 +127,7 @@ import {
   type ShellShortcutMode,
 } from "./ShellShortcuts";
 import { CommandPaletteDialog } from "./CommandPaletteDialog";
-import { useTranscriptFindStore } from "./search/transcriptFind";
+import { focusOwnsFind, useTranscriptFindStore } from "./search/transcriptFind";
 import { RepositoryTrustSheetHost } from "./code/RepositoryTrustStore";
 import { EngineSignInHost } from "./code/EngineSignIn";
 import { ShortcutsDialog } from "./ShortcutsDialog";
@@ -511,10 +511,10 @@ export function AppShell() {
       useCodeUiStore.getState().requestFilesSearch();
     },
     "find-in-transcript": () => {
-      // Monaco owns Cmd+F while it has focus, and its find widget is the
-      // better answer inside a file. Declining the key hands it back to the
-      // editor rather than to the shell.
-      if (isMonacoFocused()) return false;
+      // Monaco and the terminal each find in what they show, and Cmd+F with
+      // focus in either belongs to them. Declining the key hands it back to
+      // the focused pane rather than opening a second find bar.
+      if (focusOwnsFind()) return false;
       // Off a conversation there is nothing to find in, so the key goes to
       // whatever is focused.
       if (!useTranscriptFindStore.getState().requestOpen()) return false;
