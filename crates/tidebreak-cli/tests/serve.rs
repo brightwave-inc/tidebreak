@@ -230,6 +230,18 @@ impl Scratch {
         std::fs::write(dir.join("listen.json"), endpoint.to_string()).unwrap();
     }
 
+    /// Hold the app's data directory lock the way the running app does. The
+    /// lock is released when the returned file is dropped.
+    fn hold_app_lock(&self) -> std::fs::File {
+        let dir = self.app_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock =
+            std::fs::File::create(tidebreak_server::listen_endpoint::instance_lock_path(&dir))
+                .unwrap();
+        lock.lock().unwrap();
+        lock
+    }
+
     /// Nothing was written into the folder the command ran from.
     fn assert_project_untouched(&self) {
         let entries: Vec<_> = std::fs::read_dir(&self.project)
@@ -289,6 +301,16 @@ fn output_within(command: &mut Command, limit: Duration) -> Output {
     }
 }
 
+/// How a [`FakeApp`] answers `/version`.
+#[derive(Clone, Copy)]
+enum Answers {
+    /// As Tidebreak does, with this build's release and API level.
+    AsTidebreak,
+    /// With a `404` for everything, the way another program on a port the
+    /// app left behind might.
+    AsSomethingElse,
+}
+
 /// A stand-in for the app's server: it answers on loopback and records the
 /// head of every request it gets.
 struct FakeApp {
@@ -297,17 +319,16 @@ struct FakeApp {
 }
 
 impl FakeApp {
-    /// Answer `/healthz`, an empty chat list, and a `404` for everything else,
-    /// `/version` included, the way a server from before the version check
-    /// does.
-    fn start() -> Self {
+    /// Answer `/version` as `answers` says, an empty chat list, and a `404`
+    /// for everything else.
+    fn start(answers: Answers) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&requests);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                answer_one(stream, &seen);
+                answer_one(stream, answers, &seen);
             }
         });
         Self { base_url, requests }
@@ -318,7 +339,23 @@ impl FakeApp {
     }
 }
 
-fn answer_one(mut stream: TcpStream, seen: &Mutex<Vec<String>>) {
+/// Whether a request head carries a bearer.
+fn carries_a_bearer(head: &str) -> bool {
+    head.to_ascii_lowercase().contains("authorization:")
+}
+
+/// Whether a request head announces a body.
+fn carries_a_body(head: &str) -> bool {
+    head.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.starts_with("transfer-encoding:")
+            || line
+                .strip_prefix("content-length:")
+                .is_some_and(|length| length.trim() != "0")
+    })
+}
+
+fn answer_one(mut stream: TcpStream, answers: Answers, seen: &Mutex<Vec<String>>) {
     let mut head = Vec::new();
     let mut buffer = [0_u8; 1024];
     while !head.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -334,15 +371,15 @@ fn answer_one(mut stream: TcpStream, seen: &Mutex<Vec<String>>) {
         .unwrap_or_default()
         .to_owned();
     seen.lock().unwrap().push(head);
-    let (status, body) = if path == "/healthz" {
-        ("200 OK", r#"{"status":"ok"}"#)
-    } else if path == "/chats" {
-        ("200 OK", "[]")
-    } else {
-        (
+    let version = serde_json::to_string(&tidebreak_server::wire::ServerVersion::current())
+        .expect("the version serializes");
+    let (status, body) = match (answers, path.as_str()) {
+        (Answers::AsTidebreak, "/version") => ("200 OK", version.as_str()),
+        (Answers::AsTidebreak, "/chats") => ("200 OK", "[]"),
+        _ => (
             "404 Not Found",
             r#"{"kind":"not_found","message":"no route"}"#,
-        )
+        ),
     };
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
@@ -423,11 +460,14 @@ fn without_the_app_a_client_command_says_what_to_do_instead() {
 }
 
 /// A client command with nothing to say otherwise connects to the running
-/// app with the bearer the app published, and opens nothing locally.
+/// app with the bearer the app published, and opens nothing locally. The
+/// bearer goes out only after the app has answered `/version` as Tidebreak,
+/// and that first request carries none.
 #[test]
 fn a_client_command_connects_to_the_running_app() {
     let scratch = Scratch::new();
-    let app = FakeApp::start();
+    let _lock = scratch.hold_app_lock();
+    let app = FakeApp::start(Answers::AsTidebreak);
     let token = fixture_token();
     scratch.publish_app_endpoint(&app.base_url, &token);
 
@@ -447,6 +487,12 @@ fn a_client_command_connects_to_the_running_app() {
     assert_eq!(document["chats"], serde_json::json!([]), "{document}");
 
     let requests = app.requests();
+    assert!(
+        requests
+            .first()
+            .is_some_and(|head| head.starts_with("GET /version ") && !carries_a_bearer(head)),
+        "the first request asks /version without a bearer: {requests:?}"
+    );
     let listed = requests
         .iter()
         .find(|head| head.starts_with("GET /chats "))
@@ -464,16 +510,92 @@ fn a_client_command_connects_to_the_running_app() {
     );
 }
 
+/// The file outlives its server. When the app has stopped and something else
+/// holds the port its `listen.json` names, nothing reaches that listener: not
+/// a request, and above all not a key.
+#[test]
+fn a_listener_on_a_port_the_app_left_behind_gets_nothing() {
+    let scratch = Scratch::new();
+    let squatter = FakeApp::start(Answers::AsSomethingElse);
+    scratch.publish_app_endpoint(&squatter.base_url, &fixture_token());
+    let key_var = "TIDEBREAK_TEST_OPENAI_KEY";
+    let key = ["fixture", "provider", "key"].join("-");
+
+    let output = output_within(
+        scratch
+            .tidebreak()
+            .args(["provider", "set-key", "openai", "--from-env", key_var])
+            .env(key_var, &key),
+        COMMAND_LIMIT,
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("Tidebreak is not running"), "{stderr}");
+    assert!(
+        squatter.requests().is_empty(),
+        "nothing may be sent to a port whose data directory has no live owner: {:?}",
+        squatter.requests()
+    );
+    scratch.assert_project_untouched();
+}
+
+/// Even while the app's lock is held, as it is while the app starts, the port
+/// its old `listen.json` names may belong to something else. That listener
+/// hears one request, for `/version`, with no bearer and no body.
+#[test]
+fn a_listener_that_does_not_answer_as_tidebreak_gets_no_credential() {
+    let scratch = Scratch::new();
+    let _lock = scratch.hold_app_lock();
+    let squatter = FakeApp::start(Answers::AsSomethingElse);
+    scratch.publish_app_endpoint(&squatter.base_url, &fixture_token());
+    let key_var = "TIDEBREAK_TEST_OPENAI_KEY";
+    let key = ["fixture", "provider", "key"].join("-");
+
+    let output = output_within(
+        scratch
+            .tidebreak()
+            .args(["provider", "set-key", "openai", "--from-env", key_var])
+            .env(key_var, &key),
+        COMMAND_LIMIT,
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("answers as Tidebreak"), "{stderr}");
+    let requests = squatter.requests();
+    assert!(
+        requests
+            .iter()
+            .all(|head| head.starts_with("GET /version ") && !carries_a_bearer(head)),
+        "only an anonymous version check may reach it: {requests:?}"
+    );
+    assert!(
+        !requests.iter().any(|head| carries_a_body(head)),
+        "no request body may reach it: {requests:?}"
+    );
+}
+
 /// The app only listens on this computer. A `listen.json` that names another
-/// host did not come from it, and the command sends nothing there.
+/// host did not come from it, and no command sends anything there: not the
+/// default connection, and not `--attach` reading the same file.
 #[test]
 fn a_listen_file_naming_another_computer_is_not_followed() {
     let scratch = Scratch::new();
-    scratch.publish_app_endpoint("https://tidebreak.example.invalid", &fixture_token());
-    let output = output_within(scratch.tidebreak().args(["chat", "list"]), COMMAND_LIMIT);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("not on this computer"), "{stderr}");
+    let _lock = scratch.hold_app_lock();
+    for host in [
+        "https://tidebreak.example.invalid",
+        "http://tidebreak.example.invalid",
+    ] {
+        scratch.publish_app_endpoint(host, &fixture_token());
+        for args in [&["chat", "list"][..], &["--attach", "chat", "list"][..]] {
+            let output = output_within(scratch.tidebreak().args(args), COMMAND_LIMIT);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(1), "{host} {args:?}: {stderr}");
+            assert!(
+                stderr.contains("not on this computer") && stderr.contains("listen.json"),
+                "{host} {args:?}: the message names the file: {stderr}"
+            );
+        }
+    }
     scratch.assert_project_untouched();
 }
 
@@ -577,6 +699,56 @@ fn commands_share_the_app_profile_and_never_start_one_in_the_project() {
     assert!(!embedded.status.success(), "{stderr}");
     assert!(stderr.contains("already running"), "{stderr}");
     scratch.assert_project_untouched();
+    drop(lines);
+}
+
+/// `serve` removes the `listen.json` it published when it is told to stop,
+/// and releases the data directory, so nothing afterwards finds an address
+/// the stopped server no longer answers on.
+#[cfg(all(unix, feature = "keychain"))]
+#[test]
+fn serve_removes_its_listen_file_when_stopped() {
+    let scratch = Scratch::new();
+    let mut child = scratch
+        .tidebreak()
+        .arg("serve")
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn tidebreak serve");
+    let stdout = child.stdout.take().unwrap();
+    let mut reaper = Reaper(child);
+    let mut lines = BufReader::new(stdout).lines();
+    let addr_line = lines.next().unwrap().unwrap();
+    let _token_line = lines.next().unwrap().unwrap();
+    assert!(addr_line.contains("listening on"), "{addr_line:?}");
+    let listen_file = scratch.app_dir().join("listen.json");
+    assert!(listen_file.is_file());
+
+    let signalled = Command::new("kill")
+        .args(["-TERM", &reaper.0.id().to_string()])
+        .status()
+        .expect("run kill");
+    assert!(signalled.success());
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = reaper.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < COMMAND_LIMIT,
+            "serve was still running after SIGTERM"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        status.success(),
+        "a stop signal is a clean exit: {status:?}"
+    );
+    assert!(!listen_file.exists(), "serve left its listen.json behind");
+    assert!(
+        !tidebreak_server::listen_endpoint::owner_is_live(&scratch.app_dir()).unwrap(),
+        "serve released the data directory"
+    );
     drop(lines);
 }
 

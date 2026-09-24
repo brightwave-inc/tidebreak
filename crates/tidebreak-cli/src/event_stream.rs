@@ -334,7 +334,7 @@ impl EventStream {
         let mut last = None;
         for delay in RECONNECT_DELAYS {
             tokio::time::sleep(delay).await;
-            if let Err(error) = client.refresh_attach_endpoint() {
+            if let Err(error) = client.refresh_attach_endpoint().await {
                 last = Some(error);
                 continue;
             }
@@ -346,7 +346,7 @@ impl EventStream {
                 Err(error) => last = Some(error),
             }
         }
-        if client.refresh_attach_endpoint().is_ok() {
+        if client.refresh_attach_endpoint().await.is_ok() {
             match client.durable_turn(chat, turn_id).await {
                 Ok(Some(turn)) => return Ok(Some(turn)),
                 Ok(None) => {}
@@ -417,7 +417,7 @@ impl CodeEventStream {
         let mut last = None;
         for delay in RECONNECT_DELAYS {
             tokio::time::sleep(delay).await;
-            if let Err(error) = client.refresh_attach_endpoint() {
+            if let Err(error) = client.refresh_attach_endpoint().await {
                 last = Some(error);
                 continue;
             }

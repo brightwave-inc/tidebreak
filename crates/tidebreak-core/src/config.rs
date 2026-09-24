@@ -142,8 +142,11 @@ pub struct Config {
     /// The host app's OS bundle identifier, when it runs as one (the desktop
     /// app; its debug and staging builds use a distinct id). On macOS this names
     /// the managed-preferences domain consulted for OS-managed (MDM) policy.
-    /// `None` — the CLI, tests, self-host — only disables that macOS reader;
-    /// the Windows and Linux readers are machine-scoped and ignore it.
+    /// The CLI sets the app's identifier when it opens the app's own profile,
+    /// so that profile obeys the same policy whichever binary opens it.
+    /// `None` — tests, self-host, and a CLI profile other than the app's — only
+    /// disables that macOS reader; the Windows and Linux readers are
+    /// machine-scoped and ignore it.
     #[serde(default)]
     pub bundle_id: Option<String>,
     /// Trusted source directory for helper scripts copied into isolated exec

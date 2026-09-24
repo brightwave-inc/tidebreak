@@ -433,6 +433,17 @@ pub struct Server {
     _listen_endpoint: listen_endpoint::ListenEndpointGuard,
 }
 
+/// The file in a data directory whose lock [`InstanceLock`] holds.
+pub const INSTANCE_LOCK_FILE: &str = "tidebreak.lock";
+
+/// How many times [`InstanceLock::acquire`] tries a lock another process
+/// holds, and how long it waits between tries. A client checking whether a
+/// server owns the directory holds a shared lock for as long as it takes to
+/// let go of it (see [`listen_endpoint::owner_is_live`]); a server starting at
+/// that instant waits it out instead of refusing to start.
+const INSTANCE_LOCK_ATTEMPTS: u32 = 5;
+const INSTANCE_LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// The claim one process makes on a data directory for as long as it serves it.
 ///
 /// An OS advisory lock on a file in the directory, held open for the process's
@@ -449,7 +460,7 @@ impl InstanceLock {
     pub fn acquire(config: &Config) -> Result<Self> {
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|error| AgentError::config(format!("failed to create data dir: {error}")))?;
-        let path = config.data_dir.join("tidebreak.lock");
+        let path = config.data_dir.join(INSTANCE_LOCK_FILE);
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -459,24 +470,37 @@ impl InstanceLock {
             .map_err(|error| {
                 AgentError::config(format!("failed to open {}: {error}", path.display()))
             })?;
-        match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
-            // Two servers over one directory would race the database with
-            // nothing but SQLite's own locking between them, so this refuses
-            // instead. The second process's way in is to be a client of the
-            // first rather than a second server.
-            Err(TryLockError::WouldBlock) => Err(AgentError::config(format!(
-                "another Tidebreak process is already running on the data directory {}. \
-                 Attach with the CLI's --attach (reads {}/listen.json), or \
-                 --server <url> with TIDEBREAK_SERVER_TOKEN; quit the running one, \
-                 or point TIDEBREAK_DATA_DIR somewhere else.",
-                config.data_dir.display(),
-                config.data_dir.display()
-            ))),
-            Err(TryLockError::Error(error)) => Err(AgentError::config(format!(
-                "failed to lock {}: {error}",
-                path.display()
-            ))),
+        let mut attempt = 1;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(TryLockError::WouldBlock) if attempt < INSTANCE_LOCK_ATTEMPTS => {
+                    attempt += 1;
+                    std::thread::sleep(INSTANCE_LOCK_RETRY);
+                }
+                // Two servers over one directory would race the database with
+                // nothing but SQLite's own locking between them, so this
+                // refuses instead. The second process's way in is to be a
+                // client of the first rather than a second server. The phrase
+                // "already running on the data directory" is matched by
+                // `tidebreak folder`, which opens the store beside the owner.
+                Err(TryLockError::WouldBlock) => {
+                    return Err(AgentError::config(format!(
+                        "another Tidebreak process is already running on the data directory \
+                         {}. Quit that process and try again, or set TIDEBREAK_DATA_DIR to \
+                         another folder. A CLI command can use the running one instead: run it \
+                         without --embed, or with --attach when TIDEBREAK_DATA_DIR names this \
+                         folder.",
+                        config.data_dir.display()
+                    )))
+                }
+                Err(TryLockError::Error(error)) => {
+                    return Err(AgentError::config(format!(
+                        "failed to lock {}: {error}",
+                        path.display()
+                    )))
+                }
+            }
         }
     }
 }

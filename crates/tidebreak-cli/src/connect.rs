@@ -5,8 +5,9 @@
 //!
 //! - **The app.** With no flag and no `TIDEBREAK_DATA_DIR`, the command
 //!   connects to the Tidebreak app through the `listen.json` in the app's data
-//!   directory. When the app is not running, or has left a `listen.json`
-//!   behind that nothing answers, the command stops and says what to do next
+//!   directory. It believes the file only while a live process holds that
+//!   directory's lock, and only once the server it names answers `/version`
+//!   as Tidebreak. Otherwise the command stops and says what to do next
 //!   rather than starting an empty profile somewhere else.
 //! - **Embed.** With `--embed`, or with `TIDEBREAK_DATA_DIR` set, the CLI
 //!   binds the server in-process over the profile's data directory: the
@@ -32,18 +33,20 @@
 //! bearer token is full authority over the profile.
 //!
 //! Before an attached command does anything else, it reads the server's
-//! `GET /version` and compares the API level with the range this build reads.
-//! A server outside that range is refused with a sentence that says which side
-//! to update, rather than with a decode error halfway through the command. A
-//! server that predates the route says nothing, and is attached as before. A
-//! server that does not answer within [`VERSION_CHECK_TIMEOUT`] is reported as
+//! `GET /version`, without a credential, and compares the API level with the
+//! range this build reads. A server outside that range is refused with a
+//! sentence that says which side to update, rather than with a decode error
+//! halfway through the command. A server named by `--server` or by a named
+//! data directory's `listen.json` that predates the route says nothing, and is
+//! attached as before; the app's own file is held to a real answer. A server
+//! that does not answer within [`VERSION_CHECK_TIMEOUT`] is reported as
 //! unresponsive, so the check never adds its wait to the command's own.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use tidebreak_core::{AgentError, Result};
-use tidebreak_server::listen_endpoint::ListenEndpoint;
+use tidebreak_server::listen_endpoint::{self, ListenEndpoint};
 
 use crate::api::client::{server_url_is_loopback, validated_server_base_url, Client};
 use crate::api::wire::{compatibility, Compatibility};
@@ -67,24 +70,27 @@ pub struct Flags {
     pub embed: bool,
 }
 
+/// A `listen.json` a command reads its server from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenSource {
+    /// The data directory the file is in.
+    pub data_dir: PathBuf,
+    /// The file is the Tidebreak app's own, read because no data directory
+    /// was named. Nobody chose the server it names, so the server there must
+    /// answer `/version` as Tidebreak before anything carrying a credential is
+    /// sent to it.
+    pub app: bool,
+}
+
 /// Where a command's server comes from.
 pub enum Server {
     /// Bind one in-process over the configured data directory.
     Embed,
-    /// Talk to one that is already running.
-    Attach {
-        base: String,
-        token: String,
-        local_import_token: Option<String>,
-        /// Data directory whose `listen.json` should be re-read after a
-        /// dropped connection. Explicit `--server` attachments leave this
-        /// unset because their endpoint is fixed by the caller.
-        listen_data_dir: Option<PathBuf>,
-    },
-    /// Talk to the Tidebreak app, found through the `listen.json` in its data
-    /// directory. The default when neither a flag nor `TIDEBREAK_DATA_DIR`
-    /// says otherwise.
-    App,
+    /// Talk to the server `--server` (or `TIDEBREAK_SERVER_URL`) names.
+    Attach { base: String, token: String },
+    /// Talk to the server a `listen.json` names: the app's by default, or the
+    /// one `--attach` reads. It is re-read after a dropped connection.
+    ListenFile(ListenSource),
 }
 
 /// The choice the flags and the environment make, before anything is read.
@@ -104,24 +110,17 @@ impl Server {
         let url_env = std::env::var(SERVER_URL_ENV)
             .ok()
             .filter(|value| !value.trim().is_empty());
-        match choose(
-            &flags,
-            url_env.is_some(),
-            crate::profile::data_dir_is_named(),
-        )? {
+        let data_dir_named = crate::profile::data_dir_is_named();
+        match choose(&flags, url_env.is_some(), data_dir_named)? {
             Choice::Embed => Ok(Self::Embed),
-            Choice::App => Ok(Self::App),
-            Choice::AttachListenFile => {
-                let config = crate::profile_config()?;
-                let endpoint = ListenEndpoint::read(&config.data_dir)?;
-                let base = base_url(&endpoint.base_url)?;
-                Ok(Self::Attach {
-                    base,
-                    token: endpoint.token,
-                    local_import_token: Some(endpoint.local_import_token),
-                    listen_data_dir: Some(config.data_dir),
-                })
-            }
+            Choice::App => Ok(Self::ListenFile(ListenSource {
+                data_dir: app_data_dir()?,
+                app: true,
+            })),
+            Choice::AttachListenFile => Ok(Self::ListenFile(ListenSource {
+                data_dir: crate::profile_config()?.data_dir,
+                app: !data_dir_named,
+            })),
             Choice::AttachUrl => {
                 let url = flags
                     .url
@@ -139,12 +138,7 @@ impl Server {
                              server printed at startup (or use --attach to read listen.json)"
                         ))
                     })?;
-                Ok(Self::Attach {
-                    base,
-                    token,
-                    local_import_token: None,
-                    listen_data_dir: None,
-                })
+                Ok(Self::Attach { base, token })
             }
         }
     }
@@ -246,21 +240,10 @@ impl Session {
                     client_executor_token: Some(client_executor_token),
                 })
             }
-            // Nothing local is touched in attach mode beyond the optional
-            // listen.json read that produced this choice: no log file, no
-            // keychain. This process is only a client.
-            Server::Attach {
-                base,
-                token,
-                local_import_token,
-                listen_data_dir,
-            } => {
-                let client = Client::attach_with_reconnect_source(
-                    base.clone(),
-                    token,
-                    local_import_token.as_deref(),
-                    listen_data_dir.clone(),
-                )?;
+            // Nothing local is touched in attach mode beyond a listen.json
+            // read: no log file, no keychain. This process is only a client.
+            Server::Attach { base, token } => {
+                let client = Client::attach(base.clone(), token)?;
                 require_compatible_server(&client).await?;
                 Ok(Self {
                     client,
@@ -268,13 +251,18 @@ impl Session {
                     client_executor_token: None,
                 })
             }
-            // The same client as `--attach`, reading the app's own
-            // `listen.json`; nothing local is touched beyond that read.
-            Server::App => Ok(Self {
-                client: connect_to_app().await?,
-                serve: None,
-                client_executor_token: None,
-            }),
+            Server::ListenFile(source) => {
+                let client = client_from_listen_file(source.clone()).await?;
+                if !source.app {
+                    // The app's own file was held to a real answer already.
+                    require_compatible_server(&client).await?;
+                }
+                Ok(Self {
+                    client,
+                    serve: None,
+                    client_executor_token: None,
+                })
+            }
         }
     }
 
@@ -309,47 +297,108 @@ impl Drop for Session {
 const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long the app gets to answer before the command reports it as not
-/// running. A `listen.json` left behind by an app that crashed names a port
-/// nothing listens on, which fails at once; the wait only matters for an app
-/// that is running but stuck.
+/// answering. The wait only matters for an app that is running but stuck.
 const APP_ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Connect to the Tidebreak app through the `listen.json` in its data
-/// directory.
-async fn connect_to_app() -> Result<Client> {
-    let Some(data_dir) = crate::profile::app_data_dir() else {
-        return Err(AgentError::msg(
+/// The app's data directory, or an error saying what to do without one.
+fn app_data_dir() -> Result<PathBuf> {
+    crate::profile::app_data_dir().ok_or_else(|| {
+        AgentError::msg(
             "Tidebreak could not find the app's data folder on this computer. Set \
              TIDEBREAK_DATA_DIR to the folder of the profile you want to use.",
-        ));
-    };
-    let listen_file = ListenEndpoint::path(&data_dir);
-    if !listen_file.is_file() {
-        return Err(app_not_running());
-    }
-    let endpoint = ListenEndpoint::read(&data_dir)?;
-    let base = base_url(&endpoint.base_url)?;
-    // The app only ever listens on this computer. A file that names another
-    // host did not come from it, so nothing, the bearer included, is sent
-    // there.
-    if !server_url_is_loopback(&base) {
-        return Err(AgentError::msg(format!(
-            "{} names a server that is not on this computer, so Tidebreak did not connect \
-             to it. Quit and reopen the Tidebreak app to write it again.",
-            listen_file.display()
-        )));
-    }
+        )
+    })
+}
+
+/// A client for the server `source`'s `listen.json` names, built only when
+/// the file can be believed.
+///
+/// A `listen.json` outlives its server whenever a process ends without its
+/// clean shutdown, and the port it names can then belong to anything. So the
+/// file counts only while a live process holds the data directory's lock
+/// (decision 12: the lock names the owner, not the file), and only when it
+/// names a server on this computer, which is the only place Tidebreak writes
+/// one for. The app's own file must also lead to a server that answers
+/// `/version` as Tidebreak. That request carries no credential, and nothing
+/// that does is sent until it succeeds.
+///
+/// A reconnect calls this again, so the checks hold on every read.
+pub(crate) async fn client_from_listen_file(source: ListenSource) -> Result<Client> {
+    let endpoint = read_live_listen_file(&source)?;
     let client = Client::attach_with_reconnect_source(
-        base,
+        endpoint.base_url,
         &endpoint.token,
         Some(&endpoint.local_import_token),
-        Some(data_dir),
+        Some(source.clone()),
     )?;
-    if !client.answers(APP_ANSWER_TIMEOUT).await {
-        return Err(app_not_running());
+    if source.app {
+        require_tidebreak(&client).await?;
     }
-    require_compatible_server(&client).await?;
     Ok(client)
+}
+
+/// Read `source`'s `listen.json` if a live process owns its data directory
+/// and the file names a server on this computer. The base comes back
+/// normalized.
+fn read_live_listen_file(source: &ListenSource) -> Result<ListenEndpoint> {
+    let data_dir = &source.data_dir;
+    let file = ListenEndpoint::path(data_dir);
+    if !listen_endpoint::owner_is_live(data_dir)? {
+        return Err(if source.app {
+            app_not_running()
+        } else {
+            AgentError::msg(format!(
+                "No Tidebreak server is running on {}. Start `tidebreak serve` with \
+                 TIDEBREAK_DATA_DIR set to that folder, or run the command without --attach.",
+                data_dir.display()
+            ))
+        });
+    }
+    if source.app && !file.is_file() {
+        // The lock is held and nothing is published yet: a server is still
+        // starting.
+        return Err(AgentError::msg(
+            "Tidebreak is starting. Run the command again in a moment.",
+        ));
+    }
+    let endpoint = ListenEndpoint::read(data_dir)?;
+    let raw = endpoint.base_url.trim();
+    if !server_url_is_loopback(raw) {
+        return Err(AgentError::msg(format!(
+            "{} names a server that is not on this computer, so Tidebreak did not connect \
+             to it. Quit and reopen the Tidebreak app or server that owns {} to write the \
+             file again.",
+            file.display(),
+            data_dir.display()
+        )));
+    }
+    Ok(ListenEndpoint {
+        base_url: base_url(raw)?,
+        ..endpoint
+    })
+}
+
+/// Refuse to go on unless the server answers `/version` as Tidebreak, in a
+/// level this build reads. A `404`, another program's page, or no answer is
+/// not Tidebreak, and the command stops before sending anything carrying a
+/// credential.
+async fn require_tidebreak(client: &Client) -> Result<()> {
+    let answer = match client.server_version(APP_ANSWER_TIMEOUT).await {
+        Ok(Some(answer)) => answer,
+        Ok(None) | Err(_) => {
+            return Err(AgentError::msg(format!(
+                "The Tidebreak app's listen.json names {}, but nothing there answers as \
+                 Tidebreak, so this command sent it no credentials or data. If the app is \
+                 starting, run the command again in a moment. If the app is older than this \
+                 command, update it.",
+                client.base_url()
+            )))
+        }
+    };
+    match version_refusal(&compatibility(Some(&answer))) {
+        Some(refusal) => Err(AgentError::msg(refusal)),
+        None => Ok(()),
+    }
 }
 
 /// What a person reads when a command would connect to the app and it is not
@@ -581,8 +630,6 @@ mod tests {
         Server::Attach {
             base,
             token: "token".to_owned(),
-            local_import_token: None,
-            listen_data_dir: None,
         }
     }
 

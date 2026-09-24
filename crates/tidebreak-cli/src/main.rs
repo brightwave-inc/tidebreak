@@ -1031,7 +1031,33 @@ async fn serve() -> Result<()> {
     if profile != Profile::SelfHost {
         println!("tidebreak: token {}", server.token());
     }
-    server.serve().await
+    // A stop signal ends the accept loop by dropping the server, which removes
+    // `listen.json` and releases the data directory. Left to the signal's
+    // default, the process would die with the file still naming this port.
+    tokio::select! {
+        result = server.serve() => result,
+        () = stop_signal() => Ok(()),
+    }
+}
+
+/// Resolve on the first SIGTERM or Ctrl-C (SIGINT).
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = terminate.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            return;
+        }
+    }
+    // If no handler could be installed, the signals keep their default action
+    // and end the process; until then, keep serving.
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Rewrite the desktop profile's stored credentials so their item belongs to
@@ -1046,11 +1072,16 @@ async fn serve() -> Result<()> {
 /// Credentials live in one item, so this normally rewrites exactly that one.
 /// A profile last written by a build that predates the bundle also has its
 /// leftover per-key items swept in on the way past.
+///
+/// A profile other than the app's first gets back the credentials it stored
+/// while it still shared the app's item: they are copied into its own item
+/// once, and the shared item is left as it is. See [`profile`].
 async fn rehome_secrets() -> Result<()> {
     use tidebreak_core::BUNDLE_KEY;
     use tidebreak_server::secret_rehome::RehomeOutcome;
 
     let config = profile_config()?;
+    adopt_previous_credentials(&config).await?;
     let mut touched = 0usize;
     let mut lost = 0usize;
     for (key, outcome) in tidebreak_server::rehome_configured_secrets(&config).await? {
@@ -1087,6 +1118,38 @@ async fn rehome_secrets() -> Result<()> {
             "{lost} credential(s) were removed but could not be stored again"
         )));
     }
+    Ok(())
+}
+
+/// Copy the credentials a profile other than the app's stored while it shared
+/// the app's keychain item into its own item, the first time only.
+#[cfg(feature = "keychain")]
+async fn adopt_previous_credentials(config: &Config) -> Result<()> {
+    use tidebreak_core::KeychainSecretProvider;
+
+    let (Some(previous), Some(own)) = (
+        profile::previous_keychain_service(config),
+        config.keychain_service.as_deref(),
+    ) else {
+        return Ok(());
+    };
+    let adoption = profile::adopt_previous_bundle(
+        &KeychainSecretProvider::with_service(previous),
+        &KeychainSecretProvider::with_service(own),
+    )
+    .await?;
+    if adoption == profile::Adoption::Copied {
+        println!(
+            "tidebreak: copied the credentials this profile stored in the shared keychain \
+             entry {previous} into its own entry {own}; the shared entry is unchanged"
+        );
+    }
+    Ok(())
+}
+
+/// A build without the keychain keeps no desktop credentials to copy.
+#[cfg(not(feature = "keychain"))]
+async fn adopt_previous_credentials(_config: &Config) -> Result<()> {
     Ok(())
 }
 

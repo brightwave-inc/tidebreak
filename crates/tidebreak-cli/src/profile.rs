@@ -19,11 +19,18 @@
 //! item and nothing migrates. Any other profile keeps its credentials under a
 //! service derived from its directory, so a key set or removed there never
 //! reaches the app's.
+//!
+//! A profile other than the app's used to share the app's item, so after an
+//! upgrade its own item starts empty. `tidebreak rehome-secrets` copies the
+//! shared item into it once ([`adopt_previous_bundle`]), and leaves the shared
+//! one as it is. Nothing copies it without being asked: that would hand every
+//! new profile the app's credentials, and on macOS reading an item another
+//! build created can raise an access prompt a headless run cannot answer.
 
 use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use tidebreak_core::{Config, Profile, Result};
+use tidebreak_core::{AgentError, Config, Profile, Result, SecretProvider, BUNDLE_KEY};
 
 /// The service `tidebreak-core` stores credentials under when a config names
 /// none. A profile of this channel that is not the app's derives its own from
@@ -103,20 +110,97 @@ pub(crate) fn config() -> Result<Config> {
         config.bundle_id = identity.bundle_id;
         config.code_worktree_root_default = identity.worktree_root_default;
     }
-    #[cfg(debug_assertions)]
-    {
-        // A headless rig can still point a debug build at a scratch service
-        // of its own choosing. A freshly re-linked binary reading items
-        // another build created trips the macOS access prompt, which blocks a
-        // session with no window forever; a scratch service starts empty.
-        if let Some(service) = std::env::var("TIDEBREAK_KEYCHAIN_SERVICE")
-            .ok()
-            .filter(|service| !service.is_empty())
-        {
-            config.keychain_service = Some(service);
-        }
+    if let Some(service) = keychain_service_override() {
+        config.keychain_service = Some(service);
     }
     Ok(config)
+}
+
+/// The keychain service a debug build was pointed at with
+/// `TIDEBREAK_KEYCHAIN_SERVICE`, which wins over the profile's own.
+///
+/// A headless rig can point a debug build at a scratch service of its own
+/// choosing. A freshly re-linked binary reading items another build created
+/// trips the macOS access prompt, which blocks a session with no window
+/// forever; a scratch service starts empty. A release build ignores it.
+fn keychain_service_override() -> Option<String> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var("TIDEBREAK_KEYCHAIN_SERVICE")
+        .ok()
+        .filter(|service| !service.is_empty())
+}
+
+/// Where a profile other than the app's kept its credentials before it had a
+/// keychain service of its own. `None` for the app's own profile, a self-host
+/// profile, and a debug build pointed at `TIDEBREAK_KEYCHAIN_SERVICE`.
+#[cfg_attr(not(feature = "keychain"), allow(dead_code))]
+pub(crate) fn previous_keychain_service(config: &Config) -> Option<&'static str> {
+    if config.profile != Profile::Desktop || keychain_service_override().is_some() {
+        return None;
+    }
+    let channel = Channel::current();
+    previous_service_for(
+        channel,
+        &config.data_dir,
+        app_data_dir_for(channel).as_deref(),
+    )
+}
+
+/// Until each profile had its own, the CLI kept every desktop profile under
+/// one service: `tidebreak.dev` in a debug build, and the default `tidebreak`
+/// in every release build, staging included.
+#[cfg_attr(not(feature = "keychain"), allow(dead_code))]
+fn previous_service_for(
+    channel: Channel,
+    data_dir: &Path,
+    app_dir: Option<&Path>,
+) -> Option<&'static str> {
+    if app_dir.is_some_and(|app_dir| resolved(app_dir) == resolved(data_dir)) {
+        return None;
+    }
+    Some(match channel {
+        Channel::Dev => "tidebreak.dev",
+        Channel::Production | Channel::Staging => DEFAULT_KEYCHAIN_SERVICE,
+    })
+}
+
+/// What [`adopt_previous_bundle`] did.
+#[cfg_attr(not(feature = "keychain"), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Adoption {
+    /// The profile already has its own item, so nothing was read or written.
+    AlreadyOwn,
+    /// The shared item holds nothing.
+    NothingToCopy,
+    /// The shared item was copied into the profile's own and left as it was.
+    Copied,
+}
+
+/// Copy the credential bundle `previous` holds into `own`, but only while
+/// `own` holds none, so running it again never overwrites a key set since.
+/// `previous` is read and never changed: the app still uses it.
+#[cfg_attr(not(feature = "keychain"), allow(dead_code))]
+pub(crate) async fn adopt_previous_bundle(
+    previous: &dyn SecretProvider,
+    own: &dyn SecretProvider,
+) -> Result<Adoption> {
+    if own.get_secret(BUNDLE_KEY).await?.is_some() {
+        return Ok(Adoption::AlreadyOwn);
+    }
+    let Some(bundle) = previous.get_secret(BUNDLE_KEY).await? else {
+        return Ok(Adoption::NothingToCopy);
+    };
+    own.set_secret(BUNDLE_KEY, &bundle).await?;
+    match own.get_secret(BUNDLE_KEY).await? {
+        Some(stored) if stored == bundle => Ok(Adoption::Copied),
+        _ => Err(AgentError::Secret(
+            "the copied credentials did not read back unchanged; the previous entry is \
+             untouched, so run rehome-secrets again"
+                .to_owned(),
+        )),
+    }
 }
 
 /// Whether `TIDEBREAK_DATA_DIR` names a directory. An empty value names none,
@@ -393,5 +477,104 @@ mod tests {
             source.contains("Self::Production => None,"),
             "production must keep the default keychain service"
         );
+    }
+
+    /// One keychain service in memory: item name to value.
+    #[derive(Default)]
+    struct Items(std::sync::Mutex<std::collections::HashMap<String, String>>);
+
+    #[async_trait::async_trait]
+    impl SecretProvider for Items {
+        async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+
+        async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        async fn delete_secret(&self, key: &str) -> Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    /// A made-up credential bundle. Built from pieces so nothing here reads as
+    /// a key.
+    fn bundle(value: &str) -> String {
+        let credential = ["fixture", value].join("-");
+        serde_json::json!({ "provider.openai.credential": credential }).to_string()
+    }
+
+    /// The keys a profile stored in the shared item come back into its own,
+    /// once, and the shared item the app still reads is left as it was.
+    #[tokio::test]
+    async fn rehoming_copies_the_shared_item_once_and_leaves_it() {
+        let shared = Items::default();
+        let own = Items::default();
+        shared
+            .set_secret(BUNDLE_KEY, &bundle("before"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            adopt_previous_bundle(&shared, &own).await.unwrap(),
+            Adoption::Copied
+        );
+        assert_eq!(
+            own.get_secret(BUNDLE_KEY).await.unwrap(),
+            Some(bundle("before"))
+        );
+        assert_eq!(
+            shared.get_secret(BUNDLE_KEY).await.unwrap(),
+            Some(bundle("before")),
+            "the app's item is never changed"
+        );
+
+        // A key set in the profile since is never overwritten by a second run.
+        own.set_secret(BUNDLE_KEY, &bundle("since")).await.unwrap();
+        assert_eq!(
+            adopt_previous_bundle(&shared, &own).await.unwrap(),
+            Adoption::AlreadyOwn
+        );
+        assert_eq!(
+            own.get_secret(BUNDLE_KEY).await.unwrap(),
+            Some(bundle("since"))
+        );
+
+        let empty = Items::default();
+        let fresh = Items::default();
+        assert_eq!(
+            adopt_previous_bundle(&empty, &fresh).await.unwrap(),
+            Adoption::NothingToCopy
+        );
+        assert_eq!(fresh.get_secret(BUNDLE_KEY).await.unwrap(), None);
+    }
+
+    /// Only a profile that is not the app's had its credentials somewhere
+    /// else before; the app's own profile never moved.
+    #[test]
+    fn only_a_profile_other_than_the_apps_has_a_previous_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("app-data");
+        let named = root.path().join("named");
+        assert_eq!(
+            previous_service_for(Channel::Dev, &named, Some(&app)),
+            Some("tidebreak.dev")
+        );
+        assert_eq!(
+            previous_service_for(Channel::Production, &named, Some(&app)),
+            Some("tidebreak")
+        );
+        // A staging release build used production's service.
+        assert_eq!(
+            previous_service_for(Channel::Staging, &named, Some(&app)),
+            Some("tidebreak")
+        );
+        assert_eq!(previous_service_for(Channel::Dev, &app, Some(&app)), None);
     }
 }
