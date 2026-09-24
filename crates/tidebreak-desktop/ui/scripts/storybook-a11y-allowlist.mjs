@@ -103,20 +103,6 @@ export const allowlist = [
     rule: "story-error",
     reason: "The play function expects more than two notices and finds none.",
   },
-  {
-    story: "outputs-detail--historical-revision",
-    rule: "story-error",
-    reason:
-      "Added in #3562. The play function searches the story root for the v1 button, " +
-      "but the version list opens in a popover outside it.",
-  },
-  {
-    story: "outputs-detail--version-history-open",
-    rule: "story-error",
-    reason:
-      "Added in #3562. The play function searches the story root for 'Current version', " +
-      "but the version list opens in a popover outside it.",
-  },
 
   // A play function that fails only some of the time, so this entry also
   // shows up as unmatched in runs where the story passes.

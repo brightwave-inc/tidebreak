@@ -6,7 +6,7 @@ import {
   PencilIcon,
   RotateCcwIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { toast } from "sonner";
 
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -124,6 +124,7 @@ export function OutputDetailRoot({
   const [saving, setSaving] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const historyTitleId = useId();
   const [revisions, setRevisions] = useState<OutputRevisionInfo[] | null>(null);
   /** The non-current version being previewed, if any. */
   const [previewRevision, setPreviewRevision] =
@@ -440,8 +441,15 @@ export function OutputDetailRoot({
                     </Button>
                   </PopoverTrigger>
                 </WithTooltip>
-                <PopoverContent align="end" className="w-64 p-2">
-                  <p className="px-2 pt-1 pb-2 text-sm font-medium">
+                <PopoverContent
+                  align="end"
+                  className="w-64 p-2"
+                  aria-labelledby={historyTitleId}
+                >
+                  <p
+                    id={historyTitleId}
+                    className="px-2 pt-1 pb-2 text-sm font-medium"
+                  >
                     Version history
                   </p>
                   {revisions === null ? (

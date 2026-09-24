@@ -210,11 +210,13 @@ export const Failure: Story = {
 export const VersionHistoryOpen: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    // The version list opens in a popover portaled to the document body.
+    const page = within(canvasElement.ownerDocument.body);
     await userEvent.click(
       await canvas.findByRole("button", { name: "Version history" }),
     );
     await waitFor(() =>
-      expect(canvas.getByText("Current version")).toBeVisible(),
+      expect(page.getByText("Current version")).toBeVisible(),
     );
   },
 };
@@ -222,11 +224,13 @@ export const VersionHistoryOpen: Story = {
 export const HistoricalRevision: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    // The version list opens in a popover portaled to the document body.
+    const page = within(canvasElement.ownerDocument.body);
     await userEvent.click(
       await canvas.findByRole("button", { name: "Version history" }),
     );
-    await userEvent.click(await canvas.findByRole("button", { name: /v1/ }));
-    await canvas.findByText(/Viewing v1/);
+    await userEvent.click(await page.findByRole("button", { name: /v1/ }));
+    await page.findByText(/Viewing v1/);
   },
 };
 
