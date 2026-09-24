@@ -21,25 +21,44 @@ use tokio::sync::OnceCell;
 /// Homebrew / nvm / volta roots without dumping an unbounded PATH.
 const MAX_SEARCHED_DIRS: usize = 8;
 
+/// The environment names every user-configured stdio child gets by default:
+/// the desktop process's HOME, and the host search PATH its command was
+/// resolved on. A name the definition sets itself, in `env` or `env_from`,
+/// replaces the default.
+pub const FORWARDED_BY_DEFAULT: [&str; 2] = ["HOME", "PATH"];
+
 static PATH_OVERRIDE: Mutex<Option<OsString>> = Mutex::new(None);
 static LOGIN_PATH: OnceCell<Option<OsString>> = OnceCell::const_new();
 
-/// Test seam: replace the host search PATH (process + login-shell merge).
+/// Serializes the tests that replace the host search PATH, which is process
+/// state every stdio test reads.
 #[cfg(test)]
-pub(super) fn override_host_path(path: Option<OsString>) {
-    *PATH_OVERRIDE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
+static HOST_PATH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Test seam: replace the host search PATH (process + login-shell merge)
+/// while the guard lives, and restore the process PATH merge when it drops.
+#[cfg(test)]
+pub(super) struct HostPathGuard {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
 }
 
-/// Restore the process PATH merge after a test that overrode it.
 #[cfg(test)]
-pub(super) struct HostPathGuard;
+impl HostPathGuard {
+    pub(super) async fn set(path: Option<OsString>) -> Self {
+        let lock = HOST_PATH_TEST_LOCK.lock().await;
+        *PATH_OVERRIDE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
+        Self { _lock: lock }
+    }
+}
 
 #[cfg(test)]
 impl Drop for HostPathGuard {
     fn drop(&mut self) {
-        override_host_path(None);
+        *PATH_OVERRIDE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }
 
@@ -73,10 +92,6 @@ impl StdioResolveError {
             }
         }
     }
-
-    pub(super) fn into_error(self) -> AgentError {
-        AgentError::config(self.diagnostic())
-    }
 }
 
 /// Absolute path to show after a successful stdio verify, when the
@@ -101,13 +116,47 @@ pub(super) async fn resolved_display(
 /// PATH (and `PATHEXT` on Windows). A relative path with separators is
 /// refused. Plugin `./` commands do not go through this function.
 pub(super) async fn resolve_stdio_command(command: &str) -> Result<PathBuf> {
+    resolve_stdio_executable(command)
+        .await
+        .map_err(AgentError::config)
+}
+
+/// Resolve a user-typed stdio command exactly as verify and launch do, for a
+/// caller that shows the answer, such as the desktop's native confirmation.
+/// The error is the sentence Settings shows for the same failure.
+pub async fn resolve_stdio_executable(command: &str) -> std::result::Result<PathBuf, String> {
     let path = Path::new(command);
-    if path.is_absolute() || command.contains('/') || command.contains('\\') {
-        return resolve_stdio_command_on_path(command, OsStr::new(""))
-            .map_err(StdioResolveError::into_error);
+    let search_path = if path.is_absolute() || command.contains('/') || command.contains('\\') {
+        OsString::new()
+    } else {
+        host_search_path().await
+    };
+    resolve_stdio_executable_on(command, &search_path)
+}
+
+/// [`resolve_stdio_executable`] against an explicit search path instead of
+/// the host's, so a caller's tests do not depend on the machine they run on.
+pub fn resolve_stdio_executable_on(
+    command: &str,
+    search_path: &OsStr,
+) -> std::result::Result<PathBuf, String> {
+    resolve_stdio_command_on_path(command, search_path).map_err(|error| error.diagnostic())
+}
+
+/// The values of the names [`FORWARDED_BY_DEFAULT`] lists. HOME is this
+/// process's. PATH is the host search path a bare command resolves on, so a
+/// script such as `npx` finds the `node` beside it. A name with no value
+/// here stays unset.
+pub(super) async fn forwarded_by_default() -> Vec<(&'static str, OsString)> {
+    let mut forwarded = Vec::with_capacity(FORWARDED_BY_DEFAULT.len());
+    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+        forwarded.push(("HOME", home));
     }
-    resolve_stdio_command_on_path(command, &host_search_path().await)
-        .map_err(StdioResolveError::into_error)
+    let path = host_search_path().await;
+    if !path.is_empty() {
+        forwarded.push(("PATH", path));
+    }
+    forwarded
 }
 
 pub(super) fn resolve_stdio_command_on_path(
@@ -166,6 +215,11 @@ async fn host_search_path() -> OsString {
         return overridden;
     }
     let process = std::env::var_os("PATH").unwrap_or_default();
+    // Unit tests never start the person's login shell. A test that needs a
+    // particular search path sets one with `HostPathGuard`.
+    if cfg!(test) {
+        return merge_search_path(&process, None);
+    }
     let login = LOGIN_PATH
         .get_or_init(|| async {
             let env = capture_login_env(&HostEnv::from_process()).await.ok()?;

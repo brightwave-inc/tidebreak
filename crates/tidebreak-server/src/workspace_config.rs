@@ -85,6 +85,16 @@ pub struct ExportedMcpServer {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub bearer_token_env: Option<String>,
+    /// Whether the server's bearer token is held in the OS credential store.
+    /// The token never travels in the file, so an imported server needs it
+    /// entered on this computer before it connects. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bearer_token_stored: bool,
+    /// Names of the custom headers the server receives. Their values stay in
+    /// the credential store of the computer that exported them. Omitted when
+    /// there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<String>,
     /// Whether the server authenticates with OAuth. An exported definition
     /// carries the flag but never a token: the credential stays in the OS
     /// store, so an imported OAuth server is authenticatable but not yet
@@ -271,6 +281,8 @@ pub fn export_mcp_servers(definitions: &[McpServerDefinition]) -> Vec<ExportedMc
                 .map(|path| path.to_string_lossy().into_owned()),
             url: definition.url.clone(),
             bearer_token_env: definition.bearer_token_env.clone(),
+            bearer_token_stored: definition.bearer_token_stored,
+            headers: definition.headers.iter().cloned().collect(),
             oauth: definition.oauth,
             gateway_endpoint: definition.gateway_endpoint.clone(),
             request_timeout_ms: definition.request_timeout_ms,
@@ -456,6 +468,13 @@ fn mcp_diff(exported: &ExportedMcpServer, existing: &McpServerDefinition) -> Vec
     if exported.bearer_token_env != existing.bearer_token_env {
         fields.push("bearer_token_env".into());
     }
+    if exported.bearer_token_stored != existing.bearer_token_stored {
+        fields.push("bearer_token_stored".into());
+    }
+    let exported_headers: BTreeSet<_> = exported.headers.iter().cloned().collect();
+    if exported_headers != existing.headers {
+        fields.push("headers".into());
+    }
     if exported.oauth != existing.oauth {
         fields.push("oauth".into());
     }
@@ -520,6 +539,10 @@ pub fn exported_mcp_to_definition(exported: &ExportedMcpServer) -> McpServerDefi
         cwd: exported.cwd.as_ref().map(PathBuf::from),
         url: exported.url.clone(),
         bearer_token_env: exported.bearer_token_env.clone(),
+        bearer_token_stored: exported.bearer_token_stored,
+        bearer_token_value: None,
+        headers: exported.headers.iter().cloned().collect(),
+        header_values: BTreeMap::new(),
         oauth: exported.oauth,
         gateway_endpoint: exported.gateway_endpoint.clone(),
         request_timeout_ms: exported.request_timeout_ms,
@@ -561,12 +584,26 @@ pub fn imported_mcp_definition(
     // An explicit choice wins. Without one, a remote server that sends a
     // credential from this machine's environment imports turned off: the
     // file names the URL the value would go to, so only the person's switch
-    // for this row turns it on. Everything else keeps the file's flag.
+    // for this row turns it on. So does one that sends a stored credential,
+    // because its value never travels in the file and has to be entered here
+    // first. Everything else keeps the file's flag.
     definition.enabled = match decision.enabled {
         Some(enabled) => enabled,
-        None => definition.enabled && !sends_environment_credential(&definition),
+        None => {
+            definition.enabled
+                && !sends_environment_credential(&definition)
+                && !needs_stored_credentials(&definition)
+        }
     };
     Some(definition)
+}
+
+/// Whether a remote server sends a bearer token or header value held in the
+/// credential store. Those values never travel in an exported file, so an
+/// imported server like this starts turned off unless the person turns it
+/// on.
+pub fn needs_stored_credentials(definition: &McpServerDefinition) -> bool {
+    definition.url.is_some() && (definition.bearer_token_stored || !definition.headers.is_empty())
 }
 
 /// Whether a definition starts a program on this machine as soon as it is
@@ -668,6 +705,8 @@ mod tests {
             cwd: None,
             url: None,
             bearer_token_env: None,
+            bearer_token_stored: false,
+            headers: Vec::new(),
             oauth: false,
             gateway_endpoint: None,
             request_timeout_ms: 60_000,
@@ -715,6 +754,10 @@ mod tests {
             cwd: None,
             url: None,
             bearer_token_env: Some("BEARER".into()),
+            bearer_token_stored: false,
+            bearer_token_value: None,
+            headers: BTreeSet::new(),
+            header_values: BTreeMap::new(),
             oauth: false,
             gateway_endpoint: None,
             request_timeout_ms: 60_000,

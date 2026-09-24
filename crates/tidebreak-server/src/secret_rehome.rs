@@ -40,7 +40,7 @@ use tidebreak_core::{
 };
 
 use crate::connectors::{CHATGPT_SECRET_KEY, GATEWAY_SECRET_KEY};
-use crate::mcp_config::env_secret_key;
+use crate::mcp_config::{env_secret_key, http_secret_key};
 use crate::providers::{ProviderKind, LEGACY_ANTHROPIC_API_KEY};
 
 /// Credential keys for the web-search providers. `credential_key` is a `const
@@ -84,9 +84,9 @@ pub enum RehomeOutcome {
 /// Every key the application may store a credential under: the fixed
 /// per-feature keys, plus the dynamic per-record keys — one
 /// `connected_app.{id}.credential` per stored `rest_api` record that
-/// references a credential, and one `mcp.{id}.env_v1` per stored
-/// `mcp_server` record (present or not; a record with no stored values
-/// simply reports [`RehomeOutcome::Absent`]).
+/// references a credential, and one `mcp.{id}.env_v1` and one
+/// `mcp.{id}.http_v1` per stored `mcp_server` record (present or not; a
+/// record with no stored values simply reports [`RehomeOutcome::Absent`]).
 ///
 /// The dynamic keys are why this reads the store: they exist only as records,
 /// so a static list cannot name them, and a re-home pass that skipped them
@@ -99,6 +99,7 @@ pub async fn stored_secret_keys(store: &dyn Store) -> Result<Vec<String>> {
     for record in store.list_connected_apps().await? {
         if record.kind == ConnectedAppKind::McpServer {
             keys.push(env_secret_key(record.id));
+            keys.push(http_secret_key(record.id));
             continue;
         }
         if record.kind != ConnectedAppKind::RestApi {
@@ -560,6 +561,7 @@ mod tests {
             updated_at: now,
         };
         let expected = env_secret_key(record.id);
+        let http = http_secret_key(record.id);
         store
             .replace_connected_apps(ConnectedAppKind::McpServer, &[record])
             .await
@@ -567,6 +569,9 @@ mod tests {
 
         let keys = stored_secret_keys(&store).await.unwrap();
         assert!(keys.contains(&expected), "{keys:?}");
+        // A remote server's stored bearer token and header values sit under
+        // their own key, and are re-homed and erased with the rest.
+        assert!(keys.contains(&http), "{keys:?}");
     }
 
     /// Delete all data removes every item a credential can sit in: a leftover

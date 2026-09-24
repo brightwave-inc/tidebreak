@@ -27,6 +27,11 @@ pub(super) const MAX_ARGS: usize = 128;
 pub(super) const MAX_ENVIRONMENT_VARIABLES: usize = 128;
 pub(super) const MAX_PROCESS_STRING_BYTES: usize = 32 * 1024;
 pub(super) const MAX_ENVIRONMENT_NAME_BYTES: usize = 256;
+/// The most custom headers one HTTP server may send.
+pub(super) const MAX_HEADERS: usize = 8;
+pub(super) const MAX_HEADER_NAME_BYTES: usize = 64;
+/// The longest stored bearer token or header value.
+pub(super) const MAX_CREDENTIAL_VALUE_BYTES: usize = 8 * 1024;
 pub(super) const MAX_REQUEST_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60 * 1000;
 pub(super) const HEALTH_INTERVAL: Duration = Duration::from_secs(15);
@@ -163,7 +168,7 @@ pub struct McpServersConfig {
 /// remote Streamable HTTP endpoint (`url`), or a gateway-managed endpoint
 /// (`gateway_endpoint`). Exactly one of the three is set;
 /// [`validate_servers`] enforces that process fields stay with `command` and
-/// `bearer_token_env` stays with `url`.
+/// the bearer and header fields stay with `url`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerDefinition {
@@ -197,10 +202,32 @@ pub struct McpServerDefinition {
     /// resolved at connect time and never enters this type.
     #[serde(default)]
     pub bearer_token_env: Option<String>,
+    /// Whether this HTTP server's bearer token is held in the OS credential
+    /// store, under [`http_secret_key`], instead of a parent environment
+    /// variable. Valid only with `url`, and exclusive with
+    /// `bearer_token_env` and `oauth`. The value never enters this type.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bearer_token_stored: bool,
+    /// Inbound-only: a new value for the stored bearer token. A commit writes
+    /// it into the credential store and drops it; leaving it out keeps the
+    /// value already stored. `skip_serializing` keeps it out of the persisted
+    /// record and every projection.
+    #[serde(default, skip_serializing)]
+    pub bearer_token_value: Option<String>,
+    /// Names of the custom headers this HTTP server receives on every request.
+    /// The values live in the OS credential store under [`http_secret_key`],
+    /// like a stdio server's [`env`](Self::env) values.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub headers: BTreeSet<String>,
+    /// Inbound-only: values for [`headers`](Self::headers) names being set or
+    /// changed. A name present in `headers` but absent here keeps the value
+    /// already stored.
+    #[serde(default, skip_serializing)]
+    pub header_values: BTreeMap<String, String>,
     /// Whether this HTTP server always authenticates with OAuth (RFC 9728
     /// discovery, RFC 7591 registration, PKCE sign-in) instead of a static
-    /// bearer. Valid only with `url`, and mutually exclusive with
-    /// `bearer_token_env`. The flag is optional: a server without it that
+    /// bearer. Valid only with `url`, and exclusive with `bearer_token_env`
+    /// and `bearer_token_stored`. The flag is optional: a server without it that
     /// answers `401` with OAuth metadata signs in the same way. The obtained
     /// tokens live in the OS credential store under
     /// [`oauth_token_secret_key`], never in this type or the record.
@@ -297,6 +324,8 @@ impl std::fmt::Debug for McpServerDefinition {
             .field("cwd", &self.cwd)
             .field("url", &self.url)
             .field("bearer_token_env", &self.bearer_token_env)
+            .field("bearer_token_stored", &self.bearer_token_stored)
+            .field("header_names", &self.headers.iter().collect::<Vec<_>>())
             .field("oauth", &self.oauth)
             .field("gateway_endpoint", &self.gateway_endpoint)
             .field("request_timeout_ms", &self.request_timeout_ms)
@@ -394,6 +423,12 @@ impl McpServerDefinition {
             command.current_dir(cwd);
             return Ok(command);
         }
+        // HOME and the PATH the command was resolved on, so a script such as
+        // `npx` finds `node` and its cache. A name the definition sets itself
+        // replaces the default below.
+        for (name, value) in super::stdio::forwarded_by_default().await {
+            command.env(name, value);
+        }
         for name in &self.env_from {
             let value = std::env::var_os(name).ok_or_else(|| {
                 AgentError::config(format!(
@@ -415,12 +450,15 @@ impl McpServerDefinition {
         Ok(command)
     }
 
-    /// Open a session with this server. `oauth` is how to present a stored
-    /// OAuth session, given only for a server that [signs in](super::oauth::signs_in).
+    /// Open a session with this server. `http` is what the credential store
+    /// holds for an HTTP server: its stored bearer token and header values.
+    /// `oauth` is how to present a stored OAuth session, given only for a
+    /// server that [signs in](super::oauth::signs_in).
     pub(super) async fn connect(
         &self,
         gateway: &Arc<dyn GatewayEndpoints>,
         env: &BTreeMap<String, String>,
+        http: &StoredHttpValues,
         oauth: Option<&OAuthAccess>,
     ) -> Result<McpClient> {
         let request_timeout = Duration::from_millis(self.request_timeout_ms);
@@ -453,14 +491,17 @@ impl McpServerDefinition {
             // credential, loaded from the OS credential store and attached as
             // a per-call bearer. That holds whatever the saved `oauth` flag
             // says, so a server someone connected without the flag keeps its
-            // session.
-            let bearer_token = self.resolve_bearer_token()?;
+            // session. A stored bearer or header value goes only to the
+            // origin it was stored for: values stored before the URL moved to
+            // another origin are never sent.
+            let http = http.for_url(url);
+            let bearer_token = self.resolve_bearer_token(&http)?;
             let headers = match &self.launch {
                 Some(launch) => {
                     admit_plugin_endpoint(url).await?;
                     launch.headers.clone()
                 }
-                None => BTreeMap::new(),
+                None => self.resolve_headers(&http)?,
             };
             let oauth_connection = match oauth {
                 Some(access) => live_oauth_connection(access, url).await,
@@ -515,23 +556,49 @@ impl McpServerDefinition {
         &self,
         gateway: &Arc<dyn GatewayEndpoints>,
         env: &BTreeMap<String, String>,
+        http: &StoredHttpValues,
         oauth: Option<&OAuthAccess>,
     ) -> Result<(McpClient, HashMap<String, UiViewDocument>)> {
-        let client = self.connect(gateway, env, oauth).await?;
+        let client = self.connect(gateway, env, http, oauth).await?;
         let views = prefetch_views(&client, VIEW_PREFETCH_TIMEOUT).await;
         Ok((client, views))
     }
 
-    /// Resolve the selected bearer token by name at the connection boundary.
-    fn resolve_bearer_token(&self) -> Result<Option<String>> {
-        let Some(name) = &self.bearer_token_env else {
-            return Ok(None);
-        };
-        std::env::var(name).map(Some).map_err(|_| {
-            AgentError::config(format!(
-                "required parent environment variable {name:?} is not set"
-            ))
-        })
+    /// Resolve the bearer token at the connection boundary: by name from the
+    /// parent environment, or from the credential store.
+    fn resolve_bearer_token(&self, http: &StoredHttpValues) -> Result<Option<String>> {
+        if let Some(name) = &self.bearer_token_env {
+            return std::env::var(name).map(Some).map_err(|_| {
+                AgentError::config(format!(
+                    "required parent environment variable {name:?} is not set"
+                ))
+            });
+        }
+        if self.bearer_token_stored {
+            return http.bearer.clone().map(Some).ok_or_else(|| {
+                AgentError::config(format!(
+                    "{NOT_STORED} this server's bearer token is not in the credential store on \
+                     this computer. Enter it under Authentication, then save."
+                ))
+            });
+        }
+        Ok(None)
+    }
+
+    /// Every custom header this definition declares, with its stored value.
+    /// A declared header whose value is not stored fails by name, before
+    /// anything is sent.
+    fn resolve_headers(&self, http: &StoredHttpValues) -> Result<BTreeMap<String, String>> {
+        self.headers
+            .iter()
+            .map(|name| match http.headers.get(name) {
+                Some(value) => Ok((name.clone(), value.clone())),
+                None => Err(AgentError::config(format!(
+                    "{NOT_STORED} the value of header {name:?} is not in the credential store \
+                     on this computer. Enter it under Headers, then save."
+                ))),
+            })
+            .collect()
     }
 }
 
@@ -649,7 +716,7 @@ async fn admit_plugin_endpoint(url: &str) -> Result<()> {
 /// fields in declaration order, and every key is always present):
 ///
 /// ```json
-/// {"v":3,
+/// {"v":4,
 ///  "kind":"mcp_server",
 ///  "namespace":string,
 ///  "transport":"stdio"|"http"|"gateway",
@@ -660,6 +727,8 @@ async fn admit_plugin_endpoint(url: &str) -> Result<()> {
 ///  "env_from":[string,...],
 ///  "url":string|null,
 ///  "bearer_token_env_set":bool,
+///  "bearer_token_stored":bool,
+///  "header_names":[string,...],
 ///  "oauth":bool,
 ///  "gateway_endpoint":string|null}
 /// ```
@@ -671,7 +740,12 @@ async fn admit_plugin_endpoint(url: &str) -> Result<()> {
 /// literal values out of the definition and into the secret store did not
 /// bump `v`: the canonical form only ever saw the names, which are unchanged,
 /// so every grant issued before the move still matches after it. `bearer_token_env_set` records
-/// only whether a bearer name is selected. `cwd` is the configured path,
+/// only whether a bearer name is selected, `bearer_token_stored` only whether
+/// the bearer is held in the credential store, and `header_names` the sorted
+/// names of the custom headers the server receives, never their values.
+/// Sending a stored credential or a custom header is a different thing to
+/// have consented to run, which is why adding them bumped `v` from 3 to 4.
+/// `cwd` is the configured path,
 /// lossily UTF-8. `oauth` records whether the definition forces an
 /// OAuth-obtained token rather than a static env bearer — a different thing to
 /// have consented to run, which is why adding it bumped `v` from 2 to 3. A
@@ -708,6 +782,8 @@ pub fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 32] {
         env_from: Vec<&'a str>,
         url: Option<&'a str>,
         bearer_token_env_set: bool,
+        bearer_token_stored: bool,
+        header_names: Vec<&'a str>,
         oauth: bool,
         gateway_endpoint: Option<&'a str>,
     }
@@ -716,8 +792,10 @@ pub fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 32] {
     env_names.sort_unstable();
     let mut env_from: Vec<&str> = definition.env_from.iter().map(String::as_str).collect();
     env_from.sort_unstable();
+    let mut header_names: Vec<&str> = definition.headers.iter().map(String::as_str).collect();
+    header_names.sort_unstable();
     let canonical = CanonicalDefinition {
-        v: 3,
+        v: 4,
         kind: "mcp_server",
         namespace: &definition.name,
         transport: if definition.gateway_endpoint.is_some() {
@@ -737,6 +815,8 @@ pub fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 32] {
         env_from,
         url: definition.url.as_deref(),
         bearer_token_env_set: definition.bearer_token_env.is_some(),
+        bearer_token_stored: definition.bearer_token_stored,
+        header_names,
         oauth: definition.oauth,
         gateway_endpoint: definition.gateway_endpoint.as_deref(),
     };
@@ -757,6 +837,75 @@ pub(super) const fn default_request_timeout_ms() -> u64 {
 /// Mirrors `rest_credential_secret_key` for the REST connected-app kind.
 pub fn env_secret_key(id: ConnectedAppId) -> String {
     format!("mcp.{id}.env_v1")
+}
+
+/// Secret-store key holding one HTTP server's stored credentials: its bearer
+/// token and custom header values, as a [`StoredHttpValues`] JSON object.
+///
+/// Derived from the connected-app record id, like [`env_secret_key`], so this
+/// surface can only ever read and write its own secrets.
+pub fn http_secret_key(id: ConnectedAppId) -> String {
+    format!("mcp.{id}.http_v1")
+}
+
+/// How a connection failure starts when the credential store lacks a value
+/// the definition declares. Settings shows the sentence as it is, and the
+/// supervisor stops retrying until a settings change or a manual reconnect.
+pub(super) const NOT_STORED: &str = "Not stored:";
+
+/// One HTTP server's stored credentials, bound to the origin they were
+/// entered for.
+///
+/// A value goes only to the origin it was stored for: a save that moves the
+/// server to another origin drops the values it does not set again, and a
+/// connection loads nothing stored for a different origin.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct StoredHttpValues {
+    /// `scheme://host[:port]` of the URL the values were stored for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) origin: Option<String>,
+    /// The stored bearer token, sent as `Authorization: Bearer …`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) bearer: Option<String>,
+    /// Stored header values, by header name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) headers: BTreeMap<String, String>,
+}
+
+impl StoredHttpValues {
+    /// Whether there is nothing to store.
+    pub(super) fn is_empty(&self) -> bool {
+        self.bearer.is_none() && self.headers.is_empty()
+    }
+
+    /// These values when they were stored for `url`'s origin, and nothing
+    /// otherwise.
+    pub(super) fn for_url(&self, url: &str) -> Self {
+        match (&self.origin, http_origin(url)) {
+            (Some(stored), Some(origin)) if *stored == origin => self.clone(),
+            _ => Self::default(),
+        }
+    }
+}
+
+/// Values never appear, only which ones are stored.
+impl std::fmt::Debug for StoredHttpValues {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredHttpValues")
+            .field("origin", &self.origin)
+            .field("bearer_stored", &self.bearer.is_some())
+            .field("header_names", &self.headers.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+/// The `scheme://host[:port]` origin of an HTTP URL, or `None` when the URL
+/// does not parse or has no host.
+pub(super) fn http_origin(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let origin = parsed.origin();
+    origin.is_tuple().then(|| origin.ascii_serialization())
 }
 
 /// Lift literal `env` values out of a connected-app record persisted before

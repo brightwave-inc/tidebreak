@@ -1385,3 +1385,175 @@ async fn nth_prompt(recorder: &super::memory::SystemPromptRecorder, turn: usize)
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+/// A loopback MCP server that answers only a request carrying `bearer` and
+/// `api_key`, and counts the requests it accepted.
+async fn serve_mcp_requiring(
+    bearer: String,
+    api_key: String,
+) -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    use axum::response::IntoResponse;
+
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&accepted);
+    let app = Router::new().route(
+        "/mcp",
+        axum::routing::post(move |headers: axum::http::HeaderMap, body: String| {
+            let (bearer, api_key, counter) = (bearer.clone(), api_key.clone(), counter.clone());
+            async move {
+                let value = |name: &str| {
+                    headers
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string)
+                };
+                if value("authorization") != Some(format!("Bearer {bearer}"))
+                    || value("x-api-key") != Some(api_key)
+                {
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let Some(id) = request.get("id").cloned() else {
+                    return StatusCode::ACCEPTED.into_response();
+                };
+                let result = match request["method"].as_str().unwrap_or_default() {
+                    "initialize" => json!({
+                        "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "stored-credential-fixture", "version": "1"}
+                    }),
+                    "tools/list" => json!({"tools": [{
+                        "name": "lookup",
+                        "description": "Look something up",
+                        "inputSchema": {"type": "object"}
+                    }]}),
+                    _ => json!({}),
+                };
+                (
+                    [("content-type", "application/json")],
+                    json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (address, accepted)
+}
+
+/// SET-04 over the API: a remote MCP server's bearer token and header value,
+/// given once in `PUT /mcp/servers`, reach the server and come back in no
+/// response: not the save's answer, `GET /mcp/servers`, `GET
+/// /connected-apps`, or the workspace export, which carry the names only.
+/// They sit under the record's own key, which the re-home and erase passes
+/// name, and a disallowed header is refused before anything is stored.
+#[tokio::test]
+async fn mcp_stored_credentials_reach_the_server_and_no_response() {
+    let (router, bearer, state, _dir) = connected_apps_test_app().await;
+    let token = [
+        "route",
+        "bearer",
+        &uuid::Uuid::new_v4().simple().to_string(),
+    ]
+    .join("-");
+    let api_key = [
+        "route",
+        "header",
+        &uuid::Uuid::new_v4().simple().to_string(),
+    ]
+    .join("-");
+    let (address, accepted) = serve_mcp_requiring(token.clone(), api_key.clone()).await;
+    let put = |servers: serde_json::Value| {
+        router.clone().oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/mcp/servers")
+                .header("authorization", &bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "servers": servers }).to_string()))
+                .unwrap(),
+        )
+    };
+
+    let refused = put(json!([{
+        "name": "docs",
+        "url": format!("http://{address}/mcp"),
+        "headers": ["Transfer-Encoding"],
+        "header_values": {"Transfer-Encoding": api_key}
+    }]))
+    .await
+    .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let refused = raw_body(refused).await;
+    assert!(refused.contains("Transfer-Encoding"), "{refused}");
+    assert!(!refused.contains(&api_key), "{refused}");
+
+    let saved = put(json!([{
+        "name": "docs",
+        "url": format!("http://{address}/mcp"),
+        "bearer_token_stored": true,
+        "bearer_token_value": token,
+        "headers": ["X-Api-Key"],
+        "header_values": {"X-Api-Key": api_key}
+    }]))
+    .await
+    .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved = raw_body(saved).await;
+    assert!(accepted.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    let saved_json: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved_json["servers"][0]["health"], "healthy", "{saved}");
+    assert_eq!(saved_json["servers"][0]["bearer_token_stored"], true);
+    assert_eq!(saved_json["servers"][0]["headers"], json!(["X-Api-Key"]));
+
+    let listed = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/mcp/servers")
+                .header("authorization", &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let listed = raw_body(listed).await;
+    let apps = raw_body(get_listing(&router, &bearer).await).await;
+    let export = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/workspace-config")
+                .header("authorization", &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let export = raw_body(export).await;
+    for body in [&saved, &listed, &apps, &export] {
+        assert!(!body.contains(&token), "{body}");
+        assert!(!body.contains(&api_key), "{body}");
+    }
+    assert!(export.contains("X-Api-Key"), "{export}");
+
+    let id = state
+        .mcp
+        .app_fingerprints()
+        .await
+        .into_keys()
+        .next()
+        .unwrap();
+    let key = crate::mcp_config::http_secret_key(id);
+    let stored = state.secrets.get_secret(&key).await.unwrap().unwrap();
+    assert!(stored.contains(&token) && stored.contains(&api_key));
+    assert!(secret_rehome::stored_secret_keys(&*state.store)
+        .await
+        .unwrap()
+        .contains(&key));
+}

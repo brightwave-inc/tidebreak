@@ -153,6 +153,10 @@ fn disabled_definition(name: &str, command: &str) -> McpServerDefinition {
         cwd: None,
         url: None,
         bearer_token_env: None,
+        bearer_token_stored: false,
+        bearer_token_value: None,
+        headers: Default::default(),
+        header_values: Default::default(),
         oauth: false,
         gateway_endpoint: None,
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
@@ -173,6 +177,10 @@ fn http_definition(name: &str, url: &str) -> McpServerDefinition {
         cwd: None,
         url: Some(url.to_string()),
         bearer_token_env: None,
+        bearer_token_stored: false,
+        bearer_token_value: None,
+        headers: Default::default(),
+        header_values: Default::default(),
         oauth: false,
         gateway_endpoint: None,
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
@@ -193,6 +201,10 @@ fn gateway_definition(name: &str, slug: &str) -> McpServerDefinition {
         cwd: None,
         url: None,
         bearer_token_env: None,
+        bearer_token_stored: false,
+        bearer_token_value: None,
+        headers: Default::default(),
+        header_values: Default::default(),
         oauth: false,
         gateway_endpoint: Some(slug.to_string()),
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
@@ -449,8 +461,70 @@ async fn defaults_to_an_isolated_environment_and_sixty_second_timeout() {
     assert!(server.env.is_empty());
     assert!(server.env_from.is_empty());
     assert_eq!(server.request_timeout_ms, 60_000);
+    let _path = super::stdio::HostPathGuard::set(Some("/opt/tools/bin:/usr/bin".into())).await;
     let command = server.build_command(&BTreeMap::new()).await.unwrap();
-    assert!(command.as_std().get_envs().next().is_none());
+    // Nothing ambient beyond the two names every child is given.
+    let mut names: Vec<_> = command
+        .as_std()
+        .get_envs()
+        .map(|(name, _)| name.to_os_string())
+        .collect();
+    names.sort();
+    let expected: Vec<std::ffi::OsString> = if std::env::var_os("HOME").is_some() {
+        vec!["HOME".into(), "PATH".into()]
+    } else {
+        vec!["PATH".into()]
+    };
+    assert_eq!(names, expected);
+}
+
+/// SET-02: a child started with no PATH could not find the interpreter a
+/// script names, so even an absolute path to `npx` failed to find `node`,
+/// and with no HOME it had no cache. Every user-configured stdio child gets
+/// the host search PATH its command was resolved on, and HOME.
+#[tokio::test]
+async fn a_stdio_child_is_given_the_host_search_path_and_home() {
+    let config = parse(r#"{"servers":[{"name":"docs","command":"/bin/docs"}]}"#).unwrap();
+    let search_path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+    let _path = super::stdio::HostPathGuard::set(Some(search_path.into())).await;
+    let command = config.0[0].build_command(&BTreeMap::new()).await.unwrap();
+    let env: BTreeMap<String, String> = command
+        .as_std()
+        .get_envs()
+        .filter_map(|(name, value)| {
+            Some((
+                name.to_string_lossy().into_owned(),
+                value?.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect();
+    assert_eq!(env.get("PATH").map(String::as_str), Some(search_path));
+    assert_eq!(
+        env.get("HOME").map(String::as_str),
+        std::env::var("HOME").ok().as_deref()
+    );
+
+    // They reach the process, not only the builder: a script that prints
+    // them sees both.
+    let script = parse(
+        r#"{"servers":[{"name":"echo","command":"/bin/sh","args":["-c","printf '%s|%s' \"$PATH\" \"$HOME\""]}]}"#,
+    )
+    .unwrap();
+    let output = script.0[0]
+        .build_command(&BTreeMap::new())
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
+    let printed = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        printed,
+        format!(
+            "{search_path}|{}",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    );
 }
 
 #[test]
@@ -534,15 +608,21 @@ async fn forwards_only_explicitly_selected_parent_environment_values() {
             }]}"#,
     )
     .unwrap();
+    let _path = super::stdio::HostPathGuard::set(Some("/opt/seeded/bin".into())).await;
     let command = config.0[0].build_command(&BTreeMap::new()).await.unwrap();
     let forwarded_path = command
         .as_std()
         .get_envs()
-        .find(|(name, _)| *name == "PATH")
+        .filter(|(name, _)| *name == "PATH")
+        .last()
         .and_then(|(_, value)| value)
         .expect("PATH is selected for forwarding");
+    // A name the definition forwards itself replaces the default.
     assert_eq!(Some(forwarded_path), std::env::var_os("PATH").as_deref());
-    assert!(command.as_std().get_envs().all(|(name, _)| name == "PATH"));
+    assert!(command
+        .as_std()
+        .get_envs()
+        .all(|(name, _)| name == "PATH" || name == "HOME"));
 }
 
 #[tokio::test]
@@ -559,7 +639,7 @@ async fn missing_selected_parent_environment_fails_before_spawn_without_a_value(
     .unwrap();
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = config.0[0]
-        .connect(&gateway, &BTreeMap::new(), None)
+        .connect(&gateway, &BTreeMap::new(), &Default::default(), None)
         .await
         .err()
         .unwrap();
@@ -1120,7 +1200,7 @@ async fn missing_selected_bearer_token_fails_by_name_without_a_value() {
     definition.bearer_token_env = Some(MISSING.to_string());
     let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
     let error = definition
-        .connect(&gateway, &BTreeMap::new(), None)
+        .connect(&gateway, &BTreeMap::new(), &Default::default(), None)
         .await
         .err()
         .unwrap();
@@ -1988,8 +2068,8 @@ async fn stdio_bare_npx_resolves_on_overridden_host_path() {
     std::fs::write(&npx, "#!/bin/sh\nexit 0\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
-    super::stdio::override_host_path(Some(directory.path().as_os_str().to_os_string()));
-    let _guard = super::stdio::HostPathGuard;
+    let _guard =
+        super::stdio::HostPathGuard::set(Some(directory.path().as_os_str().to_os_string())).await;
     let resolved = super::stdio::resolve_stdio_command("npx").await.unwrap();
     assert_eq!(resolved, npx);
 
@@ -3272,27 +3352,36 @@ async fn a_server_without_client_registration_says_sign_in_is_unsupported() {
     assert_eq!(connect.state, McpOAuthState::Unsupported);
 }
 
-/// A server configured with a static bearer keeps that path: a `401` means
-/// the token is wrong, so there is no sign-in to offer.
+/// A server configured with a static bearer from a variable keeps that path
+/// until the person switches it. When the server refuses the token with a
+/// `401` that names OAuth metadata, the save keeps the server and offers Use
+/// OAuth, but not Connect: while the server carries a bearer it does not sign
+/// in.
 #[tokio::test]
-async fn a_static_bearer_server_never_offers_a_sign_in() {
+async fn a_static_bearer_server_offers_use_oauth_but_not_connect() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
     let fake = FakeOAuthServer::approving().await;
     let (runtime, _store, _directory) = oauth_test_runtime().await;
     let mut definition = http_definition("vercel", &fake.mcp_url());
     // PATH always exists and is never the fake's token.
     definition.bearer_token_env = Some("PATH".to_string());
-    let error = runtime
+    let info = runtime
         .replace(McpServersConfig {
             servers: vec![definition],
         })
         .await
-        .expect_err("a rejected static token fails the save")
-        .to_string();
-    assert!(
-        error.contains("Authentication failed (401 Unauthorized)"),
-        "{error}"
+        .expect("a refused token that names OAuth metadata saves");
+    let server = &info.servers[0];
+    assert_eq!(server.health, McpHealth::Degraded);
+    assert_eq!(oauth_state(server), Some(McpOAuthState::Available));
+    let listed = runtime.info().await;
+    assert_eq!(
+        oauth_state(&listed.servers[0]),
+        Some(McpOAuthState::Available)
     );
-    assert!(runtime.info().await.servers.is_empty());
+    let connect = runtime.oauth_connect("vercel").await.unwrap();
+    assert_eq!(connect.state, McpOAuthState::Unsupported);
 }
 
 // ---------------------------------------------------------------------------
@@ -4156,4 +4245,494 @@ async fn an_auto_mount_never_saves_a_plugin_server() {
         "{running:?}"
     );
     assert!(running.contains(&("tools", false)), "{running:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Stored bearer tokens and custom headers for remote servers
+// ---------------------------------------------------------------------------
+
+/// A fixture value built at run time, so no credential-shaped literal sits
+/// in the source.
+fn fixture_value(label: &str) -> String {
+    [label, "fixture", &uuid::Uuid::new_v4().simple().to_string()].join("-")
+}
+
+/// What one request to [`serve_credentialed_mcp`] carried.
+#[derive(Clone, Debug, Default)]
+struct SeenRequest {
+    authorization: Option<String>,
+    api_key: Option<String>,
+}
+
+type SeenRequests = Arc<std::sync::Mutex<Vec<SeenRequest>>>;
+
+/// A loopback MCP server that records the `Authorization` and `X-Api-Key`
+/// headers of every request and answers like a well-behaved server.
+async fn serve_credentialed_mcp() -> (std::net::SocketAddr, SeenRequests) {
+    use axum::http::HeaderMap;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+
+    let seen: SeenRequests = Arc::default();
+    let recorded = Arc::clone(&seen);
+    let app = axum::Router::new().route(
+        "/mcp",
+        post(move |headers: HeaderMap, body: String| {
+            let recorded = Arc::clone(&recorded);
+            async move {
+                let header = |name: &str| {
+                    headers
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string)
+                };
+                recorded.lock().unwrap().push(SeenRequest {
+                    authorization: header("authorization"),
+                    api_key: header("x-api-key"),
+                });
+                let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let Some(id) = request.get("id").cloned() else {
+                    return axum::http::StatusCode::ACCEPTED.into_response();
+                };
+                let result = match request["method"].as_str().unwrap_or_default() {
+                    "initialize" => serde_json::json!({
+                        "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "credentialed-fixture", "version": "1"}
+                    }),
+                    "tools/list" => serde_json::json!({
+                        "tools": [{
+                            "name": "lookup",
+                            "description": "Look something up",
+                            "inputSchema": {"type": "object"}
+                        }]
+                    }),
+                    _ => serde_json::json!({}),
+                };
+                (
+                    [("content-type", "application/json")],
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (address, seen)
+}
+
+/// A remote server whose bearer token and one custom header live in the
+/// credential store.
+fn stored_credential_definition(
+    name: &str,
+    url: &str,
+    bearer: Option<&str>,
+    api_key: Option<&str>,
+) -> McpServerDefinition {
+    let mut definition = http_definition(name, url);
+    definition.bearer_token_stored = true;
+    definition.bearer_token_value = bearer.map(str::to_string);
+    definition.headers.insert("X-Api-Key".to_string());
+    if let Some(api_key) = api_key {
+        definition
+            .header_values
+            .insert("X-Api-Key".to_string(), api_key.to_string());
+    }
+    definition
+}
+
+/// SET-04: a bearer token and a header value typed into Settings land in the
+/// credential store, reach the server on every request, and appear nowhere
+/// else: not in the saved record, not in any projection, not in a save's
+/// answer. A later save that leaves them blank keeps them, and removing the
+/// server deletes them.
+#[tokio::test]
+async fn stored_bearer_and_header_reach_the_server_and_nothing_else() {
+    let (address, seen) = serve_credentialed_mcp().await;
+    let (runtime, store, _directory) = test_runtime().await;
+    let bearer = fixture_value("bearer");
+    let api_key = fixture_value("header");
+    let url = format!("http://{address}/mcp");
+    let definition = stored_credential_definition("docs", &url, Some(&bearer), Some(&api_key));
+
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .unwrap();
+    assert_eq!(info.servers[0].health, McpHealth::Healthy, "{info:?}");
+    let requests = seen.lock().unwrap().clone();
+    assert!(!requests.is_empty());
+    let expected_authorization = format!("Bearer {bearer}");
+    for request in &requests {
+        assert_eq!(
+            request.authorization.as_deref(),
+            Some(expected_authorization.as_str())
+        );
+        assert_eq!(request.api_key.as_deref(), Some(api_key.as_str()));
+    }
+
+    // Names only, everywhere a definition leaves this process.
+    let answer = serde_json::to_string(&info).unwrap();
+    let listing = serde_json::to_string(&runtime.info().await).unwrap();
+    let record = saved_records(&store)
+        .await
+        .into_iter()
+        .map(|record| record.definition.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for surface in [&answer, &listing, &record] {
+        assert!(!surface.contains(&bearer), "{surface}");
+        assert!(!surface.contains(&api_key), "{surface}");
+    }
+    assert!(
+        listing.contains("\"bearer_token_stored\":true"),
+        "{listing}"
+    );
+    assert!(listing.contains("X-Api-Key"), "{listing}");
+    let debug = format!("{:?}", runtime.definitions().await);
+    assert!(
+        !debug.contains(&bearer) && !debug.contains(&api_key),
+        "{debug}"
+    );
+
+    // The values sit under the record's own key, bound to its origin.
+    let id = saved_records(&store).await[0].id;
+    let stored = runtime.stored_http(id).await;
+    assert_eq!(stored.bearer.as_deref(), Some(bearer.as_str()));
+    assert_eq!(stored.headers["X-Api-Key"], api_key);
+    assert_eq!(stored.origin, super::types::http_origin(&url));
+    assert!(!format!("{stored:?}").contains(&bearer));
+
+    // Saving again with the values blank keeps what is stored.
+    seen.lock().unwrap().clear();
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition("docs", &url, None, None)],
+        })
+        .await
+        .unwrap();
+    let requests = seen.lock().unwrap().clone();
+    assert!(!requests.is_empty());
+    assert!(requests
+        .iter()
+        .all(|request| request.api_key.as_deref() == Some(api_key.as_str())));
+    assert_eq!(
+        runtime.stored_http(id).await.bearer.as_deref(),
+        Some(bearer.as_str())
+    );
+
+    // Removing the server takes its stored values with it.
+    runtime
+        .replace(McpServersConfig { servers: vec![] })
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .secrets()
+            .get_secret(&http_secret_key(id))
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+/// A stored value goes only to the origin it was entered for. Pointing the
+/// server somewhere else without entering the values again drops them, and
+/// the verify says what is missing instead of sending the old token.
+#[tokio::test]
+async fn moving_a_server_to_another_origin_never_carries_its_stored_values() {
+    let (first, _) = serve_credentialed_mcp().await;
+    let (second, seen_second) = serve_credentialed_mcp().await;
+    let (runtime, store, _directory) = test_runtime().await;
+    let bearer = fixture_value("bearer");
+    let api_key = fixture_value("header");
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition(
+                "docs",
+                &format!("http://{first}/mcp"),
+                Some(&bearer),
+                Some(&api_key),
+            )],
+        })
+        .await
+        .unwrap();
+    let id = saved_records(&store).await[0].id;
+
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition(
+                "docs",
+                &format!("http://{second}/mcp"),
+                None,
+                None,
+            )],
+        })
+        .await
+        .expect_err("the moved server has no stored values for its new origin");
+    let message = error.to_string();
+    assert!(message.contains("Not stored:"), "{message}");
+    assert!(!message.contains(&bearer), "{message}");
+    assert!(
+        seen_second.lock().unwrap().is_empty(),
+        "nothing reached the new origin"
+    );
+    // The failed save put back what it changed.
+    assert_eq!(
+        runtime.stored_http(id).await.bearer.as_deref(),
+        Some(bearer.as_str())
+    );
+}
+
+/// A failed save rolls back the stored bearer and header values it wrote,
+/// the way it rolls back environment values and sign-ins.
+#[tokio::test]
+async fn a_failed_save_puts_back_stored_http_values() {
+    let (address, _) = serve_credentialed_mcp().await;
+    let (runtime, store, _directory) = test_runtime().await;
+    let url = format!("http://{address}/mcp");
+    let first = fixture_value("first");
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition(
+                "docs",
+                &url,
+                Some(&first),
+                Some(&first),
+            )],
+        })
+        .await
+        .unwrap();
+    let id = saved_records(&store).await[0].id;
+
+    let second = fixture_value("second");
+    let dead = http_definition("dead", "http://127.0.0.1:1/mcp");
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![
+                stored_credential_definition("docs", &url, Some(&second), Some(&second)),
+                dead,
+            ],
+        })
+        .await
+        .expect_err("the dead server fails the save");
+    assert!(error.to_string().contains("failed to start"), "{error}");
+    assert!(!error.to_string().contains(&second), "{error}");
+    let stored = runtime.stored_http(id).await;
+    assert_eq!(stored.bearer.as_deref(), Some(first.as_str()));
+    assert_eq!(stored.headers["X-Api-Key"], first);
+}
+
+/// SET-04: custom headers are a small, bounded set. A name the connection
+/// owns, a hop-by-hop or framing field, an Authorization header, or one past
+/// the cap is refused before anything is saved, naming the header, never a
+/// value.
+#[test]
+fn disallowed_and_excess_headers_are_refused() {
+    for name in [
+        "Host",
+        "Content-Length",
+        "Transfer-Encoding",
+        "Connection",
+        "Keep-Alive",
+        "Upgrade",
+        "Mcp-Session-Id",
+        "Content-Type",
+    ] {
+        let mut definition = http_definition("docs", "https://mcp.example.test/mcp");
+        definition.headers.insert(name.to_string());
+        let error = validate_servers(&[definition]).expect_err(name).to_string();
+        assert!(error.contains("not allowed"), "{name}: {error}");
+        assert!(error.contains(name), "{name}: {error}");
+    }
+
+    let mut authorization = http_definition("docs", "https://mcp.example.test/mcp");
+    authorization.headers.insert("Authorization".to_string());
+    let error = validate_servers(&[authorization]).unwrap_err().to_string();
+    assert!(
+        error.contains("bearer token under authentication"),
+        "{error}"
+    );
+
+    let mut malformed = http_definition("docs", "https://mcp.example.test/mcp");
+    malformed.headers.insert("X Api Key".to_string());
+    assert!(validate_servers(&[malformed]).is_err());
+
+    let mut too_many = http_definition("docs", "https://mcp.example.test/mcp");
+    for index in 0..=MAX_HEADERS {
+        too_many.headers.insert(format!("X-Custom-{index}"));
+    }
+    let error = validate_servers(&[too_many]).unwrap_err().to_string();
+    assert!(error.contains("more than 8 custom headers"), "{error}");
+
+    let mut duplicate = http_definition("docs", "https://mcp.example.test/mcp");
+    duplicate.headers.insert("X-Api-Key".to_string());
+    duplicate.headers.insert("x-api-key".to_string());
+    assert!(validate_servers(&[duplicate])
+        .unwrap_err()
+        .to_string()
+        .contains("more than once"));
+
+    // A value that could smuggle header syntax never gets that far, and the
+    // error does not echo it.
+    let secret = fixture_value("value");
+    let mut injected = http_definition("docs", "https://mcp.example.test/mcp");
+    injected.headers.insert("X-Api-Key".to_string());
+    injected
+        .header_values
+        .insert("X-Api-Key".to_string(), format!("{secret}\r\nHost: evil"));
+    let error = validate_servers(&[injected]).unwrap_err().to_string();
+    assert!(!error.contains(&secret), "{error}");
+
+    // Headers, like a stored bearer, belong to url servers.
+    let mut stdio = disabled_definition("docs", "/bin/docs");
+    stdio.headers.insert("X-Api-Key".to_string());
+    assert!(validate_servers(&[stdio]).is_err());
+    let mut stdio = disabled_definition("docs", "/bin/docs");
+    stdio.bearer_token_stored = true;
+    assert!(validate_servers(&[stdio]).is_err());
+}
+
+/// A stored credential rides the same https rule as a bearer variable: it
+/// may travel in cleartext only to a literal loopback address. And a server
+/// authenticates one way at a time.
+#[test]
+fn stored_credentials_need_https_and_one_way_to_authenticate() {
+    let mut cleartext = http_definition("docs", "http://remote.example/mcp");
+    cleartext.bearer_token_stored = true;
+    assert!(validate_servers(&[cleartext])
+        .unwrap_err()
+        .to_string()
+        .contains("must use https"));
+    let mut header = http_definition("docs", "http://remote.example/mcp");
+    header.headers.insert("X-Api-Key".to_string());
+    assert!(validate_servers(&[header]).is_err());
+    let mut loopback = http_definition("docs", "http://127.0.0.1:9000/mcp");
+    loopback.bearer_token_stored = true;
+    loopback.headers.insert("X-Api-Key".to_string());
+    assert!(validate_servers(&[loopback]).is_ok());
+
+    let mut both = http_definition("docs", "https://mcp.example.test/mcp");
+    both.bearer_token_stored = true;
+    both.bearer_token_env = Some("MCP_TOKEN".to_string());
+    assert!(validate_servers(&[both]).is_err());
+    let mut oauth = http_definition("docs", "https://mcp.example.test/mcp");
+    oauth.bearer_token_stored = true;
+    oauth.oauth = true;
+    assert!(validate_servers(&[oauth]).is_err());
+
+    let mut prefixed = http_definition("docs", "https://mcp.example.test/mcp");
+    prefixed.bearer_token_stored = true;
+    prefixed.bearer_token_value = Some(format!("Bearer {}", fixture_value("token")));
+    assert!(validate_servers(&[prefixed])
+        .unwrap_err()
+        .to_string()
+        .contains("without the \"Bearer\" prefix"));
+
+    // A value only travels with the setting that stores it.
+    let mut orphan = http_definition("docs", "https://mcp.example.test/mcp");
+    orphan.bearer_token_value = Some(fixture_value("token"));
+    assert!(validate_servers(&[orphan]).is_err());
+}
+
+/// SET-03: a server configured with a static bearer that refuses it with a
+/// `401` naming protected-resource metadata is saved instead of failing the
+/// save, and its row offers Use OAuth with the host the sign-in opens.
+/// Switching it to OAuth saves it waiting for a sign-in, and drops the
+/// stored bearer the server refused.
+#[tokio::test]
+async fn a_refused_bearer_with_oauth_metadata_saves_and_offers_oauth() {
+    use crate::mcp_oauth_runtime::McpOAuthState;
+
+    let fake = FakeOAuthServer::approving().await;
+    let (runtime, store, _directory) = oauth_test_runtime().await;
+    let refused = fixture_value("refused");
+    let mut definition = http_definition("vercel", &fake.mcp_url());
+    definition.bearer_token_stored = true;
+    definition.bearer_token_value = Some(refused.clone());
+
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .expect("a refused bearer that names OAuth metadata still saves");
+    let server = &info.servers[0];
+    assert_eq!(server.health, McpHealth::Degraded);
+    let status = server
+        .oauth_status
+        .as_ref()
+        .expect("the offer is projected");
+    assert_eq!(status.state, McpOAuthState::Available);
+    assert_eq!(status.sign_in_host.as_deref(), Some("127.0.0.1"));
+    let diagnostic = server.diagnostic.as_deref().unwrap();
+    assert!(diagnostic.contains("Use OAuth"), "{diagnostic}");
+    assert!(!diagnostic.contains(&refused), "{diagnostic}");
+    // The bearer reached the server; the refusal is what taught the offer.
+    assert!(fake.mcp_bearers().contains(&refused));
+    // Retrying the refused bearer cannot help until the settings change.
+    assert_eq!(
+        parked(&runtime, "vercel").await,
+        Some(ReconnectPark::Configuration)
+    );
+    // Connect is for a server that signs in, which this one does not yet.
+    let connect = runtime.oauth_connect("vercel").await.unwrap();
+    assert_eq!(connect.state, McpOAuthState::Unsupported);
+    let id = saved_records(&store).await[0].id;
+    assert!(runtime.stored_http(id).await.bearer.is_some());
+
+    // Use OAuth: the same server, switched to sign in.
+    let mut switched = http_definition("vercel", &fake.mcp_url());
+    switched.oauth = true;
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![switched],
+        })
+        .await
+        .expect("an OAuth server waiting for a sign-in saves");
+    assert_eq!(
+        oauth_state(&info.servers[0]),
+        Some(McpOAuthState::NotConnected)
+    );
+    assert_eq!(
+        runtime
+            .secrets()
+            .get_secret(&http_secret_key(id))
+            .await
+            .unwrap(),
+        None,
+        "the refused bearer is gone"
+    );
+    let status = runtime.oauth_connect("vercel").await.unwrap();
+    assert_eq!(status.state, McpOAuthState::Authorizing);
+}
+
+/// A `401` that names no OAuth metadata is what it always was for a server
+/// with a bearer: the token is wrong, and the save fails saying so.
+#[tokio::test]
+async fn a_refused_bearer_without_oauth_metadata_still_fails_the_save() {
+    let address =
+        serve_http_response(axum::http::StatusCode::UNAUTHORIZED, "text/plain", b"").await;
+    let (runtime, _store, _directory) = oauth_test_runtime().await;
+    let mut definition = http_definition("docs", &format!("http://{address}/mcp"));
+    definition.bearer_token_stored = true;
+    definition.bearer_token_value = Some(fixture_value("token"));
+    let error = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .expect_err("a plain 401 fails the save");
+    assert!(
+        error
+            .to_string()
+            .contains("Authentication failed (401 Unauthorized)"),
+        "{error}"
+    );
 }
