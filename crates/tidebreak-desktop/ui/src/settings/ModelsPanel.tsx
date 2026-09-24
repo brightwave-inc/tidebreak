@@ -63,7 +63,10 @@ const ROLES: {
   {
     role: "chat",
     title: "Work",
-    hint: "New conversations start on this model, and each one can still override it.",
+    // A model picked in any conversation outranks this one for new work
+    // (decision 21 keeps that last pick apart from this setting), so the
+    // hint says so instead of promising this model to every new chat.
+    hint: "New work starts on the model you picked most recently in any conversation. Until you pick one, it starts on this model. When the two differ, the composer names both.",
   },
   {
     role: "utility",

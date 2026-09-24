@@ -327,4 +327,14 @@ export const allowlist = [
     rule: "aria-hidden-focus",
     reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",
   },
+  {
+    story: "composer-work-menus--*",
+    rule: "aria-hidden-focus",
+    reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",
+  },
+  {
+    story: "composer-work-menus--last-used-and-default",
+    rule: "aria-required-children",
+    reason: "The model menu keeps its provider rail (a tablist) and its search field inside the role=menu content.",
+  },
 ];

@@ -71,12 +71,17 @@ import {
 } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForChat, textOnlyModelLabel } from "./ModelSelection";
+import { useManagedPolicy } from "./managedPolicy";
 import {
   ModelMenu,
   useModelSettingsNav,
   visibleModelGroups,
 } from "./ModelMenu";
-import { PermissionModeMenu } from "./PermissionModeMenu";
+import { noModelSendBlocker, noRunnableModel } from "./modelSetup";
+import {
+  PermissionModeMenu,
+  WORK_PERMISSION_MODE_DESCRIPTIONS,
+} from "./PermissionModeMenu";
 import {
   PICKER_BUSY_MESSAGE,
   PICKER_HOLDERS,
@@ -178,8 +183,21 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
  */
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey, providers, setStatus } = useApp();
+  const {
+    client,
+    models,
+    defaultModelKey,
+    providers,
+    setStatus,
+    catalogLoaded,
+  } = useApp();
+  const { managed } = useManagedPolicy();
   const modelSettingsNav = useModelSettingsNav();
+  const noModelCanRun = noRunnableModel(models, catalogLoaded);
+  const composerSendBlocker = useMemo(
+    () => noModelSendBlocker(noModelCanRun, managed, navigate),
+    [noModelCanRun, managed, navigate],
+  );
   const { layout, openPanel, setLayout } = usePanelNav();
   const sourceNav = useStableSourceNav(openPanel);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
@@ -1098,6 +1116,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     return (
       <TranscriptVisibilityProvider value={visible}>
         <ChatView
+          composerSendBlocker={composerSendBlocker}
           client={client}
           chat={chat!}
           hydrated={hydrated}
@@ -1209,6 +1228,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               scopeKey={chatId}
               value={chat!.permission_mode}
               disabled={deletingChatId !== null}
+              descriptions={WORK_PERMISSION_MODE_DESCRIPTIONS}
               onChange={onPermissionModeChange}
             />
           }

@@ -741,6 +741,13 @@ body {
     min-height: 5.25rem;
   }
 
+  /* Stands where the starters go until a model can run. Narrower than the
+   starter grid: it is one list to read down, not cards to scan across. */
+  .welcome-setup {
+    width: 100%;
+    max-width: 34rem;
+  }
+
   @media (max-width: 720px) {
     .welcome {
       gap: 1.5rem;

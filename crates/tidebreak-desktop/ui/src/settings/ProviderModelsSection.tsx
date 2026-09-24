@@ -270,7 +270,11 @@ export function discoveryBlocker(info: ProviderInfo): string | null {
   if (info.kind === "openai_compatible" && !info.base_url) {
     return "Save the endpoint's base URL to find the models it serves.";
   }
-  if (!info.has_credential && info.kind !== "ollama") {
+  if (
+    !info.has_credential &&
+    info.kind !== "ollama" &&
+    info.kind !== "openai_compatible"
+  ) {
     return "Save an API key to find the models this provider serves.";
   }
   return null;

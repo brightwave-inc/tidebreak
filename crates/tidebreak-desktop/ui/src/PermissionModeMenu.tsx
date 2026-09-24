@@ -19,6 +19,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useGuidedMenu } from "./FirstTaskWalkthrough";
+import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 /** Every mode in ascending order of autonomy. */
@@ -53,6 +54,22 @@ const PERMISSION_MODE_SCALE: {
 
 /** The stored mode a chat runs under when none is set. */
 export const DEFAULT_PERMISSION_MODE: PermissionMode = "ask";
+
+/**
+ * What each mode does in Work, one line each, matching the permission modes
+ * page of the docs. Work's own engine decides approvals, so these hold
+ * there; a code engine maps the modes onto its own settings and states its
+ * posture in the session header instead.
+ */
+export const WORK_PERMISSION_MODE_DESCRIPTIONS: Readonly<
+  Record<PermissionMode, string>
+> = {
+  plan: "Reads and plans. Changes nothing.",
+  ask: "Asks before edits and actions outside its workspace.",
+  auto: "Workspace edits run. A reviewer model may approve routine actions; others still ask.",
+  allow:
+    "Runs every action without asking. Replacing a file in your folders still asks.",
+};
 
 /** Position on the autonomy scale, for comparing a mode against a ceiling. */
 function autonomyRank(mode: PermissionMode): number {
@@ -120,8 +137,11 @@ export function permissionModeOption(mode: PermissionMode | null) {
  * the posted value themselves (`clampPermissionMode`) so the label and
  * the request agree without relying on this display remap.
  *
- * The rows carry no posture descriptions. What a mode does is stated in the
- * session header chip's tooltip, not repeated under every picker.
+ * Work passes `descriptions`, so each row says what its mode does and the
+ * trigger's tooltip names the posture in force: the choice decides whether
+ * Tidebreak acts without asking, and a bare label is a guess. Code mode
+ * states an engine's posture in the session header chip instead, because
+ * each engine maps the modes onto its own settings.
  */
 export function PermissionModeMenu({
   scopeKey,
@@ -130,6 +150,7 @@ export function PermissionModeMenu({
   onChange,
   availableModes,
   clampDisplay = true,
+  descriptions,
   open: controlledOpen,
   onOpenChange,
 }: {
@@ -150,6 +171,8 @@ export function PermissionModeMenu({
    * trigger shows `value` so it matches the engine launch posture.
    */
   clampDisplay?: boolean;
+  /** One line per mode, shown under its row and in the trigger's tooltip. */
+  descriptions?: Readonly<Record<PermissionMode, string>>;
   /** Open the menu from outside — a surface's keyboard shortcut. */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -210,6 +233,22 @@ export function PermissionModeMenu({
   const unavailable = (mode: PermissionMode) =>
     availableModes !== undefined && !availableModes.includes(mode);
   const guided = useGuidedMenu("permissions");
+  const trigger = (
+    <DropdownMenuTrigger asChild>
+      <Button
+        variant="ghost"
+        className="h-8 min-w-0 gap-1.5"
+        disabled={controlsDisabled}
+        aria-label={`Permissions: ${current.label}`}
+        aria-description={descriptions?.[current.value]}
+        aria-busy={saving}
+      >
+        <CurrentIcon className="size-4 shrink-0 text-foreground" />
+        <span className="truncate">{current.label}</span>
+        <ChevronDown className="size-4 shrink-0 opacity-50" />
+      </Button>
+    </DropdownMenuTrigger>
+  );
   return (
     <DropdownMenu
       open={
@@ -223,23 +262,27 @@ export function PermissionModeMenu({
         onOpenChange?.(next);
       }}
     >
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          className="h-8 min-w-0 gap-1.5"
-          disabled={controlsDisabled}
-          aria-label={`Permissions: ${current.label}`}
-          aria-busy={saving}
+      {descriptions ? (
+        <WithTooltip
+          label={
+            <>
+              Permissions: {current.label}
+              <span className="mt-1 block font-normal">
+                {descriptions[current.value]}
+              </span>
+            </>
+          }
+          contentClassName="max-w-64"
         >
-          <CurrentIcon className="size-4 shrink-0 text-foreground" />
-          <span className="truncate">{current.label}</span>
-          <ChevronDown className="size-4 shrink-0 opacity-50" />
-        </Button>
-      </DropdownMenuTrigger>
+          {trigger}
+        </WithTooltip>
+      ) : (
+        trigger
+      )}
       <DropdownMenuContent
         align="end"
         side="top"
-        className="w-64"
+        className={descriptions ? "w-72" : "w-64"}
         data-first-task-target="permissions-menu"
         onEscapeKeyDown={guided.onEscapeKeyDown}
       >
@@ -248,6 +291,11 @@ export function PermissionModeMenu({
           const locked = overCeiling(option.value);
           const unoffered = unavailable(option.value);
           const OptionIcon = option.icon;
+          const note = locked
+            ? "Locked by your organization's policy."
+            : unoffered
+              ? "This engine cannot honor this mode."
+              : descriptions?.[option.value];
           return (
             <DropdownMenuItem
               key={option.value}
@@ -258,7 +306,7 @@ export function PermissionModeMenu({
               }}
               className={cn(
                 "py-2",
-                (locked || unoffered) && "flex-col items-start gap-0.5 py-2.5",
+                note && "flex-col items-start gap-0.5 py-2.5",
               )}
               data-first-task-target={
                 option.value === "ask" ? "permissions-ask" : undefined
@@ -282,11 +330,9 @@ export function PermissionModeMenu({
                   selected && <Check className="size-4" />
                 )}
               </div>
-              {(locked || unoffered) && (
+              {note && (
                 <span className="text-muted-foreground pl-6 text-xs">
-                  {locked
-                    ? "Locked by your organization's policy."
-                    : "This engine cannot honor this mode."}
+                  {note}
                 </span>
               )}
             </DropdownMenuItem>

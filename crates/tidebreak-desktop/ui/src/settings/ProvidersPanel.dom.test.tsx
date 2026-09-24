@@ -11,7 +11,12 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, ModelInfo, ProviderInfo } from "../api";
+import type {
+  ApiClient,
+  ModelInfo,
+  ProviderInfo,
+  ProviderTestResult,
+} from "../api";
 import { providerInfoFixture } from "../stories/fixtures";
 import { ProvidersPanel } from "./ProvidersPanel";
 
@@ -20,6 +25,20 @@ const compatible: ProviderInfo = providerInfoFixture("openai_compatible", {
   has_credential: true,
   base_url: "http://127.0.0.1:1234/v1",
 });
+
+const connectedTest: ProviderTestResult = {
+  outcome: "connected",
+  message: "Anthropic accepted the saved key.",
+  tested_at: new Date().toISOString(),
+};
+
+const rejectedTest: ProviderTestResult = {
+  outcome: "key_rejected",
+  message:
+    "Anthropic rejected the saved API key (HTTP 401). Save a valid key, then test again.",
+  status: 401,
+  tested_at: new Date().toISOString(),
+};
 
 function grok(id: string, name: string): ModelInfo {
   return {
@@ -240,7 +259,8 @@ describe("ProvidersPanel", () => {
       ...ollama,
       enabled: true,
     });
-    const client = { putProvider } as unknown as ApiClient;
+    const testProvider = vi.fn().mockResolvedValue(connectedTest);
+    const client = { putProvider, testProvider } as unknown as ApiClient;
 
     renderPanel(
       <ProvidersPanel
@@ -265,8 +285,174 @@ describe("ProvidersPanel", () => {
       expect(putProvider).toHaveBeenCalledWith("ollama", {
         enabled: true,
         base_url: "http://127.0.0.1:11434/v1",
+        allow_loopback_http: false,
       }),
     );
+    // The save is when a stopped daemon should show up.
+    await waitFor(() => expect(testProvider).toHaveBeenCalledWith("ollama"));
+  });
+
+  it("saves a local OpenAI-compatible server with no key", async () => {
+    const empty = providerInfoFixture("openai_compatible");
+    const saved = providerInfoFixture("openai_compatible", {
+      enabled: true,
+      base_url: "http://127.0.0.1:1234/v1",
+    });
+    const putProvider = vi.fn().mockResolvedValue(saved);
+    const testProvider = vi.fn().mockResolvedValue(connectedTest);
+    const client = { putProvider, testProvider } as unknown as ApiClient;
+
+    renderPanel(
+      <ProvidersPanel
+        providers={[empty]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("No API key required for a server on this computer"),
+    ).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("API key (optional)")).toHaveValue("");
+    fireEvent.change(
+      screen.getByPlaceholderText("Base URL, such as http://127.0.0.1:1234/v1"),
+      { target: { value: "http://127.0.0.1:1234/v1" } },
+    );
+    // No key, so no clear-text consent to ask for.
+    expect(
+      screen.queryByText("Send the key over HTTP to this computer?"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("openai_compatible", {
+        enabled: true,
+        base_url: "http://127.0.0.1:1234/v1",
+        allow_loopback_http: false,
+      }),
+    );
+    await waitFor(() =>
+      expect(testProvider).toHaveBeenCalledWith("openai_compatible"),
+    );
+  });
+
+  it("asks before sending a key over HTTP to this computer", async () => {
+    const compatibleLocal = providerInfoFixture("openai_compatible", {
+      enabled: true,
+      base_url: "http://127.0.0.1:1234/v1",
+    });
+    const putProvider = vi
+      .fn()
+      .mockResolvedValue({ ...compatibleLocal, has_credential: true });
+    const testProvider = vi.fn().mockResolvedValue(connectedTest);
+    const client = { putProvider, testProvider } as unknown as ApiClient;
+
+    renderPanel(
+      <ProvidersPanel
+        providers={[compatibleLocal]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("API key"), {
+      target: { value: "local-server-key" },
+    });
+    expect(
+      screen.getByText("Send the key over HTTP to this computer?"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
+    expect(
+      await screen.findByText(
+        "Confirm that Tidebreak may send the key over HTTP to this computer, or use HTTPS.",
+      ),
+    ).toBeInTheDocument();
+    expect(putProvider).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "Send the key in clear text to this loopback address",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("openai_compatible", {
+        enabled: true,
+        base_url: "http://127.0.0.1:1234/v1",
+        credential: { type: "api_key", key: "local-server-key" },
+        allow_loopback_http: true,
+      }),
+    );
+  });
+
+  it("tests a saved key and says what the provider answered", async () => {
+    const anthropic = providerInfoFixture("anthropic", {
+      enabled: true,
+      has_credential: true,
+    });
+    const testProvider = vi.fn().mockResolvedValue(rejectedTest);
+    const onChanged = vi.fn();
+    const client = { testProvider } as unknown as ApiClient;
+
+    renderPanel(
+      <ProvidersPanel
+        providers={[anthropic]}
+        client={client}
+        onChanged={onChanged}
+      />,
+    );
+
+    // Configured but never tested: the badge does not claim a connection.
+    expect(screen.getByText("Not tested")).toBeInTheDocument();
+    expect(screen.queryByText("Connected")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+
+    expect(await screen.findAllByText("Key rejected")).not.toHaveLength(0);
+    expect(
+      screen.getByText(
+        /Anthropic rejected the saved API key \(HTTP 401\)\. Save a valid key, then test again\. Tested just now\./,
+      ),
+    ).toBeInTheDocument();
+    expect(testProvider).toHaveBeenCalledWith("anthropic");
+    // The provider list re-reads so the recorded test comes back with it.
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("drives the badge from the last recorded test", () => {
+    renderPanel(
+      <ProvidersPanel
+        providers={[
+          providerInfoFixture("anthropic", {
+            enabled: true,
+            has_credential: true,
+            last_test: connectedTest,
+          }),
+          providerInfoFixture("gemini", {
+            enabled: true,
+            has_credential: true,
+            last_test: { ...rejectedTest, outcome: "rate_limited" },
+          }),
+          providerInfoFixture("xai", {
+            enabled: false,
+            has_credential: true,
+            last_test: connectedTest,
+          }),
+        ]}
+        client={{} as ApiClient}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    const header = (name: string) =>
+      screen.getByRole("button", { name: `Collapse ${name}` });
+    expect(within(header("Anthropic")).getByText("Connected")).toBeVisible();
+    expect(
+      within(header("Google Gemini")).getByText("Rate limited"),
+    ).toBeVisible();
+    // Switched off, so the last test no longer describes anything that runs.
+    expect(within(header("xAI")).getByText("Not connected")).toBeVisible();
   });
 
   it("shows fixed endpoints for direct compatible presets without editing them", () => {

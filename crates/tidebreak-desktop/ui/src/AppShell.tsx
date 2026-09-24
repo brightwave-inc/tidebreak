@@ -109,6 +109,7 @@ import {
   useNativeHostEvent,
   useShellMenuCommands,
 } from "./nativeMenu";
+import { noRunnableModel, useRefreshWhileNoModelRuns } from "./modelSetup";
 import { openInBrowser } from "./openInBrowser";
 import { SidebarExpandStrip } from "./sidebar/SidebarExpandStrip";
 import { useSidebarLayout } from "./sidebar/useSidebarLayout";
@@ -279,6 +280,7 @@ export function AppShell() {
   const [info, setInfo] = useState<ServerInfo | null>(null);
   const [client, setClient] = useState<ApiClient | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
   const [defaultModelKey, setDefaultModelKey] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -684,6 +686,7 @@ export function AppShell() {
         ]);
         if (cancelled) return;
         setModels(catalog.models);
+        setCatalogLoaded(true);
         setDefaultModelKey(resolvedRoleKey(catalog.roles, "chat"));
         setProviders(providerList.providers);
         setBootFailure(null);
@@ -1276,6 +1279,12 @@ export function AppShell() {
     checkForUpdate: () => contextActionsRef.current.checkForUpdate(),
     restartForUpdate: () => contextActionsRef.current.restartForUpdate(),
   }));
+  // A sign-in or a gateway's model list can land after the panel that
+  // started it has closed; keep looking while nothing can run.
+  useRefreshWhileNoModelRuns(
+    catalogLoaded && noRunnableModel(models, catalogLoaded),
+    stableActions.refreshCatalog,
+  );
 
   // Memoized so the ~34 useApp() consumers re-render when the data they read
   // changes, not whenever the shell does — before this, every shell render
@@ -1289,6 +1298,7 @@ export function AppShell() {
             client,
             attachment: info.attachment,
             models,
+            catalogLoaded,
             defaultModelKey,
             providers,
             status,
@@ -1302,6 +1312,7 @@ export function AppShell() {
       client,
       info,
       models,
+      catalogLoaded,
       defaultModelKey,
       providers,
       status,

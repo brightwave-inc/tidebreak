@@ -421,6 +421,18 @@ export type ComposerProps = {
   turnStatus?: string;
   /** Quiet status or guidance that belongs to this composer setup. */
   footerNote?: ReactNode;
+  /**
+   * Why nothing can be sent yet, such as no model being able to run. Send
+   * stays off, its tooltip gives the reason, and the reason sits under the
+   * composer with the one action that fixes it.
+   */
+  sendBlocker?: ComposerSendBlocker | null;
+};
+
+/** A reason send is off that no edit to the draft can fix. */
+export type ComposerSendBlocker = {
+  reason: string;
+  action?: { label: string; onClick: () => void };
 };
 
 /**
@@ -469,8 +481,10 @@ function ComposerView({
   steerStatus,
   turnStatus,
   footerNote,
+  sendBlocker = null,
 }: ComposerProps) {
   const contextTriggerId = useId();
+  const sendBlockerId = useId();
   const contextLabelId = `${contextTriggerId}-label`;
   const contextCountId = `${contextTriggerId}-count`;
   const contextSummaryId = `${contextTriggerId}-summary`;
@@ -530,6 +544,7 @@ function ComposerView({
   const voiceWorking = voice?.state !== undefined && voice.state !== "idle";
   const canSubmit =
     !inputDisabled &&
+    sendBlocker === null &&
     !steerPending &&
     !cancelPending &&
     hasDraft &&
@@ -1494,12 +1509,15 @@ function ComposerView({
               </WithTooltip>
             </>
           ) : (
-            <WithTooltip label={imageBlocker ?? "Send · Enter"}>
+            <WithTooltip
+              label={sendBlocker?.reason ?? imageBlocker ?? "Send · Enter"}
+            >
               <Button
                 type="submit"
                 variant="default"
                 size="icon-8"
                 aria-label="Send message"
+                aria-describedby={sendBlocker ? sendBlockerId : undefined}
                 disabled={!canSubmit}
               >
                 <ArrowUpRight size={16} />
@@ -1517,7 +1535,9 @@ function ComposerView({
             ? turnStatus
             : busy
               ? "Agent is responding"
-              : "Ready to send"}
+              : sendBlocker
+                ? "Cannot send yet"
+                : "Ready to send"}
       </span>
       {voice?.error && (
         <span className="text-xs text-destructive" role="alert">
@@ -1540,6 +1560,26 @@ function ComposerView({
         <span className="text-xs text-muted-foreground" role="status">
           {steerStatus}
         </span>
+      )}
+      {sendBlocker && (
+        <p
+          id={sendBlockerId}
+          className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground"
+          role="status"
+        >
+          <span>{sendBlocker.reason}</span>
+          {sendBlocker.action && (
+            <Button
+              type="button"
+              variant="link"
+              size="2xs"
+              className="h-auto px-0 text-xs"
+              onClick={sendBlocker.action.onClick}
+            >
+              {sendBlocker.action.label}
+            </Button>
+          )}
+        </p>
       )}
       {footerNote}
       {steerTooLong && (

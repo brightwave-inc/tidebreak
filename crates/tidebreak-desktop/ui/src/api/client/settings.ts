@@ -17,6 +17,7 @@ import type {
   PromptCacheRetention,
   ProviderInfo,
   ProviderKind,
+  ProviderTestResult,
   RuntimeSettings,
   VoiceTranscriptionInfo,
   VoiceTranscriptionModel,
@@ -49,6 +50,11 @@ export function withSettingsApi<TBase extends Constructor<HttpCore>>(
         base_url?: string | null;
         credential?: { type: "api_key"; key: string };
         models?: CustomModelConfig[];
+        /**
+         * Consent to send the saved key over clear-text HTTP to a loopback IP
+         * address. Only Ollama and OpenAI-compatible endpoints take it.
+         */
+        allow_loopback_http?: boolean;
       },
     ): Promise<ProviderInfo> {
       return this.json(`/providers/${kind}`, {
@@ -65,6 +71,19 @@ export function withSettingsApi<TBase extends Constructor<HttpCore>>(
      */
     discoverProviderModels(kind: ProviderKind): Promise<DiscoveredModels> {
       return this.json(`/providers/${kind}/models/discover`, {
+        method: "POST",
+        headers: this.headers(),
+      });
+    }
+
+    /**
+     * Test the saved key and endpoint with one cheap request, and record the
+     * result as the provider's last test. The key stays on the server. A
+     * refusal to test (no key, no endpoint, ChatGPT sign-in) rejects instead
+     * and records nothing.
+     */
+    testProvider(kind: ProviderKind): Promise<ProviderTestResult> {
+      return this.json(`/providers/${kind}/test`, {
         method: "POST",
         headers: this.headers(),
       });

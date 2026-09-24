@@ -8,6 +8,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import type { ApiClient, ManagedPolicy } from "@/api";
+import type { AppContextValue } from "@/AppContext";
 import { AppsPage } from "@/apps/AppsPage";
 import { HomeRoute } from "@/HomeRoute";
 import { InboxView } from "@/InboxView";
@@ -28,9 +29,12 @@ import {
   storyClient,
   unmanagedPolicy,
 } from "./routeStoryHarness";
+import { storyModels, storyProviders } from "./SettingsStoryHarness";
 
 type RouteScenario =
   | "home"
+  | "home-no-provider"
+  | "home-managed-no-model"
   | "home-project"
   | "inbox-loading"
   | "inbox-empty"
@@ -210,7 +214,33 @@ function initialPathFor(scenario: RouteScenario): string {
 }
 
 function policyFor(scenario: RouteScenario): ManagedPolicy {
-  return scenario === "settings-managed" ? managedPolicy : unmanagedPolicy;
+  return scenario === "settings-managed" || scenario === "home-managed-no-model"
+    ? managedPolicy
+    : unmanagedPolicy;
+}
+
+/**
+ * A fresh install: the catalog loaded, and nothing in it can run because no
+ * provider is connected yet.
+ */
+function contextFor(
+  scenario: RouteScenario,
+): Partial<AppContextValue> | undefined {
+  if (scenario === "home-no-provider") {
+    return {
+      models: storyModels.map((model) => ({ ...model, available: false })),
+      providers: storyProviders.map((provider) => ({
+        ...provider,
+        enabled: false,
+        has_credential: false,
+      })),
+      catalogLoaded: true,
+    };
+  }
+  if (scenario === "home-managed-no-model") {
+    return { models: [], providers: [], catalogLoaded: true };
+  }
+  return undefined;
 }
 
 function RoutesStory({ scenario }: { scenario: RouteScenario }) {
@@ -233,12 +263,17 @@ function RoutesStory({ scenario }: { scenario: RouteScenario }) {
     return {
       client: clientForScenario(scenario),
       policy: policyFor(scenario),
+      context: contextFor(scenario),
       router: createRouteRouter(initialPathFor(scenario)),
     };
   });
 
   return (
-    <RouteStoryProviders client={state.client} policy={state.policy}>
+    <RouteStoryProviders
+      client={state.client}
+      policy={state.policy}
+      context={state.context}
+    >
       <div className="app-shell h-full min-h-0 w-full overflow-hidden">
         <div className="app-body">
           <RouterProvider router={state.router as never} />
@@ -265,6 +300,34 @@ export const HomeDesktop: Story = {};
 /** Home at 720 × 480: compact starter rows so every opener sits above the composer. */
 export const HomeMinimumWindow: Story = {
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
+};
+
+/**
+ * A fresh install with nothing connected: the setup card stands where the
+ * starters go, and the composer says why it cannot send.
+ */
+export const HomeNoProvider: Story = {
+  args: { scenario: "home-no-provider" },
+};
+
+/** The same first run in the 420 px compact pane. */
+export const HomeNoProviderCompact: Story = {
+  args: { scenario: "home-no-provider" },
+  globals: { viewport: { value: "compact", isRotated: false } },
+};
+
+/** The same first run at the 720 × 480 minimum window. */
+export const HomeNoProviderMinimumWindow: Story = {
+  args: { scenario: "home-no-provider" },
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+};
+
+/**
+ * A managed profile whose gateway has nothing for this person yet: there is
+ * no key to add, so home points at the gateway instead.
+ */
+export const HomeManagedNoModel: Story = {
+  args: { scenario: "home-managed-no-model" },
 };
 
 /**

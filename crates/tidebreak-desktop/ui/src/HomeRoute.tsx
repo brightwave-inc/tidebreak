@@ -20,15 +20,26 @@ import { type ImportedDocument, type LibraryImportSuccess } from "./documents";
 import { DocumentDropTarget } from "./DocumentDropTarget";
 import { useFirstMessage } from "./FirstMessage";
 import { hasLocalHostAuthority } from "./host";
+import { useManagedPolicy } from "./managedPolicy";
 import { ModelMenu, useModelSettingsNav } from "./ModelMenu";
 import { modelForSelection, textOnlyModelLabel } from "./ModelSelection";
+import {
+  noModelSendBlocker,
+  noRunnableModel,
+  openGatewaySettings,
+  openProviderSetup,
+} from "./modelSetup";
 import {
   effectiveNewChatSettings,
   useNewChatSettings,
 } from "./NewChatSettings";
-import { PermissionModeMenu } from "./PermissionModeMenu";
+import {
+  PermissionModeMenu,
+  WORK_PERMISSION_MODE_DESCRIPTIONS,
+} from "./PermissionModeMenu";
 import { pluginsApisFromClient } from "./plugins/pluginsApis";
 import { useProjectListStore } from "./ProjectListStore";
+import { ManagedModelNotice, ProviderSetupCard } from "./ProviderSetupCard";
 import { useComposerPlugins } from "./plugins/useComposerPlugins";
 import { WelcomeState } from "./WelcomeState";
 import { PaneDragBand } from "./WindowDragStrip";
@@ -137,8 +148,17 @@ export function HomeRoute({
   projectId?: string | null;
 } = {}) {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey, providers } = useApp();
+  const { client, models, defaultModelKey, providers, catalogLoaded } =
+    useApp();
+  const { managed } = useManagedPolicy();
   const modelSettingsNav = useModelSettingsNav();
+  // Nothing can run until a provider is connected. A starter or a message
+  // sent now could only fail, so home offers the ways to connect instead.
+  const noModelCanRun = noRunnableModel(models, catalogLoaded);
+  const sendBlocker = useMemo(
+    () => noModelSendBlocker(noModelCanRun, managed, navigate),
+    [noModelCanRun, managed, navigate],
+  );
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const project = useProjectListStore((state) =>
     projectId
@@ -507,17 +527,42 @@ export function HomeRoute({
                 executionConfigClient={client}
                 promptLibrary={promptLibrary}
                 heading={
-                  walkthroughAvailable ? "Welcome to Tidebreak" : undefined
+                  noModelCanRun
+                    ? managed
+                      ? "No models are available yet"
+                      : "Connect a model to start"
+                    : walkthroughAvailable
+                      ? "Welcome to Tidebreak"
+                      : undefined
                 }
                 description={
-                  walkthroughAvailable
-                    ? "Choose how the agent works, add what it needs, and start with a real task."
-                    : undefined
+                  noModelCanRun
+                    ? managed
+                      ? "Your organization's gateway provides the models here."
+                      : "Tidebreak runs on models you bring. Pick one way to connect. You can add more later in Settings."
+                    : walkthroughAvailable
+                      ? "Choose how the agent works, add what it needs, and start with a real task."
+                      : undefined
                 }
                 onStartWalkthrough={
                   walkthroughAvailable && !walkthroughOpen
                     ? () => setWalkthroughOpen(true)
                     : undefined
+                }
+                setup={
+                  noModelCanRun ? (
+                    managed ? (
+                      <ManagedModelNotice
+                        onOpenGateway={() => openGatewaySettings(navigate)}
+                      />
+                    ) : (
+                      <ProviderSetupCard
+                        onSetUp={(target) =>
+                          openProviderSetup(navigate, target)
+                        }
+                      />
+                    )
+                  ) : undefined
                 }
               />
             </div>
@@ -635,6 +680,9 @@ export function HomeRoute({
                   models={models}
                   value={effective.model}
                   defaultKey={defaultModelKey}
+                  lastUsed={
+                    newChat.model === null && Boolean(newChat.defaults?.model)
+                  }
                   disabled={creatingChat}
                   providers={providers}
                   onSetUpProvider={modelSettingsNav.onSetUpProvider}
@@ -646,6 +694,7 @@ export function HomeRoute({
                   scopeKey="new-chat"
                   value={effective.permissionMode}
                   disabled={creatingChat}
+                  descriptions={WORK_PERMISSION_MODE_DESCRIPTIONS}
                   onChange={newChat.setPermissionMode}
                 />
               }
@@ -664,6 +713,7 @@ export function HomeRoute({
                 setDraft(next);
                 if (!next.trim()) voice.resetInputUsed();
               }}
+              sendBlocker={sendBlocker}
               onSend={startChat}
               onSteer={async () => {}}
               onStop={async () => {}}
