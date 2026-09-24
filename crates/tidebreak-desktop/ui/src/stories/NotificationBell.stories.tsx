@@ -87,6 +87,10 @@ export const Empty: Story = {
   args: { notifications: [], unreadCount: 0 },
 };
 
+export const Loading: Story = {
+  args: { notifications: [], unreadCount: 0, loaded: false },
+};
+
 export const Unread: Story = {
   args: { notifications: [unread, read], unreadCount: 1 },
 };

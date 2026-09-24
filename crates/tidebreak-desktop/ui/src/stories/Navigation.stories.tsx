@@ -351,6 +351,16 @@ export const CollapsedRail: Story = {
   args: { scenario: "collapsed" },
 };
 
+/** At 720px the rail leaves the layout for the expand strip. */
+export const MinimumWindow: Story = {
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+};
+
+/** Above the overlay breakpoint the remembered rail width returns. */
+export const DesktopWidth: Story = {
+  globals: { viewport: { value: "desktop", isRotated: false } },
+};
+
 export const CollapsedMacWork: Story = {
   args: { scenario: "collapsed-mac" },
   globals: { viewport: { value: "minimumWindow", isRotated: false } },

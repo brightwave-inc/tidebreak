@@ -17,6 +17,7 @@ import {
   SIDEBAR_MIN_WIDTH,
   useUiStore,
 } from "@/UiStore";
+import { useSidebarLayout } from "./useSidebarLayout";
 
 /**
  * The navigation rail, shown or gone.
@@ -164,30 +165,43 @@ export function Sidebar({
   children,
   ...props
 }: ComponentProps<"div">) {
-  const collapsed = useUiStore((state) => state.sidebarCollapsed);
   const sidebarWidthPx = useUiStore((state) => state.sidebarWidth);
+  const setSidebarOverlayOpen = useUiStore(
+    (state) => state.setSidebarOverlayOpen,
+  );
+  const { inLayout, overlay } = useSidebarLayout();
   const [resizing, setResizing] = useState(false);
-  if (collapsed) return null;
+  if (!inLayout) return null;
 
   return (
     <TooltipProvider>
+      {overlay && (
+        <button
+          type="button"
+          className="absolute inset-0 z-30 bg-foreground/20"
+          aria-label="Close sidebar"
+          onClick={() => setSidebarOverlayOpen(false)}
+        />
+      )}
       <div
         {...props}
         className={cn(
           "relative flex shrink-0 flex-col overflow-hidden border-r border-border-subtle bg-page-background text-foreground",
+          overlay && "absolute top-0 bottom-0 left-0 z-40 shadow-lg",
           // Animate width changes, but not live drags — easing lags the pointer.
           !resizing && "transition-[flex-basis,min-width,width] duration-200",
           className,
         )}
         style={{
-          flex: `0 0 ${sidebarWidthPx}px`,
+          flex: overlay ? undefined : `0 0 ${sidebarWidthPx}px`,
           minWidth: `${sidebarWidthPx}px`,
           width: sidebarWidthPx,
         }}
         data-sidebar="expanded"
+        data-overlay={overlay || undefined}
       >
         {children}
-        <SidebarResizeHandle onDraggingChange={setResizing} />
+        {!overlay && <SidebarResizeHandle onDraggingChange={setResizing} />}
       </div>
     </TooltipProvider>
   );

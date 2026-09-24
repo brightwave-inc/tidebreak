@@ -16,6 +16,7 @@ import {
   type InboxItemKind,
 } from "./api";
 import { attentionLabel } from "./code/labels";
+import { PanelLoading } from "./components/PanelLoading";
 import {
   Empty,
   EmptyDescription,
@@ -77,6 +78,20 @@ export function InboxView() {
   const entries = useInbox((state) => state.entries);
   const loaded = useInbox((state) => state.loaded);
 
+  if (!loaded) {
+    return (
+      <div className="relative h-full">
+        <PaneDragBand />
+        <PanelLoading
+          variant="list"
+          label="Loading inbox"
+          rows={8}
+          className="p-4"
+        />
+      </div>
+    );
+  }
+
   if (entries.length === 0) {
     return (
       <Empty className="relative h-full">
@@ -85,13 +100,11 @@ export function InboxView() {
           <EmptyMedia variant="icon" className="text-success">
             <CircleCheck aria-hidden="true" />
           </EmptyMedia>
-          <EmptyTitle>{loaded ? "Nothing is waiting" : "Loading…"}</EmptyTitle>
-          {loaded && (
-            <EmptyDescription>
-              Approvals, questions, and plan reviews from every conversation
-              collect here while they wait for you.
-            </EmptyDescription>
-          )}
+          <EmptyTitle>Nothing is waiting</EmptyTitle>
+          <EmptyDescription>
+            Approvals, questions, and plan reviews from every conversation
+            collect here while they wait for you.
+          </EmptyDescription>
         </EmptyHeader>
       </Empty>
     );

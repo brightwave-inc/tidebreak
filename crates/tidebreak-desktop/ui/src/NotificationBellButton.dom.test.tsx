@@ -80,6 +80,22 @@ describe("NotificationBellButton", () => {
     expect(await screen.findByText("Unknown time")).toBeInTheDocument();
   });
 
+  it("shows skeleton rows while notifications have not loaded", async () => {
+    useNotifications.setState({
+      notifications: [],
+      unread: 0,
+      loaded: false,
+    });
+
+    await renderBell({} as ApiClient);
+
+    expect(
+      screen.getByRole("status", { name: "Loading notifications" }),
+    ).toBeVisible();
+    expect(screen.queryByText("No notifications")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+  });
+
   it("caps the popover width to the viewport", async () => {
     useNotifications.setState({
       notifications: [notification],

@@ -5,6 +5,7 @@ import { Bell, CircleAlert, CircleCheck } from "lucide-react";
 
 import type { AgentNotification } from "./api";
 import { useApp } from "./AppContext";
+import { PanelLoading } from "./components/PanelLoading";
 import {
   Empty,
   EmptyHeader,
@@ -100,15 +101,20 @@ export function NotificationBellButton({
             </Button>
           )}
         </div>
-        {notifications.length === 0 ? (
+        {!loaded ? (
+          <PanelLoading
+            variant="list"
+            label="Loading notifications"
+            rows={5}
+            className="py-2"
+          />
+        ) : notifications.length === 0 ? (
           <Empty className="py-8">
             <EmptyHeader>
               <EmptyMedia variant="icon">
                 <Bell aria-hidden="true" />
               </EmptyMedia>
-              <EmptyTitle>
-                {loaded ? "No notifications" : "Loading…"}
-              </EmptyTitle>
+              <EmptyTitle>No notifications</EmptyTitle>
             </EmptyHeader>
           </Empty>
         ) : (

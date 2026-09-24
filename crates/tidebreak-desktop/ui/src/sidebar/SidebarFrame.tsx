@@ -14,7 +14,7 @@ import {
   SidebarHeader,
 } from "./primitives";
 import { useTheme } from "@/theme";
-import { useUiStore } from "@/UiStore";
+import { useSidebarLayout } from "./useSidebarLayout";
 
 /**
  * The parts of the rail that do not depend on where the reader is: the way
@@ -28,7 +28,7 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const { updateState } = useApp();
   const { mode: themeMode, cycle: cycleTheme } = useTheme();
-  const toggleSidebar = useUiStore((state) => state.toggleSidebar);
+  const { toggleVisibility } = useSidebarLayout();
   const [appName, setAppName] = useState("Tidebreak");
 
   // Keep dev and staging windows distinguishable, but put that identity in
@@ -76,7 +76,7 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
             type="button"
             className="cursor-pointer rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             aria-label="Collapse sidebar"
-            onClick={toggleSidebar}
+            onClick={toggleVisibility}
           >
             <PanelLeftClose size={15} />
           </button>

@@ -120,6 +120,24 @@ describe("styles contract (see DESIGN.md)", () => {
     ).toEqual([]);
   });
 
+  it("uses type scale tokens in styles.css, not raw font-size", () => {
+    const allowed = /^var\(--text-(?:2xs|xs|sm|md|base|lg|xl|2xl|3xl)\)$/;
+    const hits: string[] = [];
+    const lines = readFileSync(join(SRC, "styles.css"), "utf8").split("\n");
+    lines.forEach((line, index) => {
+      const match = line.match(/font-size:\s*([^;]+);/);
+      if (!match) return;
+      const value = match[1].trim();
+      if (!allowed.test(value)) {
+        hits.push(`styles.css:${index + 1}  ${value}`);
+      }
+    });
+    expect(
+      hits,
+      "Every font-size in styles.css must be a var(--text-*) rung.",
+    ).toEqual([]);
+  });
+
   it("uses semantic tokens, not the raw Tailwind palette", () => {
     expect(
       offenders(RAW_PALETTE, RAW_PALETTE_ALLOWLIST),
