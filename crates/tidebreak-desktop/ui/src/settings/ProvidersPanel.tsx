@@ -42,6 +42,7 @@ import {
   testOutcomeLabel,
   testOutcomeTone,
 } from "./providerConnection";
+import { Notice } from "@/components/ui/notice";
 
 const CHATGPT_SIGN_IN_POLL_MS = 2_000;
 // Matches the server's sign-in window; polling past it can only report a
@@ -316,7 +317,7 @@ function ProviderRow({
       setKey("");
       toast.success(`Saved ${providerLabel(info.kind)} settings`);
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save these settings."));
       setSaving(false);
       return;
     }
@@ -347,7 +348,7 @@ function ProviderRow({
       onChanged();
       toast.success(`Removed the saved ${providerLabel(info.kind)} credential`);
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not remove the credential."));
     } finally {
       setSaving(false);
     }
@@ -476,15 +477,15 @@ function ProviderRow({
             />
           )}
           {consentHost && (
-            <div className="notice-surface notice-warning flex flex-col gap-2 rounded-xl border px-3 py-2">
-              <p className="text-sm font-medium">
-                Send the key over HTTP to {hostMachineLabel()}?
-              </p>
-              <p className="text-sm">
+            <Notice
+              tone="warning"
+              title={`Send the key over HTTP to ${hostMachineLabel()}?`}
+            >
+              <p>
                 This server runs on {hostMachineLabel()} without HTTPS.
                 Tidebreak sends the key in clear text to {consentHost} only.
               </p>
-              <Label className="flex items-start gap-2 text-sm font-normal">
+              <Label className="mt-2 flex items-start gap-2 text-sm font-normal text-foreground">
                 <Checkbox
                   checked={allowLoopbackHttp}
                   disabled={saving}
@@ -494,7 +495,7 @@ function ProviderRow({
                 />
                 Send the key in clear text to this loopback address
               </Label>
-            </div>
+            </Notice>
           )}
           {(info.kind === "fireworks" ||
             info.kind === "together" ||
@@ -743,7 +744,9 @@ function OpenAiCredentialSection({
       toast.message("Finish signing in with ChatGPT in your browser");
       startPolling(authorization_url);
     } catch (err) {
-      setError(String(err));
+      setError(
+        friendlyErrorMessage(err, "Could not start the ChatGPT sign-in."),
+      );
     } finally {
       setSaving(false);
     }
@@ -757,7 +760,7 @@ function OpenAiCredentialSection({
       onChanged();
       toast.success("Signed out of ChatGPT");
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not sign out of ChatGPT."));
     } finally {
       setSaving(false);
     }

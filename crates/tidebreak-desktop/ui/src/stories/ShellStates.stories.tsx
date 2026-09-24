@@ -6,6 +6,7 @@ import { ErrorBoundary } from "@/ErrorBoundary";
 import { ManagedGate } from "@/ManagedGate";
 import { NetworkPolicyDialog } from "@/NetworkPolicyDialog";
 import { gatewaySignedIn, gatewaySignedOut } from "./fixtures";
+import { Notice } from "@/components/ui/notice";
 
 const unmanaged: ManagedPolicy = {
   managed: false,
@@ -189,7 +190,7 @@ export const ManagedSessionReady: Story = {
 
 export const UnexpectedShellError: Story = {
   render: () => (
-    <ErrorBoundary onReload={fn()}>
+    <ErrorBoundary onReload={fn()} onGoHome={fn()}>
       <ThrowsOnRender />
     </ErrorBoundary>
   ),
@@ -204,9 +205,10 @@ export const ContainedViewError: Story = {
       </p>
       <ErrorBoundary
         fallback={
-          <p className="mt-4 rounded-md bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted">
-            This result could not be shown.
-          </p>
+          <Notice tone="critical" className="mt-4">
+            This result could not be shown. The rest of the conversation is
+            unaffected.
+          </Notice>
         }
       >
         <ThrowsOnRender />

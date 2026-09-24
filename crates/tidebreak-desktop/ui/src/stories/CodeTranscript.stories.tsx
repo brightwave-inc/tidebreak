@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 import { CodeTranscript } from "@/code/CodeTranscript";
 import type { CodeTranscriptItem } from "@/code/CodeSessionReducer";
 import { messageWithReviewComments } from "@/code/diff/reviewComments";
@@ -587,14 +587,14 @@ export const Notices: Story = {
     ],
   },
   play: async ({ canvasElement }) => {
-    const notices = Array.from(
-      canvasElement.querySelectorAll<HTMLElement>(
-        ".message-notice, .message-turn-failure, .notice-surface",
-      ),
-    );
-    await expect(notices.length).toBeGreaterThan(2);
-    const first = notices[0].getBoundingClientRect();
-    for (const notice of notices) {
+    const notices = () =>
+      Array.from(
+        canvasElement.querySelectorAll<HTMLElement>('[data-slot="notice"]'),
+      );
+    // The transcript draws its rows after it measures the column.
+    await waitFor(() => expect(notices().length).toBeGreaterThan(2));
+    const first = notices()[0].getBoundingClientRect();
+    for (const notice of notices()) {
       const rect = notice.getBoundingClientRect();
       await expect(Math.abs(rect.width - first.width)).toBeLessThan(1);
       await expect(Math.abs(rect.left - first.left)).toBeLessThan(1);

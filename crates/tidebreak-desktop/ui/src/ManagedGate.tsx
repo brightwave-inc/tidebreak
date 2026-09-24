@@ -27,6 +27,8 @@ import { openInBrowser } from "./openInBrowser";
 import { disconnectRemoteMachine, remoteMachineState } from "./remoteMachine";
 import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
 import { WindowDragStrip } from "./WindowDragStrip";
+import { Notice } from "@/components/ui/notice";
+import { friendlyErrorMessage } from "./lib/utils";
 
 /** While the browser flow is pending the exchange lands out of band, so the
  * poll is what turns the gate off. Matches the settings panel's cadence. */
@@ -302,7 +304,9 @@ export function ManagedGate({
     if (!gateActive) return;
     let cancelled = false;
     reload().catch((err) => {
-      if (!cancelled) setStatusError(String(err));
+      if (!cancelled) {
+        setStatusError(friendlyErrorMessage(err, "Try again in a moment."));
+      }
     });
     return () => {
       cancelled = true;
@@ -338,7 +342,9 @@ export function ManagedGate({
       await openInBrowser(started.authorization_url);
       await reload();
     } catch (err) {
-      setActionError(String(err));
+      setActionError(
+        friendlyErrorMessage(err, "Could not start the sign-in. Try again."),
+      );
     } finally {
       setWorking(false);
     }
@@ -351,7 +357,9 @@ export function ManagedGate({
       const next = await client.dismissGatewayPairing();
       setPolicyState({ kind: "resolved", policy: next });
     } catch (err) {
-      setActionError(String(err));
+      setActionError(
+        friendlyErrorMessage(err, "Could not dismiss the pairing. Try again."),
+      );
     } finally {
       setWorking(false);
     }
@@ -369,7 +377,9 @@ export function ManagedGate({
       await leave.leave(url);
       refreshPolicy();
     } catch (err) {
-      setActionError(String(err));
+      setActionError(
+        friendlyErrorMessage(err, "Could not leave the gateway. Try again."),
+      );
     } finally {
       setWorking(false);
     }
@@ -464,7 +474,12 @@ export function ManagedGate({
                       // machine this window opened on.
                       window.location.reload();
                     } catch (err) {
-                      setActionError(String(err));
+                      setActionError(
+                        friendlyErrorMessage(
+                          err,
+                          "Could not return to this computer. Try again.",
+                        ),
+                      );
                       setWorking(false);
                     }
                   })()
@@ -601,9 +616,9 @@ export function ManagedGate({
         </p>
       )}
       {failure && (
-        <p className="text-destructive text-sm" role="alert">
+        <Notice tone="critical" className="max-w-md text-left">
           {failure}
-        </p>
+        </Notice>
       )}
       {pendingUrl ? (
         <p className="text-sm">

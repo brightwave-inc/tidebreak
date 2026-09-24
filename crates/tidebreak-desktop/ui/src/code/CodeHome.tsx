@@ -26,6 +26,7 @@ import { openEngineSignIn } from "./EngineSignIn";
 import { harnessNeedsNoSignIn, workspaceHarnesses } from "./labels";
 import { isPutAway } from "./workspaceCards";
 import { PaneDragBand } from "@/WindowDragStrip";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 /**
  * `/code` home: the doctor until some engine can run a first turn, the
@@ -173,30 +174,29 @@ function CodeHomeBody() {
         </header>
       )}
       {error && (
-        <div className="notice-surface notice-critical flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
-          <span>{error}</span>
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            onClick={() => void refresh(client)}
-          >
-            Try again
-          </Button>
-        </div>
+        <Notice
+          tone="critical"
+          title="Could not load your repositories and workspaces"
+          action={<NoticeRetryButton onClick={() => void refresh(client)} />}
+        >
+          {error}
+        </Notice>
       )}
       {doctorError && (
-        <div className="notice-surface notice-warning flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
-          <span>The coding engine check did not answer: {doctorError}</span>
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            onClick={() => void onRefresh()}
-          >
-            {refreshing ? "Re-checking…" : "Re-check"}
-          </Button>
-        </div>
+        <Notice
+          tone="warning"
+          title="The coding engine check did not answer"
+          action={
+            <NoticeRetryButton
+              disabled={refreshing}
+              onClick={() => void onRefresh()}
+            >
+              {refreshing ? "Re-checking…" : "Re-check"}
+            </NoticeRetryButton>
+          }
+        >
+          {doctorError}
+        </Notice>
       )}
       {showLoading && (
         <Empty role="status">

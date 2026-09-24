@@ -3,7 +3,6 @@ import { toast } from "sonner";
 import {
   ChevronDown,
   ChevronRight,
-  CircleAlert,
   Ellipsis,
   Pencil,
   Plus,
@@ -11,7 +10,6 @@ import {
   Trash2,
 } from "lucide-react";
 import {
-  HttpError,
   type ApiClient,
   type ConnectedAppInfo,
   type CredentialPlacement,
@@ -33,14 +31,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty";
 import { Spinner } from "@/components/ui/spinner";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -56,6 +46,8 @@ import {
   SettingsSection,
   usedByLabel,
 } from "./primitives";
+import { Notice } from "@/components/ui/notice";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 type RestEntry = Extract<ConnectedAppInfo, { kind: "rest_api" }>;
 type McpEntry = Extract<ConnectedAppInfo, { kind: "mcp_server" }>;
@@ -191,15 +183,12 @@ function credentialLabel(entry: RestEntry): string {
   }
 }
 
+/** A failure in the app's one wording, plus what to do about the OpenAPI
+ * documents the importer turns away. */
 function errorMessage(err: unknown): string {
-  let raw = err instanceof Error ? err.message : String(err);
-  if (err instanceof HttpError) {
-    const prefix = `${err.status}: `;
-    if (raw.startsWith(prefix)) {
-      raw = raw.slice(prefix.length);
-    }
-  }
-  return ingestErrorGuidance(raw);
+  return ingestErrorGuidance(
+    friendlyErrorMessage(err, "Try again in a moment."),
+  );
 }
 
 function mcpUrlHint(draft: Draft): boolean {
@@ -1002,15 +991,12 @@ export function ConnectedAppsPanel({
         </p>
       )}
       {loopbackHttpHost(draft.baseUrl) !== null && (
-        <div className="notice-surface notice-warning flex flex-col gap-2 rounded-xl border px-3 py-2">
-          <p className="text-sm font-medium">
-            Allow clear-text HTTP on this computer?
-          </p>
-          <p className="text-sm text-muted-foreground">
+        <Notice tone="warning" title="Allow clear-text HTTP on this computer?">
+          <p>
             This service runs on this computer without TLS. Tidebreak sends the
             credential in clear text to {loopbackHttpHost(draft.baseUrl)} only.
           </p>
-          <Label className="flex items-start gap-2 text-sm font-normal">
+          <Label className="mt-2 flex items-start gap-2 text-sm font-normal text-foreground">
             <Checkbox
               checked={draft.allowLoopbackHttp}
               disabled={saving}
@@ -1020,7 +1006,7 @@ export function ConnectedAppsPanel({
             />
             Send the credential in clear text to this loopback address
           </Label>
-        </div>
+        </Notice>
       )}
       <DiscoveryResults
         discovery={draft.discovery}
@@ -1342,19 +1328,8 @@ function ConnectedAppsLoadFailure({
   onRetry: () => void;
 }) {
   return (
-    <Empty className="min-h-80 border" role="alert">
-      <EmptyHeader>
-        <EmptyMedia variant="icon" className="text-critical">
-          <CircleAlert />
-        </EmptyMedia>
-        <EmptyTitle>Connected apps could not load</EmptyTitle>
-        <EmptyDescription>{error}</EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent>
-        <Button variant="outline" size="sm" onClick={onRetry}>
-          Try again
-        </Button>
-      </EmptyContent>
-    </Empty>
+    <SettingsError title="Could not load connected apps" onRetry={onRetry}>
+      {error}
+    </SettingsError>
   );
 }

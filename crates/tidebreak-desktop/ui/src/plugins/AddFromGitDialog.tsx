@@ -18,6 +18,7 @@ import {
   type GitInstallPhase,
   type PluginInstallOutcome,
 } from "./gitInstall";
+import { Notice } from "@/components/ui/notice";
 
 export function AddFromGitDialog({
   open,
@@ -165,9 +166,7 @@ export function AddFromGitDialogView({
             </p>
           )}
           {phase.status === "failed" && (
-            <p role="alert" className="text-critical text-sm">
-              {phase.message}
-            </p>
+            <Notice tone="critical">{phase.message}</Notice>
           )}
           {installed && <InstalledReport outcome={installed} />}
           <DialogFooter>

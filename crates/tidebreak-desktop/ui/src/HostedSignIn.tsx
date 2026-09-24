@@ -11,6 +11,7 @@ import {
 } from "./hostedSession";
 import { BootBrand } from "./Logomark";
 import { WindowDragStrip } from "./WindowDragStrip";
+import { Notice } from "@/components/ui/notice";
 
 /**
  * Why a hosted browser tab has no session to show the app with.
@@ -187,10 +188,10 @@ export function HostedSignIn({
             onChange={(event) => setToken(event.target.value)}
           />
           {refused && (
-            <p className="text-critical text-sm" role="alert">
+            <Notice tone="critical" className="text-left">
               This machine refused that token. Check it with whoever runs the
               machine, then try again.
-            </p>
+            </Notice>
           )}
           <Button
             size="sm"

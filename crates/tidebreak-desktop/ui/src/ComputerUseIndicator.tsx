@@ -15,6 +15,8 @@ import {
   type ComputerUseAction,
 } from "./computerUseAction";
 import { Check, Hand, MousePointer2, TriangleAlert } from "lucide-react";
+import { Notice } from "@/components/ui/notice";
+import { friendlyErrorMessage } from "./lib/utils";
 
 function appLabel(appName: string | null, bundleId: string): string {
   // A screen-scoped ask (whole-display capture, screen-wide window list)
@@ -108,7 +110,9 @@ export function ComputerUseIndicatorView({
     setError(null);
     void (control === "stop" ? onStop() : onResume())
       .catch((err: unknown) => {
-        setError(`Could not ${control} control: ${String(err)}`);
+        setError(
+          `Could not ${control} control: ${friendlyErrorMessage(err, "Try again.")}`,
+        );
       })
       .finally(() => {
         busyRef.current.delete(control);
@@ -217,12 +221,13 @@ export function ComputerUseIndicatorView({
             </Button>
           </div>
           {error && (
-            <p
-              className="bg-popover text-destructive pointer-events-auto absolute bottom-full mb-2 rounded-lg border px-3 py-2 text-xs shadow-lg"
-              role="alert"
+            <Notice
+              tone="critical"
+              density="compact"
+              className="pointer-events-auto absolute bottom-full mb-2 w-auto bg-popover shadow-lg"
             >
               {error}
-            </p>
+            </Notice>
           )}
         </div>
       )}

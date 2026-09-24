@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ApiClient } from "./api";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { useOpenConversation } from "./OpenConversation";
+import { friendlyErrorMessage } from "./lib/utils";
 
 export type ToolApprovals = {
   deciding: Set<string>;
@@ -81,7 +82,7 @@ export function useToolApprovals(
       if (stillOpen(startedChatId)) {
         setErrors((current) => ({
           ...current,
-          [callId]: `Could not send your decision: ${String(err)}`,
+          [callId]: `Could not send your decision: ${friendlyErrorMessage(err, "Try again.")}`,
         }));
       }
     } finally {

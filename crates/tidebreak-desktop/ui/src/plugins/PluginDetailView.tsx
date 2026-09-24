@@ -13,6 +13,7 @@ import type { PluginsApis } from "./pluginsApis";
 import { capabilityLabel, categoryLabel } from "./pluginVocabulary";
 import { SkillDialog } from "./SkillDialog";
 import type { PluginCatalogState } from "./usePluginCatalog";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 /**
  * One bundle's page: identity up top, its member skills, and the facts the
@@ -39,7 +40,7 @@ export function PluginDetailView({
   /** Return to the plugins list. */
   onBack: () => void;
 }) {
-  const { catalog, loading, error, setEnabled } = state;
+  const { catalog, loading, error, reload, setEnabled } = state;
   const plugin =
     catalog?.plugins.find((entry) => entry.name === pluginId) ?? null;
   const [openSkill, setOpenSkill] = useState<PluginSkillInfo | null>(null);
@@ -66,9 +67,13 @@ export function PluginDetailView({
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 pt-2 pb-8">
           {error && (
-            <p className="text-critical text-sm" role="alert">
+            <Notice
+              tone="critical"
+              title="Could not load this plugin"
+              action={<NoticeRetryButton onClick={reload} />}
+            >
               {error}
-            </p>
+            </Notice>
           )}
           {!error && loading && !catalog && (
             <p className="text-muted-foreground text-sm" role="status">

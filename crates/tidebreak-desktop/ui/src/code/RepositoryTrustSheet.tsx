@@ -1,5 +1,3 @@
-import { CircleAlert } from "lucide-react";
-
 import type { CodeProjectConfigFile } from "@/api/types";
 import {
   AlertDialog,
@@ -13,6 +11,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { projectConfigEngines, projectConfigSummary } from "./repositoryTrust";
+import { Notice } from "@/components/ui/notice";
 
 /** What the reader chose on the trust sheet. */
 export type RepositoryTrustChoice = "trust" | "continue";
@@ -109,18 +108,7 @@ export function RepositoryTrustSheet({
           Trust it only if you trust everyone who can change it. You can change
           this later in the repository's settings.
         </p>
-        {error && (
-          <div
-            role="alert"
-            className="notice-surface notice-critical flex items-start gap-2 rounded-md border px-3 py-2 text-sm"
-          >
-            <CircleAlert
-              aria-hidden="true"
-              className="mt-0.5 size-3.5 shrink-0"
-            />
-            <span className="min-w-0 break-words">{error}</span>
-          </div>
-        )}
+        {error && <Notice tone="critical">{error}</Notice>}
         <AlertDialogFooter>
           <AlertDialogCancel
             disabled={busy}

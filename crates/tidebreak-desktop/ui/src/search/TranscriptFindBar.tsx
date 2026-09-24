@@ -6,6 +6,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { findCountLabel, type TranscriptFindState } from "./useTranscriptFind";
+import { Notice } from "@/components/ui/notice";
 
 /**
  * Find in the open conversation: a field, how many messages match, and the
@@ -144,9 +145,9 @@ export const TranscriptFindBar = forwardRef<
         </p>
       )}
       {state.status === "error" && state.error && (
-        <p role="alert" className="px-1 pb-0.5 text-xs text-critical">
+        <Notice tone="critical" density="compact">
           {state.error}
-        </p>
+        </Notice>
       )}
     </div>
   );

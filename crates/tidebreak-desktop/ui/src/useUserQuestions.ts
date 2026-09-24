@@ -6,6 +6,7 @@ import type {
 } from "./api";
 import { useOpenConversation } from "./OpenConversation";
 import { usePendingPrompts } from "./PendingPrompts";
+import { friendlyErrorMessage } from "./lib/utils";
 
 export type UserQuestions = {
   requests: PendingUserQuestions[];
@@ -102,7 +103,8 @@ export function useUserQuestions(
           answers,
           additionalUserContext,
         ),
-      (err) => `Could not send your answer: ${String(err)}`,
+      (err) =>
+        `Could not send your answer: ${friendlyErrorMessage(err, "Try again.")}`,
     );
   }
 

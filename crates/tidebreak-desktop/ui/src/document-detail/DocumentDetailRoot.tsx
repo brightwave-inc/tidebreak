@@ -10,8 +10,6 @@ import {
   DocumentDetails,
   isDocumentRenderable,
 } from "@/components/document/document-details";
-import { DocumentError } from "@/components/document/error";
-import { Button } from "@/components/ui/button";
 import {
   isGridOriginalViewer,
   isPaginatedOriginalViewer,
@@ -25,6 +23,7 @@ import {
   DocumentDetailActions,
   DocumentDetailBreadcrumb,
 } from "./DocumentDetailHeader";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 type Props = {
   chatId: string;
@@ -168,21 +167,24 @@ export function DocumentDetailRoot({
       }
     >
       {loadError ? (
-        <DocumentError>
-          <div className="flex flex-col items-center gap-3">
-            <span>{loadError.message}</span>
-            {loadError.retriable && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="font-normal"
+        loadError.retriable ? (
+          <Notice
+            tone="critical"
+            title="Could not load this source"
+            className="m-6 w-auto"
+            action={
+              <NoticeRetryButton
                 onClick={() => setReloads((count) => count + 1)}
-              >
-                Try again
-              </Button>
-            )}
-          </div>
-        </DocumentError>
+              />
+            }
+          >
+            {loadError.message}
+          </Notice>
+        ) : (
+          <Notice tone="neutral" className="m-6 w-auto">
+            {loadError.message}
+          </Notice>
+        )
       ) : info ? (
         <DocumentDetails
           chatId={chatId}
@@ -198,9 +200,18 @@ export function DocumentDetailRoot({
         </p>
       )}
       {downloadError && (
-        <p className="shrink-0 px-6 pb-2 text-sm text-critical" role="alert">
+        <Notice
+          tone="critical"
+          className="mx-6 mb-3 w-auto shrink-0"
+          action={
+            <NoticeRetryButton
+              disabled={downloading}
+              onClick={() => void onDownload()}
+            />
+          }
+        >
           {downloadError}
-        </p>
+        </Notice>
       )}
     </PanelFrame>
   );
@@ -230,13 +241,10 @@ function describeLoadFailure(error: unknown): LoadError {
       retriable: false,
     };
   }
-  if (error instanceof HttpError) {
-    return {
-      message: `The document could not be loaded (${error.status}).`,
-      retriable: true,
-    };
-  }
-  return { message: "The document could not be loaded.", retriable: true };
+  return {
+    message: friendlyErrorMessage(error, "Try again in a moment."),
+    retriable: true,
+  };
 }
 
 function documentTitle(info: DocumentDetail): string {

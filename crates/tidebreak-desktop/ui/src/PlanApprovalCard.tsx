@@ -27,6 +27,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { serializePlanComments, usePlanComments } from "./PlanComments";
+import { Notice } from "@/components/ui/notice";
 
 /**
  * One block of the plan, with the affordance for commenting on it.
@@ -347,9 +348,9 @@ export function PlanApprovalCard({
     );
 
   const errorNotice = error ? (
-    <p className="text-destructive text-xs break-words" role="alert">
+    <Notice tone="critical" density="compact">
       {error}
-    </p>
+    </Notice>
   ) : null;
 
   const plan = (

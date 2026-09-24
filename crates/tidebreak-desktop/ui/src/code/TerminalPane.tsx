@@ -7,10 +7,10 @@ import "@xterm/xterm/css/xterm.css";
 
 import type { ApiClient } from "../api/client";
 import { Button } from "@/components/ui/button";
-import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
 import { resolveShellShortcut, usesCommandModifier } from "../ShellShortcuts";
-import { STATUS_TEXT, STATUS_TEXT_MUTED } from "./statusTone";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 const POLL_MS = 200;
 const FRAME_BUDGET = 8 * 1024;
@@ -875,70 +875,53 @@ export function TerminalPane({
         </div>
       )}
       {writeFailure && (
-        <div
-          className="notice-surface notice-critical flex shrink-0 flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+        <Notice
+          tone="critical"
+          docked="top"
+          className="shrink-0"
           data-testid="terminal-write-failure"
-          role="alert"
+          title={`Terminal input paused · ${unsentLabel}`}
+          action={
+            <>
+              <NoticeRetryButton onClick={retryUnsentInput} />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={reconnect}
+              >
+                Reconnect
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost-destructive"
+                onClick={discardUnsentInput}
+              >
+                Discard
+              </Button>
+            </>
+          }
         >
-          <div className="min-w-0">
-            <p className={cn("text-sm font-medium", STATUS_TEXT.critical)}>
-              Terminal input paused · {unsentLabel}
-            </p>
-            <p className={cn("mt-0.5 text-xs", STATUS_TEXT_MUTED.critical)}>
-              {asSentence(writeFailure.message)} Try again sends the input to
-              this shell and can repeat it if the first request arrived.
-              Reconnect discards it and opens a new shell. Discard drops it and
-              keeps this shell.
-            </p>
-          </div>
-          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-            <Button type="button" size="xs" onClick={retryUnsentInput}>
-              Try again
-            </Button>
-            <Button
-              type="button"
-              size="xs"
-              variant="outline"
-              onClick={reconnect}
-            >
-              Reconnect
-            </Button>
-            <Button
-              type="button"
-              size="xs"
-              variant="ghost-destructive"
-              onClick={discardUnsentInput}
-            >
-              Discard
-            </Button>
-          </div>
-        </div>
+          {asSentence(writeFailure.message)} Try again sends the input to this
+          shell and can repeat it if the first request arrived. Reconnect
+          discards it and opens a new shell. Discard drops it and keeps this
+          shell.
+        </Notice>
       )}
       {terminalError && (
-        <div
-          className="notice-surface notice-critical flex shrink-0 flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+        <Notice
+          tone="critical"
+          docked="top"
+          className="shrink-0"
           data-testid={`terminal-${terminalError.kind}-error`}
-          role="alert"
+          title={terminalError.message}
+          action={<NoticeRetryButton onClick={retryTerminal} />}
         >
-          <div className="min-w-0">
-            <p className={cn("text-sm font-medium", STATUS_TEXT.critical)}>
-              {terminalError.message}
-            </p>
-            <p className={cn("mt-0.5 text-xs", STATUS_TEXT_MUTED.critical)}>
-              {terminalError.kind === "read"
-                ? "Input is paused so you do not send commands without seeing the result."
-                : "Input stays paused until the shell opens."}
-            </p>
-          </div>
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            onClick={retryTerminal}
-          >
-            Try again
-          </Button>
-        </div>
+          {terminalError.kind === "read"
+            ? "Input is paused so you do not send commands without seeing the result."
+            : "Input stays paused until the shell opens."}
+        </Notice>
       )}
       <div className="relative min-h-0 flex-1">
         <div

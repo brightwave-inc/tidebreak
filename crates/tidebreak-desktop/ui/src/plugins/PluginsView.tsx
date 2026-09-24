@@ -13,7 +13,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { PluginGlyph, SkillGlyph } from "./PluginGlyph";
 import type { PluginsApis } from "./pluginsApis";
 import {
@@ -29,6 +29,7 @@ import {
 } from "./useHostToolProvisioning";
 import type { PluginCatalogState } from "./usePluginCatalog";
 import { PaneDragBand } from "@/WindowDragStrip";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 /**
  * The Plugins library, as the panel addressed `plugins`.
@@ -110,7 +111,7 @@ export function PluginsView({
       reload();
     } catch (caught) {
       toast.error(
-        friendlyImportError(caught, "Could not import those skills."),
+        friendlyErrorMessage(caught, "Could not import those skills."),
       );
     } finally {
       setImporting(false);
@@ -171,20 +172,14 @@ export function PluginsView({
           )}
 
           {error && (
-            <div
-              className="notice-surface notice-critical flex shrink-0 items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm"
-              role="alert"
+            <Notice
+              tone="critical"
+              title="Could not load your plugins"
+              className="shrink-0"
+              action={<NoticeRetryButton onClick={reload} />}
             >
-              <span>{error}</span>
-              <Button
-                variant="outline"
-                size="xs"
-                className="shrink-0"
-                onClick={reload}
-              >
-                Try again
-              </Button>
-            </div>
+              {error}
+            </Notice>
           )}
 
           {importReport && <SkillImportSummary report={importReport} />}
@@ -402,13 +397,6 @@ function importSummary(report: SkillImportReport): string {
   const skipped = `${report.skipped.length} skipped`;
   const conflicts = `${report.conflicts.length} conflict${report.conflicts.length === 1 ? "" : "s"}`;
   return `${imported}, ${skipped}, and ${conflicts}.`;
-}
-
-function friendlyImportError(error: unknown, fallback: string): string {
-  const message = String(error)
-    .replace(/^Error:\s*/, "")
-    .trim();
-  return message && message.length <= 240 ? message : fallback;
 }
 
 function Section({

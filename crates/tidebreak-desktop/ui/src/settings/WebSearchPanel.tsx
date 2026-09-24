@@ -28,6 +28,7 @@ import {
   SettingsSection,
   SettingsStatus,
 } from "./primitives";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 const MIN_WEB_SEARCH_TIMEOUT_SECONDS = 1;
 const MAX_WEB_SEARCH_TIMEOUT_SECONDS = 60;
@@ -70,6 +71,9 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
   );
   const [removing, setRemoving] = useState<WebSearchProviderKind | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** The first read failed; Try again bumps the attempt to read again. */
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const configRef = useRef<WebSearchConfigInfo | null>(null);
   const writeSeq = useRef(0);
 
@@ -77,6 +81,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setLoadFailed(false);
     void (async () => {
       try {
         const [nextConfig, nextCredentials] = await Promise.all([
@@ -92,7 +97,10 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
         setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
         setSearxngBaseUrl(nextConfig.searxng_base_url ?? "");
       } catch (err) {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          setError(friendlyErrorMessage(err, "Try again in a moment."));
+          setLoadFailed(true);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -100,7 +108,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, loadAttempt]);
 
   const working = saving || savingKey !== null || removing !== null;
   const state = webSearchState(config);
@@ -121,7 +129,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       await refreshAfterWrite();
       toast.success(`Saved the ${providerLabel(target)} API key`);
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setSavingKey(null);
     }
@@ -156,7 +164,9 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       toast.success("Saved web-search settings");
       return true;
     } catch (err) {
-      if (seq === writeSeq.current) setError(String(err));
+      if (seq === writeSeq.current) {
+        setError(friendlyErrorMessage(err, "Could not save that change."));
+      }
       return false;
     } finally {
       if (seq === writeSeq.current) setSaving(false);
@@ -229,7 +239,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       setCredentials(nextCredentials.credentials);
       toast.success(`Removed the saved ${providerLabel(target)} API key`);
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setRemoving(null);
     }
@@ -373,7 +383,15 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
           </p>
         </>
       )}
-      {error && <SettingsError>{error}</SettingsError>}
+      {error && (
+        <SettingsError
+          onRetry={
+            loadFailed ? () => setLoadAttempt((count) => count + 1) : undefined
+          }
+        >
+          {error}
+        </SettingsError>
+      )}
     </SettingsPanel>
   );
 }

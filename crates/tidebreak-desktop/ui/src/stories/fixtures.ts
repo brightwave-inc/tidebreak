@@ -41,6 +41,7 @@ import type {
   WebSearchConfigInfo,
   WebSearchCredentialReadiness,
 } from "@/api";
+import { HttpError } from "@/api";
 import type { ContextUsageReading } from "@/ContextUsageIndicator";
 
 const CHAT_COMPLETIONS_EFFORTS: ReasoningEffort[] = [
@@ -3223,3 +3224,41 @@ export const messageSearchIndexed: MessageSearchIndexing = {
   pending_conversations: 0,
   failed_conversations: 0,
 };
+
+/**
+ * Failures as `fetch` and the HTTP client raise them, for the stories that
+ * show a panel failing. The screen never shows them raw: each goes through
+ * `friendlyErrorMessage`, which is what these stories demonstrate.
+ */
+export const failureFixtures = {
+  /** WebKit's rejection when the request never reached the server. */
+  unreachable: new TypeError("Load failed"),
+  /** A proxy or a restarting server: no JSON body, only the status text. */
+  unavailable: new HttpError(503, "503: Service Unavailable"),
+  /** The server's own refusal, of a kind the renderer words itself. */
+  notFound: new HttpError(404, "404: app app_7f3c not found", "not_found", {
+    kind: "not_found",
+    message: "app app_7f3c not found",
+  }),
+  /** A refusal whose server text is the part worth reading. */
+  conflict: new HttpError(
+    409,
+    "409: the project already holds a file named Q3 renewal plan.md",
+    "conflict",
+    {
+      kind: "conflict",
+      message: "the project already holds a file named Q3 renewal plan.md",
+    },
+  ),
+  /** Server detail at length, the way git's stderr arrives. */
+  longDetail: new HttpError(
+    409,
+    "409: git push failed: ! [rejected] feature/notices -> feature/notices (non-fast-forward). Updates were rejected because the tip of your current branch is behind its remote counterpart. Integrate the remote changes before pushing again.",
+    "git_push_failed",
+    {
+      kind: "git_push_failed",
+      message:
+        "git push failed: ! [rejected] feature/notices -> feature/notices (non-fast-forward). Updates were rejected because the tip of your current branch is behind its remote counterpart. Integrate the remote changes before pushing again.",
+    },
+  ),
+} as const;

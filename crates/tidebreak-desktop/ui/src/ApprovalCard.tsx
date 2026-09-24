@@ -6,6 +6,7 @@ import {
 } from "./ApprovalChoiceList";
 import { ScrollableContainer } from "./ScrollableContainer";
 import { toolPreviewPresentation } from "./ToolPreview";
+import { Notice } from "@/components/ui/notice";
 
 export { APPROVAL_SHORTCUT_GRACE_MS };
 
@@ -146,9 +147,9 @@ export function ApprovalCard({
         onExpand={() => setExpanded(true)}
       />
       {error && (
-        <p className="text-destructive text-xs break-words" role="alert">
+        <Notice tone="critical" density="compact">
           {error}
-        </p>
+        </Notice>
       )}
     </section>
   );

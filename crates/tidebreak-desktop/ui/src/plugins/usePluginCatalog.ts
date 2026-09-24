@@ -3,6 +3,7 @@ import { toast } from "sonner";
 
 import type { PluginCatalog, PluginEnableUpdate, PluginSkillInfo } from "@/api";
 import type { PluginsApis } from "./pluginsApis";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 /**
  * The catalog as it would read if `update` had already been accepted.
@@ -82,7 +83,7 @@ export function usePluginCatalog(apis: PluginsApis): PluginCatalogState {
         setCatalog(loaded);
       } catch (caught) {
         if (generation !== generationRef.current) return;
-        setError(friendlyPluginError(caught, "Could not load your plugins."));
+        setError(friendlyErrorMessage(caught, "Try again in a moment."));
       } finally {
         if (generation === generationRef.current) setLoading(false);
       }
@@ -111,7 +112,7 @@ export function usePluginCatalog(apis: PluginsApis): PluginCatalogState {
           if (generation !== generationRef.current) return;
           setCatalog(previous);
           toast.error(
-            friendlyPluginError(caught, "Could not save that change."),
+            friendlyErrorMessage(caught, "Could not save that change."),
           );
         }
       })();
@@ -120,11 +121,4 @@ export function usePluginCatalog(apis: PluginsApis): PluginCatalogState {
   );
 
   return { catalog, loading, error, reload, setEnabled };
-}
-
-export function friendlyPluginError(error: unknown, fallback: string): string {
-  const message = String(error)
-    .replace(/^Error:\s*/, "")
-    .trim();
-  return message && message.length <= 240 ? message : fallback;
 }

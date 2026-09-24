@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { CircleAlert } from "lucide-react";
 
 import type { ApiClient } from "@/api/client";
 import type {
@@ -8,10 +7,10 @@ import type {
   CodeTriggerCondition,
   CodeTriggerSnapshot,
 } from "@/api/types";
-import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { CodeTriggerRules, type CodeTriggerTarget } from "./CodeTriggerRules";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 type TriggerClient = Pick<
   ApiClient,
@@ -151,21 +150,20 @@ export function RepositoryTriggerRules({
         {loading && <Spinner className="size-4" />}
       </div>
       {error && (
-        <div className="notice-surface notice-critical mb-4 flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-xs">
-          <span className="flex items-start gap-2">
-            <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
-            {error}
-          </span>
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            disabled={loading}
-            onClick={() => void load()}
-          >
-            Try again
-          </Button>
-        </div>
+        <Notice
+          tone="critical"
+          density="compact"
+          className="mb-4"
+          action={
+            <NoticeRetryButton
+              size="xs"
+              disabled={loading}
+              onClick={() => void load()}
+            />
+          }
+        >
+          {error}
+        </Notice>
       )}
       {!loading && repoId && (
         <CodeTriggerRules

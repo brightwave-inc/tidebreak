@@ -66,6 +66,7 @@ import {
   type ResumableCodeClone,
 } from "./CodeUpdatesStore";
 import { displayClonePhase } from "./useAddRepoInline";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 type Stage = "sources" | "local" | "git_url" | "github" | "progress";
 
@@ -1100,7 +1101,7 @@ function LocalStage({
           disabled={busy}
         />
       </label>
-      {error && <p className="text-sm text-critical break-words">{error}</p>}
+      {error && <Notice tone="critical">{error}</Notice>}
       <FormSubmit
         busy={busy}
         disabled={!path.trim()}
@@ -1190,7 +1191,7 @@ function GitUrlStage({
           disabled={busy}
         />
       </label>
-      {error && <p className="text-sm text-critical break-words">{error}</p>}
+      {error && <Notice tone="critical">{error}</Notice>}
       <FormSubmit
         busy={busy}
         disabled={
@@ -1313,7 +1314,7 @@ function GithubStage({
           disabled={busy}
         />
       </label>
-      {error && <p className="text-sm text-critical break-words">{error}</p>}
+      {error && <Notice tone="critical">{error}</Notice>}
       <FormSubmit
         busy={busy}
         disabled={
@@ -1567,13 +1568,10 @@ export function ParentDirField({
 }) {
   if (blocked) {
     return (
-      <p
-        className="text-sm text-critical"
-        data-testid="clone-destination-missing"
-      >
+      <Notice tone="warning" data-testid="clone-destination-missing">
         This machine has no clone destination configured. An administrator sets
         one on the machine.
-      </p>
+      </Notice>
     );
   }
   return (
@@ -1706,7 +1704,9 @@ function ProgressStage({
             Create a workspace to start working in the new checkout.
           </p>
           {handoffError && (
-            <p className="mt-2 text-xs text-critical">{handoffError}</p>
+            <Notice tone="critical" density="compact" className="mt-2">
+              {handoffError}
+            </Notice>
           )}
           <Button
             type="button"
@@ -1738,19 +1738,16 @@ function ProbeFailure({
   onRetry: () => void;
 }) {
   return (
-    <div className="notice-surface notice-warning rounded-lg border p-3">
-      <p className={cn("text-sm", STATUS_TEXT.warning)}>{message}</p>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="mt-2"
-        disabled={busy}
-        onClick={onRetry}
-      >
-        {busy ? "Trying again…" : action}
-      </Button>
-    </div>
+    <Notice
+      tone="warning"
+      action={
+        <NoticeRetryButton disabled={busy} onClick={onRetry}>
+          {busy ? "Trying again…" : action}
+        </NoticeRetryButton>
+      }
+    >
+      {message}
+    </Notice>
   );
 }
 

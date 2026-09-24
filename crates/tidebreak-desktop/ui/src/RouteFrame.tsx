@@ -1,5 +1,24 @@
-import { useLayoutEffect, useRef, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useLayoutEffect,
+  useRef,
+  type ReactNode,
+} from "react";
 import { useRouter } from "@tanstack/react-router";
+
+const RouteFrameContext = createContext(false);
+
+/**
+ * Whether this tree already renders inside a route's frame, beside its rail.
+ *
+ * A not-found or failed route can land either inside a layout that drew its
+ * rail (an unknown settings section) or directly under the shell (an unknown
+ * path), and only the second needs a frame of its own.
+ */
+export function useInsideRouteFrame(): boolean {
+  return useContext(RouteFrameContext);
+}
 
 /** Last path that owned the page heading, so a remounted frame still skips the first load. */
 let lastFocusedPath: string | null = null;
@@ -56,7 +75,7 @@ export function RouteFrame({
   }, [router]);
 
   const frame = (
-    <>
+    <RouteFrameContext.Provider value={true}>
       {sidebar}
       <main
         ref={mainRef}
@@ -64,7 +83,7 @@ export function RouteFrame({
       >
         {children}
       </main>
-    </>
+    </RouteFrameContext.Provider>
   );
 
   return className ? <div className={className}>{frame}</div> : frame;

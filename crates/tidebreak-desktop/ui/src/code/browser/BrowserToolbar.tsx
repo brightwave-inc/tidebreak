@@ -12,14 +12,12 @@ import {
 } from "react";
 import {
   ScanEye,
-  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   Bot,
   ExternalLink,
   Hand,
   History,
-  Info,
   Laptop,
   LockKeyhole,
   MoreHorizontal,
@@ -45,7 +43,6 @@ import {
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { STATUS_CHIP, STATUS_DOT, STATUS_TEXT } from "../statusTone";
-import { FOCUS_RING_TIGHT, HOVER_TINT } from "../interactive";
 import {
   type BrowserAgentAccess,
   type BrowserController,
@@ -54,6 +51,7 @@ import {
 } from "./browserHost";
 import { browserSecurity, MAX_BROWSER_URL_CHARS } from "./browserNavigation";
 import type { BrowserSession } from "./browserSession";
+import { Notice } from "@/components/ui/notice";
 
 type BrowserEngine = NonNullable<BrowserHostSnapshot["engine"]>;
 
@@ -500,13 +498,14 @@ export function BrowserToolbar({
       </div>
 
       {addressError && (
-        <p
+        <Notice
           id={addressErrorId}
-          role="alert"
-          className="notice-surface notice-critical border-t px-3 py-1 text-xs"
+          tone="critical"
+          docked="bottom"
+          density="compact"
         >
           {addressError}
-        </p>
+        </Notice>
       )}
 
       {controller?.kind === "agent" && (
@@ -517,15 +516,16 @@ export function BrowserToolbar({
         />
       )}
       {resetInProgress && (
-        <div
-          role="status"
+        <Notice
+          tone="info"
+          docked="bottom"
+          density="compact"
           aria-live="polite"
-          className="notice-surface notice-info border-t px-3 py-1.5 text-xs"
         >
           <span className="live-label-shimmer">
             {profileResetStatusMessage(lastResetPhaseRef.current)}
           </span>
-        </div>
+        </Notice>
       )}
       {resetError && (
         <BrowserNoticeRow
@@ -838,7 +838,7 @@ export function BrowserAgentControlRow({
       className={cn(
         "flex min-h-9 items-center gap-2 border-t px-3 py-1.5 text-xs",
         takeoverRequired
-          ? "notice-surface notice-warning border-warning-border"
+          ? cn("border-warning-border/55", STATUS_CHIP.warning)
           : halted
             ? "border-border-subtle bg-muted/55 text-muted-foreground"
             : cn("border-live-border/55", STATUS_CHIP.running),
@@ -944,43 +944,38 @@ export function BrowserNoticeRow({
   onAction?: () => void;
   onDismiss: () => void;
 }) {
-  const Icon = tone === "info" ? Info : AlertTriangle;
   return (
-    <div
-      className={cn(
-        "notice-surface flex min-h-8 shrink-0 items-center gap-2 border-b px-3 py-1 text-xs",
-        tone === "info" && "notice-info",
-        tone === "warning" && "notice-warning",
-        tone === "critical" && "notice-critical",
-      )}
-    >
-      <Icon className="size-3.5 shrink-0" />
-      <span className="min-w-0 flex-1 truncate">{message}</span>
-      {actionLabel && onAction && (
-        <button
-          type="button"
-          className={cn(
-            "shrink-0 rounded px-1.5 py-0.5 font-medium underline decoration-current/45 underline-offset-2",
-            FOCUS_RING_TIGHT,
-            HOVER_TINT,
+    <Notice
+      tone={tone}
+      docked="top"
+      density="compact"
+      className="shrink-0"
+      role={tone === "critical" ? "alert" : "status"}
+      action={
+        <>
+          {actionLabel && onAction && (
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              onClick={onAction}
+            >
+              {actionLabel}
+            </Button>
           )}
-          onClick={onAction}
-        >
-          {actionLabel}
-        </button>
-      )}
-      <button
-        type="button"
-        className={cn(
-          "grid size-5 shrink-0 place-items-center rounded",
-          FOCUS_RING_TIGHT,
-          HOVER_TINT,
-        )}
-        onClick={onDismiss}
-      >
-        <X className="size-3" />
-        <span className="sr-only">Dismiss</span>
-      </button>
-    </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            onClick={onDismiss}
+          >
+            <X aria-hidden="true" />
+            <span className="sr-only">Dismiss</span>
+          </Button>
+        </>
+      }
+    >
+      {message}
+    </Notice>
   );
 }

@@ -12,6 +12,7 @@ import {
   SUBSCRIPTION_PREFERENCES_UNAVAILABLE,
   type InferenceSponsorshipConsent,
 } from "./settings/inferencePreferences";
+import { Notice } from "@/components/ui/notice";
 
 type ConnectApprovalPhase =
   | "loading"
@@ -238,11 +239,7 @@ export function ConnectApprovalView({
                 </div>
               </>
             )}
-            {error && (
-              <p className="text-sm text-destructive" role="alert">
-                {error}
-              </p>
-            )}
+            {error && <Notice tone="critical">{error}</Notice>}
           </div>
         ) : null}
       </Card>

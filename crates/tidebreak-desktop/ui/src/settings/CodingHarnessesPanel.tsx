@@ -77,7 +77,7 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
         : await client.getHarnessDoctor();
       setReport(next);
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Try again in a moment."));
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -98,7 +98,11 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
         setWorktreeRoot(next);
         setRootDraft(next.root ?? "");
       } catch (err) {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          setError(
+            friendlyErrorMessage(err, "Could not read the workspace folder."),
+          );
+        }
       }
     })();
     return () => {
@@ -236,7 +240,15 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
       description={`Coding engines on ${hostMachineLabel()}. Each one downloads the first time you pick it, so you only pay for the ones you use.`}
       busy={loading || refreshing}
     >
-      {error && <SettingsError>{error}</SettingsError>}
+      {error && (
+        <SettingsError
+          onRetry={
+            report === null && !loading ? () => void load(false) : undefined
+          }
+        >
+          {error}
+        </SettingsError>
+      )}
       {report && (
         <DoctorList
           report={report}

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -18,6 +19,11 @@ import { SETTINGS_SECTIONS } from "@/settings/sections";
 import { SettingsRoute } from "@/SettingsRoute";
 import { WorkLayout } from "@/WorkLayout";
 import {
+  RouteCrashScreen,
+  RouteNotFound,
+  RoutePaneError,
+} from "@/RouteFallbacks";
+import {
   denseInboxEntries,
   managedPolicy,
   pending,
@@ -30,6 +36,7 @@ import {
   unmanagedPolicy,
 } from "./routeStoryHarness";
 import { storyModels, storyProviders } from "./SettingsStoryHarness";
+import { failureFixtures } from "./fixtures";
 
 type RouteScenario =
   | "home"
@@ -52,7 +59,11 @@ type RouteScenario =
   | "apps-list"
   | "apps-detail"
   | "plugins-list"
-  | "plugins-detail";
+  | "plugins-detail"
+  | "route-crash"
+  | "shell-crash"
+  | "not-found"
+  | "settings-not-found";
 
 function InboxRouteComposition() {
   return (
@@ -62,8 +73,24 @@ function InboxRouteComposition() {
   );
 }
 
-function createRouteRouter(initialPath: string) {
-  const rootRoute = createRootRoute();
+/** A page whose render throws, the way a bad payload crashes a real one. */
+function BrokenPage(): never {
+  throw new TypeError("Cannot read properties of undefined (reading 'title')");
+}
+
+function createRouteRouter(
+  initialPath: string,
+  { shellCrash = false }: { shellCrash?: boolean } = {},
+) {
+  // The app's shell has no rail of its own; each layout draws one. A shell
+  // that crashes takes the window, so this story's shell can too.
+  const rootRoute = createRootRoute({
+    component: shellCrash
+      ? () => {
+          throw new Error("The shell could not read its saved window layout.");
+        }
+      : undefined,
+  });
   // The app's shape: every Work route hangs off one layout that mounts the
   // rail once.
   const workLayoutRoute = createRoute({
@@ -73,6 +100,7 @@ function createRouteRouter(initialPath: string) {
   });
   const homeRoute = createRoute({
     getParentRoute: () => workLayoutRoute,
+    errorComponent: RoutePaneError,
     path: "/",
     validateSearch: (search: Record<string, unknown>) => ({
       project: typeof search.project === "string" ? search.project : undefined,
@@ -84,11 +112,13 @@ function createRouteRouter(initialPath: string) {
   });
   const inboxRoute = createRoute({
     getParentRoute: () => workLayoutRoute,
+    errorComponent: RoutePaneError,
     path: "/inbox",
     component: InboxRouteComposition,
   });
   const projectRoute = createRoute({
     getParentRoute: () => workLayoutRoute,
+    errorComponent: RoutePaneError,
     path: "/p/$projectId",
     component: () => {
       const { projectId } = projectRoute.useParams();
@@ -101,11 +131,13 @@ function createRouteRouter(initialPath: string) {
   });
   const appsRoute = createRoute({
     getParentRoute: () => workLayoutRoute,
+    errorComponent: RoutePaneError,
     path: "/apps",
     component: () => <AppsPage />,
   });
   const appDetailRoute = createRoute({
     getParentRoute: () => workLayoutRoute,
+    errorComponent: RoutePaneError,
     path: "/apps/$appId",
     component: () => {
       const { appId } = appDetailRoute.useParams();
@@ -114,11 +146,13 @@ function createRouteRouter(initialPath: string) {
   });
   const pluginsRoute = createRoute({
     getParentRoute: () => workLayoutRoute,
+    errorComponent: RoutePaneError,
     path: "/plugins",
     component: () => <PluginsPage />,
   });
   const pluginDetailRoute = createRoute({
     getParentRoute: () => workLayoutRoute,
+    errorComponent: RoutePaneError,
     path: "/plugins/$pluginId",
     component: () => {
       const { pluginId } = pluginDetailRoute.useParams();
@@ -133,6 +167,7 @@ function createRouteRouter(initialPath: string) {
   const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
     createRoute({
       getParentRoute: () => settingsRoute,
+      errorComponent: RoutePaneError,
       path: section.path,
       component: section.Component,
       ...(section.validateSearch
@@ -140,6 +175,13 @@ function createRouteRouter(initialPath: string) {
         : {}),
     }),
   );
+
+  const brokenRoute = createRoute({
+    getParentRoute: () => workLayoutRoute,
+    errorComponent: RoutePaneError,
+    path: "/broken",
+    component: BrokenPage,
+  });
 
   return createRouter({
     routeTree: rootRoute.addChildren([
@@ -151,10 +193,15 @@ function createRouteRouter(initialPath: string) {
         appDetailRoute,
         pluginsRoute,
         pluginDetailRoute,
+        brokenRoute,
       ]),
       settingsRoute.addChildren(settingsSectionRoutes),
     ]),
     history: createMemoryHistory({ initialEntries: [initialPath] }),
+    // The fallbacks `createAppRouter` configures, so these stories show the
+    // screens the app shows.
+    defaultErrorComponent: RouteCrashScreen,
+    defaultNotFoundComponent: RouteNotFound,
   });
 }
 
@@ -165,7 +212,7 @@ function clientForScenario(scenario: RouteScenario): ApiClient {
   if (scenario === "project-failure") {
     return storyClient({
       listProjectDocuments: async () => {
-        throw new Error("Project files could not be loaded from this machine.");
+        throw failureFixtures.unreachable;
       },
     });
   }
@@ -210,6 +257,9 @@ function initialPathFor(scenario: RouteScenario): string {
   if (scenario === "apps-detail") return "/apps/release-brief";
   if (scenario === "plugins-list") return "/plugins";
   if (scenario === "plugins-detail") return "/plugins/document-work";
+  if (scenario === "route-crash") return "/broken";
+  if (scenario === "not-found") return "/c/chat-that-moved/files";
+  if (scenario === "settings-not-found") return "/settings/retired-section";
   return "/";
 }
 
@@ -264,7 +314,9 @@ function RoutesStory({ scenario }: { scenario: RouteScenario }) {
       client: clientForScenario(scenario),
       policy: policyFor(scenario),
       context: contextFor(scenario),
-      router: createRouteRouter(initialPathFor(scenario)),
+      router: createRouteRouter(initialPathFor(scenario), {
+        shellCrash: scenario === "shell-crash",
+      }),
     };
   });
 
@@ -432,4 +484,66 @@ export const PluginsRegisteredList: Story = {
 
 export const PluginsRegisteredDetail: Story = {
   args: { scenario: "plugins-detail" },
+};
+
+/**
+ * A page that crashed inside the Work frame: the pane says so, and the rail
+ * beside it keeps working.
+ */
+export const RouteCrash: Story = {
+  args: { scenario: "route-crash" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByRole("heading", {
+        name: "This page hit an unexpected error",
+      }),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Try again" }),
+    ).toBeVisible();
+  },
+};
+
+export const RouteCrashMinimumWindow: Story = {
+  args: { scenario: "route-crash" },
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+};
+
+/** A crash in the shell itself, where no rail survived: it takes the window. */
+export const ShellCrash: Story = {
+  args: { scenario: "shell-crash" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByRole("heading", {
+        name: "Tidebreak hit an unexpected error.",
+      }),
+    ).toBeVisible();
+    for (const name of ["Reload", "Go home", "Copy debug info"]) {
+      await expect(canvas.getByRole("button", { name })).toBeVisible();
+    }
+  },
+};
+
+/** An address no route answers, under the Work rail, with a way home. */
+export const NotFound: Story = {
+  args: { scenario: "not-found" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByRole("heading", { name: "This page does not exist" }),
+    ).toBeVisible();
+    await expect(canvas.getByRole("button", { name: "Go home" })).toBeVisible();
+  },
+};
+
+export const NotFoundMinimumWindow: Story = {
+  args: { scenario: "not-found" },
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+};
+
+/** An unknown settings section fills the settings pane and keeps its rail. */
+export const SettingsNotFound: Story = {
+  args: { scenario: "settings-not-found" },
 };

@@ -27,6 +27,7 @@ import {
   SettingsPanel,
   SettingsSection,
 } from "./primitives";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 // Radix Select reserves the empty string for its placeholder, so the
 // "automatic" choice needs a sentinel that no catalog key can collide with
@@ -105,6 +106,9 @@ export function ModelsPanel({
   const [retention, setRetention] = useState<PromptCacheRetention | null>(null);
   const [savingRetention, setSavingRetention] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** A read failed; Try again bumps the attempt to read again. */
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   // `managed` is a dependency on purpose: a policy flip mid-session re-reads
   // the catalog, so the page reshapes without a manual refresh.
@@ -112,6 +116,7 @@ export function ModelsPanel({
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setLoadFailed(false);
     void (async () => {
       try {
         const next = await client.listModels();
@@ -120,7 +125,10 @@ export function ModelsPanel({
           setCatalog(next.models);
         }
       } catch (err) {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          setError(friendlyErrorMessage(err, "Try again in a moment."));
+          setLoadFailed(true);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -128,7 +136,7 @@ export function ModelsPanel({
     return () => {
       cancelled = true;
     };
-  }, [client, managed]);
+  }, [client, managed, loadAttempt]);
 
   // The managed watch. A failed tick keeps the last answer — the next tick
   // retries — a tick that finds the previous read still in flight skips
@@ -165,12 +173,15 @@ export function ModelsPanel({
         if (!cancelled) setRetention(settings.prompt_cache_retention);
       })
       .catch((err) => {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          setError(friendlyErrorMessage(err, "Try again in a moment."));
+          setLoadFailed(true);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, loadAttempt]);
 
   // Unmanaged renders from the shell's catalog exactly as it always has;
   // managed renders from the panel's own fetch, which the watch keeps current.
@@ -192,7 +203,7 @@ export function ModelsPanel({
       // now a step behind.
       onChanged?.();
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setSaving(null);
     }
@@ -210,7 +221,7 @@ export function ModelsPanel({
       setRetention(settings.prompt_cache_retention);
     } catch (err) {
       setRetention(previous);
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setSavingRetention(false);
     }
@@ -294,7 +305,15 @@ export function ModelsPanel({
           </Select>
         </SettingsField>
       </SettingsSection>
-      {error && <SettingsError>{error}</SettingsError>}
+      {error && (
+        <SettingsError
+          onRetry={
+            loadFailed ? () => setLoadAttempt((count) => count + 1) : undefined
+          }
+        >
+          {error}
+        </SettingsError>
+      )}
     </SettingsPanel>
   );
 }

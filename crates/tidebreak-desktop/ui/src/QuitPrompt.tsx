@@ -15,6 +15,7 @@ import type {
   QuitChoice,
   QuitPromptState,
 } from "./desktopLifecycle";
+import { Notice } from "@/components/ui/notice";
 
 type QuitPromptProps = {
   prompt: QuitPromptState;
@@ -211,9 +212,9 @@ export function QuitPrompt({
               </p>
             )}
             {error && asking && (
-              <p className="text-sm text-critical" role="alert">
+              <Notice tone="critical">
                 Tidebreak could not reach a safe point. {error}
-              </p>
+              </Notice>
             )}
           </AlertDialogHeader>
           {asking && (

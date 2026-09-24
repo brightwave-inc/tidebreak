@@ -106,6 +106,7 @@ import {
   shouldAttachPastedText,
   type PastedTextAttachment,
 } from "./PastedText";
+import { Notice } from "@/components/ui/notice";
 
 const MIN_COMPOSER_LINES = 1;
 export const MAX_COMPOSER_LINES = 6;
@@ -1589,21 +1590,21 @@ function ComposerView({
                 : "Ready to send"}
       </span>
       {voice?.error && (
-        <span className="text-xs text-destructive" role="alert">
+        <Notice tone="critical" density="compact">
           {voice.error}
-        </span>
+        </Notice>
       )}
       {cancelError && (
-        <span className="text-xs text-destructive" role="status">
+        <Notice tone="critical" density="compact" role="status">
           {"Couldn’t stop turn: "}
           {cancelError}
-        </span>
+        </Notice>
       )}
       {steerError && (
-        <span className="text-xs text-destructive" role="alert">
+        <Notice tone="critical" density="compact">
           {"Couldn’t redirect: "}
           {steerError}
-        </span>
+        </Notice>
       )}
       {steerStatus && !steerError && (
         <span className="text-xs text-muted-foreground" role="status">
@@ -1632,40 +1633,40 @@ function ComposerView({
       )}
       {footerNote}
       {steerTooLong && (
-        <span className="text-xs text-destructive" role="alert">
+        <Notice tone="critical" density="compact">
           Guidance is too long.
-        </span>
+        </Notice>
       )}
       {steerHasUnsupportedCharacter && (
-        <span className="text-xs text-destructive" role="alert">
+        <Notice tone="critical" density="compact">
           Guidance contains an unsupported character.
-        </span>
+        </Notice>
       )}
       {attachError && (
-        <span className="text-xs text-destructive" role="alert">
+        <Notice tone="critical" density="compact">
           {"Couldn’t attach: "}
           {attachError}
-        </span>
+        </Notice>
       )}
       {folders?.error && (
-        <span className="text-xs text-destructive" role="alert">
+        <Notice tone="critical" density="compact">
           {"Couldn’t update folders: "}
           {folders.error}
-        </span>
+        </Notice>
       )}
       {images?.error && (
-        <span className="text-xs text-destructive" role="alert">
+        <Notice tone="critical" density="compact">
           {"Couldn’t attach image: "}
           {images.error}
-        </span>
+        </Notice>
       )}
       {images?.unsupportedModel && images.items.length > 0 && (
-        <span className="text-xs text-destructive" role="alert">
+        <Notice tone="critical" density="compact">
           {images.unsupportedModel}
           {
             " can’t read images. Choose a model that accepts image input, or remove the attached image."
           }
-        </span>
+        </Notice>
       )}
       {confirmDialog}
     </form>
@@ -2040,7 +2041,7 @@ function ImageAttachmentChip({
             would read every tick of a bar that is already on screen. */}
         {showStatus ? (
           <small
-            className={cn("text-2xs", failed && "text-destructive")}
+            className={cn("text-2xs", failed && "text-critical")}
             role={failed ? "alert" : uploading ? undefined : "status"}
           >
             {describeImageAttachment(attachment)}

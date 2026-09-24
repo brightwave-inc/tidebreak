@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AppInvokeRefusalError,
+  HttpError,
   type AppDetail,
   type AppGrantState,
   type ManagedPolicy,
@@ -696,5 +697,47 @@ describe("AppDetailView", () => {
       screen.queryByRole("button", { name: "Publish at gateway" }),
     ).not.toBeInTheDocument();
     expect(apis.gatewayPage).not.toHaveBeenCalled();
+  });
+});
+
+describe("AppDetailView load failures", () => {
+  it("words a missing app for the reader, not as the server's 404", async () => {
+    const apis = apisWith(GRANTED);
+    vi.mocked(apis.get).mockRejectedValue(
+      new HttpError(404, "404: app app-1 not found", "not_found", {
+        kind: "not_found",
+        message: "app app-1 not found",
+      }),
+    );
+    renderPaired(apis);
+
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveTextContent("Could not load this app");
+    expect(failure).toHaveTextContent("This app is no longer in your library.");
+    expect(failure).not.toHaveTextContent("404");
+    // Asking again cannot bring it back; the way out is the library.
+    expect(
+      within(failure).queryByRole("button", { name: "Try again" }),
+    ).toBeNull();
+    expect(
+      within(failure).getByRole("button", { name: "Back to apps" }),
+    ).toBeInTheDocument();
+  });
+
+  it("loads the app again when the reader tries again", async () => {
+    const apis = apisWith(GRANTED);
+    vi.mocked(apis.get)
+      .mockRejectedValueOnce(new TypeError("Load failed"))
+      .mockResolvedValue(DETAIL);
+    renderPaired(apis);
+
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveTextContent("Tidebreak could not reach its server.");
+    fireEvent.click(within(failure).getByRole("button", { name: "Try again" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Fixture app" }),
+    ).toBeInTheDocument();
+    expect(apis.get).toHaveBeenCalledTimes(2);
   });
 });

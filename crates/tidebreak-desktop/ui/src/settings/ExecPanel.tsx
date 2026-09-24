@@ -24,6 +24,7 @@ import {
   SettingsSection,
   SettingsStatus,
 } from "./primitives";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 const MIN_CODE_EXECUTION_TIMEOUT_SECONDS = 1;
 const MAX_CODE_EXECUTION_TIMEOUT_SECONDS = 120;
@@ -46,12 +47,16 @@ export function ExecPanel({ client }: { client: ApiClient }) {
   const [savingKey, setSavingKey] = useState<ExecProviderKind | null>(null);
   const [removing, setRemoving] = useState<ExecProviderKind | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** The first read failed; Try again bumps the attempt to read again. */
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const writeSeq = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setLoadFailed(false);
     void (async () => {
       try {
         const [nextConfig, nextCredentials] = await Promise.all([
@@ -64,7 +69,10 @@ export function ExecPanel({ client }: { client: ApiClient }) {
         setProvider(nextConfig.provider ?? "");
         setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
       } catch (err) {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          setError(friendlyErrorMessage(err, "Try again in a moment."));
+          setLoadFailed(true);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -72,7 +80,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, loadAttempt]);
 
   const working = saving || savingKey !== null || removing !== null;
   const state = codeExecutionState(config);
@@ -89,7 +97,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
       setCredentials(nextCredentials.credentials);
       toast.success(`Saved the ${codeExecutionProviderLabel(target)} API key`);
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setSavingKey(null);
     }
@@ -115,7 +123,9 @@ export function ExecPanel({ client }: { client: ApiClient }) {
       toast.success("Saved code-execution settings");
       return true;
     } catch (err) {
-      if (seq === writeSeq.current) setError(String(err));
+      if (seq === writeSeq.current) {
+        setError(friendlyErrorMessage(err, "Could not save that change."));
+      }
       return false;
     } finally {
       if (seq === writeSeq.current) setSaving(false);
@@ -164,7 +174,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
         `Removed the saved ${codeExecutionProviderLabel(target)} API key`,
       );
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setRemoving(null);
     }
@@ -276,7 +286,15 @@ export function ExecPanel({ client }: { client: ApiClient }) {
           </p>
         </>
       )}
-      {error && <SettingsError>{error}</SettingsError>}
+      {error && (
+        <SettingsError
+          onRetry={
+            loadFailed ? () => setLoadAttempt((count) => count + 1) : undefined
+          }
+        >
+          {error}
+        </SettingsError>
+      )}
     </SettingsPanel>
   );
 }

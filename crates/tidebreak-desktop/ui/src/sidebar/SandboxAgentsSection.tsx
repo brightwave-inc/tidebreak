@@ -256,7 +256,7 @@ function SandboxAgentRow({
         <WithTooltip label="Stop agent" side="right">
           <button
             type="button"
-            className="absolute top-1/2 right-1.5 hidden -translate-y-1/2 rounded p-0.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive group-hover/agent:flex"
+            className="absolute top-1/2 right-1.5 hidden -translate-y-1/2 rounded p-0.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-critical group-hover/agent:flex"
             aria-label={`Stop ${HARNESS_LABELS[agent.harness]} agent`}
             onClick={(event) => {
               event.stopPropagation();

@@ -1,8 +1,19 @@
 import { cloneElement, isValidElement, useId, type ReactNode } from "react";
-import { CircleAlert, CircleCheck, CircleMinus } from "lucide-react";
+import {
+  CircleAlert,
+  CircleCheck,
+  CircleMinus,
+  type LucideIcon,
+} from "lucide-react";
 
 import { Card } from "@/components/ui/card";
+import {
+  Notice,
+  NoticeRetryButton,
+  type NoticeTone,
+} from "@/components/ui/notice";
 import { PaneDragBand } from "@/WindowDragStrip";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 /**
  * A whole settings surface: the page title, an optional description, and the
@@ -146,18 +157,20 @@ export function SettingsSection({
  */
 export type SettingsStatusTone = "ready" | "neutral" | "warning" | "critical";
 
-const STATUS_NOTICE: Record<SettingsStatusTone, string> = {
-  ready: "notice-success",
-  neutral: "",
-  warning: "notice-warning",
-  critical: "notice-critical",
+const STATUS_NOTICE: Record<
+  SettingsStatusTone,
+  { tone: NoticeTone; icon: LucideIcon }
+> = {
+  ready: { tone: "success", icon: CircleCheck },
+  neutral: { tone: "neutral", icon: CircleMinus },
+  warning: { tone: "warning", icon: CircleAlert },
+  critical: { tone: "critical", icon: CircleAlert },
 };
 
 /**
  * The readiness line a settings surface leads with: a short verdict and the one
- * sentence that says what to do about it. It reads as a notice: a neutral
- * surface with the tone on its leading edge and icon, so a panel never has to
- * reach for the class itself.
+ * sentence that says what to do about it. It is a `Notice`: a neutral surface
+ * with the tone on its leading edge and icon.
  */
 export function SettingsStatus({
   tone,
@@ -168,42 +181,43 @@ export function SettingsStatus({
   label: string;
   description: ReactNode;
 }) {
-  const Icon =
-    tone === "ready"
-      ? CircleCheck
-      : tone === "neutral"
-        ? CircleMinus
-        : CircleAlert;
+  const notice = STATUS_NOTICE[tone];
   return (
-    <div
-      className={`settings-status ${STATUS_NOTICE[tone]}`.trim()}
-      role="status"
-    >
-      <Icon className="settings-status-icon" aria-hidden="true" />
-      <span className="settings-status-copy">
-        <strong>{label}</strong>
-        <span className="break-words">{description}</span>
-      </span>
-    </div>
+    <Notice tone={notice.tone} icon={notice.icon} title={label} role="status">
+      {description}
+    </Notice>
   );
 }
 
 /**
- * An error line on a settings surface, in the critical ink that reads as text
- * on the page in both themes. `String(err)` puts the error's class name in
- * front of the message ("Error: …", "HttpError: …"); the reader needs only
- * the message.
+ * A failure on a settings surface, as a critical `Notice`. When the failure is
+ * the panel's own load, pass `onRetry` so the reader can run it again. A
+ * string goes through `friendlyErrorMessage`, so a message a caller
+ * stringified keeps no `Error:` or `HttpError: 409:` prefix.
  */
-export function SettingsError({ children }: { children: ReactNode }) {
+export function SettingsError({
+  children,
+  title,
+  onRetry,
+  className,
+}: {
+  children: ReactNode;
+  title?: ReactNode;
+  onRetry?: () => void;
+  className?: string;
+}) {
   return (
-    <p className="text-sm text-critical break-words" role="alert">
-      {typeof children === "string" ? withoutErrorName(children) : children}
-    </p>
+    <Notice
+      tone="critical"
+      title={title}
+      className={className}
+      action={onRetry && <NoticeRetryButton onClick={onRetry} />}
+    >
+      {typeof children === "string"
+        ? friendlyErrorMessage(children, children)
+        : children}
+    </Notice>
   );
-}
-
-function withoutErrorName(message: string): string {
-  return message.replace(/^(?:[A-Z][A-Za-z]*)?Error:\s*/, "") || message;
 }
 
 /**

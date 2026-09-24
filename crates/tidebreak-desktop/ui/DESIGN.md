@@ -70,8 +70,10 @@ text near-white and dark tints into saturated slabs.
 
 The critical mark doubles as error ink: it clears 4.5:1 as text on every
 surface and row, so `text-critical` can carry an error message on the page.
-`destructive` is shadcn's name for the same red, so `text-destructive` does
-too. No other mark reads as text; put text in its `-foreground` rung.
+`destructive` is shadcn's name for the same red. Fills and borders may use
+either name, but text uses `text-critical`; `stylesContract.test.ts` rejects
+`text-destructive`. No other mark reads as text; put text in its
+`-foreground` rung.
 
 Dim text with a token, never an alpha. `text-muted-foreground` at full
 strength is the secondary ink, and `stylesContract.test.ts` rejects a text
@@ -223,8 +225,8 @@ Use a `Switch` for binary toggles and a `Select` for short lists. Use an
 async validation pattern for text that must be checked, such as a workspace
 URL.
 
-`SettingsStatus` is the verdict a settings surface leads with. It renders as a
-notice, a neutral surface with the tone on its leading edge and icon, and it
+`SettingsStatus` is the verdict a settings surface leads with. It is a
+`Notice`, a neutral surface with the tone on its leading edge and icon, and it
 speaks the status vocabulary:
 
 | Tone | Means | Icon |
@@ -234,9 +236,9 @@ speaks the status vocabulary:
 | `warning` | needs a look: half working, nearly full, missing a key | `CircleAlert`, warning |
 | `critical` | a real failure | `CircleAlert`, critical |
 
-An optional feature nobody has set up is `neutral`, never red. `SettingsError`
-prints an error in critical ink and drops the `Error:` prefix `String(err)`
-adds.
+An optional feature nobody has set up is `neutral`, never red.
+`SettingsError` is a critical `Notice`. When the failure is the panel's own
+load, pass `onRetry` so the reader can run the load again.
 
 ### Cards and rows
 
@@ -347,12 +349,42 @@ button alone.
 
 ### Notices and errors
 
-Use `notice-surface` with `notice-info`, `notice-warning`, `notice-critical`,
-or `notice-success` for banners and notices. Keep the surface neutral and the
-body in normal ink. A thin leading edge carries the status color; icons may
-repeat it. Do not fill a notice with a status color. Keep its role, recovery
-actions, and error detail accessible.
+`Notice` (`components/ui/notice.tsx`) is the one shape a notice or a failure
+takes: a neutral surface with a hairline border and the 8px radius (6px when
+compact), the tone on a straight 2px bar along the leading edge and on the
+icon, the message in normal ink, and an action slot. The bar runs between
+the corners, so it never bends around them into a bracket. It speaks the status tones (`critical`, `warning`, `info`,
+`success`) plus `neutral`. Do not fill a notice with a status color, and do
+not draw a notice box by hand: `stylesContract.test.ts` rejects the retired
+`notice-surface`, `.message-notice`, `.message-turn-failure`, and
+`.settings-status` classes. `Components/Notice` in Storybook shows every tone,
+the action slot, long text, and a narrow panel.
+
+- Lead with a short title in sentence case ("Could not load your apps"), and
+  let the body say what happened and what to do next. Do not apologize.
+- A panel-level failure inside an Index or Resource detail surface is a
+  critical notice whose action is `NoticeRetryButton`, wired to the panel's
+  own reload or refetch, never to a page reload. An empty index is not a
+  failure: it keeps `EmptyMedia variant="icon"` and never becomes an error
+  box.
+- Word every failure with `friendlyErrorMessage` from `lib/utils.ts`. It drops
+  the class name and status code `String(err)` shows, words a request that
+  never reached the server as "Tidebreak could not reach its server. Check
+  that the app is running, then try again.", and prefers renderer copy for a
+  known `HttpError.kind`. Pass kind copy for your own context, such as a
+  missing app. `errorMessagesContract.test.ts` rejects `String(err)`.
+- `docked="top"` or `"bottom"` fits a notice to a pane edge as a strip.
+  `density="compact"` sets it in the dense chrome size for transcripts,
+  composers, and rows. Put machine output under the message in
+  `NoticeDetail`.
 
 In chat and code journals, notices span the full message column regardless of
 text length or severity. Do not add a prose-width cap or size a notice to its
 content. Compaction stays a plain text event in the same column.
+
+A page that crashes keeps its rail: every route under a layout sets
+`errorComponent: RoutePaneError`, which says so in the pane with Try again, Go
+home, and Copy debug info. A crash in the shell or a layout takes the window
+through `RouteCrashScreen`, the same screen the app-wide `ErrorBoundary`
+draws. An address no route answers renders `RouteNotFound`: an `Empty` state
+with a way home, inside the frame.

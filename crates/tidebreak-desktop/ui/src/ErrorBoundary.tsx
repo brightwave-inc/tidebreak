@@ -1,12 +1,13 @@
 import { Component, type ReactNode } from "react";
-import { Button } from "@/components/ui/button";
-import { BootBrand } from "./Logomark";
+import { CrashScreen, currentRoutePath, homePathFor } from "./CrashScreen";
 import { reportRendererError } from "./rendererErrors";
 
 type ErrorBoundaryProps = {
   children: ReactNode;
   /** Injectable for tests; defaults to a real page reload. */
   onReload?: () => void;
+  /** Injectable for tests; defaults to reloading onto the home page. */
+  onGoHome?: () => void;
   /**
    * Rendered instead of the full-page recovery screen.
    *
@@ -32,7 +33,17 @@ type ErrorBoundaryProps = {
 
 type ErrorBoundaryState = {
   error: Error | null;
+  componentStack: string | null;
 };
+
+/**
+ * Outside the router there is no navigation to ask for, so going home is a
+ * reload onto the home page's address.
+ */
+function reloadHome() {
+  window.location.hash = `#${homePathFor(currentRoutePath())}`;
+  window.location.reload();
+}
 
 /**
  * Last-resort catch for render and lifecycle throws anywhere in the tree.
@@ -44,14 +55,15 @@ export class ErrorBoundary extends Component<
   ErrorBoundaryProps,
   ErrorBoundaryState
 > {
-  state: ErrorBoundaryState = { error: null };
+  state: ErrorBoundaryState = { error: null, componentStack: null };
 
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+  static getDerivedStateFromError(error: Error): Partial<ErrorBoundaryState> {
     return { error };
   }
 
   componentDidCatch(error: Error, info: { componentStack?: string | null }) {
     console.error("unhandled render error", error, info.componentStack);
+    this.setState({ componentStack: info.componentStack ?? null });
     reportRendererError("render", error, {
       componentStack: info.componentStack,
     });
@@ -60,29 +72,21 @@ export class ErrorBoundary extends Component<
   componentDidUpdate(previous: ErrorBoundaryProps) {
     if (this.state.error === null) return;
     if (previous.resetKey === this.props.resetKey) return;
-    this.setState({ error: null });
+    this.setState({ error: null, componentStack: null });
   }
 
   render() {
     if (!this.state.error) return this.props.children;
     if (this.props.fallback !== undefined) return this.props.fallback;
     return (
-      <div className="boot" role="alert">
-        <BootBrand />
-        <h1>Tidebreak hit an unexpected error.</h1>
-        <p className="boot-error-detail">{String(this.state.error.message)}</p>
-        <Button
-          size="sm"
-          className="mt-3"
-          onClick={() =>
-            this.props.onReload
-              ? this.props.onReload()
-              : window.location.reload()
-          }
-        >
-          Reload
-        </Button>
-      </div>
+      <CrashScreen
+        error={this.state.error}
+        componentStack={this.state.componentStack}
+        onReload={() =>
+          this.props.onReload ? this.props.onReload() : window.location.reload()
+        }
+        onGoHome={this.props.onGoHome ?? reloadHome}
+      />
     );
   }
 }

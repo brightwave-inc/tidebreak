@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { friendlyErrorMessage } from "./lib/utils";
 
 export type VoiceComposerState =
   | "idle"
@@ -42,10 +43,7 @@ function voiceError(error: unknown): string {
   if (error instanceof DOMException && error.name === "NotAllowedError") {
     return "Microphone access was denied. Allow it in system settings and try again.";
   }
-  const message = String(error)
-    .replace(/^Error:\s*/, "")
-    .trim();
-  return message || "Could not record from the microphone.";
+  return friendlyErrorMessage(error, "Could not record from the microphone.");
 }
 
 /**

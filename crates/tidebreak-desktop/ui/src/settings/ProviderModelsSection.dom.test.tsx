@@ -332,8 +332,9 @@ describe("ProviderModelsSection", () => {
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "Add model" }));
 
+    // The server's reason, started as a sentence.
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-      "configured model `claude-next` lists reasoning effort `none`",
+      "Configured model `claude-next` lists reasoning effort `none`",
     );
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });

@@ -13,6 +13,7 @@ import {
   SettingsPanel,
   SettingsSection,
 } from "./primitives";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 const MIN_ACTIVE_AGENTS = 1;
 const MAX_ACTIVE_AGENTS = 1024;
@@ -39,9 +40,15 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
   const [saving, setSaving] = useState(false);
   const [savingTurnRecaps, setSavingTurnRecaps] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The first read failed; Try again bumps the attempt to read again. */
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setLoadFailed(false);
     void client
       .getSettings()
       .then((settings) => {
@@ -52,7 +59,10 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
         setTurnRecapsEnabled(settings.code_turn_recaps_enabled);
       })
       .catch((err) => {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          setError(friendlyErrorMessage(err, "Try again in a moment."));
+          setLoadFailed(true);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -60,7 +70,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, loadAttempt]);
 
   async function saveNumbers() {
     const parsedLimit = Number(limit);
@@ -109,7 +119,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
       setErrorCheckin(String(settings.sandbox_agent_error_checkin));
       toast.success("Saved agent settings");
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setSaving(false);
     }
@@ -127,7 +137,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
       setTurnRecapsEnabled(settings.code_turn_recaps_enabled);
     } catch (err) {
       setTurnRecapsEnabled(previous);
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setSavingTurnRecaps(false);
     }
@@ -248,7 +258,15 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
           />
         </SettingsField>
       </SettingsSection>
-      {error && <SettingsError>{error}</SettingsError>}
+      {error && (
+        <SettingsError
+          onRetry={
+            loadFailed ? () => setLoadAttempt((count) => count + 1) : undefined
+          }
+        >
+          {error}
+        </SettingsError>
+      )}
     </SettingsPanel>
   );
 }

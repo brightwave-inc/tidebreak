@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { friendlyErrorMessage } from "@/lib/utils";
+import { Notice, NoticeDetail } from "@/components/ui/notice";
 
 /**
  * Commit every change in the worktree with a message, from Source control.
@@ -107,17 +108,13 @@ export function CommitBox({
         </p>
       </div>
       {failure && (
-        <div
-          role="alert"
-          className="notice-surface notice-critical rounded-md border px-3 py-2 text-sm"
-        >
-          <p className="font-medium">{failure.title}</p>
+        <Notice tone="critical" title={failure.title}>
           {failure.detail && (
-            <pre className="mt-1 max-h-40 overflow-auto font-mono text-xs whitespace-pre-wrap break-words">
+            <NoticeDetail className="max-h-40 w-full overflow-auto">
               {failure.detail}
-            </pre>
+            </NoticeDetail>
           )}
-        </div>
+        </Notice>
       )}
     </form>
   );

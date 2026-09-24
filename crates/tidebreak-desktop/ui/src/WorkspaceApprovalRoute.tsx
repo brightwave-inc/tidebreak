@@ -7,6 +7,7 @@ import { connectPageFailurePhase, channelLabel } from "./ConnectApprovalRoute";
 import { BootBrand } from "./Logomark";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Notice } from "@/components/ui/notice";
 
 type WorkspaceApprovalPhase =
   | "loading"
@@ -156,11 +157,7 @@ export function WorkspaceApprovalView({
                 </div>
               </>
             )}
-            {error && (
-              <p className="text-sm text-destructive" role="alert">
-                {error}
-              </p>
-            )}
+            {error && <Notice tone="critical">{error}</Notice>}
           </div>
         ) : null}
       </Card>

@@ -1,9 +1,8 @@
-import { TriangleAlert } from "lucide-react";
-
 import { Spinner } from "@/components/ui/spinner";
 
 import type { CodeHarnessInstallSnapshot } from "../api/types";
 import { HARNESS_LABELS } from "./labels";
+import { Notice } from "@/components/ui/notice";
 
 /**
  * What a harness download is doing, under the engine picker.
@@ -23,16 +22,10 @@ export function HarnessInstallNote({
   const version = install.version ? ` ${install.version}` : "";
   if (install.error) {
     return (
-      <p className="text-critical flex items-start gap-1.5 text-xs">
-        <TriangleAlert
-          className="mt-0.5 size-3.5 shrink-0"
-          aria-hidden="true"
-        />
-        <span>
-          {label}
-          {version} could not be downloaded. {install.error}
-        </span>
-      </p>
+      <Notice tone="critical" density="compact">
+        {label}
+        {version} could not be downloaded. {install.error}
+      </Notice>
     );
   }
   return (

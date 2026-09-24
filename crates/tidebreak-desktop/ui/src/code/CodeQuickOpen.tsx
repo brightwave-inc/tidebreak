@@ -19,6 +19,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { fuzzyScore, queryTokens } from "@/fuzzy";
 import { friendlyErrorMessage } from "@/lib/utils";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 const QUICK_OPEN_LIMIT = 5000;
 const VISIBLE_RESULTS = 12;
@@ -54,6 +55,8 @@ export function CodeQuickOpen({
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Bumped by Try again, so the tree loads once more. */
+  const [attempt, setAttempt] = useState(0);
   const loadedKeyRef = useRef<string | null>(null);
   const treeKey = `${workspaceId}:${contentRevision}`;
 
@@ -108,7 +111,7 @@ export function CodeQuickOpen({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceId, open, openWorkspaceId, treeKey]);
+  }, [client, workspaceId, open, openWorkspaceId, treeKey, attempt]);
 
   const results = useMemo(
     () => rankQuickOpenPaths(paths, query).slice(0, VISIBLE_RESULTS),
@@ -164,7 +167,17 @@ export function CodeQuickOpen({
           </div>
           <CommandList className="max-h-[min(55vh,30rem)] min-h-20 p-1.5">
             {error ? (
-              <p className="text-critical px-3 py-5 text-sm">{error}</p>
+              <Notice
+                tone="critical"
+                className="m-1.5 w-auto"
+                action={
+                  <NoticeRetryButton
+                    onClick={() => setAttempt((count) => count + 1)}
+                  />
+                }
+              >
+                {error}
+              </Notice>
             ) : loading ? (
               <p className="text-muted-foreground px-3 py-5 text-sm">
                 Loading files…

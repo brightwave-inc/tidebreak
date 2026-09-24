@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 
 import type { DiagnosticsSaveState } from "./desktopLifecycle";
+import { Notice } from "@/components/ui/notice";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 type UncleanExitNoticeProps = {
   save: DiagnosticsSaveState;
@@ -68,9 +70,9 @@ export function UncleanExitNotice({
         )}
       </div>
       {save.status === "failed" && (
-        <p className="mt-2 text-sm text-critical" role="alert">
-          {save.error.replace(/^Error:\s*/, "")}
-        </p>
+        <Notice tone="critical" className="mt-2">
+          {friendlyErrorMessage(save.error, "Try again in a moment.")}
+        </Notice>
       )}
     </aside>
   );

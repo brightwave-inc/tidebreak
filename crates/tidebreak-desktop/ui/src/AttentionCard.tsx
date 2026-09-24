@@ -1,4 +1,5 @@
 import type { ReactNode, Ref } from "react";
+import { Notice } from "@/components/ui/notice";
 
 /**
  * The shared shell for a transcript card that parks the turn on the person.
@@ -45,9 +46,9 @@ export function AttentionCard({
       )}
       {children}
       {error && (
-        <p className="text-destructive text-xs break-words" role="alert">
+        <Notice tone="critical" density="compact">
           {error}
-        </p>
+        </Notice>
       )}
     </section>
   );

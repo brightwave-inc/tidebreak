@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -59,6 +59,7 @@ import {
   useInlineThumbnailSidebar,
 } from "@/components/extend/document-viewer-sidebar";
 import { FileThumbnail } from "@/components/extend/file-thumbnail";
+import { Notice } from "@/components/ui/notice";
 
 setWasmSource(pptxWasmUrl);
 
@@ -1292,15 +1293,14 @@ export function PptxViewerPreview({
                 <ViewerLoadingSurface showSpinner={shouldShowLoadingSpinner} />
               )}
               renderError={(error) => (
-                <div className="grid h-full min-h-96 place-items-center p-6 text-center">
-                  <div className="max-w-md rounded-lg border bg-background p-4 text-sm text-destructive shadow-xs">
-                    <div className="font-medium">
-                      Unable to display PowerPoint
-                    </div>
-                    <div className="mt-1 text-muted-foreground">
-                      {error.message}
-                    </div>
-                  </div>
+                <div className="grid h-full min-h-96 place-items-center p-6">
+                  <Notice
+                    tone="critical"
+                    title="Could not display this presentation"
+                    className="max-w-md"
+                  >
+                    {friendlyErrorMessage(error, "Try opening it again.")}
+                  </Notice>
                 </div>
               )}
               emptyState={

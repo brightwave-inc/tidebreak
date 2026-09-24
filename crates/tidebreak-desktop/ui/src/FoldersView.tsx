@@ -45,6 +45,7 @@ import {
 import { verbLabel } from "./settings/PermissionsPanel";
 import { useRefreshSignals } from "./RefreshSignals";
 import { hostErrorMessage } from "@/remoteMachine";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 /**
  * A chat's connected folders: the directories the native host may reach on
@@ -94,7 +95,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
       // A panel that could not load is a standing state, not a transient
       // failure, so it stays on the page. Every action below reports through a
       // toast instead.
-      setError(hostErrorMessage(err, "The folders could not be loaded."));
+      setError(hostErrorMessage(err, "Try again in a moment."));
     }
   }
 
@@ -277,12 +278,14 @@ export function FoldersView({ chat }: { chat: Chat }) {
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4">
         {error && (
-          <div
-            className="notice-surface notice-critical shrink-0 rounded-md px-3 py-2 text-sm"
-            role="alert"
+          <Notice
+            tone="critical"
+            title="Could not load folders"
+            className="shrink-0"
+            action={<NoticeRetryButton onClick={() => void refresh()} />}
           >
             {error}
-          </div>
+          </Notice>
         )}
 
         {nothingToShow && !error ? (

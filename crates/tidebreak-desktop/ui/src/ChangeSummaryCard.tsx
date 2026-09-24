@@ -128,7 +128,7 @@ export function ChangeSummaryCard({ client, chatId, turnId, files }: Props) {
             </span>
           </div>
           {rejected > 0 && (
-            <p className="mt-0.5 text-xs text-destructive">
+            <p className="mt-0.5 text-xs text-critical">
               {rejected} rejected and left unchanged
             </p>
           )}
@@ -184,7 +184,7 @@ function FileChangeRow({
       <div className="flex items-start gap-2">
         {rejected ? (
           <AlertTriangle
-            className="mt-0.5 shrink-0 text-destructive"
+            className="mt-0.5 shrink-0 text-critical"
             size={14}
             aria-hidden="true"
           />

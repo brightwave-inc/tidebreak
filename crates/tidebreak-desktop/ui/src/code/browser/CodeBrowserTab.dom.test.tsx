@@ -1246,7 +1246,9 @@ describe("CodeBrowserTab", () => {
       "Downloads are not available in the in-app browser yet",
     );
     await userEvent.click(
-      within(downloadNotice.parentElement!).getByRole("button", {
+      within(
+        downloadNotice.closest<HTMLElement>('[data-slot="notice"]')!,
+      ).getByRole("button", {
         name: "Open externally",
       }),
     );
@@ -1265,7 +1267,9 @@ describe("CodeBrowserTab", () => {
       "report.md: The downloaded text file is not valid UTF-8",
     );
     await userEvent.click(
-      within(failedNotice.parentElement!).getByRole("button", {
+      within(
+        failedNotice.closest<HTMLElement>('[data-slot="notice"]')!,
+      ).getByRole("button", {
         name: "Open externally",
       }),
     );

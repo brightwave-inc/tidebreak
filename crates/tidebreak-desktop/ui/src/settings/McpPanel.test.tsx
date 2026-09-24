@@ -348,8 +348,9 @@ describe("McpPanel", () => {
     await user.click(screen.getByRole("button", { name: "Add server" }));
     await user.click(screen.getByRole("button", { name: "Save and verify" }));
 
+    // The server's reason, started as a sentence.
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      'invalid external MCP server "docs": must configure exactly one of command, url, or gateway endpoint',
+      'Invalid external MCP server "docs": must configure exactly one of command, url, or gateway endpoint',
     );
   });
 
@@ -697,7 +698,7 @@ describe("McpPanel", () => {
     render(<McpPanel client={client} />);
 
     expect(
-      await screen.findByText("MCP servers could not load"),
+      await screen.findByText("Could not load MCP servers"),
     ).toBeInTheDocument();
     expect(
       screen.queryByText(/No MCP servers configured/),

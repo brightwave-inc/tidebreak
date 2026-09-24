@@ -30,7 +30,7 @@ function ImageViewerSource({ source, className, ...restProps }: Props) {
     return (
       <div className={cn("relative overflow-auto", className)} {...restProps}>
         {file.error ? (
-          <DocumentViewerState variant="error">
+          <DocumentViewerState variant="error" onRetry={file.retry}>
             This image could not be loaded.
           </DocumentViewerState>
         ) : file.progress ? (

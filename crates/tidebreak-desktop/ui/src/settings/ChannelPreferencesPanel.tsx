@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import type { ApiClient, HarnessKind } from "../api";
-import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -22,6 +21,7 @@ import type {
   ChannelSubscriptionPreference,
   ChannelPreferencesSnapshot,
 } from "./channelPreferences";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 const LABELS: Record<HarnessKind, string> = {
   internal: "Tidebreak",
@@ -65,7 +65,9 @@ export function ChannelPreferencesPanel({
         setInstructions(next.instructions);
       })
       .catch((err: unknown) => {
-        if (generation.current === current) setError(String(err));
+        if (generation.current === current) {
+          setError(friendlyErrorMessage(err, "Try again in a moment."));
+        }
       })
       .finally(() => {
         if (generation.current === current) setLoading(false);
@@ -106,7 +108,11 @@ export function ChannelPreferencesPanel({
           if (active) setModels(models);
         })
         .catch((err: unknown) => {
-          if (active) setCatalogError(String(err));
+          if (active) {
+            setCatalogError(
+              friendlyErrorMessage(err, "Could not load the model list."),
+            );
+          }
         });
     return () => {
       active = false;
@@ -136,7 +142,9 @@ export function ChannelPreferencesPanel({
       });
       if (generation.current === current) setPreferences(next);
     } catch (err) {
-      if (generation.current === current) setError(String(err));
+      if (generation.current === current) {
+        setError(friendlyErrorMessage(err, "Could not save that change."));
+      }
     } finally {
       if (generation.current === current) setSaving(false);
     }
@@ -154,12 +162,12 @@ export function ChannelPreferencesPanel({
           Loading channel settings…
         </p>
       ) : !preferences ? (
-        <>
-          <SettingsError>{error}</SettingsError>
-          <Button variant="outline" onClick={() => setReload((n) => n + 1)}>
-            Try again
-          </Button>
-        </>
+        <SettingsError
+          title="Could not load this channel's settings"
+          onRetry={() => setReload((n) => n + 1)}
+        >
+          {error}
+        </SettingsError>
       ) : (
         <>
           {!preferences.can_edit && (

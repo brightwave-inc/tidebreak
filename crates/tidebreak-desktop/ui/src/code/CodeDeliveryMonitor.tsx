@@ -19,6 +19,7 @@ import {
 } from "./CodeDeliveryStore";
 import { triggersForNotificationRules } from "./CodeTriggerMigration";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 // Freshness rides the `delivery` nudge on the updates socket (decision 66):
 // the server says when the pull-request or workflow-run store changed, and
@@ -397,5 +398,5 @@ function isAbortError(error: unknown): boolean {
 }
 
 function deliveryErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return friendlyErrorMessage(error, "Try again in a moment.");
 }

@@ -1,15 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
+import { ExternalLink, Plus, RefreshCw, Trash2, Upload } from "lucide-react";
 import {
-  CircleAlert,
-  ExternalLink,
-  Plus,
-  RefreshCw,
-  Trash2,
-  Upload,
-} from "lucide-react";
-import {
-  HttpError,
   type ApiClient,
   type GatewayApps,
   type McpDirectoryEntry,
@@ -19,14 +11,6 @@ import {
   type McpServerInfo,
 } from "../api";
 import { Button } from "@/components/ui/button";
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -50,6 +34,8 @@ import {
   type McpImportSecret,
   type McpImportStored,
 } from "./mcpImport";
+import { Notice } from "@/components/ui/notice";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 3_600_000;
@@ -102,7 +88,7 @@ export function McpHealthChip({ health }: { health: McpHealth }) {
     health === "healthy"
       ? "text-success"
       : health === "degraded"
-        ? "text-destructive"
+        ? "text-critical"
         : "text-muted-foreground";
   return (
     <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
@@ -1317,7 +1303,7 @@ export function McpPanel({
                     mounted.health !== "initializing" &&
                     mounted.health !== "reconnecting" &&
                     mounted.diagnostic !== null && (
-                      <span className="text-xs text-destructive break-words">
+                      <span className="text-xs text-critical break-words">
                         {mounted.diagnostic}
                       </span>
                     )}
@@ -1905,20 +1891,9 @@ function McpLoadFailure({
   onRetry: () => void;
 }) {
   return (
-    <Empty className="min-h-80 border" role="alert">
-      <EmptyHeader>
-        <EmptyMedia variant="icon" className="text-critical">
-          <CircleAlert />
-        </EmptyMedia>
-        <EmptyTitle>MCP servers could not load</EmptyTitle>
-        <EmptyDescription>{error}</EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent>
-        <Button variant="outline" size="sm" onClick={onRetry}>
-          Try again
-        </Button>
-      </EmptyContent>
-    </Empty>
+    <SettingsError title="Could not load MCP servers" onRetry={onRetry}>
+      {error}
+    </SettingsError>
   );
 }
 
@@ -1985,14 +1960,11 @@ function mountStatus(mounted: McpServerInfo): string {
   }
 }
 
-/** A message that can sit mid-sentence: `String(err)` would keep the error
- * class prefix ("HttpError: ...") in front of it. HTTP status prefixes stay
- * off so a rejected save shows the server's field-level reason. */
+/** A failure in the app's one wording (`friendlyErrorMessage`): a rejected
+ * save shows the server's field-level reason, without a class name or an
+ * HTTP status in front of it. */
 function errorMessage(err: unknown): string {
-  if (err instanceof HttpError) {
-    return err.message.replace(/^\d+:\s*/, "");
-  }
-  return err instanceof Error ? err.message : String(err);
+  return friendlyErrorMessage(err, "Try again in a moment.");
 }
 
 /** A fresh gateway mount: everything comes from the session except the name,
@@ -2545,15 +2517,13 @@ function UrlEditDropsStoredValues({
   const dropped = droppedByUrlEdit(server, saved);
   if (dropped === null) return null;
   return (
-    <div className="notice-surface notice-warning flex flex-col gap-1 rounded-xl border px-3 py-2">
-      <p className="text-sm font-medium">
-        Saving this URL drops the stored {dropped}
-      </p>
-      <p className="text-sm">
-        Tidebreak sends a stored value only to the URL it was entered for. Enter
-        the values again below, or change the URL back to keep them.
-      </p>
-    </div>
+    <Notice
+      tone="warning"
+      title={`Saving this URL drops the stored ${dropped}`}
+    >
+      Tidebreak sends a stored value only to the URL it was entered for. Enter
+      the values again below, or change the URL back to keep them.
+    </Notice>
   );
 }
 

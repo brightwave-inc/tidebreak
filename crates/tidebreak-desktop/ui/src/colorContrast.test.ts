@@ -373,8 +373,9 @@ describe("token contrast in both themes (see DESIGN.md)", () => {
   });
 
   it("keeps error ink readable as text", () => {
-    // `text-destructive` and `text-critical` carry error messages and
-    // destructive menu items, so the critical mark has to read as text too.
+    // `text-critical` carries error messages and destructive menu items, and
+    // `destructive` is shadcn's name for the same red, so the critical mark
+    // has to read as text too.
     expect(
       tokenPairs(["destructive", "critical"], () => GROUNDS, TEXT),
     ).toEqual([]);

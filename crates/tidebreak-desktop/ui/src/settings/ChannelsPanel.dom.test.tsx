@@ -198,7 +198,7 @@ describe("ChannelsPanel", () => {
       "Connection lost",
     );
     expect(screen.getByRole("button", { name: "Revoke" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "Refresh grants" }));
+    await user.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
     expect(listCodeGrants).toHaveBeenCalledTimes(3);
     expect(revokeCodeGrant).toHaveBeenCalledExactlyOnceWith(workspace.id);

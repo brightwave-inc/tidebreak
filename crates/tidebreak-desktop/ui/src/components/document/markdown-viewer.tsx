@@ -175,7 +175,7 @@ export function MarkdownViewer({
   if (fileDownload.error) {
     return (
       <div className={cn("relative overflow-auto", className)} {...props}>
-        <DocumentViewerState variant="error">
+        <DocumentViewerState variant="error" onRetry={fileDownload.retry}>
           This document could not be loaded.
         </DocumentViewerState>
       </div>

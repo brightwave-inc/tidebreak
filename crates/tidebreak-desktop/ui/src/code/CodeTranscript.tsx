@@ -58,6 +58,7 @@ import {
   ReviewFinishedRow,
   TurnReviewCard,
 } from "./TurnReviewCard";
+import { Notice } from "@/components/ui/notice";
 
 /**
  * The code-session transcript: the reader's prompts, markdown for assistant
@@ -1086,28 +1087,20 @@ export function HarnessNotice({
   const tone =
     level === "error" ? "critical" : level === "warning" ? "warning" : "info";
   return (
-    <div
+    <Notice
       // An error is the reason the turn is not going anywhere, so it interrupts
       // the reader. A warning or an aside is announced when they get to it.
+      tone={tone}
       role={level === "error" ? "alert" : "status"}
-      className={cn(
-        "notice-surface w-full self-stretch px-3 py-2 text-sm",
-        tone === "critical" && "notice-critical",
-        tone === "warning" && "notice-warning",
-        tone === "info" && "notice-info",
-      )}
+      className="self-stretch"
+      action={
+        level === "error" && onFileIssue ? (
+          <FileIssueButton onClick={onFileIssue} />
+        ) : undefined
+      }
     >
-      {level === "error" && onFileIssue ? (
-        <div className="flex flex-col gap-1.5">
-          <p>{message}</p>
-          <div className="flex items-center">
-            <FileIssueButton onClick={onFileIssue} />
-          </div>
-        </div>
-      ) : (
-        message
-      )}
-    </div>
+      {message}
+    </Notice>
   );
 }
 

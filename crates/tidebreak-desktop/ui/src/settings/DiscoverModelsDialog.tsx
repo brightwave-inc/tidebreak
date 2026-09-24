@@ -32,6 +32,7 @@ import {
   validateDraft,
 } from "./customModels";
 import { SettingsError } from "./primitives";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 /** Show the filter once a listing is long enough to need one. */
 const FILTER_THRESHOLD = 8;
@@ -238,15 +239,9 @@ export function DiscoverModelsDialog({
         )}
 
         {step === "pick" && listing.state === "failed" && (
-          <div
-            className="notice-surface notice-critical flex flex-col items-start gap-2 rounded-md border px-3 py-2"
-            role="alert"
-          >
-            <p className="text-sm">{listing.message}</p>
-            <Button type="button" variant="outline" size="xs" onClick={load}>
-              Try again
-            </Button>
-          </div>
+          <Notice tone="critical" action={<NoticeRetryButton onClick={load} />}>
+            {listing.message}
+          </Notice>
         )}
 
         {step === "pick" &&

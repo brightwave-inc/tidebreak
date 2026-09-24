@@ -4,6 +4,7 @@ import { AppInvokeRefusalError } from "@/api";
 import { createMcpAppBridge, type McpAppBridge } from "@/McpAppBridge";
 import { useTheme } from "@/theme";
 import type { AppsApis } from "./appsApis";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 /**
  * The running app: one stored revision in the same sandbox the MCP App card
@@ -51,6 +52,8 @@ export function AppFrame({
 }) {
   const { resolved: resolvedTheme } = useTheme();
   const [state, setState] = useState<FrameState>({ kind: "loading" });
+  /** Bumped by Try again, so the view session is asked for once more. */
+  const [openAttempt, setOpenAttempt] = useState(0);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const bridgeRef = useRef<McpAppBridge | null>(null);
 
@@ -133,7 +136,7 @@ export function AppFrame({
     return () => {
       cancelled = true;
     };
-  }, [apis, appId]);
+  }, [apis, appId, openAttempt]);
 
   return (
     <div className="bg-background mx-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border">
@@ -141,10 +144,18 @@ export function AppFrame({
         <p className="text-muted-foreground p-3 text-xs">Opening app…</p>
       )}
       {state.kind === "unavailable" && (
-        <p className="text-muted-foreground p-3 text-xs">
-          This app could not be opened. Its stored revision may be missing — try
-          again, or delete the app.
-        </p>
+        <Notice
+          tone="critical"
+          title="Could not open this app"
+          className="m-3 w-auto"
+          action={
+            <NoticeRetryButton
+              onClick={() => setOpenAttempt((count) => count + 1)}
+            />
+          }
+        >
+          Its stored revision may be missing. Try again, or delete the app.
+        </Notice>
       )}
       {state.kind === "ready" && (
         <iframe

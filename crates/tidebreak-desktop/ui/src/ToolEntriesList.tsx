@@ -199,11 +199,11 @@ function FailureRows({ failures }: { failures: ResultFailure[] }) {
           className="flex items-start gap-2 rounded p-1 px-1.5 text-sm"
         >
           <X
-            className="text-destructive mt-0.5 size-4 shrink-0"
+            className="text-critical mt-0.5 size-4 shrink-0"
             aria-hidden="true"
           />
           <span className="truncate">{failure.label ?? "Item"}</span>
-          <span className="text-destructive ml-auto min-w-0 truncate text-right text-xs">
+          <span className="text-critical ml-auto min-w-0 truncate text-right text-xs">
             {failure.error}
           </span>
         </div>

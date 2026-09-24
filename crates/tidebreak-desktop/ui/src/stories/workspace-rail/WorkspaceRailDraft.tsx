@@ -24,6 +24,7 @@ import {
 import { WorkspaceRailGroups } from "@/code/WorkspaceRailGroups";
 import { WorkspaceRailToolbar } from "@/code/WorkspaceRailToolbar";
 import { railEntries, railRepositories } from "./fixtures";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 export type RailScenario =
   | "shared-repo"
@@ -214,23 +215,14 @@ export function WorkspaceRailDraft({
               ))}
             </div>
           ) : state === "error" ? (
-            <div
-              role="alert"
-              className="notice-surface notice-critical mx-1 mt-2 rounded-md px-3 py-3"
+            <Notice
+              tone="critical"
+              title="Could not load workspaces"
+              className="mx-1 mt-2 w-auto"
+              action={<NoticeRetryButton onClick={() => setRecovered(true)} />}
             >
-              <p className="text-sm font-medium">Workspaces could not load</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Check your connection and try again.
-              </p>
-              <Button
-                size="sm"
-                variant="outline"
-                className="mt-3"
-                onClick={() => setRecovered(true)}
-              >
-                Try again
-              </Button>
-            </div>
+              Check your connection, then try again.
+            </Notice>
           ) : entries.length === 0 ? (
             <Empty className="min-h-56 px-3">
               <EmptyHeader>

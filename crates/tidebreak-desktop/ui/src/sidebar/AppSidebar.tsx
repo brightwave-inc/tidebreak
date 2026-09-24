@@ -12,6 +12,7 @@ import { ProjectsSection } from "./ProjectsSection";
 import { SidebarButton } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
 import { useActiveChatId } from "@/useActiveChatId";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 /**
  * The one navigation rail, used by every route that is not settings.
@@ -71,15 +72,19 @@ export function AppSidebar() {
       <ProjectsSection activeChatId={activeChatId} />
       <ChatsSection activeChatId={activeChatId} />
       {chatsError && (
-        <div className="flex shrink-0 flex-col gap-1 px-2 py-1">
-          <p className="text-xs text-critical">{chatsError}</p>
-          <button
-            type="button"
-            className="self-start text-xs text-muted-foreground underline-offset-2 hover:underline"
-            onClick={() => void refreshChats()}
+        <div className="shrink-0 px-2 py-1">
+          <Notice
+            tone="critical"
+            density="compact"
+            action={
+              <NoticeRetryButton
+                size="xs"
+                onClick={() => void refreshChats()}
+              />
+            }
           >
-            Try again
-          </button>
+            {chatsError}
+          </Notice>
         </div>
       )}
     </SidebarFrame>

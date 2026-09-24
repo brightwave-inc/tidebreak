@@ -42,6 +42,7 @@ import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { listArchivedWorkspaces, isPutAway } from "./workspaceCards";
 import { workspaceCommandsForAccess } from "./workspaceAccess";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 type AgeFilter = "all" | "7d" | "30d" | "90d";
 
@@ -369,9 +370,14 @@ function CodeArchiveBody() {
         {!loaded ? (
           <ArchiveSkeleton />
         ) : error ? (
-          <div className="notice-surface notice-critical m-5 rounded-lg border px-3 py-2 text-sm">
+          <Notice
+            tone="critical"
+            title="Could not load archived workspaces"
+            className="m-5 w-auto"
+            action={<NoticeRetryButton onClick={() => void refresh(client)} />}
+          >
             {error}
-          </div>
+          </Notice>
         ) : totalArchived === 0 ? (
           <Empty className="min-h-80">
             <EmptyHeader>

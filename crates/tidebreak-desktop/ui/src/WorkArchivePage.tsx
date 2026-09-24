@@ -20,6 +20,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { paneHeaderDragRegion } from "./WindowDragStrip";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 function archivedAgo(chat: Chat): string {
   const at = Date.parse(chat.archived_at ?? lastActivityAt(chat));
@@ -41,9 +42,12 @@ export function WorkArchivePage() {
   const loaded = useChatListStore((state) => state.archivedLoaded);
   const [error, setError] = useState<string | null>(null);
   const [unavailable, setUnavailable] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    // A retry clears the failure so the loading rows show while it runs.
+    if (attempt > 0) setError(null);
     client.listChats({ archived: true }).then(
       (chats) => {
         if (cancelled) return;
@@ -59,14 +63,14 @@ export function WorkArchivePage() {
       },
       (err) => {
         if (!cancelled) {
-          setError(friendlyErrorMessage(err, "Could not load the archive."));
+          setError(friendlyErrorMessage(err, "Try again in a moment."));
         }
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, attempt]);
 
   return (
     <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
@@ -96,6 +100,7 @@ export function WorkArchivePage() {
             loaded={loaded}
             error={error}
             unavailable={unavailable}
+            onRetry={() => setAttempt((count) => count + 1)}
           />
         </div>
       </div>
@@ -108,12 +113,14 @@ function ArchiveBody({
   loaded,
   error,
   unavailable,
+  onRetry,
 }: {
   archived: Chat[];
   loaded: boolean;
   error: string | null;
   /** The server is older than the archive. */
   unavailable: boolean;
+  onRetry: () => void;
 }) {
   if (unavailable) {
     return (
@@ -133,12 +140,14 @@ function ArchiveBody({
   }
   if (error && !loaded) {
     return (
-      <div
-        role="alert"
-        className="notice-surface notice-critical m-5 rounded-lg border px-3 py-2 text-sm"
+      <Notice
+        tone="critical"
+        title="Could not load the archive"
+        className="m-5 w-auto"
+        action={<NoticeRetryButton onClick={onRetry} />}
       >
         {error}
-      </div>
+      </Notice>
     );
   }
   if (!loaded) {

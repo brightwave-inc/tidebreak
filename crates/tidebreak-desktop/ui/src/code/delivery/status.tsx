@@ -20,6 +20,7 @@ import { humanize, runTone } from "./helpers";
 import { relativeTime } from "../PullRequestDetail";
 import { STATUS_TEXT } from "../statusTone";
 import { createContext, useContext } from "react";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 export const DeliveryRetryContext = createContext<(() => void) | null>(null);
 
@@ -94,16 +95,14 @@ export function PartialErrorBanner({
   const visible = deliveryRefreshErrors(errors);
   if (visible.length === 0) return null;
   return (
-    <div
-      role="status"
-      className={cn(
-        "notice-surface notice-warning flex shrink-0 items-start gap-2 border-b px-5 py-2.5 text-xs",
-        compact && "border-t",
-      )}
+    <Notice
+      tone="warning"
+      docked="top"
+      density="compact"
+      className={cn("shrink-0 px-5", compact && "border-t")}
     >
-      <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
-      <span>{refreshErrorSummary(visible)}</span>
-    </div>
+      {refreshErrorSummary(visible)}
+    </Notice>
   );
 }
 
@@ -115,12 +114,15 @@ export function RepositoryRefreshWarning({
   onRetry: () => void;
 }) {
   return (
-    <div className="notice-surface notice-warning flex shrink-0 items-center justify-between gap-3 border-b px-5 py-2.5 text-xs">
-      <span>GitHub repository discovery is stale: {message}</span>
-      <Button type="button" size="xs" variant="outline" onClick={onRetry}>
-        Try again
-      </Button>
-    </div>
+    <Notice
+      tone="warning"
+      docked="top"
+      density="compact"
+      className="shrink-0 px-5"
+      action={<NoticeRetryButton size="xs" onClick={onRetry} />}
+    >
+      GitHub repository discovery is stale: {message}
+    </Notice>
   );
 }
 
@@ -176,12 +178,13 @@ export function InlineLoadError({
   onRetry: () => void;
 }) {
   return (
-    <div className="notice-surface notice-critical m-4 flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
-      <span>{message}</span>
-      <Button type="button" size="xs" variant="outline" onClick={onRetry}>
-        Try again
-      </Button>
-    </div>
+    <Notice
+      tone="critical"
+      className="m-4 w-auto"
+      action={<NoticeRetryButton onClick={onRetry} />}
+    >
+      {message}
+    </Notice>
   );
 }
 

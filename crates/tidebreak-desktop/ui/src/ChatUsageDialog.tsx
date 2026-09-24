@@ -147,7 +147,8 @@ function ContextWindowPanel({
             <span
               className={cn(
                 "rounded-full px-2 py-0.5 text-2xs font-semibold tracking-wide uppercase",
-                level === "critical" && "bg-destructive/15 text-destructive",
+                level === "critical" &&
+                  "bg-critical-background text-critical-foreground",
                 level === "warning" &&
                   "bg-warning-background text-warning-foreground",
               )}
@@ -162,7 +163,7 @@ function ContextWindowPanel({
             <p
               className={cn(
                 "font-mono text-4xl leading-none font-semibold tracking-tight tabular-nums",
-                level === "critical" && "text-destructive",
+                level === "critical" && "text-critical",
                 level === "warning" && "text-warning-foreground",
               )}
               aria-label={`${percent}% of context window used`}

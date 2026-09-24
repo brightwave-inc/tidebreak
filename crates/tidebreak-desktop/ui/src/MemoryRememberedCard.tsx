@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { ToolCardShell } from "./ToolCardShell";
+import { Notice } from "@/components/ui/notice";
 
 /** What editing or forgetting a remembered record needs from the client. */
 export type MemoryRememberedClient = Pick<
@@ -251,9 +252,9 @@ function MemoryRememberedRow({
         </>
       )}
       {error && (
-        <p className="mt-1 text-xs text-destructive" role="alert">
+        <Notice tone="critical" density="compact" className="mt-1">
           {error}
-        </p>
+        </Notice>
       )}
     </li>
   );

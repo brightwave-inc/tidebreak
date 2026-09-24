@@ -35,6 +35,7 @@ import {
 } from "@/NativePickerLatch";
 import { useRefreshSignals } from "@/RefreshSignals";
 import { hostErrorMessage } from "@/remoteMachine";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 const OutputsTable = lazy(() =>
   import("./OutputsTable").then((module) => ({ default: module.OutputsTable })),
 );
@@ -95,12 +96,7 @@ export function OutputsView({
       setCatalog(next);
     } catch (caught) {
       if (generation !== generationRef.current) return;
-      setError(
-        friendlyOutputError(
-          caught,
-          "Could not load this conversation's outputs.",
-        ),
-      );
+      setError(friendlyOutputError(caught, "Try again in a moment."));
     } finally {
       if (generation === generationRef.current) setLoading(false);
     }
@@ -219,20 +215,14 @@ export function OutputsView({
 
       <div className="flex min-h-0 flex-1 flex-col gap-2 pt-4">
         {error && (
-          <div
-            className="notice-surface notice-critical mx-4 flex shrink-0 items-center justify-between gap-3 rounded-md px-3 py-2 text-sm"
-            role="alert"
+          <Notice
+            tone="critical"
+            title="Could not load this conversation's outputs"
+            className="mx-4 w-auto shrink-0"
+            action={<NoticeRetryButton onClick={() => void refresh(true)} />}
           >
-            <span>{error}</span>
-            <Button
-              variant="outline"
-              size="xs"
-              className="shrink-0"
-              onClick={() => void refresh(true)}
-            >
-              Try again
-            </Button>
-          </div>
+            {error}
+          </Notice>
         )}
         {catalog.truncated && (
           <p className="shrink-0 px-4 text-xs text-muted-foreground">

@@ -5,9 +5,9 @@ import type {
 } from "../api/types";
 import { recoveryAttention } from "./sessionRecovery";
 import { useConfirm } from "@/components/ConfirmDialog";
-import { Button } from "@/components/ui/button";
 import { Loader } from "@/components/motion/loader";
 import { useRecoveryDelay } from "./useRecoveryDelay";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 export function SessionRecoveryNotice({
   lifecycle,
@@ -72,37 +72,35 @@ export function SessionRecoveryNotice({
     onRetry();
   }
   return (
-    <div
-      role="status"
-      className="notice-surface notice-warning mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm"
+    <Notice
+      tone="warning"
+      className="mx-4 mt-3 w-auto"
+      action={
+        canRetry && (
+          <NoticeRetryButton disabled={retrying} onClick={() => void retry()}>
+            {retrying
+              ? "Trying again…"
+              : missingOutput
+                ? "Continue with saved transcript"
+                : "Try again"}
+          </NoticeRetryButton>
+        )
+      }
     >
       <p>
         {attention.state.prompt ||
           "This session needs your attention before it can continue."}
       </p>
       {missingOutput && (
-        <p className="text-muted-foreground">
+        <p className="mt-1 text-muted-foreground">
           Continuing keeps the saved transcript. The missing final output will
           not be recovered.
         </p>
       )}
-      {!canRetry && unavailableHint && <p>{unavailableHint}</p>}
-      {canRetry && (
-        <Button
-          type="button"
-          size="sm"
-          className="self-start"
-          disabled={retrying}
-          onClick={() => void retry()}
-        >
-          {retrying
-            ? "Trying again…"
-            : missingOutput
-              ? "Continue with saved transcript"
-              : "Try again"}
-        </Button>
+      {!canRetry && unavailableHint && (
+        <p className="mt-1">{unavailableHint}</p>
       )}
       {dialog}
-    </div>
+    </Notice>
   );
 }

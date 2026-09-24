@@ -13,6 +13,8 @@ import {
 } from "@/components/ui/dialog";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
+import { Notice } from "@/components/ui/notice";
+import { friendlyErrorMessage } from "./lib/utils";
 
 const OPTIONS = [
   {
@@ -112,10 +114,9 @@ export function NetworkPolicyDialog({
       await onChange(policy);
       onOpenChange(false);
     } catch (caught) {
-      const message = String(caught)
-        .replace(/^Error:\s*/, "")
-        .trim();
-      setSaveError(message || "Could not update the network policy.");
+      setSaveError(
+        friendlyErrorMessage(caught, "Could not update the network policy."),
+      );
     } finally {
       setSaving(false);
     }
@@ -248,11 +249,7 @@ export function NetworkPolicyDialog({
             Saving network policy…
           </p>
         )}
-        {saveError && (
-          <p className="text-destructive text-sm" role="alert">
-            {saveError}
-          </p>
-        )}
+        {saveError && <Notice tone="critical">{saveError}</Notice>}
       </DialogContent>
     </Dialog>
   );

@@ -97,6 +97,7 @@ import {
   prStateChips,
   pullRequestLifecycle,
 } from "./prState";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 export type InspectorTab = "files" | "source" | "pr";
 
@@ -313,6 +314,7 @@ export function CodeInspector({
             <WorkspaceFilesUnavailable
               remote={remote}
               error={prResource?.error}
+              onRetry={prResource ? () => void prResource.refresh() : undefined}
               hasPr={Boolean(pr)}
               onReview={() => setTab("pr")}
             />
@@ -339,6 +341,9 @@ export function CodeInspector({
               <WorkspaceFilesUnavailable
                 remote={remote}
                 error={prResource?.error}
+                onRetry={
+                  prResource ? () => void prResource.refresh() : undefined
+                }
                 hasPr={Boolean(pr)}
                 onReview={() => setTab("pr")}
               />
@@ -367,12 +372,15 @@ export function CodeInspector({
 export function WorkspaceFilesUnavailable({
   remote = false,
   error,
+  onRetry,
   hasPr = false,
   onReview,
   archived = false,
 }: {
   remote?: boolean;
   error?: string | null;
+  /** Reads the workspace again after `error`. */
+  onRetry?: () => void;
   hasPr?: boolean;
   onReview?: () => void;
   archived?: boolean;
@@ -386,12 +394,14 @@ export function WorkspaceFilesUnavailable({
   }
   if (!remote) {
     return error ? (
-      <p
-        role="alert"
-        className="notice-surface notice-critical m-4 rounded-md p-3 text-sm"
+      <Notice
+        tone="critical"
+        title="Could not load this workspace"
+        className="m-4 w-auto"
+        action={onRetry && <NoticeRetryButton onClick={onRetry} />}
       >
         {error}
-      </p>
+      </Notice>
     ) : (
       <div
         role="status"
@@ -931,9 +941,9 @@ export function PrTab({
             </div>
           ) : null}
           {mergeError && (
-            <p className="text-critical text-xs" role="alert">
+            <Notice tone="critical" density="compact">
               {mergeError}
-            </p>
+            </Notice>
           )}
         </div>
       )}
@@ -1014,12 +1024,14 @@ function CommentsSection({
         )}
       </div>
       {error && (
-        <div className="flex flex-col items-start gap-1">
-          <p className="text-critical text-xs">{error}</p>
-          <Button type="button" variant="outline" size="sm" onClick={onRetry}>
-            Retry
-          </Button>
-        </div>
+        <Notice
+          tone="critical"
+          density="compact"
+          title="Could not load comments"
+          action={<NoticeRetryButton size="xs" onClick={onRetry} />}
+        >
+          {error}
+        </Notice>
       )}
       {!error && comments === null && (
         <p className="text-muted-foreground text-xs">Loading…</p>

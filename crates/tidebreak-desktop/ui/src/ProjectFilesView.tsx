@@ -16,6 +16,8 @@ import {
 } from "@/components/ui/empty";
 import { InstructionsField } from "@/settings/InstructionsField";
 import { SettingsSection } from "@/settings/primitives";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 /**
  * The location hash the project menu's Instructions item opens this page
@@ -56,26 +58,33 @@ export function ProjectFilesView({ projectId }: { projectId: string }) {
     select: (state) => state.location.hash === PROJECT_INSTRUCTIONS_HASH,
   });
   const [documents, setDocuments] = useState<ProjectDocument[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  /** Why the file list did not load; its Try again runs the load once more. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  /** Why a removal failed; the list stays as it was. */
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const { confirm, dialog: confirmDialog } = useConfirm();
 
   useEffect(() => {
     let cancelled = false;
     setDocuments(null);
-    setError(null);
+    setLoadError(null);
+    setRemoveError(null);
     void client
       .listProjectDocuments(projectId)
       .then((page) => {
         if (!cancelled) setDocuments(page.documents);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          setLoadError(friendlyErrorMessage(err, "Try again in a moment."));
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [client, projectId]);
+  }, [client, projectId, loadAttempt]);
 
   async function remove(document: ProjectDocument) {
     const name = document.title ?? "this file";
@@ -91,7 +100,7 @@ export function ProjectFilesView({ projectId }: { projectId: string }) {
       return;
     }
     setRemoving(document.document_id);
-    setError(null);
+    setRemoveError(null);
     try {
       await client.deleteProjectDocument(projectId, document.document_id);
       setDocuments(
@@ -101,7 +110,9 @@ export function ProjectFilesView({ projectId }: { projectId: string }) {
           ) ?? null,
       );
     } catch (err) {
-      setError(String(err));
+      setRemoveError(
+        friendlyErrorMessage(err, `Could not remove ${name}. Try again.`),
+      );
     } finally {
       setRemoving(null);
     }
@@ -144,9 +155,22 @@ export function ProjectFilesView({ projectId }: { projectId: string }) {
       </SettingsSection>
 
       <SettingsSection title="Files">
-        {error && <p className="text-destructive text-sm">{error}</p>}
+        {loadError && (
+          <Notice
+            tone="critical"
+            title="Could not load the project's files"
+            action={
+              <NoticeRetryButton
+                onClick={() => setLoadAttempt((count) => count + 1)}
+              />
+            }
+          >
+            {loadError}
+          </Notice>
+        )}
+        {removeError && <Notice tone="critical">{removeError}</Notice>}
 
-        {documents === null && !error && (
+        {documents === null && !loadError && (
           <p className="text-sm text-muted-foreground">Loading files…</p>
         )}
 
