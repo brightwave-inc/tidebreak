@@ -4106,3 +4106,54 @@ while read _line; do :; done
         "something wrote after the kill"
     );
 }
+
+/// Review finding: a gateway endpoint auto-mount committed every running
+/// definition, plugin-sourced ones included, so it saved a plugin's server
+/// as an ordinary record that outlived the plugin. The mount now saves only
+/// configured servers and leaves the plugin's server derived.
+#[tokio::test]
+async fn an_auto_mount_never_saves_a_plugin_server() {
+    let (runtime, store, directory) = test_runtime().await;
+    let root = directory.path().join("pkg");
+    let data = directory.path().join("data");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    runtime.set_plugin_catalog(Arc::new(FixedPluginCatalog(vec![(
+        "toolbox".to_owned(),
+        root,
+        data,
+    )])));
+    assert!(runtime.reconcile_plugin_servers().await);
+    let plugin_name = runtime.info().await.servers[0].definition.name.clone();
+
+    assert!(runtime
+        .auto_mount_gateway_endpoints(&["tools".to_owned()])
+        .await
+        .unwrap());
+
+    let saved = saved_records(&store).await;
+    assert_eq!(
+        saved
+            .iter()
+            .map(|record| record.name.as_str())
+            .collect::<Vec<_>>(),
+        ["tools"],
+        "only the gateway mount is saved"
+    );
+    let info = runtime.info().await;
+    let running: Vec<(&str, bool)> = info
+        .servers
+        .iter()
+        .map(|server| {
+            (
+                server.definition.name.as_str(),
+                server.definition.plugin.is_some(),
+            )
+        })
+        .collect();
+    assert!(
+        running.contains(&(plugin_name.as_str(), true)),
+        "{running:?}"
+    );
+    assert!(running.contains(&("tools", false)), "{running:?}");
+}
