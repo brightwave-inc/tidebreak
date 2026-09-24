@@ -762,6 +762,15 @@ non-required: the required `semantic PR title` job already fails unless the
 managed release labels match the title, so requiring the label job too would
 add nothing.
 
+Two scoped lanes are not required yet. `macOS desktop` runs clippy and the
+desktop test subset on macOS for every Rust-scoped change, because no other
+pull request lane compiles the desktop's macOS-only code. `Storybook
+accessibility` runs axe, through the Storybook a11y addon, over every built
+story for every UI change, and fails on critical and serious violations that
+`crates/tidebreak-desktop/ui/scripts/storybook-a11y-allowlist.mjs` does not
+name. To require either lane, add its name to the `main` ruleset's required
+status checks, pinned to the GitHub Actions app, and to the list above.
+
 `Windows cargo check` is rust-scoped like clippy because a Windows compile
 break on `main` blocks the desktop release. It typechecks the installer graph
 on `x86_64-pc-windows-msvc`: `tidebreak-desktop` plus the `tidebreak-cli` and
