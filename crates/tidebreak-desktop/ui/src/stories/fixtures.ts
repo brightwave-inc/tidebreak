@@ -1247,6 +1247,311 @@ export const releasedWorkspace: CodeWorkspaceSnapshot = {
 };
 
 // ---------------------------------------------------------------------------
+// Code home: a returning reader's work across the three shared repositories.
+// ---------------------------------------------------------------------------
+
+function minutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
+
+function homeWorkspace(
+  id: string,
+  repoId: string,
+  title: string,
+  minutes: number,
+  pr?: PullRequestDigest,
+): CodeWorkspaceSnapshot {
+  const slug = id.replace(/^ws-/, "");
+  return {
+    id,
+    repo_id: repoId,
+    title,
+    worktree_path: `/Users/sam/tidebreak/code/worktrees/${slug}`,
+    branch_name: `thet/${slug}`,
+    base_ref: "main",
+    status: "active",
+    created_at: minutesAgo(minutes + 30),
+    ...(pr ? { pr } : {}),
+  };
+}
+
+function homePr(
+  number: number,
+  repo: string,
+  title: string,
+  overrides: Partial<PullRequestDigest> = {},
+): PullRequestDigest {
+  return {
+    number,
+    url: `https://github.com/brightwave-inc/${repo}/pull/${number}`,
+    state: "open",
+    title,
+    ...overrides,
+  };
+}
+
+function homeDigest(
+  workspace: string | null,
+  minutes: number,
+  overrides: Partial<CodeSessionDigest>,
+): CodeSessionDigest {
+  return codeDigest({
+    workspace,
+    session: `sess-${workspace ?? overrides.session ?? "free"}`,
+    lifecycle: "idle",
+    attention: attentionDoneUnreviewed,
+    title: "",
+    turn_count: 3,
+    trigger_target_at: minutesAgo(minutes),
+    ...overrides,
+  });
+}
+
+/** Nothing waits: parked work, checks in flight, and a merged branch. */
+export const codeHomeQuietWorkspaces: CodeWorkspaceSnapshot[] = [
+  homeWorkspace(
+    "ws-settings-split",
+    "repo-tidebreak",
+    "Split the settings panel",
+    90,
+  ),
+  homeWorkspace(
+    "ws-managed-docs",
+    "repo-tidebreak",
+    "Document managed deployments",
+    130,
+    homePr(2330, "tidebreak", "Document managed deployments", {
+      check_counts: { passing: 6, pending: 3, failing: 0, skipped: 0 },
+    }),
+  ),
+  homeWorkspace(
+    "ws-analytics-schema",
+    "repo-model-gateway",
+    "Explore the analytics schema",
+    60 * 26,
+  ),
+  homeWorkspace(
+    "ws-release-notes",
+    "repo-tidebreak",
+    "Merge the release notes",
+    60 * 72,
+    homePr(2301, "tidebreak", "Merge the release notes", {
+      state: "merged",
+      merged: true,
+    }),
+  ),
+];
+
+export const codeHomeQuietSessions: CodeSessionDigest[] = [
+  homeDigest("ws-settings-split", 90, {
+    title: "Split the settings panel",
+    recap: "Moved the privacy toggles into their own section.",
+  }),
+  homeDigest("ws-managed-docs", 130, {
+    title: "Document managed deployments",
+    attention: attentionIdle,
+  }),
+];
+
+/**
+ * A busy morning: seven needs across approvals, failed turns, and pull
+ * requests, live agents and a watch, two pull requests ready to merge, and
+ * more recent work than one section shows.
+ */
+export const codeHomeBusyWorkspaces: CodeWorkspaceSnapshot[] = [
+  homeWorkspace(
+    "ws-gateway-retry",
+    "repo-model-gateway",
+    "Add retry to the gateway client",
+    3,
+  ),
+  homeWorkspace(
+    "ws-flaky-login",
+    "repo-tidebreak",
+    "Fix the flaky login test",
+    18,
+  ),
+  homeWorkspace(
+    "ws-billing-tables",
+    "repo-tidebreak",
+    "Rename the billing tables",
+    50,
+  ),
+  homeWorkspace(
+    "ws-browser-recovery",
+    "repo-tidebreak",
+    "Make browser recovery clear",
+    64,
+    homePr(2314, "tidebreak", "Make browser recovery clear", {
+      review_decision: "changes_requested",
+      check_counts: { passing: 7, pending: 0, failing: 1, skipped: 0 },
+    }),
+  ),
+  homeWorkspace(
+    "ws-panel-rhythm",
+    "repo-design-system",
+    "Tune dense panel rhythm",
+    125,
+    homePr(412, "design-system-components", "Tune dense panel rhythm", {
+      mergeable: "conflicting",
+      merge_state_status: "dirty",
+    }),
+  ),
+  homeWorkspace(
+    "ws-provider-errors",
+    "repo-model-gateway",
+    "Recover provider errors",
+    190,
+    homePr(1371, "model-gateway", "Recover provider errors", {
+      check_counts: { passing: 11, pending: 0, failing: 2, skipped: 1 },
+    }),
+  ),
+  homeWorkspace(
+    "ws-usage-header",
+    "repo-model-gateway",
+    "Stream usage into the header",
+    26,
+  ),
+  homeWorkspace(
+    "ws-storybook-audit",
+    "repo-tidebreak",
+    "Audit Storybook coverage",
+    2,
+  ),
+  homeWorkspace(
+    "ws-usage-progress",
+    "repo-model-gateway",
+    "Show subscription progress",
+    6,
+  ),
+  homeWorkspace(
+    "ws-history-index",
+    "repo-tidebreak",
+    "Index workspace history",
+    11,
+    homePr(2320, "tidebreak", "Index workspace history", {
+      check_counts: { passing: 8, pending: 0, failing: 1, skipped: 0 },
+    }),
+  ),
+  homeWorkspace(
+    "ws-delivery-density",
+    "repo-tidebreak",
+    "Clarify delivery density",
+    40,
+    homePr(2311, "tidebreak", "Clarify delivery density", {
+      review_decision: "approved",
+      mergeable: "mergeable",
+      merge_state_status: "clean",
+      check_counts: { passing: 9, pending: 0, failing: 0, skipped: 0 },
+    }),
+  ),
+  homeWorkspace(
+    "ws-icon-family",
+    "repo-design-system",
+    "Pin the icon family",
+    300,
+    homePr(418, "design-system-components", "Pin the icon family", {
+      mergeable: "mergeable",
+      merge_state_status: "clean",
+      check_counts: { passing: 4, pending: 0, failing: 0, skipped: 0 },
+    }),
+  ),
+  ...codeHomeQuietWorkspaces,
+  homeWorkspace(
+    "ws-shortcut-audit",
+    "repo-tidebreak",
+    "Audit keyboard shortcuts",
+    60 * 50,
+  ),
+];
+
+export const codeHomeBusySessions: CodeSessionDigest[] = [
+  homeDigest("ws-gateway-retry", 3, {
+    title: "Add retry to the gateway client",
+    attention: attentionNeedsYou,
+  }),
+  homeDigest("ws-flaky-login", 18, {
+    title: "Fix the flaky login test",
+    attention: {
+      state: {
+        type: "needs_you",
+        prompt: "the engine turn failed",
+        source: "lifecycle",
+      },
+      source: "lifecycle",
+    },
+  }),
+  homeDigest("ws-billing-tables", 50, {
+    title: "Rename the billing tables",
+    harness_kind: "codex",
+    attention: attentionNeedsYou,
+  }),
+  homeDigest("ws-browser-recovery", 64, {
+    title: "Make browser recovery clear",
+  }),
+  homeDigest("ws-usage-header", 26, {
+    title: "Stream usage into the header",
+    attention: attentionStalled,
+  }),
+  homeDigest("ws-storybook-audit", 2, {
+    title: "Audit Storybook coverage",
+    lifecycle: "running",
+    attention: attentionWorking,
+    activity: "shell",
+    activity_detail: "pnpm --dir crates/tidebreak-desktop/ui storybook:build",
+  }),
+  homeDigest("ws-usage-progress", 6, {
+    title: "Show subscription progress",
+    lifecycle: "running",
+    attention: attentionWorking,
+    activity: "subagents",
+    subagents: [
+      {
+        call_id: "toolu_home_a",
+        name: "Map the usage endpoints",
+        status: "running",
+      },
+      {
+        call_id: "toolu_home_b",
+        name: "Draft the progress copy",
+        status: "running",
+      },
+    ],
+  }),
+  homeDigest("ws-history-index", 11, { title: "Index workspace history" }),
+  {
+    ...homeDigest("ws-history-index", 4, {}),
+    session: "watch-history-index",
+    kind: "watch",
+    lifecycle: "running",
+    attention: attentionWorking,
+    title: "Watch #2320",
+    watch_state: "fixing",
+    watch_cycles: 2,
+  },
+  homeDigest("ws-delivery-density", 40, {
+    title: "Clarify delivery density",
+  }),
+  homeDigest(null, 1, {
+    session: "sess-deploy-alert",
+    title: "Triage the deploy alert",
+    lifecycle: "running",
+    attention: attentionWorking,
+    activity: "search",
+    activity_detail: "deploy_failed in the last hour",
+    external_origin: {
+      channel_kind: "slack",
+      external_key: "T024BE7LD/C07ALERTS/1726000000.000100",
+    },
+  }),
+  ...codeHomeQuietSessions,
+  homeDigest("ws-shortcut-audit", 60 * 50, {
+    title: "Audit keyboard shortcuts",
+    recap: "Listed the chords that collide with macOS text editing.",
+  }),
+];
+
+// ---------------------------------------------------------------------------
 // Delivery center: cross-repository pull requests, runs, archive, notifications.
 // ---------------------------------------------------------------------------
 
