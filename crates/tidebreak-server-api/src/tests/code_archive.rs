@@ -806,6 +806,51 @@ async fn archive_succeeds_for_a_branch_with_no_commits_past_its_base() {
     );
 }
 
+#[tokio::test]
+async fn archived_local_workspace_file_reads_answer_workspace_archived() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let workspace_id = json_id(&workspace);
+    let path = workspace["worktree_path"].as_str().unwrap();
+
+    let archived = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/archive"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::OK);
+    assert!(!std::path::Path::new(path).exists());
+
+    for suffix in [
+        "tree",
+        "files",
+        "pr",
+        "diff",
+        "search?query=readme",
+        "blob?path=README.md",
+        "file?path=README.md",
+    ] {
+        let response = client
+            .get(format!(
+                "http://{addr}/code/workspaces/{workspace_id}/{suffix}"
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT, "{suffix}");
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["kind"], "workspace_archived", "{suffix}: {body}");
+    }
+}
+
 /// A failed release write leaves the branch and bundle available for retry.
 #[tokio::test]
 async fn archive_persists_release_metadata_before_returning_success() {

@@ -20,7 +20,10 @@ import { HttpCore } from "./client/http";
 export {
   ARCHIVE_FORCE_KINDS,
   HttpError,
+  WORKSPACE_ARCHIVED_KIND,
+  WORKSPACE_ARCHIVED_MESSAGE,
   archiveForceKind,
+  isWorkspaceArchivedError,
   type DeliveryRequestOptions,
 } from "./client/http";
 export { type CodeWorkspaceMergeRequest } from "./client/code-git";

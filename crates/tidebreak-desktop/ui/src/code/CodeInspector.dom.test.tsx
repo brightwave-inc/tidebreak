@@ -841,6 +841,26 @@ it("keeps a managed workspace PR on the workspace API and hides remote merge", a
   ).not.toBeInTheDocument();
 });
 
+it("shows archived files copy without requesting tree, files, or pr", () => {
+  const client = makeClient();
+  render(
+    <CodeInspector
+      client={client as ApiClient}
+      workspaceId="ws-1"
+      workspace={{ ...WORKSPACE, status: "archived" }}
+      contentRevision={0}
+    />,
+  );
+  expect(
+    screen.getByText(
+      "This workspace is archived. Its files come back when you restore it.",
+    ),
+  ).toBeInTheDocument();
+  expect(client.listCodeWorkspaceTree).not.toHaveBeenCalled();
+  expect(client.listCodeWorkspaceFiles).not.toHaveBeenCalled();
+  expect(client.getCodeWorkspacePr).not.toHaveBeenCalled();
+});
+
 it("keeps remote Files readable when its external connection cannot load PR status", async () => {
   const client = makeClient();
   render(
