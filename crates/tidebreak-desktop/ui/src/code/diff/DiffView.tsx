@@ -50,7 +50,7 @@ import {
  */
 
 /** Rows per chunk: a screenful several times over, cheap to render in a frame. */
-export const DIFF_CHUNK_ROWS = 120;
+export const DIFF_CHUNK_ROWS = 60;
 /** Chunks mounted on the first render, before the rest arrive frame by frame. */
 const FIRST_CHUNKS = 1;
 /**
