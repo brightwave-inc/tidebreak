@@ -453,7 +453,7 @@ const AUTHENTICATIONS: ReadonlyArray<{ value: Authentication; label: string }> =
 const AUTHENTICATION_HINT: Record<Authentication, string> = {
   none: "Tidebreak sends no credential. A server that asks you to sign in offers Connect after you save.",
   stored:
-    "Tidebreak keeps the token in the OS credential store and sends it only to this server's address. It works however Tidebreak starts, Dock and Finder included.",
+    "Tidebreak keeps the token in the OS credential store and sends it only to this server's URL. It works however Tidebreak starts, Dock and Finder included.",
   variable:
     "Tidebreak reads the variable from the environment it started with. Export it in the shell you start Tidebreak from, then restart Tidebreak. A Dock or Finder launch does not see variables from your shell profile.",
   oauth:
@@ -1599,6 +1599,11 @@ export function McpPanel({
                       />
                     </SettingsField>
 
+                    <UrlEditDropsStoredValues
+                      server={server}
+                      saved={savedServers.get(server.name)}
+                    />
+
                     <HttpAuthentication
                       server={server}
                       saved={savedServers.get(server.name)}
@@ -2251,7 +2256,7 @@ function HeadersEditor({
   return (
     <NamedValuesEditor
       label="Headers"
-      hint={`Optional, up to ${MAX_HEADERS}. Values are held in the OS credential store, sent only to this server's address, and never shown again. Set a bearer token under Authentication, not here.`}
+      hint={`Optional, up to ${MAX_HEADERS}. Values are held in the OS credential store, sent only to this server's URL, and never shown again. Set a bearer token under Authentication, not here.`}
       noun="Header"
       namePlaceholder="X-Api-Key"
       valuePlaceholder={(name) =>
@@ -2394,7 +2399,7 @@ function HttpAuthentication({
   const choice = authenticationOf(server);
   const tokenStored =
     saved?.stored_credentials?.bearer === true &&
-    sameOrigin(saved.url, server.url);
+    sameStoredUrl(saved.url, server.url);
   return (
     <>
       <FieldGroup label="Authentication" hint={AUTHENTICATION_HINT[choice]}>
@@ -2468,27 +2473,88 @@ function HttpAuthentication({
 }
 
 /** The header names whose value the credential store holds for this server,
- * as the saved server reports it, while the draft keeps the same origin: a
- * save that moves the server to another origin drops what was stored. */
+ * as the saved server reports it, while the draft keeps the same URL: a save
+ * that changes the URL drops what was stored. */
 function storedHeaderNames(
   server: McpServerInfo,
   saved: McpServerInfo | undefined,
 ): ReadonlySet<string> {
-  if (saved === undefined || !sameOrigin(saved.url, server.url)) {
+  if (saved === undefined || !sameStoredUrl(saved.url, server.url)) {
     return new Set();
   }
   return new Set(saved.stored_credentials?.headers ?? []);
 }
 
-/** Whether two server URLs share a scheme, host, and port: the origin a
- * stored value is bound to. */
-function sameOrigin(left: string | null, right: string | null): boolean {
-  if (left === null || right === null) return false;
+/** The URL a stored value is bound to: the scheme, host, port, path, and
+ * query, as the URL parser normalizes them. The fragment and any user info
+ * do not count. The server binds values the same way. */
+function storedValueUrl(url: string | null): string | null {
+  if (url === null) return null;
   try {
-    return new URL(left).origin === new URL(right).origin;
+    const parsed = new URL(url);
+    parsed.hash = "";
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.href;
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** Whether a stored value entered for one URL still goes to the other. */
+function sameStoredUrl(left: string | null, right: string | null): boolean {
+  const bound = storedValueUrl(left);
+  return bound !== null && bound === storedValueUrl(right);
+}
+
+/** What saving the draft's URL drops, in words, or `null` when the edit
+ * keeps every stored value the draft still uses. */
+function droppedByUrlEdit(
+  server: McpServerInfo,
+  saved: McpServerInfo | undefined,
+): string | null {
+  if (saved === undefined || sameStoredUrl(saved.url, server.url)) {
+    return null;
+  }
+  const bearer =
+    saved.stored_credentials?.bearer === true &&
+    server.bearer_token_stored === true;
+  const draftHeaders = server.headers ?? [];
+  const headers = (saved.stored_credentials?.headers ?? []).filter((name) =>
+    draftHeaders.includes(name),
+  );
+  if (bearer && headers.length > 0) return "bearer token and header values";
+  if (bearer) return "bearer token";
+  if (headers.length === 1) return "header value";
+  if (headers.length > 1) return "header values";
+  return null;
+}
+
+/**
+ * Says, while the draft URL differs from the saved one, which stored values
+ * a save would drop. A stored value goes only to the exact URL it was entered
+ * for, so another path on the same host gets none of them.
+ */
+function UrlEditDropsStoredValues({
+  server,
+  saved,
+}: {
+  server: McpServerInfo;
+  saved: McpServerInfo | undefined;
+}) {
+  const dropped = droppedByUrlEdit(server, saved);
+  if (dropped === null) return null;
+  return (
+    <div className="notice-surface notice-warning flex flex-col gap-1 rounded-xl border px-3 py-2">
+      <p className="text-sm font-medium">
+        Saving this URL drops the stored {dropped}
+      </p>
+      <p className="text-sm">
+        Tidebreak sends a stored value only to the URL it was entered for. Enter
+        the values again below, or change the URL back to keep them.
+      </p>
+    </div>
+  );
 }
 
 /**

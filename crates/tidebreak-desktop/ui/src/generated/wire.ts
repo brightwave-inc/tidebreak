@@ -4085,9 +4085,9 @@ curated: McpCuration | null,
 oauth_status?: McpOAuthStatus,
 /**
  * Which of this HTTP server's stored bearer token and header values the
- * OS credential store holds for its URL's origin, so Settings can say a
- * value is set without ever showing it. Absent for a server that stores
- * none. Read per request, and never carries a value.
+ * OS credential store holds for its URL, so Settings can say a value is
+ * set without ever showing it. Absent for a server that stores none.
+ * Read per request, and never carries a value.
  */
 stored_credentials?: McpStoredCredentials, name: string, command: string | null, args: Array<string>,
 /**
@@ -4216,7 +4216,7 @@ reason: string, };
  */
 export type McpStoredCredentials = {
 /**
- * Whether a bearer token is stored for the server's origin.
+ * Whether a bearer token is stored for the server's URL.
  */
 bearer: boolean,
 /**

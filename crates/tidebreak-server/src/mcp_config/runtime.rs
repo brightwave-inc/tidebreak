@@ -644,25 +644,26 @@ impl McpRuntime {
     /// under record `id`, and empty its inbound values.
     ///
     /// The stored entry becomes exactly what the definition declares, bound
-    /// to the origin of its URL: a value just set wins, a header dropped from
-    /// `headers` or a bearer no longer stored loses its value, and one kept
-    /// without a new value keeps the value already stored. A value stored for
-    /// another origin is dropped unless this save sets it again, so editing a
-    /// server to point somewhere else never carries a credential there.
+    /// to its URL: a value just set wins, a header dropped from `headers` or
+    /// a bearer no longer stored loses its value, and one kept without a new
+    /// value keeps the value already stored. A value stored for another URL,
+    /// including another path on the same host, is dropped unless this save
+    /// sets it again, so editing a server to point somewhere else never
+    /// carries a credential there.
     async fn commit_http_value(
         &self,
         definition: &mut McpServerDefinition,
         id: ConnectedAppId,
         journal: Option<&mut CredentialJournal>,
     ) -> Result<()> {
-        let origin = definition.url.as_deref().and_then(http_origin);
+        let binding = definition.url.as_deref().and_then(http_binding);
         let stored = self.stored_http(id).await;
-        let mut values = if origin.is_some() && stored.origin == origin {
+        let mut values = if binding.is_some() && stored.url == binding {
             stored.clone()
         } else {
             StoredHttpValues::default()
         };
-        values.origin = origin;
+        values.url = binding;
         if let Some(bearer) = definition.bearer_token_value.take() {
             values.bearer = Some(bearer);
         }

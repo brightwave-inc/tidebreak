@@ -4285,9 +4285,11 @@ fn fixture_value(label: &str) -> String {
     [label, "fixture", &uuid::Uuid::new_v4().simple().to_string()].join("-")
 }
 
-/// What one request to [`serve_credentialed_mcp`] carried.
+/// What one request to [`serve_credentialed_mcp`] carried, and the path it
+/// went to.
 #[derive(Clone, Debug, Default)]
 struct SeenRequest {
+    path: String,
     authorization: Option<String>,
     api_key: Option<String>,
 }
@@ -4296,55 +4298,58 @@ type SeenRequests = Arc<std::sync::Mutex<Vec<SeenRequest>>>;
 
 /// A loopback MCP server that records the `Authorization` and `X-Api-Key`
 /// headers of every request and answers like a well-behaved server.
+/// An MCP server at `/mcp`, and a second tenant's at `/tenant-b/mcp` on the
+/// same host, that records every request.
 async fn serve_credentialed_mcp() -> (std::net::SocketAddr, SeenRequests) {
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, Uri};
     use axum::response::IntoResponse;
     use axum::routing::post;
 
     let seen: SeenRequests = Arc::default();
     let recorded = Arc::clone(&seen);
-    let app = axum::Router::new().route(
-        "/mcp",
-        post(move |headers: HeaderMap, body: String| {
-            let recorded = Arc::clone(&recorded);
-            async move {
-                let header = |name: &str| {
-                    headers
-                        .get(name)
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_string)
-                };
-                recorded.lock().unwrap().push(SeenRequest {
-                    authorization: header("authorization"),
-                    api_key: header("x-api-key"),
-                });
-                let request: serde_json::Value = serde_json::from_str(&body).unwrap();
-                let Some(id) = request.get("id").cloned() else {
-                    return axum::http::StatusCode::ACCEPTED.into_response();
-                };
-                let result = match request["method"].as_str().unwrap_or_default() {
-                    "initialize" => serde_json::json!({
-                        "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
-                        "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "credentialed-fixture", "version": "1"}
-                    }),
-                    "tools/list" => serde_json::json!({
-                        "tools": [{
-                            "name": "lookup",
-                            "description": "Look something up",
-                            "inputSchema": {"type": "object"}
-                        }]
-                    }),
-                    _ => serde_json::json!({}),
-                };
-                (
-                    [("content-type", "application/json")],
-                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
-                )
-                    .into_response()
-            }
-        }),
-    );
+    let handler = post(move |uri: Uri, headers: HeaderMap, body: String| {
+        let recorded = Arc::clone(&recorded);
+        async move {
+            let header = |name: &str| {
+                headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string)
+            };
+            recorded.lock().unwrap().push(SeenRequest {
+                path: uri.path().to_string(),
+                authorization: header("authorization"),
+                api_key: header("x-api-key"),
+            });
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let Some(id) = request.get("id").cloned() else {
+                return axum::http::StatusCode::ACCEPTED.into_response();
+            };
+            let result = match request["method"].as_str().unwrap_or_default() {
+                "initialize" => serde_json::json!({
+                    "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "credentialed-fixture", "version": "1"}
+                }),
+                "tools/list" => serde_json::json!({
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Look something up",
+                        "inputSchema": {"type": "object"}
+                    }]
+                }),
+                _ => serde_json::json!({}),
+            };
+            (
+                [("content-type", "application/json")],
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+            )
+                .into_response()
+        }
+    });
+    let app = axum::Router::new()
+        .route("/mcp", handler.clone())
+        .route("/tenant-b/mcp", handler);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -4429,12 +4434,12 @@ async fn stored_bearer_and_header_reach_the_server_and_nothing_else() {
         "{debug}"
     );
 
-    // The values sit under the record's own key, bound to its origin.
+    // The values sit under the record's own key, bound to its URL.
     let id = saved_records(&store).await[0].id;
     let stored = runtime.stored_http(id).await;
     assert_eq!(stored.bearer.as_deref(), Some(bearer.as_str()));
     assert_eq!(stored.headers["X-Api-Key"], api_key);
-    assert_eq!(stored.origin, super::types::http_origin(&url));
+    assert_eq!(stored.url, super::types::http_binding(&url));
     assert!(!format!("{stored:?}").contains(&bearer));
 
     // Saving again with the values blank keeps what is stored.
@@ -5147,3 +5152,107 @@ async fn a_declared_path_or_home_never_gets_the_default() {
     assert_eq!(super::defaulted_names(["PATH"]), ["HOME"]);
 }
 
+/// Stored values bind to the URL as the parser normalizes it: two spellings
+/// of one URL bind the same values, and any change to where requests go
+/// binds none.
+#[test]
+fn stored_values_bind_to_the_normalized_url() {
+    use super::types::http_binding;
+
+    let base = http_binding("https://api.example.com/mcp");
+    assert!(base.is_some());
+    for same in [
+        "https://API.Example.COM:443/mcp",
+        "https://api.example.com/./mcp",
+        "https://api.example.com/other/../mcp",
+        "https://api.example.com/mcp#section",
+    ] {
+        assert_eq!(http_binding(same), base, "{same}");
+    }
+    for other in [
+        "http://api.example.com/mcp",
+        "https://api.example.com:8443/mcp",
+        "https://api.example.com./mcp",
+        "https://api.example.com.evil.test/mcp",
+        "https://api.example.com/tenant-b/mcp",
+        "https://api.example.com/mcp/",
+        "https://api.example.com/MCP",
+        "https://api.example.com/mcp?tenant=b",
+    ] {
+        assert_ne!(http_binding(other), base, "{other}");
+    }
+    assert_eq!(
+        http_binding("https://bücher.example/mcp"),
+        http_binding("https://xn--bcher-kva.example/mcp")
+    );
+    assert_ne!(
+        http_binding("https://ex\u{0430}mple.com/mcp"),
+        http_binding("https://example.com/mcp")
+    );
+    assert_eq!(http_binding("not a url"), None);
+}
+
+/// Finding 4: stored values were bound to the URL's origin, so an edit that
+/// moved a server to another path on the same host carried its stored bearer
+/// and header there with nothing entered again. They are bound to the whole
+/// URL now: the moved server has none until they are entered for it.
+#[tokio::test]
+async fn moving_a_server_to_another_path_never_carries_its_stored_values() {
+    let (address, seen) = serve_credentialed_mcp().await;
+    let (runtime, store, _directory) = test_runtime().await;
+    let bearer = fixture_value("bearer");
+    let api_key = fixture_value("header");
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition(
+                "docs",
+                &format!("http://{address}/mcp"),
+                Some(&bearer),
+                Some(&api_key),
+            )],
+        })
+        .await
+        .unwrap();
+    let id = saved_records(&store).await[0].id;
+    seen.lock().unwrap().clear();
+
+    let moved = format!("http://{address}/tenant-b/mcp");
+    let message = runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition("docs", &moved, None, None)],
+        })
+        .await
+        .expect_err("the moved server has no stored values for its new path")
+        .to_string();
+    assert!(message.contains("Not stored:"), "{message}");
+    assert!(!message.contains(&bearer), "{message}");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "nothing reached the new path"
+    );
+    assert_eq!(
+        runtime.stored_http(id).await.bearer.as_deref(),
+        Some(bearer.as_str())
+    );
+
+    // Entered again for the new path, they go there.
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![stored_credential_definition(
+                "docs",
+                &moved,
+                Some(&bearer),
+                Some(&api_key),
+            )],
+        })
+        .await
+        .unwrap();
+    let requests = seen.lock().unwrap().clone();
+    assert!(!requests.is_empty());
+    let expected = format!("Bearer {bearer}");
+    for request in &requests {
+        assert_eq!(request.path, "/tenant-b/mcp");
+        assert_eq!(request.authorization.as_deref(), Some(expected.as_str()));
+        assert_eq!(request.api_key.as_deref(), Some(api_key.as_str()));
+    }
+}

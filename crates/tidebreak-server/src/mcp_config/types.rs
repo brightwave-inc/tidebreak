@@ -526,9 +526,9 @@ impl McpServerDefinition {
             // credential, loaded from the OS credential store and attached as
             // a per-call bearer. That holds whatever the saved `oauth` flag
             // says, so a server someone connected without the flag keeps its
-            // session. A stored bearer or header value goes only to the
-            // origin it was stored for: values stored before the URL moved to
-            // another origin are never sent.
+            // session. A stored bearer or header value goes only to the URL
+            // it was stored for: values stored before the URL changed are
+            // never sent.
             let http = http.for_url(url);
             let bearer_token = self.resolve_bearer_token(&http)?;
             let headers = match &self.launch {
@@ -889,17 +889,19 @@ pub fn http_secret_key(id: ConnectedAppId) -> String {
 /// supervisor stops retrying until a settings change or a manual reconnect.
 pub(super) const NOT_STORED: &str = "Not stored:";
 
-/// One HTTP server's stored credentials, bound to the origin they were
-/// entered for.
+/// One HTTP server's stored credentials, bound to the URL they were entered
+/// for.
 ///
-/// A value goes only to the origin it was stored for: a save that moves the
-/// server to another origin drops the values it does not set again, and a
-/// connection loads nothing stored for a different origin.
+/// A value goes only to the URL it was stored for, as [`http_binding`]
+/// normalizes it: a save that changes the server's scheme, host, port, path,
+/// or query drops the values it does not set again, and a connection loads
+/// nothing stored for a different URL. Another path on the same host can be
+/// another tenant or another service, so an origin is not enough.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct StoredHttpValues {
-    /// `scheme://host[:port]` of the URL the values were stored for.
+    /// The [`http_binding`] of the URL the values were stored for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) origin: Option<String>,
+    pub(super) url: Option<String>,
     /// The stored bearer token, sent as `Authorization: Bearer …`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) bearer: Option<String>,
@@ -914,11 +916,10 @@ impl StoredHttpValues {
         self.bearer.is_none() && self.headers.is_empty()
     }
 
-    /// These values when they were stored for `url`'s origin, and nothing
-    /// otherwise.
+    /// These values when they were stored for `url`, and nothing otherwise.
     pub(super) fn for_url(&self, url: &str) -> Self {
-        match (&self.origin, http_origin(url)) {
-            (Some(stored), Some(origin)) if *stored == origin => self.clone(),
+        match (&self.url, http_binding(url)) {
+            (Some(stored), Some(binding)) if *stored == binding => self.clone(),
             _ => Self::default(),
         }
     }
@@ -929,19 +930,31 @@ impl std::fmt::Debug for StoredHttpValues {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("StoredHttpValues")
-            .field("origin", &self.origin)
+            .field("url", &self.url)
             .field("bearer_stored", &self.bearer.is_some())
             .field("header_names", &self.headers.keys().collect::<Vec<_>>())
             .finish()
     }
 }
 
-/// The `scheme://host[:port]` origin of an HTTP URL, or `None` when the URL
-/// does not parse or has no host.
-pub(super) fn http_origin(url: &str) -> Option<String> {
-    let parsed = url::Url::parse(url).ok()?;
-    let origin = parsed.origin();
-    origin.is_tuple().then(|| origin.ascii_serialization())
+/// The URL a stored value is bound to: `url` as the URL parser normalizes
+/// it, with its scheme, host, port, path, and query, or `None` when it does
+/// not parse or has no host.
+///
+/// The parser lowercases the scheme and host, encodes an international host,
+/// drops a default port, and resolves `.` and `..` path segments, so two
+/// spellings of one URL bind the same values. Any other change binds
+/// nothing. The fragment never leaves this computer and user info is refused
+/// before any connection, so neither counts.
+pub(super) fn http_binding(url: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(url).ok()?;
+    if !parsed.origin().is_tuple() {
+        return None;
+    }
+    parsed.set_fragment(None);
+    parsed.set_username("").ok()?;
+    parsed.set_password(None).ok()?;
+    Some(parsed.into())
 }
 
 /// Lift literal `env` values out of a connected-app record persisted before
@@ -1075,9 +1088,9 @@ pub struct McpServerInfo {
     #[ts(optional)]
     pub oauth_status: Option<McpOAuthStatus>,
     /// Which of this HTTP server's stored bearer token and header values the
-    /// OS credential store holds for its URL's origin, so Settings can say a
-    /// value is set without ever showing it. Absent for a server that stores
-    /// none. Read per request, and never carries a value.
+    /// OS credential store holds for its URL, so Settings can say a value is
+    /// set without ever showing it. Absent for a server that stores none.
+    /// Read per request, and never carries a value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub stored_credentials: Option<McpStoredCredentials>,
@@ -1086,7 +1099,7 @@ pub struct McpServerInfo {
 /// Which stored credentials one HTTP server has on this computer, by name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct McpStoredCredentials {
-    /// Whether a bearer token is stored for the server's origin.
+    /// Whether a bearer token is stored for the server's URL.
     pub bearer: bool,
     /// The configured header names whose value is stored, in name order.
     pub headers: Vec<String>,
@@ -1094,7 +1107,7 @@ pub struct McpStoredCredentials {
 
 impl McpStoredCredentials {
     /// What `stored` holds for `definition`, counting only the values it
-    /// declares and only for its URL's origin.
+    /// declares and only for its URL.
     pub(super) fn of(definition: &McpServerDefinition, stored: &StoredHttpValues) -> Self {
         let stored = match &definition.url {
             Some(url) => stored.for_url(url),

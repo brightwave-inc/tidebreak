@@ -1792,6 +1792,52 @@ describe("McpPanel remote authentication", () => {
     );
   });
 
+  it("says a URL edit drops the stored values, since they go only to the URL they were entered for", async () => {
+    const user = userEvent.setup();
+    render(
+      <McpPanel
+        client={api({
+          servers: [
+            remoteServer({
+              bearer_token_stored: true,
+              headers: ["X-Api-Key"],
+              stored_credentials: { bearer: true, headers: ["X-Api-Key"] },
+            }),
+          ],
+        })}
+      />,
+    );
+    const url = await screen.findByLabelText("Server URL");
+    const notice =
+      "Saving this URL drops the stored bearer token and header values";
+
+    // The same URL spelled another way keeps them.
+    await user.clear(url);
+    await user.type(url, "https://MCP.example.test:443/mcp#tools");
+    expect(screen.queryByText(notice)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Bearer token")).toHaveAttribute(
+      "placeholder",
+      "Stored. Leave blank to keep it.",
+    );
+
+    // Another path on the same host is another URL.
+    await user.clear(url);
+    await user.type(url, "https://mcp.example.test/tenant-b/mcp");
+    expect(screen.getByText(notice)).toBeInTheDocument();
+    expect(screen.getByLabelText("Bearer token")).toHaveAttribute(
+      "placeholder",
+      "Token",
+    );
+    expect(screen.getByLabelText("Header value 1")).toHaveAttribute(
+      "placeholder",
+      "Value",
+    );
+
+    await user.clear(url);
+    await user.type(url, "https://mcp.example.test/mcp");
+    expect(screen.queryByText(notice)).not.toBeInTheDocument();
+  });
+
   it("asks for a stored token this computer does not hold, as after an import", async () => {
     render(
       <McpPanel

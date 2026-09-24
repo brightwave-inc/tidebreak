@@ -143,10 +143,11 @@ channels that do carry a value are:
   token is stored and names each header, and the values live in the OS
   credential store under the server's connected-app record. Settings shows
   that a value is set, never the value, and leaving a field blank keeps it.
-  A stored value is bound to the origin (scheme, host, and port) of the URL it
-  was entered for: a save that points the server at another origin drops the
-  values it does not set again, so a credential never follows an edited URL
-  to a new host. Switching to another way to authenticate, removing a header,
+  A stored value is bound to the URL it was entered for: its scheme, host,
+  port, path, and query, as the URL parser normalizes them. A save that
+  changes any of them drops the values it does not set again, so a credential
+  never follows an edited URL to another host or to another path on the same
+  host, and the editor says so before you save. Switching to another way to authenticate, removing a header,
   or removing the server deletes the value. A save that fails puts back every
   value it wrote.
 - **`env_from`** and **Bearer token variable** — a name selected from the
@@ -163,7 +164,7 @@ custom headers, each value at most 8 KiB of visible ASCII. A server that
 sends a stored bearer or a custom header must use `https` unless its URL
 names a literal loopback address, the same rule a bearer variable follows,
 and the HTTP client never follows a redirect, so no stored value reaches
-another origin.
+another URL.
 
 A missing selected name produces a server-specific error containing the name,
 not a value, and tells you to export it in the shell you start Tidebreak from
@@ -520,7 +521,7 @@ token under **Authentication**:
 
 - **Bearer token, stored** — paste the token, without the word `Bearer`.
   Tidebreak keeps it in the OS credential store and sends it only to that
-  server's origin. This works however Tidebreak was launched, including from
+  server's URL. This works however Tidebreak was launched, including from
   the Dock or Finder.
 - **Bearer token from a variable** — enter the *name* of the variable (for
   example `GATEWAY_TOKEN`), export it in the shell you start Tidebreak from,

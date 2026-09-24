@@ -46,7 +46,9 @@ resolves to each time the server starts.
 | **Request timeout (ms)** | |
 
 A stored bearer token or header value is shown as set, never shown again,
-and goes only to the origin of the URL you entered it for.
+and goes only to the URL you entered it for. Changing the URL's scheme, host,
+port, path, or query drops the stored values, and the editor says so before
+you save. Enter them again for the new URL.
 
 A server that refuses its bearer token and offers an OAuth sign-in instead is
 saved with **Sign-in available**, and **Use OAuth** switches it and opens the

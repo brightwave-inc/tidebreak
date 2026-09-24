@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { userEvent, within } from "storybook/test";
 import type { ApiClient, GatewayStatus, McpServerInfo } from "@/api";
 import { McpPanel } from "@/settings/McpPanel";
 import {
@@ -259,6 +260,27 @@ export const HttpAuthenticationStoredToken: Story = {
     ]),
   },
   parameters: { layout: "padded" },
+};
+
+/** The URL of a server with a stored token and header, edited to another
+ * path on the same host. Each stored value goes only to the URL it was
+ * entered for, so the editor says a save drops them. */
+export const HttpUrlEditDropsStoredValues: Story = {
+  args: {
+    client: stubClient([
+      remoteServer({
+        bearer_token_stored: true,
+        headers: ["X-Api-Key"],
+        stored_credentials: { bearer: true, headers: ["X-Api-Key"] },
+      }),
+    ]),
+  },
+  parameters: { layout: "padded" },
+  play: async ({ canvasElement }) => {
+    const url = await within(canvasElement).findByLabelText("Server URL");
+    await userEvent.clear(url);
+    await userEvent.type(url, "https://mcp.example.com/tenant-b/mcp");
+  },
 };
 
 /** Authentication: a bearer token read from a variable in the environment
