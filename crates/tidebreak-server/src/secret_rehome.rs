@@ -163,21 +163,13 @@ pub async fn rehome_secrets(
     Ok(rehome_keys(secrets, stored_secret_keys(store).await?).await)
 }
 
-/// Remove every credential this profile stores, for Delete all data.
+/// Every keychain item a credential of this profile may sit in, for Delete
+/// all data: each per-key item (each key [`stored_secret_keys`] names, and
+/// each MCP server's sign-in), then the bundle item that holds the rest.
 ///
-/// `keychain` is the raw store, not the bundle wrapper, so this deletes
-/// items rather than keys inside one: first every per-key item a credential
-/// may still sit in (each key [`stored_secret_keys`] names, and each MCP
-/// server's sign-in), then the bundle item that holds the rest. A key with
-/// nothing stored is not an error.
-///
-/// The first failure stops the pass and names the key, so the caller can
-/// stop before it deletes anything else. Returns how many items it asked the
-/// store to delete.
-pub async fn erase_stored_secrets(
-    store: &dyn Store,
-    keychain: &dyn SecretProvider,
-) -> Result<usize> {
+/// Read from the store, so a caller that deletes the store takes this list
+/// first and can erase the same items again once nothing else runs.
+pub async fn erasable_secret_keys(store: &dyn Store) -> Result<Vec<String>> {
     let mut keys = stored_secret_keys(store).await?;
     for record in store.list_connected_apps().await? {
         if record.kind == ConnectedAppKind::McpServer {
@@ -188,12 +180,22 @@ pub async fn erase_stored_secrets(
     keys.sort();
     keys.dedup();
     keys.push(BUNDLE_KEY.to_owned());
-    for key in &keys {
+    Ok(keys)
+}
+
+/// Delete `keys` from `keychain`, in order.
+///
+/// `keychain` is the raw store, not the bundle wrapper, so this deletes items
+/// rather than keys inside one. A key with nothing stored is not an error.
+/// The first failure stops the pass and names the key, so the caller can stop
+/// before it deletes anything else.
+pub async fn erase_secret_keys(keychain: &dyn SecretProvider, keys: &[String]) -> Result<()> {
+    for key in keys {
         keychain.delete_secret(key).await.map_err(|error| {
             tidebreak_core::AgentError::Secret(format!("could not remove {key}: {error}"))
         })?;
     }
-    Ok(keys.len())
+    Ok(())
 }
 
 /// The pass itself, over an already-enumerated key list.
@@ -603,9 +605,8 @@ mod tests {
             .unwrap();
         assert_eq!(keychain.item_keys().len(), 3);
 
-        erase_stored_secrets(&store, keychain.as_ref())
-            .await
-            .unwrap();
+        let keys = erasable_secret_keys(&store).await.unwrap();
+        erase_secret_keys(keychain.as_ref(), &keys).await.unwrap();
 
         assert_eq!(keychain.item_keys(), Vec::<String>::new());
         assert_eq!(

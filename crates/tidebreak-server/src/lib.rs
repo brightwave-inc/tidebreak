@@ -140,6 +140,7 @@ mod scripted_provider;
 /// Rewriting stored credentials so the running binary owns their keychain items.
 pub mod secret_rehome;
 /// The version handshake: what a server reports, and whether a client reads it.
+mod server_stop;
 pub mod server_version;
 mod source_tools;
 pub(crate) mod stack;
@@ -334,6 +335,7 @@ pub use pairing::{
     register_replacing_pairing, DeprovisionTarget, PairingError, PairingHandle,
     PendingRegistration,
 };
+pub use server_stop::ServerStop;
 pub use state::{AppState, LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
 pub use tidebreak_sandbox_runtime::DurableOperationStore;
 pub use update_quiesce::{QuitProgress, UpdateQuiesce};
@@ -403,6 +405,9 @@ pub struct Server {
     /// Brings live work to a restart-safe point before an update replaces
     /// the bundle; see `update_quiesce`.
     update_quiesce: update_quiesce::UpdateQuiesce,
+    /// Stops the accept loop and every worker below for good; see
+    /// [`ServerStop`].
+    stop: ServerStop,
     listener: Option<TcpListener>,
     router: Option<Router>,
     /// What each supervised worker below is doing. Shutdown tells it first,
@@ -588,6 +593,12 @@ impl Server {
         self.update_quiesce.clone()
     }
 
+    /// The handle that stops this server's accept loop and every worker, for
+    /// an embedder about to delete the data they work on.
+    pub fn stop_handle(&self) -> ServerStop {
+        self.stop.clone()
+    }
+
     /// A wake for one native executor loop.
     ///
     /// It fires when client-executed work may have become pending, so an
@@ -596,7 +607,9 @@ impl Server {
         self.client_execution_wake.clone()
     }
 
-    /// Run the accept loop until the process exits.
+    /// Run the accept loop until the process exits, or until
+    /// [`ServerStop::stop`] asks it to end. Either way the workers stop
+    /// before this returns.
     pub async fn serve(mut self) -> Result<()> {
         let listener = self
             .listener
@@ -606,13 +619,23 @@ impl Server {
             .router
             .take()
             .expect("a bound server keeps its router until serve");
+        let stop = self.stop.clone();
         let result = match &mut self._store_ownership {
-            store_ownership::StoreOwnership::Local => axum::serve(
-                listener,
-                router.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .map_err(|error| AgentError::msg(format!("server error: {error}"))),
+            store_ownership::StoreOwnership::Local => {
+                let server = async move {
+                    axum::serve(
+                        listener,
+                        router.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .await
+                };
+                tokio::select! {
+                    result = server => {
+                        result.map_err(|error| AgentError::msg(format!("server error: {error}")))
+                    }
+                    () = stop.requested() => Ok(()),
+                }
+            }
             #[cfg(feature = "postgres")]
             store_ownership::StoreOwnership::Postgres(ownership) => {
                 let server = async move {
@@ -630,10 +653,12 @@ impl Server {
                         })
                     }
                     error = ownership.wait_until_lost() => Err(error),
+                    () = stop.requested() => Ok(()),
                 }
             }
         };
         self.stop_workers().await;
+        self.stop.mark_stopped();
         result
     }
 
@@ -1992,6 +2017,7 @@ async fn bind_inner(
             quiesce_store,
             quiesce_events,
         ),
+        stop: ServerStop::new(),
         listener: Some(listener),
         router: Some(router),
         worker_health,

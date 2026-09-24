@@ -18,6 +18,9 @@ use uuid::Uuid;
 use crate::broker::BrokerClient;
 use crate::client_execution::{ControlPlaneClient, ReceiptStore};
 
+/// How long Delete all data waits for the embedded server's workers to stop.
+const SERVER_STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub(crate) struct HostAccess {
     pub(super) broker: BrokerClient,
     pub(super) trusted_folders: crate::trusted_folders::TrustedFolderStore,
@@ -37,6 +40,7 @@ pub(crate) struct HostAccess {
     /// [`Self::quiesce_for_update`] runs it before the broker drain so a
     /// restart-to-update parks sessions at a safe point first.
     server_quiesce: OnceCell<tidebreak_server::UpdateQuiesce>,
+    server_stop: OnceCell<tidebreak_server::ServerStop>,
     /// Which machine this client is attached to. Host authority applies to the
     /// local one only, so every native command consults this first.
     remote: std::sync::Arc<crate::remote::RemoteAttachment>,
@@ -73,6 +77,7 @@ impl HostAccess {
             receipts,
             staged_folders: OnceCell::new(),
             server_quiesce: OnceCell::new(),
+            server_stop: OnceCell::new(),
             remote,
             run_marker,
         })
@@ -127,6 +132,29 @@ impl HostAccess {
         self.server_quiesce
             .set(quiesce)
             .map_err(|_| "server update quiesce was initialized more than once".to_owned())
+    }
+
+    /// Install the embedded server's stop handle at server boot.
+    pub(crate) fn initialize_server_stop(
+        &self,
+        stop: tidebreak_server::ServerStop,
+    ) -> Result<(), String> {
+        self.server_stop
+            .set(stop)
+            .map_err(|_| "server stop handle was initialized more than once".to_owned())
+    }
+
+    /// Stop the embedded server's accept loop and every worker for good, for
+    /// Delete all data. Nothing in this process writes to the profile
+    /// afterwards except what the caller does next. Waits at most
+    /// [`SERVER_STOP_DEADLINE`]; an error says the workers did not stop.
+    pub(crate) async fn stop_server(&self) -> Result<(), String> {
+        let Some(stop) = self.server_stop.get() else {
+            return Ok(());
+        };
+        tokio::time::timeout(SERVER_STOP_DEADLINE, stop.stop())
+            .await
+            .map_err(|_| "the local server did not stop in time".to_owned())
     }
 
     /// Drop conversation-scoped broker rows whose chats no longer exist.

@@ -1866,7 +1866,91 @@ async fn delete_managed_profile(
         }
         Ok(())
     } else {
-        remove_legacy_website_data(app, profile.website_hosts()).await
+        remove_legacy_website_data(app, Some(profile.website_hosts())).await
+    }
+}
+
+/// Close every code browser, then remove every website data store WebKit
+/// keeps for this app, for Delete all data.
+///
+/// The browser profile manifest goes with the data folder, and a fresh
+/// profile adopts the initial local store again, so a store left behind would
+/// bring its sign-ins back on the next launch. The default store, which the
+/// app's own window and the browsers on macOS 13 and earlier share, goes with
+/// [`remove_default_website_data`].
+#[cfg(target_os = "macos")]
+pub(crate) async fn remove_all_browser_data(app: &AppHandle) -> Result<(), String> {
+    let profiles = app.state::<BrowserProfileStore>();
+    let _lifecycle = profiles.lock_lifecycle().await;
+    close_every_browser(app).await?;
+    if macos_major_version() < 14 {
+        return Ok(());
+    }
+    let present = app
+        .fetch_data_store_identifiers()
+        .await
+        .map_err(browser_error)?;
+    for identifier in stores_to_remove(present) {
+        remove_profile_data_when_released(|| remove_named_browser_profile(app, identifier)).await?;
+    }
+    Ok(())
+}
+
+/// Code browsers keep their website data inside the data folder here, so
+/// deleting the folder deletes it.
+#[cfg(not(target_os = "macos"))]
+pub(crate) async fn remove_all_browser_data(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+/// Remove every record in the default website data store, for Delete all
+/// data: the app's own window keeps its preferences there, and so do the
+/// browsers on macOS 13 and earlier.
+#[cfg(target_os = "macos")]
+pub(crate) async fn remove_default_website_data(app: &AppHandle) -> Result<(), String> {
+    remove_legacy_website_data(app, None).await
+}
+
+/// The window's website data lives inside the data folder here, so deleting
+/// the folder deletes it.
+#[cfg(not(target_os = "macos"))]
+pub(crate) async fn remove_default_website_data(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+/// The data stores Delete all data removes: every one WebKit reports for this
+/// app, each once. The browser profile manifest is not the list, because a
+/// store outlives a lost manifest and the initial local store is adopted
+/// again by the next profile.
+#[cfg(any(target_os = "macos", test))]
+fn stores_to_remove(mut present: Vec<[u8; 16]>) -> Vec<[u8; 16]> {
+    present.sort_unstable();
+    present.dedup();
+    present
+}
+
+/// Close every code browser webview and wait until they are gone.
+#[cfg(target_os = "macos")]
+async fn close_every_browser(app: &AppHandle) -> Result<(), String> {
+    let labels: Vec<String> = app
+        .webviews()
+        .into_keys()
+        .filter(|label| label.starts_with(BROWSER_LABEL_PREFIX))
+        .collect();
+    for label in &labels {
+        if let Some(webview) = app.get_webview(label) {
+            close_browser_webview(&webview)?;
+        }
+    }
+    let deadline = tokio::time::Instant::now() + PROFILE_CLOSE_TIMEOUT;
+    loop {
+        if labels.iter().all(|label| app.get_webview(label).is_none()) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("the code browsers did not close in time".to_owned());
+        }
+        tokio::time::sleep(PROFILE_CLOSE_POLL_INTERVAL).await;
     }
 }
 
@@ -1983,10 +2067,12 @@ fn macos_major_version() -> isize {
         .majorVersion
 }
 
+/// Remove the default store's website data: the records for
+/// `website_hosts`, or every record when that is `None`.
 #[cfg(target_os = "macos")]
 async fn remove_legacy_website_data(
     app: &AppHandle,
-    website_hosts: &std::collections::BTreeSet<String>,
+    website_hosts: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<(), String> {
     use std::{
         ptr::NonNull,
@@ -1998,11 +2084,11 @@ async fn remove_legacy_website_data(
     use objc2_foundation::{NSArray, NSString};
     use objc2_web_kit::WKWebsiteDataStore;
 
-    if website_hosts.is_empty() {
+    if website_hosts.is_some_and(std::collections::BTreeSet::is_empty) {
         return Ok(());
     }
 
-    let website_hosts = Arc::new(website_hosts.clone());
+    let website_hosts = Arc::new(website_hosts.cloned());
     let (sender, receiver) = oneshot::channel();
     let sender = Arc::new(Mutex::new(Some(sender)));
     let callback_sender = Arc::clone(&sender);
@@ -2028,8 +2114,11 @@ async fn remove_legacy_website_data(
                     .to_vec()
                     .into_iter()
                     .filter(|record| {
+                        let Some(hosts) = fetch_hosts.as_ref() else {
+                            return true;
+                        };
                         let display_name: Retained<NSString> = msg_send![&**record, displayName];
-                        website_record_matches(&display_name.to_string(), &fetch_hosts)
+                        website_record_matches(&display_name.to_string(), hosts)
                     })
                     .collect::<Vec<_>>();
                 if matching.is_empty() {
@@ -2946,6 +3035,18 @@ mod tests {
         assert!(snapshot.document_epoch.is_none());
         assert!(snapshot.controller.is_none());
         assert!(snapshot.agent_access.is_none());
+    }
+
+    #[test]
+    fn delete_all_data_removes_every_store_webkit_reports_once() {
+        let initial = crate::browser_profile::INITIAL_LOCAL_DATA_STORE_IDENTIFIER;
+        let named = [3_u8; 16];
+        let unknown_to_the_manifest = [7_u8; 16];
+        let removed = stores_to_remove(vec![named, initial, unknown_to_the_manifest, named]);
+        assert_eq!(removed.len(), 3, "{removed:?}");
+        for store in [initial, named, unknown_to_the_manifest] {
+            assert!(removed.contains(&store), "{store:?} stays behind");
+        }
     }
 
     #[test]

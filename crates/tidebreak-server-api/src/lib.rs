@@ -41,7 +41,7 @@ pub use core::{
     DeprovisionTarget, DurableOperationStore, LocalVoiceError, LocalVoiceRunner, LocalVoiceState,
     LocalVoiceStatus, NativeChannelBinding, NativeRuntime, NativeRuntimeError, NativeRuntimeScope,
     PairingError, PairingHandle, PendingRegistration, QuitProgress, Server, ServerError,
-    UpdateQuiesce,
+    ServerStop, UpdateQuiesce,
 };
 
 pub mod routes;

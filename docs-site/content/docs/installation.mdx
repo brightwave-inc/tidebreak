@@ -157,9 +157,14 @@ directory holds `backups/`, so copy out any backup you want to keep first.
 
 To remove the data and your keys in one step, use **Delete all data** in
 **Settings → Data and privacy** before you delete the app. It asks you to type
-`delete all data`, deletes the application data directory and this
-installation's keychain items, and quits. It leaves your code worktrees and
-repositories alone.
+`delete all data`, then asks once more in a system dialog. It stops every
+agent, deletes the application data, cache, and log directories, the code
+browser's website data, and this installation's keychain items, and quits.
+The release app and the `tidebreak` command-line tool share one keychain item,
+so the command line is signed out too. It leaves the worktrees in
+`~/Tidebreak` and your repositories alone. Worktrees from before version 0.59
+live inside the data directory, and the system dialog says so when it finds
+any.
 
 On macOS:
 
