@@ -1620,9 +1620,25 @@ impl McpRuntime {
     /// mounting — rather than resurrecting an endpoint the user turned off.
     pub async fn auto_mount_gateway_endpoints(&self, entitled: &[String]) -> Result<bool> {
         let _mutation = self.mutation.lock().await;
-        let (mut servers, skipped) = {
+        // Plugin-sourced servers are derived from the installed tree, never
+        // saved: the commit below persists what it is given, and adds them
+        // back itself. Their names still count as taken, so a new mount
+        // never renames one.
+        let (mut servers, plugin_names, skipped) = {
             let state = self.state.lock().await;
-            (state.definitions.clone(), state.skipped.clone())
+            let (configured, plugin): (Vec<_>, Vec<_>) = state
+                .definitions
+                .iter()
+                .cloned()
+                .partition(|definition| definition.plugin.is_none());
+            (
+                configured,
+                plugin
+                    .into_iter()
+                    .map(|definition| definition.name)
+                    .collect::<Vec<_>>(),
+                state.skipped.clone(),
+            )
         };
         let unmounts = read_endpoint_unmounts(&*self.store).await?;
         // A skipped record still holds its name and, for a gateway mount, its
@@ -1643,6 +1659,7 @@ impl McpRuntime {
         let mut taken: HashSet<String> = servers
             .iter()
             .map(|definition| definition.name.clone())
+            .chain(plugin_names)
             .chain(skipped.iter().map(|skipped| skipped.record.name.clone()))
             .collect();
         let before = servers.len();
