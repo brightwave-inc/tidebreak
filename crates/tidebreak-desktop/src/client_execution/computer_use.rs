@@ -146,7 +146,14 @@ fn notify_permission_required(
     bundle_id: Option<&str>,
     after_consent: bool,
 ) {
-    if let Some(notice) = permission_required(call, error, bundle_id, after_consent) {
+    emit_permission_required(
+        app,
+        permission_required(call, error, bundle_id, after_consent),
+    );
+}
+
+fn emit_permission_required(app: &AppHandle, notice: Option<PermissionRequired>) {
+    if let Some(notice) = notice {
         if let Err(error) = app.emit(PERMISSION_REQUIRED_EVENT, notice) {
             eprintln!("tidebreak-desktop: could not report a missing macOS permission: {error}");
         }
@@ -1616,7 +1623,7 @@ async fn dispatch_broker(
             if cu.is_halted() {
                 return stopped_resolution();
             }
-            dispatch_confirmation(app, state, call, held, admission).await
+            dispatch_confirmation(app, state, call, held, admission, false).await
         }
         Ok(result) => map_result(app, state, context, call, result, delivery).await,
         Err(error) => match map_broker_error(&error) {
@@ -1822,7 +1829,7 @@ async fn dispatch_consent(
             {
                 stopped_resolution()
             } else {
-                dispatch_confirmation(app, state, call, held, admission).await
+                dispatch_confirmation(app, state, call, held, admission, true).await
             }
         }
         Ok(result) => map_result(app, state, context, call, result, delivery).await,
@@ -1872,12 +1879,16 @@ async fn revoke_once_grant(
 /// The act-time consequential confirmation: the broker is holding the action
 /// and honors the native confirmation only while the target's label still
 /// matches.
+///
+/// `after_consent` says the person allowed the task to use the app just
+/// before this, which a missing macOS permission reports along with it.
 async fn dispatch_confirmation(
     app: &AppHandle,
     state: &HostAccess,
     call: &ToolCallRecord,
     held: tidebreak_host_broker::CuNeedsConfirmationResult,
     admission: NativeInputAdmission,
+    after_consent: bool,
 ) -> StoredResolution {
     let cu = &state.computer_use;
     if !cu.admission_is_current(call.chat_id, admission) {
@@ -1932,14 +1943,39 @@ async fn dispatch_confirmation(
             "operation_failed",
             "The computer-use confirmation returned an unexpected result.",
         ),
-        Err(error) => match map_broker_error(&error) {
-            BrokerFailure::Resolution(resolution) => resolution,
-            BrokerFailure::ConsentRequired => unavailable(
-                "grant_declined",
-                "The computer-use grant no longer covers this app. Ask the user to review the app's grants in Settings.",
-            ),
-        },
+        Err(error) => {
+            let (resolution, notice) =
+                confirmation_failure(call, &error, &view.bundle_id, after_consent);
+            emit_permission_required(app, notice);
+            resolution
+        }
     }
+}
+
+/// The answer to a confirmed action the broker could not carry out, and the
+/// permission notice it raises when macOS is what refused.
+///
+/// The broker holds a Return or shortcut press for confirmation before the
+/// helper sees it, so on a fresh install the confirmed press is the first
+/// operation that needs Accessibility. It asks the way any other operation
+/// does.
+fn confirmation_failure(
+    call: &ToolCallRecord,
+    error: &BrokerClientError,
+    bundle_id: &str,
+    after_consent: bool,
+) -> (StoredResolution, Option<PermissionRequired>) {
+    let resolution = match map_broker_error(error) {
+        BrokerFailure::Resolution(resolution) => resolution,
+        BrokerFailure::ConsentRequired => unavailable(
+            "grant_declined",
+            "The computer-use grant no longer covers this app. Ask the user to review the app's grants in Settings.",
+        ),
+    };
+    (
+        resolution,
+        permission_required(call, error, Some(bundle_id), after_consent),
+    )
 }
 
 /// Preserve screenshot badge numbers when a tree read returns a smaller or
@@ -3547,6 +3583,54 @@ mod tests {
             retryable: false,
         };
         assert_eq!(permission_required(&call, &denied, None, false), None);
+    }
+
+    /// The broker holds Return and shortcut presses for confirmation before
+    /// the helper sees them, so the confirmed press is where a fresh install
+    /// first meets Accessibility. It must ask like any other operation.
+    #[test]
+    fn a_confirmed_key_press_that_needs_accessibility_asks_for_it() {
+        let session = SessionId::new();
+        let call = session_call_record(
+            session,
+            CallId::new(),
+            tidebreak_core::COMPUTER_KEY_PRESS_TOOL,
+            serde_json::json!({"app_id": "com.apple.Notes", "key": "n", "modifiers": ["cmd"]}),
+        );
+        let refusal = BrokerClientError::Broker {
+            code: ErrorCode::OsPermissionDenied,
+            message: "Accessibility permission is not granted".to_owned(),
+            retryable: true,
+        };
+
+        let (resolution, notice) = confirmation_failure(&call, &refusal, "com.apple.Notes", true);
+
+        let StoredResolution::Failed { error_code, .. } = &resolution else {
+            panic!("a refused press fails the call");
+        };
+        assert_eq!(error_code, "os_permission_required");
+        assert_eq!(
+            notice,
+            Some(PermissionRequired {
+                task_id: session.0.to_string(),
+                permission: Some(MissingPermission::Accessibility),
+                browser: false,
+                after_consent: true,
+            })
+        );
+
+        // A grant that lapsed before the press is not a macOS permission.
+        let lapsed = BrokerClientError::Broker {
+            code: ErrorCode::Denied,
+            message: "denied".to_owned(),
+            retryable: false,
+        };
+        let (resolution, notice) = confirmation_failure(&call, &lapsed, "com.apple.Notes", false);
+        let StoredResolution::Failed { error_code, .. } = &resolution else {
+            panic!("a lapsed grant fails the call");
+        };
+        assert_eq!(error_code, "grant_declined");
+        assert_eq!(notice, None);
     }
 
     #[test]
