@@ -3,6 +3,35 @@
 use super::*;
 
 impl CodeRuntime {
+    /// Stop every background sweep for good, for a server that is stopping
+    /// before its data is deleted. Each is marked started first, so nothing
+    /// starts it again, and dropping its guard aborts its task.
+    pub(crate) fn stop_sweeps(&self) {
+        for started in [
+            &self.recovery_started,
+            &self.stall_started,
+            &self.watch_started,
+            &self.trigger_started,
+            &self.reconcile_started,
+            &self.pr_refresh_started,
+            &self.remote_started,
+        ] {
+            started.store(true, Ordering::SeqCst);
+        }
+        drop(self.recovery_sweep.lock().expect("recovery sweep").take());
+        drop(self.stall_sweep.lock().expect("stall sweep").take());
+        drop(self.watch_sweep.lock().expect("watch sweep").take());
+        drop(self.trigger_sweep.lock().expect("trigger sweep").take());
+        drop(self.reconcile_sweep.lock().expect("reconcile sweep").take());
+        drop(
+            self.pr_refresh_sweep
+                .lock()
+                .expect("pr refresh sweep")
+                .take(),
+        );
+        drop(self.remote_sweep.lock().expect("remote sweep").take());
+    }
+
     pub(super) fn ensure_stall_sweep(&self) {
         if self.stall_started.swap(true, Ordering::SeqCst) {
             return;
@@ -129,5 +158,47 @@ impl CodeRuntime {
         }
         let guard = crate::code::remote::service::RemoteSweepGuard::spawn(Arc::downgrade(self));
         *self.remote_sweep.lock().expect("remote sweep") = Some(guard);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Delete all data stops the server before it removes the folders the
+    /// sweeps write into, so a stopped sweep must stay stopped: a watch or a
+    /// trigger armed afterwards cannot start it again.
+    #[tokio::test]
+    async fn stopped_sweeps_do_not_start_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            tidebreak_core::DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("code.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let runtime = Arc::new(CodeRuntime::new(
+            db,
+            dir.path().into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+        runtime.ensure_watch_sweep();
+        assert!(runtime.watch_sweep.lock().unwrap().is_some());
+
+        runtime.stop_sweeps();
+        assert!(runtime.watch_sweep.lock().unwrap().is_none());
+        runtime.ensure_watch_sweep();
+        runtime.ensure_trigger_sweep();
+        runtime.ensure_reconcile_sweep();
+        assert!(runtime.watch_sweep.lock().unwrap().is_none());
+        assert!(runtime.trigger_sweep.lock().unwrap().is_none());
+        assert!(runtime.reconcile_sweep.lock().unwrap().is_none());
     }
 }

@@ -621,30 +621,12 @@ impl Server {
             .expect("a bound server keeps its router until serve");
         let stop = self.stop.clone();
         let result = match &mut self._store_ownership {
-            store_ownership::StoreOwnership::Local => {
-                let server = async move {
-                    axum::serve(
-                        listener,
-                        router.into_make_service_with_connect_info::<SocketAddr>(),
-                    )
-                    .await
-                };
-                tokio::select! {
-                    result = server => {
-                        result.map_err(|error| AgentError::msg(format!("server error: {error}")))
-                    }
-                    () = stop.requested() => Ok(()),
-                }
-            }
+            store_ownership::StoreOwnership::Local => serve_until_stopped(listener, router, stop)
+                .await
+                .map_err(|error| AgentError::msg(format!("server error: {error}"))),
             #[cfg(feature = "postgres")]
             store_ownership::StoreOwnership::Postgres(ownership) => {
-                let server = async move {
-                    axum::serve(
-                        listener,
-                        router.into_make_service_with_connect_info::<SocketAddr>(),
-                    )
-                    .await
-                };
+                let server = serve_until_stopped(listener, router, stop);
                 tokio::pin!(server);
                 tokio::select! {
                     result = &mut server => {
@@ -653,7 +635,6 @@ impl Server {
                         })
                     }
                     error = ownership.wait_until_lost() => Err(error),
-                    () = stop.requested() => Ok(()),
                 }
             }
         };
@@ -664,6 +645,7 @@ impl Server {
 
     async fn stop_workers(&mut self) {
         self.worker_health.begin_shutdown();
+        self.update_quiesce.stop_code_sweeps();
         self._queued_turn_promoter.abort();
         self._code_recovery.abort();
         self._turn_worker.abort();
@@ -704,6 +686,42 @@ impl Server {
         self._mcp_supervisor.wait().await;
         self._gateway_model_sync.wait().await;
         self.worker_health.mark_all_stopped();
+    }
+}
+
+/// How long a stopped server waits for its open connections to finish the
+/// requests they are serving before it lets them go. An event stream never
+/// finishes, so this bounds the wait.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Serve until the process ends, or until `stop` is asked for. A stop closes
+/// the listener at once and asks every open connection to finish the request
+/// it is serving and accept no other, so a kept-alive connection cannot start
+/// new work; after [`STOP_GRACE`] the rest are let go.
+async fn serve_until_stopped(
+    listener: TcpListener,
+    router: Router,
+    stop: ServerStop,
+) -> std::io::Result<()> {
+    let signal = {
+        let stop = stop.clone();
+        async move { stop.requested().await }
+    };
+    let server = async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(signal)
+        .await
+    };
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result,
+        () = async {
+            stop.requested().await;
+            tokio::time::sleep(STOP_GRACE).await;
+        } => Ok(()),
     }
 }
 
