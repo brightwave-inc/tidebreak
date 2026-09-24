@@ -44,7 +44,7 @@ debug-assertions = false
 brush-parser = "=0.4.0"
 # Backreference regexes for the sed danger heuristics; `regex` has no
 # backreferences and cannot express them.
-fancy-regex = "=0.19.1"
+fancy-regex = "=0.19.2"
 serde = { version = "=1.0.229", features = ["derive"] }
 # `unbounded_depth` matches what tauri-build already enables in the desktop
 # graph, so every build selection resolves one serde_json instead of two.
@@ -81,8 +81,8 @@ chrono = { version = "=0.4.45", features = ["serde"] }
 # pinned by a test rather than left to coincidence.
 ts-rs = { version = "=12.0.1", features = ["chrono-impl", "uuid-impl", "no-serde-warnings"] }
 windows-sys = "=0.61.2"
-sea-orm = { version = "=2.0.2", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
-sea-orm-migration = { version = "=2.0.2", default-features = false, features = ["runtime-tokio-rustls"] }
+sea-orm = { version = "=2.0.3", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
+sea-orm-migration = { version = "=2.0.3", default-features = false, features = ["runtime-tokio-rustls"] }
 # One unified feature set for every build selection, so `-p` builds, the
 # `--workspace` lanes, and the release sidecar/desktop builds all share the
 # same compiled tokio (and everything above it) instead of resolving
@@ -114,7 +114,7 @@ tokio-tungstenite = { version = "=0.30.0", default-features = false, features = 
 # Query and form encoding require explicit features in reqwest 0.13.
 reqwest = { version = "=0.13.5", default-features = false, features = ["json", "multipart", "stream", "query", "form", "rustls"] }
 oauth2 = { version = "=5.0.0", default-features = false }
-jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["aws_lc_rs"] }
 sha2 = "=0.11.0"
 symphonia = { version = "=0.6.1", default-features = false, features = ["aac", "alac", "isomp4", "mkv"] }
 opus-decoder = "=0.1.1"
@@ -122,10 +122,10 @@ base64 = "=0.23.1"
 minisign-verify = "=0.2.5"
 libc = "=0.2.189"
 async-stream = "=0.3.6"
-object_store = { version = "=0.14.1", default-features = false, features = ["aws"] }
+object_store = { version = "=0.14.2", default-features = false, features = ["aws"] }
 axum = { version = "=0.8.9", features = ["ws"] }
 tempfile = "=3.27.0"
-trash = { version = "=5.2.8", default-features = false, features = ["coinit_apartmentthreaded"] }
+trash = { version = "=5.2.9", default-features = false, features = ["coinit_apartmentthreaded"] }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }
 
 tracing = "=0.1.44"
