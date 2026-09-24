@@ -166,6 +166,59 @@ describe("message actions", () => {
     ).toBeDisabled();
   });
 
+  it("asks before regenerating an answer that acted, then answers in a new chat", async () => {
+    const user = userEvent.setup();
+    const turnActions = actions();
+    await renderList({
+      turnActions,
+      latestSideEffects: { turnId: "t2", effects: ["files_written"] },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Regenerate" }));
+    expect(turnActions.onRegenerate).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText(
+        "This answer wrote files, so answering again starts a new chat. This chat stays as it is.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("menuitem", { name: "Regenerate in new chat" }),
+    );
+    expect(turnActions.onRegenerate).toHaveBeenCalledWith("t2", undefined);
+  });
+
+  it("continues a stopped answer from its notice instead of regenerating it", async () => {
+    const onRetryTurn = vi.fn();
+    await renderList({
+      turnActions: actions(),
+      onRetryTurn,
+      messages: [
+        ...conversation.slice(0, 3),
+        {
+          id: "p2",
+          role: "assistant",
+          text: "Harbor to the",
+          sources: [],
+          turnId: "t2",
+          createdAt: "2026-09-20T10:01:03Z",
+        },
+        { id: "c2", role: "system", text: TURN_CANCELLED_NOTICE, turnId: "t2" },
+      ],
+    });
+
+    const answers = screen.getAllByRole("article", { name: "Assistant" });
+    const stopped = answers[answers.length - 1];
+    expect(
+      within(stopped).queryByRole("button", { name: "Regenerate" }),
+    ).toBeNull();
+    expect(
+      within(stopped).getByRole("button", { name: "Branch from here" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Try again" }),
+    ).toBeInTheDocument();
+  });
+
   it("pages back to an earlier answer without touching the turns after it", async () => {
     const user = userEvent.setup();
     await renderList({
@@ -191,6 +244,8 @@ describe("message actions", () => {
 
     const pager = screen.getByRole("group", { name: "Answer versions" });
     expect(within(pager).getByText("2 of 2")).toBeInTheDocument();
+    const continues = "The conversation continues from answer 2.";
+    expect(screen.queryByText(continues)).toBeNull();
     await user.click(
       within(pager).getByRole("button", { name: "Previous version" }),
     );
@@ -202,6 +257,8 @@ describe("message actions", () => {
         "1 of 2",
       ),
     ).toBeInTheDocument();
+    // The answer on screen is not the one the conversation goes on from.
+    expect(screen.getByText(continues)).toBeInTheDocument();
   });
 
   it("answers a stopped turn again from its notice", async () => {

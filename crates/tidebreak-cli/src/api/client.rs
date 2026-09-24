@@ -711,8 +711,23 @@ impl Client {
             .ok_or_else(|| AgentError::msg(format!("chat {chat} has no turns yet")))
     }
 
+    /// Continue `turn` after it failed or was stopped, as `new_turn` (`202`).
+    pub async fn retry_turn(
+        &self,
+        chat: SessionId,
+        turn: TurnId,
+        new_turn: TurnId,
+    ) -> Result<ChatTurnStarted> {
+        self.post_json(
+            format!("{}/chats/{chat}/turns/{turn}/retry", self.base),
+            &serde_json::json!({ "new_turn_id": new_turn }),
+        )
+        .await
+    }
+
     /// Answer `turn`'s message again as `new_turn` (`202`), under `model`
-    /// when given and the chat's model otherwise.
+    /// when given and the chat's model otherwise. The answer says whether the
+    /// regenerate started a new chat.
     pub async fn regenerate_turn(
         &self,
         chat: SessionId,

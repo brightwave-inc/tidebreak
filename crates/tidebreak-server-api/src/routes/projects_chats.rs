@@ -731,9 +731,12 @@ pub struct ChatTranscript {
 }
 
 /// One earlier answer to a message that was answered again.
+///
+/// An answer is one attempt: a turn and the turns it retried. Everything the
+/// attempt said and did is here, under the attempt's latest turn.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct ChatAnswerVersion {
-    /// The turn that gave this answer.
+    /// The latest turn of the attempt that gave this answer.
     pub turn_id: TurnId,
     /// The turn shown in its place now: the newest answer to the same
     /// message.
@@ -743,7 +746,8 @@ pub struct ChatAnswerVersion {
     pub messages: Vec<ChatMessageSnapshot>,
     /// The answer's finished tool activity.
     pub tool_activity: Vec<tidebreak_core::ChatToolActivitySnapshot>,
-    /// How the answer ended.
+    /// How the answer ended, with the file changes and memory of every turn
+    /// in the attempt.
     pub terminal_turn: ChatTerminalTurnSnapshot,
 }
 
@@ -907,19 +911,19 @@ pub async fn list_chat_messages(
     for invoked in transcript.message_invoked_skills {
         invoked_skills_by_message.insert(invoked.message_id, invoked.skills);
     }
-    // A replaced turn is not part of the conversation as it stands: an
-    // earlier version moves to `answer_versions`, and an edited turn is gone.
-    let replaced = tidebreak_core::replaced_turns(&transcript.replacements);
+    // Where each turn stands. A retry continues the turn it retried, so the
+    // two stay in the conversation as one attempt, and only the copy of the
+    // message the retry sent again is left out. A regenerated attempt moves
+    // to `answer_versions`, and an edited one is gone.
+    let placements = tidebreak_core::TurnPlacements::new(&transcript.replacements);
     let mut version_messages: std::collections::HashMap<TurnId, Vec<ChatMessageSnapshot>> =
         std::collections::HashMap::new();
+    let mut opened = std::collections::HashSet::new();
     let mut messages: Vec<ChatMessageSnapshot> = transcript
         .messages
         .into_iter()
         .filter(|message| {
-            !matches!(
-                replaced.get(&message.turn_id),
-                Some(tidebreak_core::ReplacedTurn::Discarded)
-            )
+            placements.placement(message.turn_id) != tidebreak_core::TurnPlacement::Discarded
         })
         .filter_map(|message| {
             let mut snapshot = ChatMessageSnapshot::for_transcript(message)?;
@@ -943,19 +947,30 @@ pub async fn list_chat_messages(
             }
             Some(snapshot)
         })
-        .filter_map(|snapshot| {
-            if !replaced.contains_key(&snapshot.turn_id) {
-                return Some(snapshot);
+        .filter_map(|mut snapshot| {
+            let turn = snapshot.turn_id;
+            // A turn's first message is the one it was sent with.
+            let opens_turn = snapshot.role == TranscriptRole::User && opened.insert(turn);
+            let attempt = placements.attempt(turn);
+            if placements.placement(turn) != tidebreak_core::TurnPlacement::InConversation {
+                // The message an earlier version answered is the current
+                // turn's message, sent again; only the answer is kept.
+                if snapshot.role != TranscriptRole::User {
+                    snapshot.turn_id = attempt;
+                    version_messages.entry(attempt).or_default().push(snapshot);
+                }
+                return None;
             }
-            // The message an earlier version answered is the current turn's
-            // message, sent again; only the answer is kept.
-            if snapshot.role != TranscriptRole::User {
-                version_messages
-                    .entry(snapshot.turn_id)
-                    .or_default()
-                    .push(snapshot);
+            if opens_turn && placements.retried(turn).is_some() {
+                // A retry's message is a copy of the one already shown.
+                return None;
             }
-            None
+            if opens_turn && attempt != turn {
+                // The message a retry sent again stands for the whole
+                // attempt, so acting on it acts on the turn that can be rerun.
+                snapshot.turn_id = attempt;
+            }
+            Some(snapshot)
         })
         .collect();
     if let Some(checkpoint) = state
@@ -1050,8 +1065,23 @@ pub async fn list_chat_messages(
             }
         }
     }
+    let mut tool_activity = Vec::with_capacity(transcript.tool_activity.len());
+    let mut version_activity: std::collections::HashMap<TurnId, Vec<_>> =
+        std::collections::HashMap::new();
+    for mut activity in transcript.tool_activity {
+        match placements.placement(activity.turn_id) {
+            tidebreak_core::TurnPlacement::InConversation => tool_activity.push(activity),
+            tidebreak_core::TurnPlacement::EarlierVersion { .. } => {
+                let attempt = placements.attempt(activity.turn_id);
+                activity.turn_id = attempt;
+                version_activity.entry(attempt).or_default().push(activity);
+            }
+            tidebreak_core::TurnPlacement::Discarded => {}
+        }
+    }
     let mut terminal_turns = Vec::with_capacity(transcript.terminal_turns.len());
-    let mut version_turns = std::collections::HashMap::new();
+    let mut version_turns: std::collections::HashMap<TurnId, Vec<ChatTerminalTurnSnapshot>> =
+        std::collections::HashMap::new();
     for turn in transcript.terminal_turns {
         let mut snapshot = ChatTerminalTurnSnapshot::from(turn);
         snapshot.file_changes = file_changes_by_turn
@@ -1060,59 +1090,79 @@ pub async fn list_chat_messages(
         snapshot.memory_proposals = memory_proposals_by_turn
             .remove(&snapshot.turn_id)
             .unwrap_or_default();
-        match replaced.get(&snapshot.turn_id) {
-            None => terminal_turns.push(snapshot),
-            Some(tidebreak_core::ReplacedTurn::EarlierVersion { .. }) => {
-                version_turns.insert(snapshot.turn_id, snapshot);
+        match placements.placement(snapshot.turn_id) {
+            tidebreak_core::TurnPlacement::InConversation => {
+                // A retried turn that left nothing but its notice says
+                // nothing the retry's answer does not.
+                let retried = placements.attempt(snapshot.turn_id) != snapshot.turn_id;
+                let left_something = !snapshot.partial_content.trim().is_empty()
+                    || !snapshot.file_changes.is_empty()
+                    || !snapshot.memory_proposals.is_empty()
+                    || messages.iter().any(|message| {
+                        message.turn_id == snapshot.turn_id
+                            && message.role != TranscriptRole::User
+                            && !message.content.trim().is_empty()
+                    })
+                    || tool_activity
+                        .iter()
+                        .any(|activity| activity.turn_id == snapshot.turn_id);
+                if !retried || left_something {
+                    terminal_turns.push(snapshot);
+                }
             }
-            Some(tidebreak_core::ReplacedTurn::Discarded) => {}
-        }
-    }
-    let mut tool_activity = Vec::with_capacity(transcript.tool_activity.len());
-    let mut version_activity: std::collections::HashMap<TurnId, Vec<_>> =
-        std::collections::HashMap::new();
-    for activity in transcript.tool_activity {
-        match replaced.get(&activity.turn_id) {
-            None => tool_activity.push(activity),
-            Some(tidebreak_core::ReplacedTurn::EarlierVersion { .. }) => {
-                version_activity
-                    .entry(activity.turn_id)
+            tidebreak_core::TurnPlacement::EarlierVersion { .. } => {
+                version_turns
+                    .entry(placements.attempt(snapshot.turn_id))
                     .or_default()
-                    .push(activity);
+                    .push(snapshot);
             }
-            Some(tidebreak_core::ReplacedTurn::Discarded) => {}
+            tidebreak_core::TurnPlacement::Discarded => {}
         }
     }
     let mut answer_versions = Vec::new();
     for replacement in &transcript.replacements {
-        let Some(tidebreak_core::ReplacedTurn::EarlierVersion { current }) =
-            replaced.get(&replacement.replaces).copied()
+        if replacement.kind != tidebreak_core::TurnReplacementKind::Regenerate {
+            continue;
+        }
+        let attempt = replacement.replaces;
+        let tidebreak_core::TurnPlacement::EarlierVersion { current } =
+            placements.placement(attempt)
         else {
             continue;
         };
         // A page holds a version's rows only when it holds the moment the
         // version finished.
-        let Some(terminal_turn) = version_turns.remove(&replacement.replaces) else {
+        let mut turns = version_turns.remove(&attempt).unwrap_or_default();
+        let Some(at) = turns.iter().position(|turn| turn.turn_id == attempt) else {
             continue;
         };
-        let messages = version_messages
-            .remove(&replacement.replaces)
-            .unwrap_or_default();
-        let said_something = matches!(terminal_turn.status, ChatTerminalTurnStatus::Completed)
+        let mut terminal_turn = turns.remove(at);
+        // Nothing an attempt did is hidden: the file changes and memory of
+        // the turns it retried come along with its answer.
+        for retried in turns {
+            terminal_turn.file_changes.extend(retried.file_changes);
+            terminal_turn
+                .memory_proposals
+                .extend(retried.memory_proposals);
+        }
+        let messages = version_messages.remove(&attempt).unwrap_or_default();
+        let tool_activity = version_activity.remove(&attempt).unwrap_or_default();
+        let left_something = matches!(terminal_turn.status, ChatTerminalTurnStatus::Completed)
             || !terminal_turn.partial_content.trim().is_empty()
+            || !terminal_turn.file_changes.is_empty()
+            || !terminal_turn.memory_proposals.is_empty()
+            || !tool_activity.is_empty()
             || messages
                 .iter()
                 .any(|message| !message.content.trim().is_empty());
-        if !said_something {
+        if !left_something {
             continue;
         }
         answer_versions.push(ChatAnswerVersion {
-            turn_id: replacement.replaces,
+            turn_id: attempt,
             current_turn_id: current,
             messages,
-            tool_activity: version_activity
-                .remove(&replacement.replaces)
-                .unwrap_or_default(),
+            tool_activity,
             terminal_turn,
         });
     }

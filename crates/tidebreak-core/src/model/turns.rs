@@ -449,12 +449,18 @@ impl TurnClientWaitStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnReplacementKind {
-    /// The same message, answered again. The replaced answer stays as an
-    /// earlier version the reader can page back to.
+    /// The same message, answered again. The replaced answer leaves the
+    /// conversation and stays as an earlier version the reader can page back
+    /// to.
     Regenerate,
     /// A changed message. The replaced turn leaves the conversation, because
     /// the message it answered no longer exists.
     Edit,
+    /// The same message, continued after the replaced turn failed or was
+    /// stopped. The replaced turn stays in the conversation: what it said and
+    /// every tool call it made stay in the model's view and in the transcript,
+    /// so work that already ran is not repeated blind.
+    Retry,
 }
 
 impl TurnReplacementKind {
@@ -464,6 +470,7 @@ impl TurnReplacementKind {
         match self {
             Self::Regenerate => "regenerate",
             Self::Edit => "edit",
+            Self::Retry => "retry",
         }
     }
 
@@ -473,48 +480,41 @@ impl TurnReplacementKind {
         match value {
             "regenerate" => Some(Self::Regenerate),
             "edit" => Some(Self::Edit),
+            "retry" => Some(Self::Retry),
             _ => None,
+        }
+    }
+
+    /// Whether the replaced turn leaves the conversation.
+    #[must_use]
+    pub const fn removes_replaced(self) -> bool {
+        match self {
+            Self::Regenerate | Self::Edit => true,
+            Self::Retry => false,
         }
     }
 }
 
 /// One turn that reran another.
-///
-/// A replaced turn leaves the model's view of the conversation. Its rows stay:
-/// a regenerated answer is still shown as an earlier version, and an edited
-/// one is still on record for its tool calls and outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnReplacement {
     /// The turn that reran.
     pub turn_id: TurnId,
     /// The turn it replaced.
     pub replaces: TurnId,
-    /// Whether the rerun kept the message or changed it.
+    /// How it reran.
     pub kind: TurnReplacementKind,
 }
 
-/// The turns that left the conversation because a later turn reran them.
-///
-/// Everything that reads the conversation for the model filters on this set,
-/// so a replaced turn's messages and tool calls never reach a request again.
-#[must_use]
-pub fn replaced_turn_ids(replacements: &[TurnReplacement]) -> std::collections::HashSet<TurnId> {
-    replacements
-        .iter()
-        .map(|replacement| replacement.replaces)
-        .collect()
-}
-
-/// Where a replaced turn stands in the conversation.
-///
-/// A turn that no replacement names is part of the conversation and has no
-/// entry here.
+/// Where one turn stands in the conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplacedTurn {
+pub enum TurnPlacement {
+    /// Part of the conversation the model reads and the transcript shows.
+    InConversation,
     /// An earlier answer to the message `current` answers now. Only
-    /// regenerates lead from this turn to `current`.
+    /// regenerates lead from this turn's attempt to `current`.
     EarlierVersion {
-        /// The turn shown in its place.
+        /// The attempt shown in its place, named by its latest turn.
         current: TurnId,
     },
     /// Gone from the conversation: an edit changed the message it answered,
@@ -522,43 +522,132 @@ pub enum ReplacedTurn {
     Discarded,
 }
 
-/// What became of every replaced turn in one conversation.
-#[must_use]
-pub fn replaced_turns(
-    replacements: &[TurnReplacement],
-) -> std::collections::HashMap<TurnId, ReplacedTurn> {
-    let by_replaced: std::collections::HashMap<TurnId, (TurnId, TurnReplacementKind)> =
-        replacements
-            .iter()
-            .map(|replacement| {
-                (
-                    replacement.replaces,
-                    (replacement.turn_id, replacement.kind),
-                )
-            })
-            .collect();
-    by_replaced
-        .keys()
-        .map(|&turn| {
-            let mut current = turn;
-            let mut discarded = false;
-            // Each turn is replaced at most once, so the chain cannot branch.
-            // The step bound stops a corrupt cycle rather than looping on it.
-            for _ in 0..=by_replaced.len() {
-                let Some(&(next, kind)) = by_replaced.get(&current) else {
-                    break;
-                };
-                discarded |= kind == TurnReplacementKind::Edit;
-                current = next;
+/// Where every turn stands, given every rerun in one conversation.
+///
+/// A retry continues the turn it retries, so a turn and the turns it retried
+/// form one attempt at answering a message. Regenerate and edit replace whole
+/// attempts: every turn of a replaced attempt leaves the conversation together,
+/// and an earlier version is an attempt, not a single turn.
+#[derive(Debug, Clone, Default)]
+pub struct TurnPlacements {
+    /// Replaced turn → (the turn that replaced it, how).
+    by_replaced: std::collections::HashMap<TurnId, (TurnId, TurnReplacementKind)>,
+    /// Replacing turn → (the turn it replaced, how).
+    by_replacer: std::collections::HashMap<TurnId, (TurnId, TurnReplacementKind)>,
+}
+
+impl TurnPlacements {
+    /// Index one conversation's replacements.
+    #[must_use]
+    pub fn new(replacements: &[TurnReplacement]) -> Self {
+        let mut placements = Self::default();
+        for replacement in replacements {
+            placements.by_replaced.insert(
+                replacement.replaces,
+                (replacement.turn_id, replacement.kind),
+            );
+            placements.by_replacer.insert(
+                replacement.turn_id,
+                (replacement.replaces, replacement.kind),
+            );
+        }
+        placements
+    }
+
+    /// The latest turn of the attempt `turn` belongs to: `turn` itself unless
+    /// a retry continued it.
+    #[must_use]
+    pub fn attempt(&self, turn: TurnId) -> TurnId {
+        let mut current = turn;
+        // Each turn is replaced at most once, so the chain cannot branch. The
+        // step bound stops a corrupt cycle rather than looping on it.
+        for _ in 0..=self.by_replaced.len() {
+            match self.by_replaced.get(&current) {
+                Some(&(next, TurnReplacementKind::Retry)) => current = next,
+                _ => break,
             }
-            let placement = if discarded || by_replaced.contains_key(&current) {
-                ReplacedTurn::Discarded
-            } else {
-                ReplacedTurn::EarlierVersion { current }
+        }
+        current
+    }
+
+    /// Every turn of the attempt whose latest turn is `head`, oldest first.
+    #[must_use]
+    pub fn attempt_turns(&self, head: TurnId) -> Vec<TurnId> {
+        let mut turns = vec![head];
+        let mut current = head;
+        for _ in 0..=self.by_replacer.len() {
+            match self.by_replacer.get(&current) {
+                Some(&(previous, TurnReplacementKind::Retry)) if !turns.contains(&previous) => {
+                    turns.push(previous);
+                    current = previous;
+                }
+                _ => break,
+            }
+        }
+        turns.reverse();
+        turns
+    }
+
+    /// The turn `turn` retried, when it is a retry. A retry's message is a
+    /// copy of that turn's.
+    #[must_use]
+    pub fn retried(&self, turn: TurnId) -> Option<TurnId> {
+        match self.by_replacer.get(&turn) {
+            Some(&(previous, TurnReplacementKind::Retry)) => Some(previous),
+            _ => None,
+        }
+    }
+
+    /// Where `turn` stands.
+    #[must_use]
+    pub fn placement(&self, turn: TurnId) -> TurnPlacement {
+        let mut head = self.attempt(turn);
+        if !self.by_replaced.contains_key(&head) {
+            return TurnPlacement::InConversation;
+        }
+        let mut discarded = false;
+        for _ in 0..=self.by_replaced.len() {
+            let Some(&(next, kind)) = self.by_replaced.get(&head) else {
+                break;
             };
-            (turn, placement)
-        })
-        .collect()
+            discarded |= kind == TurnReplacementKind::Edit;
+            head = self.attempt(next);
+        }
+        if discarded || self.by_replaced.contains_key(&head) {
+            TurnPlacement::Discarded
+        } else {
+            TurnPlacement::EarlierVersion { current: head }
+        }
+    }
+
+    /// Whether `turn` is part of the conversation as it stands.
+    #[must_use]
+    pub fn in_conversation(&self, turn: TurnId) -> bool {
+        self.placement(turn) == TurnPlacement::InConversation
+    }
+
+    /// Every turn that left the conversation because a regenerate or an edit
+    /// replaced its attempt.
+    #[must_use]
+    pub fn outside_conversation(&self) -> std::collections::HashSet<TurnId> {
+        self.by_replaced
+            .keys()
+            .copied()
+            .filter(|&turn| !self.in_conversation(turn))
+            .collect()
+    }
+}
+
+/// The turns that left the conversation because a later turn reran them.
+///
+/// Everything that reads the conversation for the model filters on this set,
+/// so a replaced turn's messages and tool calls never reach a request again.
+/// A retried turn stays: the retry continues it.
+#[must_use]
+pub fn turns_outside_conversation(
+    replacements: &[TurnReplacement],
+) -> std::collections::HashSet<TurnId> {
+    TurnPlacements::new(replacements).outside_conversation()
 }
 
 #[cfg(test)]
@@ -576,24 +665,66 @@ mod replacement_tests {
     #[test]
     fn an_edit_anywhere_along_the_chain_discards_every_answer_before_it() {
         let [first, second, third, fourth] = std::array::from_fn(|_| TurnId::new());
-        let placements = replaced_turns(&[
+        let placements = TurnPlacements::new(&[
             rerun(second, first, TurnReplacementKind::Regenerate),
             rerun(third, second, TurnReplacementKind::Edit),
             rerun(fourth, third, TurnReplacementKind::Regenerate),
         ]);
         // The first two answered a message the edit changed.
-        assert_eq!(placements[&first], ReplacedTurn::Discarded);
-        assert_eq!(placements[&second], ReplacedTurn::Discarded);
+        assert_eq!(placements.placement(first), TurnPlacement::Discarded);
+        assert_eq!(placements.placement(second), TurnPlacement::Discarded);
         // The third answered the edited message, which the fourth answers now.
         assert_eq!(
-            placements[&third],
-            ReplacedTurn::EarlierVersion { current: fourth }
+            placements.placement(third),
+            TurnPlacement::EarlierVersion { current: fourth }
         );
-        assert!(!placements.contains_key(&fourth));
+        assert_eq!(placements.placement(fourth), TurnPlacement::InConversation);
         assert_eq!(
-            replaced_turn_ids(&[rerun(second, first, TurnReplacementKind::Regenerate),]),
-            std::collections::HashSet::from([first])
+            placements.outside_conversation(),
+            std::collections::HashSet::from([first, second, third])
         );
+    }
+
+    #[test]
+    fn a_retry_continues_the_turn_it_retries_and_both_leave_together() {
+        let [failed, retried, regenerated] = std::array::from_fn(|_| TurnId::new());
+        let retry = rerun(retried, failed, TurnReplacementKind::Retry);
+
+        // A retry keeps the failed turn in the conversation, as one attempt.
+        let placements = TurnPlacements::new(&[retry]);
+        assert_eq!(placements.placement(failed), TurnPlacement::InConversation);
+        assert_eq!(placements.placement(retried), TurnPlacement::InConversation);
+        assert_eq!(placements.attempt(failed), retried);
+        assert_eq!(placements.attempt_turns(retried), [failed, retried]);
+        assert_eq!(placements.retried(retried), Some(failed));
+        assert!(placements.outside_conversation().is_empty());
+
+        // Regenerating the attempt takes both turns out, as one earlier
+        // version named by its latest turn.
+        let placements = TurnPlacements::new(&[
+            retry,
+            rerun(regenerated, retried, TurnReplacementKind::Regenerate),
+        ]);
+        for turn in [failed, retried] {
+            assert_eq!(
+                placements.placement(turn),
+                TurnPlacement::EarlierVersion {
+                    current: regenerated
+                }
+            );
+        }
+        assert_eq!(
+            placements.outside_conversation(),
+            std::collections::HashSet::from([failed, retried])
+        );
+
+        // An edit discards the whole attempt.
+        let placements = TurnPlacements::new(&[
+            retry,
+            rerun(regenerated, retried, TurnReplacementKind::Edit),
+        ]);
+        assert_eq!(placements.placement(failed), TurnPlacement::Discarded);
+        assert_eq!(placements.placement(retried), TurnPlacement::Discarded);
     }
 }
 
@@ -607,6 +738,9 @@ pub enum TurnReplacementRefusal {
     /// A later turn exists. Only the latest turn can be rerun, and a turn
     /// that was rerun already is no longer the latest.
     NotLatest,
+    /// A retry continues a turn that failed or was stopped. This one
+    /// finished.
+    NotRetryable,
 }
 
 /// One message accepted while its chat had a live turn, waiting its turn.

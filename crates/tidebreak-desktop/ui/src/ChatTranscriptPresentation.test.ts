@@ -775,7 +775,7 @@ describe("terminal transcript presentation", () => {
       terminal_turns: [
         {
           ...terminal("turn-current", "current-answer"),
-          side_effects: ["outputs_created"],
+          side_effects: ["commands_run"],
         },
       ],
       last_event_seq: 30,
@@ -818,7 +818,7 @@ describe("terminal transcript presentation", () => {
     });
     expect(presented.latestSideEffects).toEqual({
       turnId: "turn-current",
-      effects: ["outputs_created"],
+      effects: ["commands_run"],
     });
     // The current answer is the conversation; the earlier one is not in it.
     expect(presented.messages.map((message) => message.id)).toEqual([

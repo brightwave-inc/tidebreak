@@ -250,6 +250,7 @@ pub mod context_checkpoint {
         pub cache_read_input_tokens: i64,
         pub cache_creation_input_tokens: i64,
         pub created_at: DateTimeUtc,
+        pub through_turn_id: Option<Uuid>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

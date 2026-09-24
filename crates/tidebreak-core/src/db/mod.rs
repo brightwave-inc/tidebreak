@@ -2423,6 +2423,22 @@ impl Store for DbStore {
         ops::branch::branch_chat(self, Some(owner), request).await
     }
 
+    async fn list_turn_tool_uses(
+        &self,
+        chat_id: SessionId,
+        turns: &[TurnId],
+    ) -> Result<Vec<crate::storage::TurnToolUse>> {
+        ops::conversation::list_turn_tool_uses(self, chat_id, turns).await
+    }
+
+    async fn discard_branch_scoped(
+        &self,
+        owner: &OwnerId,
+        chat_id: SessionId,
+    ) -> Result<DeleteChatOutcome> {
+        ops::conversation::discard_branch(self, chat_id, Some(owner)).await
+    }
+
     async fn claim_turn(
         &self,
         lease_token: uuid::Uuid,

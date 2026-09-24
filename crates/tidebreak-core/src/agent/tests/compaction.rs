@@ -888,6 +888,7 @@ async fn projects_a_checkpoint_whenever_its_boundary_is_valid() {
         content: "The user chose the durable option.".into(),
         usage: Usage::default(),
         created_at: Utc::now(),
+        through_turn_id: None,
     };
     store.save_context_checkpoint(&checkpoint).await.unwrap();
 
@@ -1049,6 +1050,7 @@ async fn checkpoint_fitting_preserves_tool_pairs_and_fails_closed_when_over_budg
         content: "Earlier discussion selected the durable option.".into(),
         usage: Usage::default(),
         created_at: Utc::now(),
+        through_turn_id: None,
     };
     let (fitted, reduced) = agent.fit_transcript(&transcript, 0, Some(&checkpoint), Some(1));
     assert!(
@@ -1098,6 +1100,7 @@ fn unsupported_or_foreign_checkpoints_are_not_projectable() {
         content: "valid historical context".into(),
         usage: Usage::default(),
         created_at: Utc::now(),
+        through_turn_id: None,
     };
     assert!(checkpoint_is_projectable(&checkpoint, chat_id));
     assert!(!checkpoint_is_projectable(&checkpoint, SessionId::new()));

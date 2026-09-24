@@ -29,7 +29,12 @@ import { isToolMessage, stableSubset } from "./chatSessionSelectors";
 import { loadCurrentTerminalTranscript } from "./ChatTranscriptPresentation";
 import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
-import type { BranchOrigin, ChatMessage, RetryableTurn } from "./MessageList";
+import {
+  withRetriedTurn,
+  type BranchOrigin,
+  type ChatMessage,
+  type RetryableTurn,
+} from "./MessageList";
 import type { RetryModelGroup, TurnActions } from "./MessageActions";
 import { HttpError, type Chat, type TurnSideEffect } from "./api";
 import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
@@ -148,11 +153,18 @@ function withoutAnswer(
   ];
 }
 
-/** What the reader is told when an edit started a new chat. */
-function editBranchedMessage(effects: readonly TurnSideEffect[]): string {
+/** What the reader is told when a rerun started a new chat. */
+function branchedRerunMessage(
+  rerun: "edit" | "regenerate",
+  effects: readonly TurnSideEffect[],
+): string {
+  const started =
+    rerun === "edit"
+      ? "Your edit started a new chat"
+      : "The new answer is in a new chat";
   return effects.length > 0
-    ? "Your edit started a new chat, because an answer it replaced changed things outside this one."
-    : "Your edit started a new chat.";
+    ? `${started}, because the answer it replaces changed things outside this one.`
+    : `${started}.`;
 }
 const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
 
@@ -503,14 +515,32 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   /**
-   * Retry answers a failed or stopped turn again, in place.
+   * Retry continues a failed or stopped turn.
    *
-   * It is a regenerate: the server reruns the turn's own message, images, and
-   * files, so the question is never sent a second time and retries never
-   * stack. A failure or a stop that said nothing leaves no earlier version.
+   * The server sends the turn's own message, images, and files again, and
+   * the turn stays in the conversation, so the model sees every tool call it
+   * made and does not repeat them. The question is shown once.
    */
-  function retryTurn(turn: RetryableTurn) {
-    void regenerateTurn(turn.turnId);
+  async function retryTurn(turn: RetryableTurn) {
+    if (!canRerun()) return;
+    const newTurnId = crypto.randomUUID();
+    const before = useChatSessionStore.getState().messages;
+    terminalHydrationGenerationRef.current += 1;
+    updateSession((session) => ({
+      ...session,
+      busy: true,
+      activeTurnId: newTurnId,
+      messages: withRetriedTurn(session.messages, turn.turnId),
+    }));
+    signalTurnLifecycle("submitted");
+    setRerunPending(true);
+    try {
+      await client.retryTurn(chatId, turn.turnId, newTurnId);
+    } catch (err) {
+      abandonRerun(before, err);
+    } finally {
+      setRerunPending(false);
+    }
   }
 
   /** A rerun or a branch the server has not answered yet. */
@@ -567,14 +597,30 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     signalTurnLifecycle("resolved");
   }
 
-  /** Answer the latest message again, with `model` or the chat's model. */
+  /**
+   * Answer the latest message again, with `model` or the chat's model. When
+   * the answer it replaces changed things outside the conversation, the
+   * server answers in a new chat instead; this one goes back the way it was,
+   * and the reader follows the answer there.
+   */
   async function regenerateTurn(turnId: string, model?: string) {
     if (!canRerun()) return;
     const newTurnId = crypto.randomUUID();
     const before = beginRerun(turnId, newTurnId);
     setRerunPending(true);
     try {
-      await client.regenerateTurn(chatId, turnId, newTurnId, model);
+      const started = await client.regenerateTurn(
+        chatId,
+        turnId,
+        newTurnId,
+        model,
+      );
+      if (!started.branched) return;
+      abandonRerun(before);
+      await openNewChat(
+        started.chat_id,
+        branchedRerunMessage("regenerate", started.side_effects),
+      );
     } catch (err) {
       abandonRerun(before, err);
     } finally {
@@ -583,9 +629,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   /**
-   * Replace the latest message and answer it. When the turn it replaces, or
-   * an earlier answer to the same message, changed things outside the
-   * conversation, the server starts a new chat instead; this one goes back the way it was, and the reader follows the
+   * Replace the latest message and answer it. When the answer it replaces
+   * changed things outside the conversation, the server starts a new chat
+   * instead; this one goes back the way it was, and the reader follows the
    * edit there.
    */
   async function editTurn(turnId: string, text: string) {
@@ -602,7 +648,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       abandonRerun(before);
       await openNewChat(
         started.chat_id,
-        editBranchedMessage(started.side_effects),
+        branchedRerunMessage("edit", started.side_effects),
       );
     } catch (err) {
       abandonRerun(before, err);

@@ -55,6 +55,7 @@ fn checkpoint(
             cache_creation_input_tokens: 1,
         },
         created_at: at(second),
+        through_turn_id: None,
     }
 }
 

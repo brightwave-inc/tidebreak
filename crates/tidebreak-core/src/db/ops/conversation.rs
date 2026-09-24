@@ -1253,6 +1253,75 @@ async fn prune_empty_chat(
     Ok(true)
 }
 
+/// Remove a branch whose first message was refused.
+///
+/// Its folders came from its project when it was made, in the same
+/// transaction, and nothing has run in it since, so no folder change exists
+/// for it and no native authority was ever granted to it. The project keeps
+/// those folders. A folder change of any kind, a folder it did not get from
+/// its project, or running work refuses the discard exactly as it would a
+/// delete.
+pub(in crate::db) async fn discard_branch(
+    store: &DbStore,
+    chat_id: SessionId,
+    owner: Option<&OwnerId>,
+) -> Result<DeleteChatOutcome> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DeleteChatOutcome::NotFound);
+    }
+    let mut branch = entities::session::Entity::find_by_id(chat_id.0)
+        .filter(internal_sessions())
+        .filter(entities::session::Column::BranchedFromSessionId.is_not_null());
+    if let Some(owner) = owner {
+        branch = branch.filter(entities::session::Column::Owner.eq(owner.as_str()));
+    }
+    if branch.one(&transaction).await.map_err(store_err)?.is_none() {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DeleteChatOutcome::NotFound);
+    }
+    let active_turn = entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::turn::Column::Status.is_not_in(TurnRunStatus::TERMINAL.iter().copied()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if active_turn {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DeleteChatOutcome::ActiveWork);
+    }
+    let changed = entities::root_attachment_change::Entity::find()
+        .filter(entities::root_attachment_change::Column::ChatId.eq(chat_id.0))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    let attached = entities::chat_root_attachment::Entity::find()
+        .filter(entities::chat_root_attachment::Column::ChatId.eq(chat_id.0))
+        .all(&transaction)
+        .await
+        .map_err(store_err)?;
+    let from_project = attachment_origin_to_db(RootAttachmentOrigin::ProjectDefault);
+    if changed
+        || attached
+            .iter()
+            .any(|attachment| attachment.origin != from_project)
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DeleteChatOutcome::RootsAttached);
+    }
+    entities::chat_root_attachment::Entity::delete_many()
+        .filter(entities::chat_root_attachment::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    let background_run_ids = erase_quiesced_chat_on(&transaction, chat_id).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(DeleteChatOutcome::Deleted { background_run_ids })
+}
+
 /// Remove one fully quiesced conversation and its terminal history.
 ///
 /// Every turn writer takes the chat fence, and all runnable work is rejected
@@ -2291,6 +2360,42 @@ pub(in crate::db) async fn list_tool_calls(
         .map_err(store_err)?
         .into_iter()
         .map(super::client_execution::tool_call_from_model)
+        .collect()
+}
+
+/// What `turns` called, read without the columns a call's arguments and
+/// result live in.
+pub(in crate::db) async fn list_turn_tool_uses(
+    store: &DbStore,
+    chat_id: SessionId,
+    turns: &[TurnId],
+) -> Result<Vec<crate::storage::TurnToolUse>> {
+    if turns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(uuid::Uuid, String, String, Option<String>)> =
+        entities::tool_call::Entity::find()
+            .select_only()
+            .column(entities::tool_call::Column::TurnId)
+            .column(entities::tool_call::Column::Name)
+            .column(entities::tool_call::Column::Status)
+            .column(entities::tool_call::Column::ErrorCode)
+            .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
+            .filter(entities::tool_call::Column::TurnId.is_in(turns.iter().map(|turn| turn.0)))
+            .order_by_asc(entities::tool_call::Column::HistoryOrder)
+            .into_tuple()
+            .all(&store.conn)
+            .await
+            .map_err(store_err)?;
+    rows.into_iter()
+        .map(|(turn_id, name, status, error_code)| {
+            Ok(crate::storage::TurnToolUse {
+                turn_id: TurnId(turn_id),
+                name,
+                status: super::client_execution::status_from_db(&status)?,
+                error_code,
+            })
+        })
         .collect()
 }
 

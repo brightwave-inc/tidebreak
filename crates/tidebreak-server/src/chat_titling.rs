@@ -262,7 +262,14 @@ impl ChatTitler {
         if chat.title.is_some() {
             return Ok(None);
         }
-        let Some(material) = user_message_digest(&self.store.list_messages(chat_id).await?) else {
+        // A title names the conversation as it stands, not a message an edit
+        // replaced.
+        let replaced = tidebreak_core::turns_outside_conversation(
+            &self.store.list_turn_replacements(chat_id).await?,
+        );
+        let mut messages = self.store.list_messages(chat_id).await?;
+        messages.retain(|message| !replaced.contains(&message.turn_id));
+        let Some(material) = user_message_digest(&messages) else {
             return Ok(None);
         };
         // The title runs under the conversation's credential authority: an

@@ -1098,7 +1098,29 @@ body {
   .message-versions-row {
     display: flex;
     min-height: 1.7rem;
+    flex-wrap: wrap;
     align-items: center;
+  }
+
+  /* Said under an earlier answer while it is on screen, so the reader knows
+   the conversation goes on from the latest one. */
+  .message-versions-note {
+    margin: 0;
+    padding-inline: 0.3rem;
+    color: var(--muted-foreground);
+    font-size: 0.72rem;
+  }
+
+  /* Why answering again starts a new chat, at the top of the Regenerate
+   menu, before anything is sent. */
+  .message-rerun-note {
+    max-width: 18rem;
+    margin: 0;
+    padding: 0.375rem 0.5rem 0.5rem;
+    color: var(--muted-foreground);
+    font-size: 0.8rem;
+    line-height: 1.45;
+    text-wrap: pretty;
   }
 
   /* Editing the latest message, in the bubble's place and shape. The bottom

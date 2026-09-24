@@ -107,6 +107,12 @@ pub(crate) enum StreamEnd {
 /// transcript keep exactly what the user watched stream.
 pub(crate) const USER_INTERRUPTION_NOTE: &str = "\n\n[The user stopped this response here]";
 
+/// Appended in model context to the message a retry sent again. Never stored
+/// and never rendered: the transcript shows the message once. The model reads
+/// the attempt above it, tool calls and results included, and continues
+/// from there instead of starting the work over.
+pub(crate) const RETRY_NOTE: &str = "\n\n[The user sent this again because the response above stopped before it finished. Tool calls above already ran and their results are real: continue from them, and do not repeat an action unless the user asks.]";
+
 #[derive(Clone, Copy)]
 pub(crate) struct TurnExecution<'a> {
     turn_id: TurnId,
@@ -171,6 +177,9 @@ pub(crate) struct LoadedTranscript {
     source_boundaries: Vec<TranscriptSourceBoundary>,
     /// Durable user texts for `original_requests` carry-forward.
     user_texts: Vec<(MessageId, String)>,
+    /// The latest turn this view holds, which a checkpoint written from it
+    /// records.
+    latest_turn_id: Option<TurnId>,
 }
 
 /// Inclusive provider boundary contributed by one durable transcript row.

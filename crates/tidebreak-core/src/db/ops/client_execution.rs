@@ -1186,7 +1186,7 @@ fn execution_from_db(value: &str) -> Result<ToolCallExecution> {
     }
 }
 
-fn status_from_db(value: &str) -> Result<ToolCallStatus> {
+pub(in crate::db) fn status_from_db(value: &str) -> Result<ToolCallStatus> {
     match value {
         "pending" => Ok(ToolCallStatus::Pending),
         "completed" => Ok(ToolCallStatus::Completed),

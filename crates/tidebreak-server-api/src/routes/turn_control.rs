@@ -273,8 +273,10 @@ impl From<&PostMessage> for TurnInput {
 #[derive(Debug, Clone)]
 pub(crate) enum TurnSubmission {
     /// An ordinary message. `queue` parks it behind a live turn instead of
-    /// refusing it.
-    Message { queue: bool },
+    /// refusing it. `model` answers it with another model than the chat's,
+    /// for this turn only; it is already a validated selection, and a queued
+    /// message never carries one.
+    Message { queue: bool, model: Option<String> },
     /// Rerun the chat's latest settled turn, answered by `model` when set and
     /// by the chat's model otherwise. `model` is already a validated
     /// selection.
@@ -345,6 +347,10 @@ pub(crate) fn replacement_refused(
         Refusal::NotLatest => ServerError::conflict_kind(
             "turn_not_latest",
             format!("turn {turn} is not the latest turn; only the latest turn can be rerun"),
+        ),
+        Refusal::NotRetryable => ServerError::conflict_kind(
+            "turn_not_retryable",
+            format!("turn {turn} finished; regenerate it instead of retrying it"),
         ),
     }
 }
@@ -427,7 +433,10 @@ pub async fn post_message(
         &store,
         id,
         &input,
-        &TurnSubmission::Message { queue: body.queue },
+        &TurnSubmission::Message {
+            queue: body.queue,
+            model: None,
+        },
     ))
     .await?;
     Ok(StatusCode::ACCEPTED)
@@ -484,9 +493,12 @@ pub(crate) async fn admit_turn(
     validate_invoked_skill_identity(&input.invoked_skills)?;
     let _admission = state.active_turns.serialize_admission(input.turn_id).await;
     let mut chat = store.require_chat(id).await?;
-    // A rerun with another model answers under that model and leaves the
+    // A turn answered by another model runs under that model and leaves the
     // chat's own selection alone for the turns after it.
-    if let TurnSubmission::Replacement {
+    if let TurnSubmission::Message {
+        model: Some(model), ..
+    }
+    | TurnSubmission::Replacement {
         model: Some(model), ..
     } = submission
     {
@@ -597,7 +609,7 @@ pub(crate) async fn admit_turn(
                     )));
                 }
                 AcceptTurnOutcome::ChatBusy(active) => {
-                    if matches!(submission, TurnSubmission::Message { queue: true }) {
+                    if matches!(submission, TurnSubmission::Message { queue: true, .. }) {
                         match state
                             .store
                             .enqueue_reserved_turn(lease, &queued_turn_from_input(id, input))

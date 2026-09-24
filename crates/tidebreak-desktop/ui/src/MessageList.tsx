@@ -69,12 +69,14 @@ import {
 import { useSourceNav } from "./panel/SourceNav";
 import { TurnFailureNotice } from "./TurnFailureNotice";
 import {
+  AnswerVersionNote,
   AnswerVersionPager,
   BranchButton,
   BranchNotice,
   EditButton,
   RegenerateControl,
   UserMessageEditor,
+  regenerateStartsNewChatCopy,
   type TurnActions,
 } from "./MessageActions";
 import type {
@@ -230,6 +232,34 @@ export function retryableTurn(
   return null;
 }
 
+/**
+ * The transcript a retry of `turnId` leaves while it runs: everything stays,
+ * because the retry continues the turn. Only the notice of a turn that left
+ * nothing else goes, since the answer arriving below says the same thing.
+ */
+export function withRetriedTurn(
+  messages: ChatMessage[],
+  turnId: string,
+): ChatMessage[] {
+  const opened = messages.findIndex(
+    (message) => message.role === "user" && message.turnId === turnId,
+  );
+  if (opened < 0) return messages;
+  const isNotice = (message: ChatMessage) =>
+    "turnId" in message &&
+    message.turnId === turnId &&
+    (message.role === "turn_failure" ||
+      (message.role === "system" && message.text === TURN_CANCELLED_NOTICE));
+  // Tool activity carries no turn id here, so what the turn left is read by
+  // position: anything after its message other than its notice.
+  const leftSomething = messages
+    .slice(opened + 1)
+    .some((message) => message.role !== "user" && !isNotice(message));
+  return leftSomething
+    ? messages
+    : messages.filter((message) => !isNotice(message));
+}
+
 type MessageListProps = {
   messages: ChatMessage[];
   /** Enables MCP App cards to fetch their call's result envelope. */
@@ -366,6 +396,12 @@ type TurnUi = {
   selectedVersions: Readonly<Record<string, number>>;
   selectVersion: (group: string, index: number) => void;
   latestSideEffects: LatestTurnSideEffects | null;
+  /**
+   * The turn the transcript offers Try again for: it failed or was stopped,
+   * and its notice's Try again continues it, so Regenerate is not offered
+   * beside it.
+   */
+  retryTurnId: string | null;
 };
 
 const NO_ANSWER_VERSIONS: AnswerVersions = {};
@@ -459,6 +495,10 @@ export function MessageList({
     Record<string, number>
   >({});
   const latest = useMemo(() => latestTurn(messages, busy), [messages, busy]);
+  const retryTurnId = useMemo(
+    () => retryableTurn(messages)?.turnId ?? null,
+    [messages],
+  );
   const versionGroups = useMemo(
     () => answerVersionGroups(answerVersions),
     [answerVersions],
@@ -496,6 +536,7 @@ export function MessageList({
       selectedVersions,
       selectVersion,
       latestSideEffects,
+      retryTurnId,
     }),
     [
       turnActions,
@@ -506,6 +547,7 @@ export function MessageList({
       selectedVersions,
       selectVersion,
       latestSideEffects,
+      retryTurnId,
     ],
   );
   const backgroundAgents = useMemo(
@@ -1003,6 +1045,9 @@ export function groupMessageItems(
       items.push(
         <div key={`versions-${pagerOwed}`} className="message-versions-row">
           <AnswerVersionPager {...pager} />
+          {pager.index < pager.count - 1 && (
+            <AnswerVersionNote latest={pager.count} />
+          )}
         </div>,
       );
     }
@@ -1892,6 +1937,7 @@ function MessageBubbleImpl({
             versions={footer?.versions}
             revealOnHover={footer?.revealOnHover}
           />
+          {footer?.note}
         </article>
       </MessageCitationsProvider>
     );
@@ -2068,24 +2114,39 @@ function MessageBubbleImpl({
 function answerFooter(
   turnUi: TurnUi,
   turnId: string,
-): { actions?: ReactNode; versions?: ReactNode; revealOnHover: boolean } {
+): {
+  actions?: ReactNode;
+  versions?: ReactNode;
+  note?: ReactNode;
+  revealOnHover: boolean;
+} {
   const group = turnUi.versionGroups.get(turnId) ?? turnId;
   const latest = group === turnUi.latestTurnId;
   const pager = turnUi.versionGroups.has(turnId)
     ? versionPager(turnUi, group)
     : null;
   const actions = turnUi.actions;
+  const sideEffects =
+    turnUi.latestSideEffects?.turnId === group
+      ? turnUi.latestSideEffects.effects
+      : [];
   return {
     revealOnHover: !latest,
     versions: pager ? <AnswerVersionPager {...pager} /> : undefined,
+    note:
+      pager && pager.index < pager.count - 1 ? (
+        <AnswerVersionNote latest={pager.count} />
+      ) : undefined,
     actions: actions ? (
       <>
-        {latest && (
+        {/* A turn that stopped short is continued from its notice. */}
+        {latest && group !== turnUi.retryTurnId && (
           <RegenerateControl
             onRegenerate={(model) => actions.onRegenerate(group, model)}
             retryModels={actions.retryModels}
             currentModelKey={actions.currentModelKey}
             disabled={actions.pending}
+            newChatNote={regenerateStartsNewChatCopy(sideEffects)}
           />
         )}
         <BranchButton

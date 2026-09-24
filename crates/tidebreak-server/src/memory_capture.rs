@@ -399,6 +399,12 @@ impl MemoryCapture {
         chat_id: SessionId,
         turn_id: TurnId,
     ) -> Result<Option<(String, MemoryEvidence)>> {
+        // A turn a regenerate or an edit took out of the conversation is not
+        // something the person stands by, so nothing in it is remembered.
+        let replacements = self.store.list_turn_replacements(chat_id).await?;
+        if tidebreak_core::turns_outside_conversation(&replacements).contains(&turn_id) {
+            return Ok(None);
+        }
         let messages = self.store.list_messages(chat_id).await?;
         let turn_messages: Vec<_> = messages
             .iter()

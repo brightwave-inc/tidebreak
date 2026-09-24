@@ -10,7 +10,8 @@ use crate::id::{AgentRunId, DocumentId, MessageId, SessionId, TurnId};
 use crate::image::ImageRef;
 use crate::model::{
     user_message_llm_content, AgentRunStatus, TurnAdmissionLease, TurnAdmissionRequest,
-    TurnReplacement, TurnReplacementKind, TurnReplacementRefusal, TurnRun, TurnRunStatus,
+    TurnPlacements, TurnReplacement, TurnReplacementKind, TurnReplacementRefusal, TurnRun,
+    TurnRunStatus,
 };
 use crate::provider::Usage;
 use crate::storage::{
@@ -493,6 +494,7 @@ async fn refuse_replacement_on<C>(
     conn: &C,
     chat_id: SessionId,
     replaces: TurnId,
+    kind: TurnReplacementKind,
 ) -> Result<Option<TurnReplacementRefusal>>
 where
     C: ConnectionTrait,
@@ -516,9 +518,64 @@ where
         .map_err(store_err)?;
     // A turn that was rerun is followed by the turn that reran it, so this
     // also refuses a second rerun of the same turn.
-    Ok(latest
-        .is_some_and(|latest| latest.id != target.id)
-        .then_some(TurnReplacementRefusal::NotLatest))
+    if latest.is_some_and(|latest| latest.id != target.id) {
+        return Ok(Some(TurnReplacementRefusal::NotLatest));
+    }
+    // A retry continues work that stopped short. A finished answer is
+    // regenerated or edited instead.
+    Ok(
+        (kind == TurnReplacementKind::Retry && target.status == TurnRunStatus::Completed.as_str())
+            .then_some(TurnReplacementRefusal::NotRetryable),
+    )
+}
+
+/// Drop the chat's checkpoint when its summary could hold anything the
+/// replaced attempt said.
+///
+/// A checkpoint summarizes the whole view it was written from. One whose view
+/// reached a turn of the attempt being replaced would carry that turn into
+/// every later request, which is the opposite of what a regenerate or an
+/// edit asks for. A checkpoint from before this was recorded falls back to
+/// its time: written after the attempt began, it may have seen it.
+async fn drop_checkpoint_of_replaced_attempt_on<C>(
+    conn: &C,
+    chat_id: SessionId,
+    replaces: TurnId,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let Some(checkpoint) = entities::context_checkpoint::Entity::find_by_id(chat_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(());
+    };
+    let placements = TurnPlacements::new(&list_turn_replacements_on(conn, chat_id).await?);
+    let attempt = placements.attempt_turns(replaces);
+    let saw_attempt = match checkpoint.through_turn_id {
+        Some(through) => attempt.contains(&TurnId(through)),
+        None => {
+            let began = entities::turn::Entity::find()
+                .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+                .filter(entities::turn::Column::Id.is_in(attempt.iter().map(|turn| turn.0)))
+                .all(conn)
+                .await
+                .map_err(store_err)?
+                .into_iter()
+                .map(|turn| turn.started_at)
+                .min();
+            began.is_some_and(|began| checkpoint.created_at >= began)
+        }
+    };
+    if saw_attempt {
+        entities::context_checkpoint::Entity::delete_by_id(chat_id.0)
+            .exec(conn)
+            .await
+            .map_err(store_err)?;
+    }
+    Ok(())
 }
 
 /// Every turn in this chat that reran another, oldest first.
@@ -655,10 +712,13 @@ async fn accept_turn_inner(
         )));
     }
 
-    if let Some((target, _)) = replaces {
-        if let Some(refusal) = refuse_replacement_on(&transaction, chat_id, target).await? {
+    if let Some((target, kind)) = replaces {
+        if let Some(refusal) = refuse_replacement_on(&transaction, chat_id, target, kind).await? {
             transaction.rollback().await.map_err(store_err)?;
             return Ok(ReservedTurnAcceptanceOutcome::ReplacementRefused(refusal));
+        }
+        if kind.removes_replaced() {
+            drop_checkpoint_of_replaced_attempt_on(&transaction, chat_id, target).await?;
         }
     }
 
@@ -710,8 +770,10 @@ async fn accept_turn_inner(
             }
             // The unique index on `replaces_turn_id` backs the check above
             // when two replacements race past it.
-            if let Some((target, _)) = replaces {
-                if let Some(refusal) = refuse_replacement_on(&store.conn, chat_id, target).await? {
+            if let Some((target, kind)) = replaces {
+                if let Some(refusal) =
+                    refuse_replacement_on(&store.conn, chat_id, target, kind).await?
+                {
                     return Ok(ReservedTurnAcceptanceOutcome::ReplacementRefused(refusal));
                 }
             }

@@ -152,8 +152,17 @@ pub enum Command {
         turn: TurnId,
         content: String,
     },
+    /// Continue a chat's latest turn after it failed or was stopped, with
+    /// what it already did in view. `turn` defaults to the latest turn.
+    ChatRetry {
+        chat: SessionId,
+        turn: Option<TurnId>,
+        wait: bool,
+    },
     /// Answer a chat's latest message again. `turn` defaults to the latest
-    /// turn; `model` answers with another model this once.
+    /// turn; `model` answers with another model this once. A regenerate that
+    /// replaces an answer that changed things outside the chat starts a new
+    /// chat instead.
     ChatRegenerate {
         chat: SessionId,
         turn: Option<TurnId>,
@@ -219,7 +228,7 @@ async fn finish_rerun(
     } else {
         if started.branched {
             eprintln!(
-                "tidebreak: the edit replaces an answer that changed things outside the chat \
+                "tidebreak: this replaces an answer that changed things outside the chat \
                  ({}), so it started chat {}",
                 side_effect_words(&started.side_effects),
                 started.chat_id
@@ -263,8 +272,8 @@ fn side_effect_words(effects: &[crate::api::wire::TurnSideEffect]) -> String {
         .iter()
         .map(|effect| match effect {
             TurnSideEffect::FilesWritten => "wrote files",
-            TurnSideEffect::OutputsCreated => "created outputs",
             TurnSideEffect::ConnectedAppsCalled => "called connected apps",
+            TurnSideEffect::CommandsRun => "ran commands",
             TurnSideEffect::OtherActions => "took other actions",
         })
         .collect::<Vec<_>>()
@@ -630,6 +639,14 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                 }));
             }
             println!("tidebreak: steered turn {turn}");
+        }
+        Command::ChatRetry { chat, turn, wait } => {
+            let turn = match turn {
+                Some(turn) => turn,
+                None => client.latest_turn(chat).await?,
+            };
+            let started = client.retry_turn(chat, turn, TurnId::new()).await?;
+            return finish_rerun(client, turn, &started, wait, format).await;
         }
         Command::ChatRegenerate {
             chat,

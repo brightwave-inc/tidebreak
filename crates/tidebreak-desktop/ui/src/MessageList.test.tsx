@@ -8,6 +8,7 @@ import {
   latestTurn,
   retryableTurn,
   withBranchNotice,
+  withRetriedTurn,
   withSelectedVersions,
   type ChatMessage,
 } from "./MessageList";
@@ -723,6 +724,40 @@ describe("retryableTurn", () => {
     expect(
       retryableTurn([{ id: "n1", role: "system", text: "Turn stopped." }]),
     ).toBeNull();
+  });
+});
+
+describe("withRetriedTurn", () => {
+  const question: ChatMessage = {
+    id: "u1",
+    role: "user",
+    text: "send the invoice",
+    turnId: "t1",
+  };
+  const failure: ChatMessage = {
+    id: "f1",
+    role: "turn_failure",
+    category: "transient",
+    turnId: "t1",
+  };
+
+  it("keeps a retried turn's work and its notice while the retry runs", () => {
+    const messages: ChatMessage[] = [
+      question,
+      {
+        id: "call",
+        role: "tool",
+        callId: "call-1",
+        name: "mcp__billing__send_invoice",
+        status: "completed",
+      },
+      failure,
+    ];
+    expect(withRetriedTurn(messages, "t1")).toBe(messages);
+  });
+
+  it("drops the notice of a turn that left nothing else", () => {
+    expect(withRetriedTurn([question, failure], "t1")).toEqual([question]);
   });
 });
 

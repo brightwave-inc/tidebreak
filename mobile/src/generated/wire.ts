@@ -783,10 +783,13 @@ created_at: string, };
 
 /**
  * One earlier answer to a message that was answered again.
+ *
+ * An answer is one attempt: a turn and the turns it retried. Everything the
+ * attempt said and did is here, under the attempt's latest turn.
  */
 export type ChatAnswerVersion = {
 /**
- * The turn that gave this answer.
+ * The latest turn of the attempt that gave this answer.
  */
 turn_id: TurnId,
 /**
@@ -804,7 +807,8 @@ messages: Array<ChatMessageSnapshot>,
  */
 tool_activity: Array<ChatToolActivitySnapshot>,
 /**
- * How the answer ended.
+ * How the answer ended, with the file changes and memory of every turn
+ * in the attempt.
  */
 terminal_turn: ChatTerminalTurnSnapshot, };
 
@@ -1103,11 +1107,11 @@ earlier_cursor: number | null,
 answer_versions: Array<ChatAnswerVersion>, };
 
 /**
- * Answer of the regenerate and edit routes.
+ * Answer of the retry, regenerate, and edit routes.
  */
 export type ChatTurnStarted = {
 /**
- * The conversation the new turn runs in. An edit that starts a new
+ * The conversation the new turn runs in. A rerun that starts a new
  * conversation answers with that conversation.
  */
 chat_id: SessionId,
@@ -1116,13 +1120,13 @@ chat_id: SessionId,
  */
 turn_id: TurnId,
 /**
- * Whether the edit started a new conversation instead of replacing the
+ * Whether the rerun started a new conversation instead of replacing the
  * turn in place.
  */
 branched: boolean,
 /**
- * What the replaced turn and its earlier answers did outside the
- * conversation, which is why an edit started a new conversation. Empty
+ * What the replaced turn and the answers before it did outside the
+ * conversation, which is why the rerun started a new conversation. Empty
  * otherwise.
  */
 side_effects: Array<TurnSideEffect>, };
@@ -5419,6 +5423,16 @@ label: string | null,
 error: string, };
 
 /**
+ * Body of `POST /chats/{id}/turns/{turn_id}/retry`.
+ */
+export type RetryTurnBody = {
+/**
+ * Client-generated identity of the new turn, for acceptance and
+ * ambiguous retries.
+ */
+new_turn_id: TurnId, };
+
+/**
  * Why a root appears in one conversation's exact ordered projection.
  */
 export type RootAttachmentOrigin = "project_default" | "conversation";
@@ -6455,11 +6469,11 @@ export type TurnRewriteState = "rewriting" | "rewritten" | "failed";
 /**
  * What a turn did outside the conversation.
  *
- * An edit that would replace a turn with any of these starts a new
- * conversation instead: the original keeps the record of what ran, and what
- * ran is not undone either way.
+ * A regenerate or an edit that would replace a turn with any of these starts
+ * a new conversation instead: the original keeps the record of what ran, and
+ * what ran is not undone either way.
  */
-export type TurnSideEffect = "files_written" | "outputs_created" | "connected_apps_called" | "other_actions";
+export type TurnSideEffect = "files_written" | "connected_apps_called" | "commands_run" | "other_actions";
 
 /**
  * One user→engine turn.

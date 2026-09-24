@@ -16,6 +16,11 @@
 //! `branched_from_session_id` and `branched_from_turn_id`, the conversation
 //! and the last turn the branch copied. Neither is a foreign key: deleting the
 //! original leaves the branch whole, with a link that no longer resolves.
+//!
+//! One nullable column on `context_checkpoint`, `through_turn_id`, names the
+//! latest turn the summarized view held. A summary can repeat anything in that
+//! view, so it is dropped when a rerun takes that turn out of the
+//! conversation, and a branch copies it only when that turn is copied too.
 use sea_orm_migration::prelude::*;
 
 pub(super) struct TurnVersionsAndBranches;
@@ -30,6 +35,7 @@ const TURN_REPLACES: &str = "replaces_turn_id";
 const TURN_REPLACEMENT: &str = "replacement";
 const SESSION_BRANCHED_FROM_SESSION: &str = "branched_from_session_id";
 const SESSION_BRANCHED_FROM_TURN: &str = "branched_from_turn_id";
+const CHECKPOINT_THROUGH_TURN: &str = "through_turn_id";
 const REPLACES_INDEX: &str = "idx_turn_replaces";
 
 #[async_trait::async_trait]
@@ -41,6 +47,7 @@ impl MigrationTrait for TurnVersionsAndBranches {
             ("turn", TURN_REPLACEMENT),
             ("session", SESSION_BRANCHED_FROM_SESSION),
             ("session", SESSION_BRANCHED_FROM_TURN),
+            ("context_checkpoint", CHECKPOINT_THROUGH_TURN),
         ] {
             if manager.has_column(table, column).await? {
                 continue;
@@ -89,6 +96,7 @@ impl MigrationTrait for TurnVersionsAndBranches {
             ("turn", TURN_REPLACEMENT),
             ("session", SESSION_BRANCHED_FROM_SESSION),
             ("session", SESSION_BRANCHED_FROM_TURN),
+            ("context_checkpoint", CHECKPOINT_THROUGH_TURN),
         ] {
             if !manager.has_column(table, column).await? {
                 continue;

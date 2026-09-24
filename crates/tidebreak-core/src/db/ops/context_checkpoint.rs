@@ -3,13 +3,20 @@
 //! Checkpoints are a bounded cache of meaning, not transcript messages. The
 //! chat write lock makes their source-boundary comparison serializable across
 //! workers, so a resumed older worker cannot replace a newer checkpoint.
+//!
+//! A checkpoint summarizes the whole view it was written from, so it is only
+//! good while the latest turn of that view is part of the conversation. A
+//! rerun that takes that turn out drops the checkpoint when it is accepted
+//! (`turn.rs`), and the same lock refuses a checkpoint whose view a rerun
+//! overtook while it was being written.
 
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, TransactionTrait,
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{MessageId, SessionId};
+use crate::id::{MessageId, SessionId, TurnId};
+use crate::model::TurnPlacements;
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
 
 use super::super::{entities, store_err, DbStore};
@@ -41,6 +48,17 @@ pub(in crate::db) async fn save_context_checkpoint(
             checkpoint.source_message_id, checkpoint.chat_id
         )));
     };
+    // A rerun accepted while this summary was being written took its view's
+    // latest turn out of the conversation. Storing it would bring back what
+    // that turn said.
+    if let Some(through) = checkpoint.through_turn_id {
+        let replacements =
+            super::turn::list_turn_replacements_on(&transaction, checkpoint.chat_id).await?;
+        if !TurnPlacements::new(&replacements).in_conversation(through) {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(SaveContextCheckpointOutcome::Superseded);
+        }
+    }
 
     if let Some(existing) =
         find_context_checkpoint_model_on(&transaction, checkpoint.chat_id).await?
@@ -80,6 +98,7 @@ pub(in crate::db) async fn save_context_checkpoint(
         cache_read_input_tokens: Set(i64::from(checkpoint.usage.cache_read_input_tokens)),
         cache_creation_input_tokens: Set(i64::from(checkpoint.usage.cache_creation_input_tokens)),
         created_at: Set(created_at),
+        through_turn_id: Set(checkpoint.through_turn_id.map(|turn| turn.0)),
     };
     if find_context_checkpoint_model_on(&transaction, checkpoint.chat_id)
         .await?
@@ -161,6 +180,7 @@ fn context_checkpoint_from_model(
             )?,
         },
         created_at: model.created_at,
+        through_turn_id: model.through_turn_id.map(TurnId),
     };
     checkpoint.validate()?;
     Ok(checkpoint)

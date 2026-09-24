@@ -862,6 +862,28 @@ export const RetryWithModel: Story = {
   },
 };
 
+/**
+ * The answer on screen ran commands, so Regenerate says before sending that
+ * the new answer starts a new chat, and this one stays as it is.
+ */
+export const RegenerateThatStartsNewChat: Story = {
+  args: {
+    messages: actionMessages,
+    turnActions: storyTurnActions,
+    latestSideEffects: {
+      turnId: "actions-turn-2",
+      effects: ["commands_run"],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    await userEvent.click(
+      await within(canvasElement).findByRole("button", {
+        name: "Regenerate",
+      }),
+    );
+  },
+};
+
 /** A branch's copied history ends at a rule that links back to its original. */
 export const BranchNotice: Story = {
   args: {
@@ -929,8 +951,36 @@ export const RetryAfterCancel: Story = {
 };
 
 /**
+ * The provider failed after the answer had already sent an invoice. The call
+ * stays in view, and Try again continues from it rather than starting over.
+ */
+export const RetryAfterAToolCall: Story = {
+  args: {
+    messages: [
+      ...actionMessages.slice(0, 3),
+      {
+        id: "invoice-call",
+        role: "tool",
+        callId: "call-invoice",
+        name: "mcp__billing__send_invoice",
+        status: "completed",
+      },
+      {
+        id: "overloaded-failure",
+        role: "turn_failure",
+        turnId: "actions-turn-2",
+        category: "transient",
+        detail: "overloaded_error: Overloaded",
+        model: { id: "claude-opus-5", provider: "anthropic" },
+      },
+    ],
+    turnActions: storyTurnActions,
+  },
+};
+
+/**
  * A rejected key points at provider settings, with Try again beside it for
- * after the fix. The retry answers the same turn; nothing stacks.
+ * after the fix. The retry continues the same turn; the question shows once.
  */
 export const RetryAfterProviderError: Story = {
   args: {

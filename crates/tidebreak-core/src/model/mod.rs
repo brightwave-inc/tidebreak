@@ -47,11 +47,11 @@ pub use runs::{
     SandboxToolCallStatus,
 };
 pub use turns::{
-    replaced_turn_ids, replaced_turns, AgentRunWaitCondition, AgentRunWaitSetCandidate,
-    AgentRunWaitSetCheckpointRequest, ClientToolCallRequest, QueuedAgentTurn, ReplacedTurn,
-    TurnAdmissionLease, TurnAdmissionRequest, TurnAgentRunWaitSet, TurnAgentRunWaitStatus,
-    TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
-    TurnFailureRetry, TurnReplacement, TurnReplacementKind, TurnReplacementRefusal, TurnRun,
+    turns_outside_conversation, AgentRunWaitCondition, AgentRunWaitSetCandidate,
+    AgentRunWaitSetCheckpointRequest, ClientToolCallRequest, QueuedAgentTurn, TurnAdmissionLease,
+    TurnAdmissionRequest, TurnAgentRunWaitSet, TurnAgentRunWaitStatus, TurnCheckpointProgress,
+    TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnPlacement,
+    TurnPlacements, TurnReplacement, TurnReplacementKind, TurnReplacementRefusal, TurnRun,
     TurnRunStatus, TurnSteer, TurnSteerStatus,
 };
 

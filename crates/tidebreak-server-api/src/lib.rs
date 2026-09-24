@@ -862,6 +862,10 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/chats/{id}/messages", post(routes::post_message))
         .route(
+            "/chats/{chat_id}/turns/{turn_id}/retry",
+            post(routes::post_retry_turn),
+        )
+        .route(
             "/chats/{chat_id}/turns/{turn_id}/regenerate",
             post(routes::post_regenerate_turn),
         )

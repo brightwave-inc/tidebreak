@@ -662,13 +662,14 @@ impl ScopedStore {
         self.store.list_turn_replacements(chat_id).await
     }
 
-    /// [`Store::list_exec_file_snapshots`]. The caller has already authorized
-    /// the chat.
-    pub async fn list_exec_file_snapshots(
+    /// [`Store::list_turn_tool_uses`]. The caller has already authorized the
+    /// chat.
+    pub async fn list_turn_tool_uses(
         &self,
         chat_id: SessionId,
-    ) -> Result<Vec<tidebreak_core::ExecFileSnapshot>> {
-        self.store.list_exec_file_snapshots(chat_id).await
+        turns: &[tidebreak_core::TurnId],
+    ) -> Result<Vec<tidebreak_core::TurnToolUse>> {
+        self.store.list_turn_tool_uses(chat_id, turns).await
     }
 
     /// Branch one of the principal's conversations into a new one they own.
@@ -677,6 +678,12 @@ impl ScopedStore {
         request: &tidebreak_core::BranchChat,
     ) -> Result<tidebreak_core::BranchChatOutcome> {
         self.store.branch_chat_scoped(&self.owner, request).await
+    }
+
+    /// Remove one of the principal's branches whose first message was
+    /// refused.
+    pub async fn discard_branch(&self, chat_id: SessionId) -> Result<DeleteChatOutcome> {
+        self.store.discard_branch_scoped(&self.owner, chat_id).await
     }
 }
 

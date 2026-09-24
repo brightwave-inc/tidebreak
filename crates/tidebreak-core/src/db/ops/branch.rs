@@ -8,10 +8,12 @@
 //! What is copied is what the model reads and what the transcript shows for
 //! each copied turn: the turn rows, their messages, their settled tool calls,
 //! the images and files the messages carried, and the citations under the
-//! answers. The conversation's documents come along under new ids, and every
-//! mention of an old id in the copied model context is rewritten to the new
-//! one. The conversation's image publications come along too, so a later turn
-//! in the branch can send those images again.
+//! answers. The documents added before the branch point come along under new
+//! ids, and every mention of an old id in the copied model context is
+//! rewritten to the new one. The conversation's image publications come along
+//! too, so a later turn in the branch can send those images again. The
+//! compaction checkpoint comes along only when the latest turn it summarized
+//! was copied: a summary written later can repeat what the branch left out.
 //!
 //! What stays with the original: the event journal (so a copied turn keeps its
 //! answer but not the streamed reasoning summary), outputs and their bytes,
@@ -21,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait,
@@ -30,8 +32,8 @@ use sea_orm::{
 use crate::error::{AgentError, Result};
 use crate::id::{CallId, DocumentId, MessageId, SessionId, TurnId};
 use crate::model::{
-    replaced_turns, validate_chat_root_projection, ChatRootAttachment, OwnerId, ReplacedTurn,
-    RootAttachmentOrigin, TurnRunStatus,
+    validate_chat_root_projection, ChatRootAttachment, OwnerId, RootAttachmentOrigin,
+    TurnPlacement, TurnPlacements, TurnReplacementKind, TurnRunStatus,
 };
 use crate::storage::{BranchChat, BranchChatOutcome, ChatBranchPoint, ChatBranchRefusal};
 
@@ -81,8 +83,8 @@ pub(in crate::db) async fn branch_chat(
         .await
         .map_err(store_err)?;
     let replacements = super::turn::list_turn_replacements_on(&transaction, source).await?;
-    let replaced = replaced_turns(&replacements);
-    let copied = match turns_to_copy(&turns, &replaced, request.point) {
+    let placements = TurnPlacements::new(&replacements);
+    let (copied, point) = match turns_to_copy(&turns, &placements, request.point) {
         Ok(copied) => copied,
         Err(refusal) => {
             transaction.rollback().await.map_err(store_err)?;
@@ -125,7 +127,15 @@ pub(in crate::db) async fn branch_chat(
         .map(|session| session.owner)
         .ok_or_else(|| AgentError::Store(format!("branch {branch} vanished after insert")))?;
 
-    let documents = copy_documents(&transaction, source, branch, &branch_owner).await?;
+    let documents = copy_documents(
+        &transaction,
+        source,
+        branch,
+        &branch_owner,
+        &point,
+        &request.carry_documents,
+    )
+    .await?;
     copy_image_publications(&transaction, source, branch).await?;
 
     let turn_ids: HashMap<uuid::Uuid, uuid::Uuid> = copied
@@ -175,7 +185,16 @@ pub(in crate::db) async fn branch_chat(
     )
     .await?;
     copy_citations(&transaction, &messages, &documents).await?;
-    copy_checkpoint(&transaction, source, branch, &messages, &documents).await?;
+    copy_checkpoint(
+        &transaction,
+        source,
+        branch,
+        &messages,
+        &documents,
+        &turn_ids,
+        &point,
+    )
+    .await?;
 
     transaction.commit().await.map_err(store_err)?;
     Ok(BranchChatOutcome::Branched {
@@ -187,16 +206,37 @@ pub(in crate::db) async fn branch_chat(
     })
 }
 
-/// The source turns a branch copies, oldest first.
+/// The moment a branch copies up to: what existed by then belongs to it.
+struct BranchCutoff {
+    at: DateTime<Utc>,
+    /// Whether something stamped exactly `at` is still before the point.
+    inclusive: bool,
+}
+
+impl BranchCutoff {
+    fn includes(&self, stamped: DateTime<Utc>) -> bool {
+        if self.inclusive {
+            stamped <= self.at
+        } else {
+            stamped < self.at
+        }
+    }
+}
+
+/// The source turns a branch copies, oldest first, and the moment it copies
+/// up to.
 ///
 /// Only the conversation as it stands is copied: a regenerated answer's
-/// earlier versions and an edited turn stay behind. Branching from an earlier
-/// version copies the history before it and that version.
+/// earlier versions and an edited turn stay behind. A retry and the turns it
+/// retried are one attempt; branching through a turn copies its attempt up to
+/// that turn, and branching before a turn leaves its whole attempt out.
+/// Branching from an earlier version copies the history before it and that
+/// version.
 fn turns_to_copy<'a>(
     turns: &'a [entities::turn::Model],
-    replaced: &HashMap<TurnId, ReplacedTurn>,
+    placements: &TurnPlacements,
     point: ChatBranchPoint,
-) -> std::result::Result<Vec<&'a entities::turn::Model>, ChatBranchRefusal> {
+) -> std::result::Result<(Vec<&'a entities::turn::Model>, BranchCutoff), ChatBranchRefusal> {
     let (target, inclusive) = match point {
         ChatBranchPoint::Through(turn) => (turn, true),
         ChatBranchPoint::Before(turn) => (turn, false),
@@ -208,18 +248,31 @@ fn turns_to_copy<'a>(
         if !SETTLED.contains(&target_row.status.as_str()) {
             return Err(ChatBranchRefusal::Unsettled);
         }
-        if matches!(replaced.get(&target), Some(ReplacedTurn::Discarded)) {
+        if placements.placement(target) == TurnPlacement::Discarded {
             return Err(ChatBranchRefusal::NotInConversation);
         }
     }
-    let mut copied: Vec<&entities::turn::Model> = turns
-        .iter()
-        .filter(|turn| turn.ordinal < target_row.ordinal)
-        .filter(|turn| !replaced.contains_key(&TurnId(turn.id)))
+    let attempt: HashSet<uuid::Uuid> = placements
+        .attempt_turns(placements.attempt(target))
+        .into_iter()
+        .map(|turn| turn.0)
         .collect();
-    if inclusive {
-        copied.push(target_row);
-    }
+    let attempt_start = turns
+        .iter()
+        .filter(|turn| attempt.contains(&turn.id))
+        .map(|turn| turn.ordinal)
+        .min()
+        .unwrap_or(target_row.ordinal);
+    let copied: Vec<&entities::turn::Model> = turns
+        .iter()
+        .filter(|turn| {
+            if turn.ordinal < attempt_start {
+                placements.in_conversation(TurnId(turn.id))
+            } else {
+                inclusive && attempt.contains(&turn.id) && turn.ordinal <= target_row.ordinal
+            }
+        })
+        .collect();
     // Everything before a settled turn has settled too; a row that has not
     // is one this copy would have to fence, so refuse rather than copy it.
     if copied
@@ -228,25 +281,49 @@ fn turns_to_copy<'a>(
     {
         return Err(ChatBranchRefusal::Unsettled);
     }
-    Ok(copied)
+    let cutoff = if inclusive {
+        BranchCutoff {
+            at: target_row.ended_at.unwrap_or(target_row.started_at),
+            inclusive: true,
+        }
+    } else {
+        let started = turns
+            .iter()
+            .find(|turn| turn.ordinal == attempt_start)
+            .unwrap_or(target_row);
+        BranchCutoff {
+            at: started.started_at,
+            inclusive: false,
+        }
+    };
+    Ok((copied, cutoff))
 }
 
-/// Copy the conversation's documents under new ids, keeping the derived ids
+/// Copy the documents added before the branch point, and the ones the
+/// branch's first message carries, under new ids, keeping the derived ids
 /// derived so a later re-import in the branch finds its copy.
+///
+/// A document added after the point would be offered to the model in the
+/// branch, which never saw the turn that added it.
 async fn copy_documents<C>(
     conn: &C,
     source: SessionId,
     branch: SessionId,
     owner: &str,
+    point: &BranchCutoff,
+    carry: &[DocumentId],
 ) -> Result<HashMap<uuid::Uuid, uuid::Uuid>>
 where
     C: ConnectionTrait,
 {
-    let rows = entities::document::Entity::find()
+    let rows: Vec<entities::document::Model> = entities::document::Entity::find()
         .filter(entities::document::Column::ChatId.eq(source.0))
         .all(conn)
         .await
-        .map_err(store_err)?;
+        .map_err(store_err)?
+        .into_iter()
+        .filter(|row| point.includes(row.created_at) || carry.contains(&DocumentId(row.id)))
+        .collect();
     let now = Utc::now();
     let mut ids = HashMap::with_capacity(rows.len());
     for row in rows {
@@ -393,8 +470,14 @@ where
     // A copy was never submitted under its new id, so it has no request to
     // compare a retry against.
     copy.fingerprint = Set(None);
-    copy.replaces_turn_id = Set(None);
-    copy.replacement = Set(None);
+    // A retry copied with the turn it retried is still one attempt in the
+    // branch. Every other rerun's replaced turn stayed behind.
+    let retried = turn
+        .replaces_turn_id
+        .filter(|_| turn.replacement.as_deref() == Some(TurnReplacementKind::Retry.as_str()))
+        .and_then(|replaced| turn_ids.get(&replaced).copied());
+    copy.replaces_turn_id = Set(retried);
+    copy.replacement = Set(retried.map(|_| TurnReplacementKind::Retry.as_str().to_owned()));
     copy.updated_at = Set(Some(Utc::now()));
     copy.insert(conn).await.map_err(store_err)?;
     Ok(())
@@ -555,12 +638,19 @@ where
 }
 
 /// Copy the compaction checkpoint when everything it summarizes was copied.
+///
+/// The summary covers the whole view it was written from, not only the
+/// messages before its boundary, so the latest turn of that view has to be
+/// copied too. A checkpoint from before that turn was recorded is copied only
+/// when it was written before the branch point.
 async fn copy_checkpoint<C>(
     conn: &C,
     source: SessionId,
     branch: SessionId,
     messages: &HashMap<uuid::Uuid, uuid::Uuid>,
     documents: &HashMap<uuid::Uuid, uuid::Uuid>,
+    turn_ids: &HashMap<uuid::Uuid, uuid::Uuid>,
+    point: &BranchCutoff,
 ) -> Result<()>
 where
     C: ConnectionTrait,
@@ -571,6 +661,14 @@ where
         .map_err(store_err)?
     else {
         return Ok(());
+    };
+    let through = match row.through_turn_id {
+        Some(through) => match turn_ids.get(&through) {
+            Some(copied) => Some(*copied),
+            None => return Ok(()),
+        },
+        None if point.includes(row.created_at) => None,
+        None => return Ok(()),
     };
     let Some(source_message) = messages.get(&row.source_message_id).copied() else {
         return Ok(());
@@ -589,6 +687,7 @@ where
     copy.source_message_id = Set(source_message);
     copy.source_message_seq = Set(seq);
     copy.content = Set(content);
+    copy.through_turn_id = Set(through);
     copy.insert(conn).await.map_err(store_err)?;
     Ok(())
 }

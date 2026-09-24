@@ -337,10 +337,10 @@ pub use memory_tool::{
     MEMORY_TOOL_SEARCH_LIMIT,
 };
 pub use model::{
-    exec_attachment_file_name, replaced_turn_ids, replaced_turns, AgentRun,
-    AgentRunCancellationReason, AgentRunCancellationSignal, AgentRunCheckInReason,
-    AgentRunExecutionLocation, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunProgressEntry,
-    AgentRunResult, AgentRunResultPayload, AgentRunStatus, AgentRunSubmittedOutput, AgentRunTier,
+    exec_attachment_file_name, turns_outside_conversation, AgentRun, AgentRunCancellationReason,
+    AgentRunCancellationSignal, AgentRunCheckInReason, AgentRunExecutionLocation,
+    AgentRunInboxEntry, AgentRunInboxStatus, AgentRunProgressEntry, AgentRunResult,
+    AgentRunResultPayload, AgentRunStatus, AgentRunSubmittedOutput, AgentRunTier,
     AgentRunWaitCondition, AgentRunWaitSetCandidate, AgentRunWaitSetCheckpointRequest,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ChatBranchOrigin,
     ChatListing, ChatRootAttachment, ClientToolCallRequest, DelegatedFileReadClaim, DocumentBlob,
@@ -348,7 +348,7 @@ pub use model::{
     DocumentSummaryRecord, DocumentUpsert, ExecFileChange, ExecFileRejection,
     ExecFileRejectionReason, ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord,
     ExecUndoState, Message, MessageAttachment, MessageDocumentAttachment, NetworkPolicy, OwnerId,
-    Project, QueuedAgentTurn, ReasoningEffort, ReplacedTurn, Role, RootAttachmentChange,
+    Project, QueuedAgentTurn, ReasoningEffort, Role, RootAttachmentChange,
     RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangePhase,
     RootAttachmentChangeTerminal, RootAttachmentOrigin, RootAttachmentSubjectKind,
     SandboxAgentAdmission, SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest, SandboxToolCall,
@@ -356,10 +356,10 @@ pub use model::{
     SandboxToolCallStatus, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
     TurnAdmissionLease, TurnAdmissionRequest, TurnAgentRunWaitSet, TurnAgentRunWaitStatus,
     TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
-    TurnFailureRetry, TurnReplacement, TurnReplacementKind, TurnReplacementRefusal, TurnRun,
-    TurnRunStatus, TurnSteer, TurnSteerStatus, EXEC_SNAPSHOT_RETAINED_TURNS,
-    MAX_ATTACHMENT_REVISION, MAX_EXEC_SNAPSHOT_BYTES, MAX_EXEC_WORKSPACE_FILE_BYTES,
-    MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
+    TurnFailureRetry, TurnPlacement, TurnPlacements, TurnReplacement, TurnReplacementKind,
+    TurnReplacementRefusal, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
+    EXEC_SNAPSHOT_RETAINED_TURNS, MAX_ATTACHMENT_REVISION, MAX_EXEC_SNAPSHOT_BYTES,
+    MAX_EXEC_WORKSPACE_FILE_BYTES, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
 };
 #[cfg(feature = "blob-object")]
 pub use object_blob::ObjectBlobStore;
@@ -423,7 +423,7 @@ pub use storage::{
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome,
     SandboxAdmissionMode, SandboxProvision, SandboxProvisionState, SecretProvider,
     SettleChildSessionWaitOutcome, Store, SubmitAgentRunResultOutcome, TranscriptPage,
-    TurnEventAppend, TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    TurnEventAppend, TurnLeaseFence, TurnToolUse, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use task_plan::{
     open_task_plan_steps, parse_update_task_plan_arguments, sandbox_update_task_plan_tool_spec,

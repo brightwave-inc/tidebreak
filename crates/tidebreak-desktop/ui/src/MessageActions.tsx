@@ -79,6 +79,18 @@ export function MessageActionButton({
   );
 }
 
+/**
+ * Said under an earlier answer while it is on screen: the conversation goes
+ * on from the latest answer, not the one shown.
+ */
+export function AnswerVersionNote({ latest }: { latest: number }) {
+  return (
+    <p className="message-versions-note">
+      The conversation continues from answer {latest}.
+    </p>
+  );
+}
+
 /** "2 of 3", with a step to each side, for an answer given more than once. */
 export function AnswerVersionPager({
   index,
@@ -116,79 +128,121 @@ export function AnswerVersionPager({
 /**
  * Regenerate, with "Retry with model" beside it when there is a model to
  * pick. The answer on screen becomes an earlier version either way.
+ *
+ * When answering again would start a new chat, because the answer on screen
+ * acted outside this one, Regenerate opens a menu that says so before
+ * anything is sent, the way the editor does for an edit.
  */
 export function RegenerateControl({
   onRegenerate,
   retryModels,
   currentModelKey,
   disabled,
+  newChatNote = null,
 }: {
   onRegenerate: (model?: string) => void;
   retryModels: readonly RetryModelGroup[];
   currentModelKey: string | null;
   disabled: boolean;
+  /** Why answering again starts a new chat, or `null` when it does not. */
+  newChatNote?: string | null;
 }) {
+  const [open, setOpen] = useState(false);
+  const confirms = newChatNote !== null;
+  const regenerate = (
+    <MessageActionButton
+      label="Regenerate"
+      disabled={disabled}
+      onClick={() => (confirms ? setOpen(true) : onRegenerate())}
+    >
+      <RefreshCw aria-hidden="true" />
+    </MessageActionButton>
+  );
+  if (!confirms && retryModels.length === 0) {
+    return <span className="message-action-pair">{regenerate}</span>;
+  }
   return (
     <span className="message-action-pair">
-      <MessageActionButton
-        label="Regenerate"
-        disabled={disabled}
-        onClick={() => onRegenerate()}
-      >
-        <RefreshCw aria-hidden="true" />
-      </MessageActionButton>
-      {retryModels.length > 0 && (
-        <DropdownMenu>
-          <WithTooltip label="Retry with model…">
+      <DropdownMenu open={open} onOpenChange={setOpen}>
+        {retryModels.length > 0 ? (
+          <>
+            {regenerate}
+            <WithTooltip label="Retry with model…">
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  // Narrow and joined to Regenerate, so the pair reads as one
+                  // control with a choice attached.
+                  className="message-action h-6 w-4 [&_svg]:size-3"
+                  aria-label="Retry with model…"
+                  disabled={disabled}
+                >
+                  <ChevronDown aria-hidden="true" />
+                </Button>
+              </DropdownMenuTrigger>
+            </WithTooltip>
+          </>
+        ) : (
+          <WithTooltip label="Regenerate">
             <DropdownMenuTrigger asChild>
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-xs"
-                // Narrow and joined to Regenerate, so the pair reads as one
-                // control with a choice attached.
-                className="message-action h-6 w-4 [&_svg]:size-3"
-                aria-label="Retry with model…"
+                className="message-action"
+                aria-label="Regenerate"
                 disabled={disabled}
               >
-                <ChevronDown aria-hidden="true" />
+                <RefreshCw aria-hidden="true" />
               </Button>
             </DropdownMenuTrigger>
           </WithTooltip>
-          <DropdownMenuContent
-            align="start"
-            className="message-retry-models max-h-80 overflow-y-auto"
-          >
+        )}
+        <DropdownMenuContent
+          align="start"
+          className="message-retry-models max-h-80 overflow-y-auto"
+        >
+          {confirms && (
+            <>
+              <p className="message-rerun-note">{newChatNote}</p>
+              <DropdownMenuItem onSelect={() => onRegenerate()}>
+                <RefreshCw aria-hidden="true" />
+                Regenerate in new chat
+              </DropdownMenuItem>
+            </>
+          )}
+          {retryModels.length > 0 && confirms && <DropdownMenuSeparator />}
+          {retryModels.length > 0 && (
             <p className="px-2 pt-1 pb-1 text-xs font-medium text-muted-foreground">
               Retry with model
             </p>
-            {retryModels.map((group, groupIndex) => (
-              <DropdownMenuGroup key={group.label} aria-label={group.label}>
-                {groupIndex > 0 && <DropdownMenuSeparator />}
-                <p className="px-2 pt-1.5 pb-0.5 text-xs text-muted-foreground">
-                  {group.label}
-                </p>
-                {group.models.map((model) => (
-                  <DropdownMenuItem
-                    key={model.key}
-                    onSelect={() => onRegenerate(model.key)}
-                  >
-                    <span className="min-w-0 flex-1 truncate">
-                      {model.label}
-                    </span>
-                    {model.key === currentModelKey && (
-                      <Check
-                        aria-label="The chat's model"
-                        className="text-muted-foreground"
-                      />
-                    )}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuGroup>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
+          )}
+          {retryModels.map((group, groupIndex) => (
+            <DropdownMenuGroup key={group.label} aria-label={group.label}>
+              {groupIndex > 0 && <DropdownMenuSeparator />}
+              <p className="px-2 pt-1.5 pb-0.5 text-xs text-muted-foreground">
+                {group.label}
+              </p>
+              {group.models.map((model) => (
+                <DropdownMenuItem
+                  key={model.key}
+                  onSelect={() => onRegenerate(model.key)}
+                >
+                  <span className="min-w-0 flex-1 truncate">{model.label}</span>
+                  {model.key === currentModelKey && (
+                    <Check
+                      aria-label="The chat's model"
+                      className="text-muted-foreground"
+                    />
+                  )}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuGroup>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
     </span>
   );
 }
@@ -225,6 +279,22 @@ export function EditButton({
   );
 }
 
+/** What an answer did outside the chat, as one phrase: "wrote files and ran commands". */
+function sideEffectsPhrase(effects: readonly TurnSideEffect[]): string {
+  const done = effects.map(
+    (effect) =>
+      ({
+        files_written: "wrote files",
+        connected_apps_called: "used connected apps",
+        commands_run: "ran commands",
+        other_actions: "took other actions",
+      })[effect],
+  );
+  return done.length === 1
+    ? done[0]
+    : `${done.slice(0, -1).join(", ")} and ${done[done.length - 1]}`;
+}
+
 /**
  * The sentence an edit shows when it will start a new chat, or `null` when it
  * replaces the message in place.
@@ -233,20 +303,18 @@ export function editStartsNewChatCopy(
   effects: readonly TurnSideEffect[],
 ): string | null {
   if (effects.length === 0) return null;
-  const done = effects.map(
-    (effect) =>
-      ({
-        files_written: "wrote files",
-        outputs_created: "created outputs",
-        connected_apps_called: "used connected apps",
-        other_actions: "started other work",
-      })[effect],
-  );
-  const listed =
-    done.length === 1
-      ? done[0]
-      : `${done.slice(0, -1).join(", ")} and ${done[done.length - 1]}`;
-  return `Your edit replaces an answer that ${listed}, so it starts a new chat. This chat stays as it is.`;
+  return `Your edit replaces an answer that ${sideEffectsPhrase(effects)}, so it starts a new chat. This chat stays as it is.`;
+}
+
+/**
+ * The sentence Regenerate shows when answering again will start a new chat,
+ * or `null` when it answers in place.
+ */
+export function regenerateStartsNewChatCopy(
+  effects: readonly TurnSideEffect[],
+): string | null {
+  if (effects.length === 0) return null;
+  return `This answer ${sideEffectsPhrase(effects)}, so answering again starts a new chat. This chat stays as it is.`;
 }
 
 /**

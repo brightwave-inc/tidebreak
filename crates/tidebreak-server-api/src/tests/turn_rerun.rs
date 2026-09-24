@@ -12,6 +12,63 @@ struct NumberedProvider {
     requests: Arc<Mutex<Vec<SeenRequest>>>,
     /// Fail the first request with an error the worker does not retry.
     fail_first: bool,
+    /// Call [`INVOICE_TOOL`] first, then fail the next request.
+    invoice_then_fail: bool,
+}
+
+/// A tool that acts outside the conversation, the way a connected app does.
+const INVOICE_TOOL: &str = "mcp__billing__send_invoice";
+
+/// Counts every invoice it is asked to send.
+struct InvoiceTool {
+    sent: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for InvoiceTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: INVOICE_TOOL.into(),
+            description: "Send the invoice.".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::ReadOnly
+    }
+
+    async fn execute(
+        &self,
+        _ctx: &ToolCtx,
+        _args: serde_json::Value,
+    ) -> tidebreak_core::Result<ToolOutput> {
+        self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(ToolOutput::text("invoice INV-7 sent"))
+    }
+}
+
+/// The test app with [`InvoiceTool`] registered.
+async fn app_with_invoice_tool(
+    provider: NumberedProvider,
+    sent: Arc<std::sync::atomic::AtomicUsize>,
+) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
+    let (dir, store) = temp_db_store("t.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(provider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new().with(Box::new(InvoiceTool { sent }))),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    (app(state), token, store, dir)
 }
 
 impl NumberedProvider {
@@ -35,7 +92,11 @@ impl ModelProvider for NumberedProvider {
                     .content
                     .iter()
                     .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        ContentBlock::ToolUse { name, .. } => Some(format!("tool_use:{name}")),
+                        ContentBlock::ToolResult { content, .. } => {
+                            Some(format!("tool_result:{content}"))
+                        }
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -50,6 +111,28 @@ impl ModelProvider for NumberedProvider {
         };
         if self.fail_first && number == 1 {
             return Err(AgentError::MissingCredential("no key yet".into()));
+        }
+        // Send the invoice, then fail the way a provider outage does, with
+        // the call already made.
+        if self.invoice_then_fail && number == 1 {
+            return Ok(stream::iter(vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "send-1".into(),
+                    name: INVOICE_TOOL.into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: "{}".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ])
+            .boxed());
+        }
+        if self.invoice_then_fail && number == 2 {
+            return Err(AgentError::MissingCredential("provider unavailable".into()));
         }
         Ok(stream::iter(vec![
             ProviderEvent::TextDelta {
@@ -241,7 +324,7 @@ async fn regenerating_keeps_the_earlier_answer_as_a_version_and_one_question() {
 }
 
 #[tokio::test]
-async fn a_retry_after_a_failure_replaces_the_failure_without_a_version() {
+async fn a_retry_after_a_failure_that_did_nothing_shows_one_question_and_the_answer() {
     let provider = NumberedProvider {
         fail_first: true,
         ..NumberedProvider::default()
@@ -261,27 +344,135 @@ async fn a_retry_after_a_failure_replaces_the_failure_without_a_version() {
     let response = post_json(
         &router,
         &bearer,
-        &format!("/chats/{}/turns/{}/regenerate", chat.id, failed.id),
+        &format!("/chats/{}/turns/{}/retry", chat.id, failed.id),
         serde_json::json!({ "new_turn_id": retry }),
     )
     .await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     wait_for_turns(&store, chat.id, 2).await;
 
+    // The model reads the request again, with a note on why it repeats.
+    let rerun = provider.request(1);
+    assert_eq!(mentions(&rerun, Role::User, "try this"), 2);
+    assert_eq!(mentions(&rerun, Role::User, "sent this again"), 1);
+
+    // The reader sees one question, and the answer under it. A failure that
+    // left nothing behind is not worth a notice once the retry answered.
     let transcript = transcript(&router, &bearer, chat.id).await;
-    let shown = shown(&transcript);
     assert_eq!(
-        shown.iter().filter(|(role, _, _)| role == "user").count(),
-        1,
-        "a retry never stacks a second copy of the question"
+        shown(&transcript),
+        [
+            ("user".to_owned(), "try this".to_owned(), retry.to_string()),
+            (
+                "assistant".to_owned(),
+                "answer 2".to_owned(),
+                retry.to_string()
+            ),
+        ]
     );
-    assert_eq!(shown.last().unwrap().1, "answer 2");
     assert!(transcript["answer_versions"].as_array().unwrap().is_empty());
     assert!(transcript["terminal_turns"]
         .as_array()
         .unwrap()
         .iter()
         .all(|turn| turn["status"] == "completed"));
+}
+
+#[tokio::test]
+async fn a_retry_after_a_tool_call_and_a_provider_error_keeps_the_call_in_view() {
+    let provider = NumberedProvider {
+        invoice_then_fail: true,
+        ..NumberedProvider::default()
+    };
+    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (router, token, store, _dir) = app_with_invoice_tool(provider.clone(), sent.clone()).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "send the invoice and summarize").await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turns(&store, chat.id, 1).await;
+    let failed = store.list_turns(chat.id).await.unwrap().pop().unwrap();
+    assert_eq!(failed.status, TurnRunStatus::Failed);
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let before = transcript(&router, &bearer, chat.id).await;
+    assert_eq!(before["tool_activity"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        before["terminal_turns"][0]["side_effects"],
+        serde_json::json!(["connected_apps_called"])
+    );
+
+    let retry = TurnId::new();
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/turns/{}/retry", chat.id, failed.id),
+        serde_json::json!({ "new_turn_id": retry }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let started: serde_json::Value = json_body(response).await;
+    assert_eq!(started["branched"], false);
+    wait_for_turns(&store, chat.id, 2).await;
+
+    // The retry continues from the call the failed turn made and its result.
+    let rerun = provider.request(2);
+    assert_eq!(
+        mentions(&rerun, Role::Assistant, &format!("tool_use:{INVOICE_TOOL}")),
+        1
+    );
+    assert_eq!(mentions(&rerun, Role::User, "invoice INV-7 sent"), 1);
+    assert_eq!(mentions(&rerun, Role::User, "sent this again"), 1);
+
+    // The reader still sees the call, the failure it ended in, and one
+    // question; the invoice went out once.
+    let after = transcript(&router, &bearer, chat.id).await;
+    assert_eq!(after["tool_activity"].as_array().unwrap().len(), 1);
+    assert_eq!(after["tool_activity"][0]["turn_id"], failed.id.to_string());
+    let shown = shown(&after);
+    assert_eq!(
+        shown.iter().filter(|(role, _, _)| role == "user").count(),
+        1
+    );
+    assert_eq!(
+        shown[0].2,
+        retry.to_string(),
+        "the question acts on the retry"
+    );
+    assert_eq!(shown.last().unwrap().1, "answer 3");
+    let statuses: Vec<&str> = after["terminal_turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| turn["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(statuses, ["failed", "completed"]);
+    assert_eq!(
+        after["terminal_turns"][1]["side_effects"],
+        serde_json::json!(["connected_apps_called"]),
+        "an edit of the retry would replace the call too"
+    );
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Regenerating the answer would take the call out of the conversation,
+    // so it answers in a new chat instead.
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/turns/{retry}/regenerate", chat.id),
+        serde_json::json!({ "new_turn_id": TurnId::new() }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let started: serde_json::Value = json_body(response).await;
+    assert_eq!(started["branched"], true);
+    assert_eq!(
+        started["side_effects"],
+        serde_json::json!(["connected_apps_called"])
+    );
+    assert_ne!(started["chat_id"], chat.id.to_string());
 }
 
 #[tokio::test]
@@ -298,8 +489,23 @@ async fn only_the_latest_settled_turn_can_be_rerun() {
     }
     let turns = store.list_turns(chat.id).await.unwrap();
     let earlier = turns[0].id;
+    let latest = turns[1].id;
+
+    // A retry continues a turn that stopped short; a finished one is
+    // regenerated instead.
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/turns/{latest}/retry", chat.id),
+        serde_json::json!({ "new_turn_id": TurnId::new() }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = json_body(response).await;
+    assert_eq!(body["kind"], "turn_not_retryable");
 
     for (action, body) in [
+        ("retry", serde_json::json!({ "new_turn_id": TurnId::new() })),
         (
             "regenerate",
             serde_json::json!({ "new_turn_id": TurnId::new() }),
@@ -510,7 +716,7 @@ async fn an_edit_of_a_turn_that_wrote_files_starts_a_new_chat_and_says_why() {
 }
 
 #[tokio::test]
-async fn an_edit_starts_a_new_chat_when_an_earlier_answer_acted() {
+async fn a_regenerate_of_an_answer_that_acted_answers_in_a_new_chat() {
     let provider = NumberedProvider::default();
     let (router, token, store, _dir) = test_app_with(Arc::new(provider.clone())).await;
     let bearer = format!("Bearer {token}");
@@ -523,31 +729,14 @@ async fn an_edit_starts_a_new_chat_when_an_earlier_answer_acted() {
     let wrote = latest_turn(&store, chat.id).await;
     record_call(&store, chat.id, wrote, "write_file").await;
 
-    // The answer that replaces it only talks.
+    // Answering again in place would take the write out of the
+    // conversation, so the regenerate answers in a new chat and says why.
     let regenerated = TurnId::new();
     let response = post_json(
         &router,
         &bearer,
         &format!("/chats/{}/turns/{wrote}/regenerate", chat.id),
         serde_json::json!({ "new_turn_id": regenerated }),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    wait_for_turns(&store, chat.id, 2).await;
-
-    // An edit takes the earlier answer out of the conversation too, so the
-    // transcript warns before sending and the edit starts a new chat.
-    let before = transcript(&router, &bearer, chat.id).await;
-    assert_eq!(
-        before["terminal_turns"][0]["side_effects"],
-        serde_json::json!(["files_written"])
-    );
-    let edited = TurnId::new();
-    let response = post_json(
-        &router,
-        &bearer,
-        &format!("/chats/{}/turns/{regenerated}/edit", chat.id),
-        serde_json::json!({ "new_turn_id": edited, "content": "write a shorter report" }),
     )
     .await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -560,10 +749,27 @@ async fn an_edit_starts_a_new_chat_when_an_earlier_answer_acted() {
     let branch: SessionId = serde_json::from_value(started["chat_id"].clone()).unwrap();
     assert_ne!(branch, chat.id);
     wait_for_turns(&store, branch, 1).await;
+    let branched = transcript(&router, &bearer, branch).await;
+    assert_eq!(
+        shown(&branched),
+        [
+            (
+                "user".to_owned(),
+                "write the report".to_owned(),
+                regenerated.to_string()
+            ),
+            (
+                "assistant".to_owned(),
+                "answer 2".to_owned(),
+                regenerated.to_string()
+            ),
+        ]
+    );
 
-    // The original still pages back to the answer that wrote the file.
+    // The original keeps the answer that wrote the file, as it was.
     let original = transcript(&router, &bearer, chat.id).await;
-    assert_eq!(original["answer_versions"][0]["turn_id"], wrote.to_string());
+    assert!(original["answer_versions"].as_array().unwrap().is_empty());
+    assert_eq!(shown(&original)[1].1, "answer 1");
 }
 
 #[tokio::test]
@@ -803,4 +1009,238 @@ async fn a_rerun_and_a_branch_carry_the_message_files() {
     let request = provider.request(2);
     assert_eq!(mentions(&request, Role::User, &copy), 1);
     assert_eq!(mentions(&request, Role::User, &document.to_string()), 0);
+}
+
+/// A checkpoint as a compaction during `through` would have written it: a
+/// summary of everything in view, from a boundary at `source`.
+fn checkpoint_through(
+    chat: SessionId,
+    source: MessageId,
+    through: TurnId,
+    content: &str,
+) -> tidebreak_core::ContextCheckpoint {
+    tidebreak_core::ContextCheckpoint {
+        chat_id: chat,
+        source_message_id: source,
+        format_version: tidebreak_core::CONTEXT_CHECKPOINT_FORMAT_V1,
+        content: content.into(),
+        usage: Usage::default(),
+        created_at: chrono::Utc::now(),
+        through_turn_id: Some(through),
+    }
+}
+
+#[tokio::test]
+async fn an_edit_drops_a_checkpoint_that_summarized_the_edited_turn() {
+    let provider = NumberedProvider::default();
+    let (router, token, store, _dir) = test_app_with(Arc::new(provider.clone())).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    for (index, question) in ["set the scene", "my door code is 4471"]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, question).await,
+            StatusCode::ACCEPTED
+        );
+        wait_for_turns(&store, chat.id, index + 1).await;
+    }
+    let pasted = latest_turn(&store, chat.id).await;
+    // A compaction during the second turn summarized everything in view, the
+    // pasted code included, from a boundary in the first turn.
+    let first_message = store.list_messages(chat.id).await.unwrap()[0].id;
+    let checkpoint = checkpoint_through(
+        chat.id,
+        first_message,
+        pasted,
+        "The user shared door code 4471.",
+    );
+    assert!(matches!(
+        store.save_context_checkpoint(&checkpoint).await.unwrap(),
+        tidebreak_core::SaveContextCheckpointOutcome::Saved(_)
+    ));
+
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/turns/{pasted}/edit", chat.id),
+        serde_json::json!({ "new_turn_id": TurnId::new(), "content": "never mind the code" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    wait_for_turns(&store, chat.id, 3).await;
+
+    let rerun = provider.request(2);
+    assert!(
+        rerun.iter().all(|(_, text)| !text.contains("4471")),
+        "the edited message came back through the checkpoint: {rerun:?}"
+    );
+    assert!(store
+        .get_context_checkpoint(chat.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    // A compaction that began before the edit cannot bring it back.
+    assert_eq!(
+        store.save_context_checkpoint(&checkpoint).await.unwrap(),
+        tidebreak_core::SaveContextCheckpointOutcome::Superseded
+    );
+}
+
+#[tokio::test]
+async fn a_branch_leaves_behind_what_came_after_its_point() {
+    let provider = NumberedProvider::default();
+    let (router, token, store, _dir) = test_app_with(Arc::new(provider.clone())).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let upload = |title: &'static str| {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        async move {
+            let response = post_raw(
+                &router,
+                &bearer,
+                &format!("/chats/{}/documents/raw?title={title}", chat.id),
+                Some("text/plain"),
+                b"notes".to_vec(),
+            )
+            .await;
+            assert!(response.status().is_success(), "{}", response.status());
+        }
+    };
+    upload("early.txt").await;
+    for (index, question) in ["first", "second"].into_iter().enumerate() {
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, question).await,
+            StatusCode::ACCEPTED
+        );
+        wait_for_turns(&store, chat.id, index + 1).await;
+    }
+    let through = latest_turn(&store, chat.id).await;
+    upload("late.txt").await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "the budget is 90").await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turns(&store, chat.id, 3).await;
+    let third = latest_turn(&store, chat.id).await;
+    let first_message = store.list_messages(chat.id).await.unwrap()[0].id;
+    store
+        .save_context_checkpoint(&checkpoint_through(
+            chat.id,
+            first_message,
+            third,
+            "The third message settled the budget at 90.",
+        ))
+        .await
+        .unwrap();
+
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/turns/{through}/branch", chat.id),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let branch: ChatListing = json_body(response).await;
+    let branch = branch.chat.id;
+
+    // The summary was written after the point, and so was the late file.
+    assert!(store
+        .get_context_checkpoint(branch)
+        .await
+        .unwrap()
+        .is_none());
+    let titles: Vec<Option<String>> = store
+        .list_documents(tidebreak_core::DocumentScope::Chat(branch))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|document| document.title)
+        .collect();
+    assert_eq!(titles, [Some("early.txt".to_owned())]);
+
+    assert_eq!(
+        send_message(&router, &bearer, branch, "and then?").await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turns(&store, branch, 3).await;
+    let request = provider.request(3);
+    assert!(
+        request.iter().all(|(_, text)| !text.contains("budget")),
+        "the branch saw a turn it never copied: {request:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_branch_whose_first_message_is_refused_is_removed_even_in_a_project_with_folders() {
+    let provider = NumberedProvider::default();
+    let (router, token, store, _dir) = test_app_with(Arc::new(provider.clone())).await;
+    let bearer = format!("Bearer {token}");
+    let project = Project {
+        id: ProjectId::new(),
+        title: Some("reports".into()),
+        attachment_revision: 1,
+        root_attachments: vec![HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap()],
+        instructions: String::new(),
+        created_at: chrono::Utc::now(),
+    };
+    store.create_project(&project).await.unwrap();
+    let response = post_json(
+        &router,
+        &bearer,
+        "/chats",
+        serde_json::json!({ "project_id": project.id }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let chat: Chat = json_body(response).await;
+    assert_eq!(chat.root_attachments.len(), 1, "the project's folder");
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "write the report").await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turns(&store, chat.id, 1).await;
+    let wrote = latest_turn(&store, chat.id).await;
+    record_call(&store, chat.id, wrote, "write_file").await;
+
+    // The edit has to start a new chat, and its message names a file that
+    // does not exist, so the new chat's first message is refused.
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/turns/{wrote}/edit", chat.id),
+        serde_json::json!({
+            "new_turn_id": TurnId::new(),
+            "content": "write a shorter report",
+            "file_attachments": [tidebreak_core::DocumentId::new()],
+        }),
+    )
+    .await;
+    assert!(response.status().is_client_error(), "{}", response.status());
+    let listings: Vec<ChatListing> = json_body(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/chats")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        listings
+            .iter()
+            .map(|listing| listing.chat.id)
+            .collect::<Vec<_>>(),
+        [chat.id],
+        "no copy is left behind"
+    );
 }

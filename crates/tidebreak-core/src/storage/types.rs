@@ -724,6 +724,26 @@ pub struct BranchChat {
     /// empty; a branch in a project gets the project's folders the way any new
     /// conversation does.
     pub chat: crate::model::Chat,
+    /// Documents of the source to copy whenever they were added: the files a
+    /// message sent into the new conversation carries. Every other document
+    /// is copied only when it was added before the branch point.
+    pub carry_documents: Vec<crate::id::DocumentId>,
+}
+
+/// One tool call's identity and outcome, without its arguments or result.
+///
+/// Enough to say what a turn did outside the conversation, and small enough
+/// to read on every transcript request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnToolUse {
+    /// The turn that made the call.
+    pub turn_id: TurnId,
+    /// The tool's name.
+    pub name: String,
+    /// Where the call stands.
+    pub status: crate::model::ToolCallStatus,
+    /// Why it failed, when it did.
+    pub error_code: Option<String>,
 }
 
 /// Result of branching a conversation.

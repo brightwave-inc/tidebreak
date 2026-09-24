@@ -414,7 +414,7 @@ impl ApprovalJudgeWorker {
         };
         // The judge reads the conversation the model is in, which leaves out
         // every regenerated or edited turn.
-        let replaced = tidebreak_core::replaced_turn_ids(
+        let replaced = tidebreak_core::turns_outside_conversation(
             &self.store.list_turn_replacements(approval.chat_id).await?,
         );
         let mut messages = self.store.list_messages(approval.chat_id).await?;

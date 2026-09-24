@@ -2220,13 +2220,51 @@ pub trait Store: Send + Sync {
 
     /// Every turn in this chat that reran another, oldest first.
     ///
-    /// A turn named as `replaces` here has left the conversation the model
-    /// sees. A store without turn replacement has none.
+    /// See [`crate::model::TurnPlacements`] for which turns that takes out of
+    /// the conversation the model sees. A store without turn replacement has
+    /// none.
     async fn list_turn_replacements(
         &self,
         _chat_id: SessionId,
     ) -> Result<Vec<crate::model::TurnReplacement>> {
         Ok(Vec::new())
+    }
+
+    /// The tool calls `turns` made in this chat, without their arguments or
+    /// results, oldest first.
+    async fn list_turn_tool_uses(
+        &self,
+        chat_id: SessionId,
+        turns: &[TurnId],
+    ) -> Result<Vec<crate::storage::TurnToolUse>> {
+        Ok(self
+            .list_tool_calls(chat_id)
+            .await?
+            .into_iter()
+            .filter(|call| turns.contains(&call.turn_id))
+            .map(|call| crate::storage::TurnToolUse {
+                turn_id: call.turn_id,
+                name: call.name,
+                status: call.status,
+                error_code: call.error_code,
+            })
+            .collect())
+    }
+
+    /// Remove a branch whose first message was refused, as if it had never
+    /// been made.
+    ///
+    /// Unlike [`Store::delete_chat_scoped`], the folders its project gave it
+    /// do not stand in the way: nothing ever ran in it, so no folder change
+    /// was ever made for it. Anything else that would stop a delete still
+    /// does, and a conversation that is not a branch is refused as
+    /// [`DeleteChatOutcome::NotFound`].
+    async fn discard_branch_scoped(
+        &self,
+        _owner: &OwnerId,
+        _chat_id: SessionId,
+    ) -> Result<DeleteChatOutcome> {
+        turn_storage_unavailable()
     }
 
     /// Perform one durable claim action under a fresh exact lease.
