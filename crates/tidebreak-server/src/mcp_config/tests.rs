@@ -4529,6 +4529,54 @@ async fn a_failed_save_puts_back_stored_http_values() {
     assert_eq!(stored.headers["X-Api-Key"], first);
 }
 
+/// Settings says a stored value is set only when the credential store holds
+/// it for the server's origin, as it does not after an import on a new
+/// computer, and the listing never carries the value itself.
+#[tokio::test]
+async fn the_listing_says_which_stored_values_are_set() {
+    let (runtime, _store, _directory) = test_runtime().await;
+    let url = "https://mcp.example.test/mcp";
+    let mut imported = stored_credential_definition("docs", url, None, None);
+    imported.enabled = false;
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![imported],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        info.servers[0].stored_credentials,
+        Some(McpStoredCredentials {
+            bearer: false,
+            headers: Vec::new()
+        })
+    );
+
+    let bearer = fixture_value("bearer");
+    let api_key = fixture_value("header");
+    let mut entered = stored_credential_definition("docs", url, Some(&bearer), Some(&api_key));
+    entered.enabled = false;
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![entered],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        info.servers[0].stored_credentials,
+        Some(McpStoredCredentials {
+            bearer: true,
+            headers: vec!["X-Api-Key".to_string()]
+        })
+    );
+    let listing = serde_json::to_string(&runtime.info().await).unwrap();
+    assert!(
+        listing.contains(r#""stored_credentials":{"bearer":true,"headers":["X-Api-Key"]}"#),
+        "{listing}"
+    );
+    assert!(!listing.contains(&bearer) && !listing.contains(&api_key));
+}
+
 /// SET-04: custom headers are a small, bounded set. A name the connection
 /// owns, a hop-by-hop or framing field, an Authorization header, or one past
 /// the cap is refused before anything is saved, naming the header, never a

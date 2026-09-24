@@ -1706,6 +1706,7 @@ mod tests {
                         notes: "Read and write under one root.".into(),
                     }),
                     oauth_status: None,
+                    stored_credentials: None,
                 },
                 McpServerInfo {
                     definition: gateway,
@@ -1715,6 +1716,7 @@ mod tests {
                     resolved_command: None,
                     curated: None,
                     oauth_status: None,
+                    stored_credentials: None,
                 },
             ],
         };

@@ -1038,6 +1038,42 @@ pub struct McpServerInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub oauth_status: Option<McpOAuthStatus>,
+    /// Which of this HTTP server's stored bearer token and header values the
+    /// OS credential store holds for its URL's origin, so Settings can say a
+    /// value is set without ever showing it. Absent for a server that stores
+    /// none. Read per request, and never carries a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stored_credentials: Option<McpStoredCredentials>,
+}
+
+/// Which stored credentials one HTTP server has on this computer, by name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct McpStoredCredentials {
+    /// Whether a bearer token is stored for the server's origin.
+    pub bearer: bool,
+    /// The configured header names whose value is stored, in name order.
+    pub headers: Vec<String>,
+}
+
+impl McpStoredCredentials {
+    /// What `stored` holds for `definition`, counting only the values it
+    /// declares and only for its URL's origin.
+    pub(super) fn of(definition: &McpServerDefinition, stored: &StoredHttpValues) -> Self {
+        let stored = match &definition.url {
+            Some(url) => stored.for_url(url),
+            None => StoredHttpValues::default(),
+        };
+        Self {
+            bearer: definition.bearer_token_stored && stored.bearer.is_some(),
+            headers: definition
+                .headers
+                .iter()
+                .filter(|name| stored.headers.contains_key(*name))
+                .cloned()
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]

@@ -4068,7 +4068,14 @@ curated: McpCuration | null,
  * from the OS credential store per request, never stored in the
  * definition. The status carries no token material.
  */
-oauth_status?: McpOAuthStatus, name: string, command: string | null, args: Array<string>,
+oauth_status?: McpOAuthStatus,
+/**
+ * Which of this HTTP server's stored bearer token and header values the
+ * OS credential store holds for its URL's origin, so Settings can say a
+ * value is set without ever showing it. Absent for a server that stores
+ * none. Read per request, and never carries a value.
+ */
+stored_credentials?: McpStoredCredentials, name: string, command: string | null, args: Array<string>,
 /**
  * Names of the environment variables this server is given directly. The
  * values live in the secret store under [`env_secret_key`] and never
@@ -4175,6 +4182,19 @@ name: string,
  * environment variable names, never a value.
  */
 reason: string, };
+
+/**
+ * Which stored credentials one HTTP server has on this computer, by name.
+ */
+export type McpStoredCredentials = {
+/**
+ * Whether a bearer token is stored for the server's origin.
+ */
+bearer: boolean,
+/**
+ * The configured header names whose value is stored, in name order.
+ */
+headers: Array<string>, };
 
 /**
  * Where the sandboxed iframe should load one view from, valid once.

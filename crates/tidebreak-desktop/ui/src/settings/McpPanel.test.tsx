@@ -1767,7 +1767,11 @@ describe("McpPanel remote authentication", () => {
       <McpPanel
         client={api({
           servers: [
-            remoteServer({ bearer_token_stored: true, headers: ["X-Api-Key"] }),
+            remoteServer({
+              bearer_token_stored: true,
+              headers: ["X-Api-Key"],
+              stored_credentials: { bearer: true, headers: ["X-Api-Key"] },
+            }),
           ],
         })}
       />,
@@ -1786,6 +1790,31 @@ describe("McpPanel remote authentication", () => {
       "placeholder",
       "Stored. Leave blank to keep it.",
     );
+  });
+
+  it("asks for a stored token this computer does not hold, as after an import", async () => {
+    render(
+      <McpPanel
+        client={api({
+          servers: [
+            remoteServer({
+              bearer_token_stored: true,
+              stored_credentials: { bearer: false, headers: [] },
+              health: "degraded",
+              tool_count: 0,
+              diagnostic:
+                "Not stored: this server's bearer token is not in the credential store on this computer. Enter it under Authentication, then save.",
+            }),
+          ],
+        })}
+      />,
+    );
+
+    const token = await screen.findByLabelText("Bearer token");
+    expect(token).toHaveAttribute("placeholder", "Token");
+    expect(
+      screen.getByText("Paste the token alone, without the word Bearer."),
+    ).toBeInTheDocument();
   });
 
   it("choosing OAuth drops the bearer token setting", async () => {
@@ -1829,7 +1858,7 @@ describe("McpPanel remote authentication", () => {
     // The list reads what was last saved, as the server's would.
     let saved: McpServerInfo = refused;
     const listMcpServers = vi.fn(async () => ({ servers: [saved] }));
-    const putMcpServers = vi.fn(async () => {
+    const putMcpServers = vi.fn(async (_servers: unknown) => {
       saved = switched;
       return { servers: [switched] };
     });

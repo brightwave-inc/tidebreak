@@ -1508,7 +1508,7 @@ impl McpRuntime {
         // progress is read under the same lock as what the last connection
         // learned: a finished sign-in updates both under it, so no read sees
         // one without the other.
-        let (mut servers, oauth_servers) = {
+        let (mut servers, oauth_servers, credential_servers) = {
             let state = self.state.lock().await;
             let sign_ins = self
                 .sign_ins
@@ -1516,6 +1516,10 @@ impl McpRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut servers = Vec::with_capacity(state.definitions.len());
             let mut oauth_servers = Vec::new();
+            // Servers whose stored bearer token or header values Settings
+            // says are set: read, like the OAuth status, once the lock is
+            // released.
+            let mut credential_servers = Vec::new();
             for (index, definition) in state.definitions.iter().enumerate() {
                 let managed = state.servers.get(&definition.name);
                 if let (Some(id), Some(url)) = (
@@ -1533,6 +1537,11 @@ impl McpRuntime {
                             .filter(|record| record.server_url == url)
                             .map(|record| record.progress.view()),
                     });
+                }
+                if let Some(id) = state.ids.get(&definition.name) {
+                    if uses_stored_http_values(definition) {
+                        credential_servers.push((index, *id));
+                    }
                 }
                 servers.push(McpServerInfo {
                     health: managed.map_or(
@@ -1554,13 +1563,19 @@ impl McpRuntime {
                     oauth_status: oauth::offered_status(
                         managed.and_then(|server| server.oauth.as_ref()),
                     ),
+                    stored_credentials: None,
                     definition: definition.clone(),
                 });
             }
-            (servers, oauth_servers)
+            (servers, oauth_servers, credential_servers)
         };
         for snapshot in oauth_servers {
             servers[snapshot.index].oauth_status = self.oauth_status_of(&snapshot).await;
+        }
+        for (index, id) in credential_servers {
+            let stored = self.stored_http(id).await;
+            let server = &mut servers[index];
+            server.stored_credentials = Some(McpStoredCredentials::of(&server.definition, &stored));
         }
         McpServersInfo { servers }
     }
@@ -3378,6 +3393,7 @@ impl McpRuntime {
                         oauth_status: oauth::offered_status(
                             managed.and_then(|server| server.oauth.as_ref()),
                         ),
+                        stored_credentials: None,
                         definition: definition.clone(),
                     }
                 })

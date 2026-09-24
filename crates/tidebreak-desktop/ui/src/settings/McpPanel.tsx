@@ -518,6 +518,7 @@ function definition(server: McpServerInfo): McpServerDefinition {
     curated: ____,
     resolved_command: _____,
     oauth_status: ______,
+    stored_credentials: _______,
     ...value
   } = server;
   return value;
@@ -2392,7 +2393,8 @@ function HttpAuthentication({
 }) {
   const choice = authenticationOf(server);
   const tokenStored =
-    saved?.bearer_token_stored === true && saved.url === server.url;
+    saved?.stored_credentials?.bearer === true &&
+    sameOrigin(saved.url, server.url);
   return (
     <>
       <FieldGroup label="Authentication" hint={AUTHENTICATION_HINT[choice]}>
@@ -2465,14 +2467,28 @@ function HttpAuthentication({
   );
 }
 
-/** The header names whose value is already stored for this server: the
- * saved server's, while the draft keeps the same URL. */
+/** The header names whose value the credential store holds for this server,
+ * as the saved server reports it, while the draft keeps the same origin: a
+ * save that moves the server to another origin drops what was stored. */
 function storedHeaderNames(
   server: McpServerInfo,
   saved: McpServerInfo | undefined,
 ): ReadonlySet<string> {
-  if (saved === undefined || saved.url !== server.url) return new Set();
-  return new Set(saved.headers ?? []);
+  if (saved === undefined || !sameOrigin(saved.url, server.url)) {
+    return new Set();
+  }
+  return new Set(saved.stored_credentials?.headers ?? []);
+}
+
+/** Whether two server URLs share a scheme, host, and port: the origin a
+ * stored value is bound to. */
+function sameOrigin(left: string | null, right: string | null): boolean {
+  if (left === null || right === null) return false;
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -58,6 +58,17 @@ const document: WorkspaceConfigDocument = {
         request_timeout_ms: 60_000,
         enabled: true,
       },
+      {
+        name: "tickets",
+        args: [],
+        env: [],
+        env_from: [],
+        url: "https://mcp.example.com/tickets",
+        bearer_token_stored: true,
+        headers: ["X-Api-Key"],
+        request_timeout_ms: 60_000,
+        enabled: true,
+      },
     ],
   },
 };
@@ -159,6 +170,18 @@ export const StartCredentialServer: Story = {
     await userEvent.click(
       dialog.getByRole("switch", { name: "Start search after import" }),
     );
+  },
+};
+
+/** A remote server whose bearer token and header value were stored on the
+ * computer that exported it. The values never travel in the file, so the
+ * row says what to enter here, and the server imports turned off. */
+export const StoredCredentialServer: Story = {
+  args: {
+    client: previewClient([entry("mcp_servers", "tickets", "new")]),
+  },
+  play: async ({ canvasElement }) => {
+    await openPreview(canvasElement);
   },
 };
 
