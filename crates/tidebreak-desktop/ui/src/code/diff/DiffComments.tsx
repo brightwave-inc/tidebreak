@@ -211,9 +211,12 @@ export function CommentQuote({
   const shown = lines.slice(0, max);
   const rest = lines.length - shown.length;
   return (
-    <pre className="bg-muted text-foreground overflow-x-auto rounded-md px-2 py-1 font-mono text-xs">
+    <pre className="bg-muted text-foreground rounded-md px-2 py-1 font-mono text-xs">
       {shown.map((line, index) => (
-        <span key={`${index}:${line.text}`} className="block whitespace-pre">
+        <span
+          key={`${index}:${line.text}`}
+          className="block [overflow-wrap:anywhere] whitespace-pre-wrap"
+        >
           <span className="text-muted-foreground select-none">
             {QUOTE_MARKER[line.kind]}
           </span>

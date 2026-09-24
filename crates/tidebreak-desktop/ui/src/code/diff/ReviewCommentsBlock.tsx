@@ -2,15 +2,21 @@ import { useId, useState } from "react";
 import { ChevronDown, ChevronRight, MessageSquareDiff } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { MiddleTruncate } from "../MiddleTruncate";
 import type { SentReviewComment } from "./reviewComments";
 
 /** Comments listed before the block folds the rest behind its disclosure. */
 const PREVIEW_COMMENTS = 3;
 
-function spanLabel(comment: SentReviewComment): string {
-  if (comment.lines) return `${comment.path}:${comment.lines}`;
-  if (comment.oldLines) return `${comment.path}:${comment.oldLines} (deleted)`;
-  return comment.path;
+/** Where a comment points: `path:12-14`, or the old lines of a deletion. */
+function spanLabel(comment: SentReviewComment, path = comment.path): string {
+  if (comment.lines) return `${path}:${comment.lines}`;
+  if (comment.oldLines) return `${path}:${comment.oldLines} (deleted)`;
+  return path;
+}
+
+function fileName(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1) || path;
 }
 
 /**
@@ -68,15 +74,18 @@ export function ReviewCommentsBlock({
           >
             {open ? (
               <div className="flex min-w-0 flex-col gap-1 py-0.5">
-                <span className="text-foreground truncate font-mono text-xs">
-                  {spanLabel(comment)}
-                </span>
+                <MiddleTruncate
+                  text={spanLabel(comment)}
+                  className="text-foreground font-mono text-xs"
+                />
                 {comment.quote.length > 0 && (
-                  <pre className="bg-background text-foreground overflow-x-auto rounded-md px-2 py-1 font-mono text-xs">
+                  // Long quoted lines wrap: a quote that scrolled sideways
+                  // would be a scroll region nothing can focus.
+                  <pre className="bg-background text-foreground rounded-md px-2 py-1 font-mono text-xs">
                     {comment.quote.map((line, lineIndex) => (
                       <span
                         key={`${lineIndex}:${line}`}
-                        className="block whitespace-pre"
+                        className="block [overflow-wrap:anywhere] whitespace-pre-wrap"
                       >
                         {line || " "}
                       </span>
@@ -88,9 +97,14 @@ export function ReviewCommentsBlock({
                 </p>
               </div>
             ) : (
+              // Folded, the file name is enough to tell comments apart and
+              // leaves the row to what the comment says.
               <p className="flex min-w-0 items-baseline gap-2 text-xs">
-                <span className="text-foreground shrink-0 font-mono">
-                  {spanLabel(comment)}
+                <span
+                  className="text-foreground shrink-0 font-mono"
+                  title={spanLabel(comment)}
+                >
+                  {spanLabel(comment, fileName(comment.path))}
                 </span>
                 <span className="min-w-0 truncate">
                   {comment.body.split("\n")[0]}

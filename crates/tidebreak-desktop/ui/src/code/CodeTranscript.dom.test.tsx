@@ -563,7 +563,10 @@ describe("CodeTranscript", () => {
     expect(screen.getByText("Fix these, please.")).toBeInTheDocument();
     expect(screen.getByText("1 comment on 1 file")).toBeInTheDocument();
     // One line per comment: where, and the start of what it says.
-    expect(screen.getByText("src/queue.ts:23")).toBeInTheDocument();
+    expect(screen.getByText("queue.ts:23")).toHaveAttribute(
+      "title",
+      "src/queue.ts:23",
+    );
     expect(screen.getByText("Why double it?")).toBeInTheDocument();
     expect(screen.queryByText(/review_comments/)).toBeNull();
     expect(screen.queryByText("-const MAX = 10;")).toBeNull();
