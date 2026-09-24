@@ -15,6 +15,14 @@
 //!
 //! The copy's git runs with no global or system config, so none of the
 //! person's filters, hooks, or credential helpers apply to it.
+//!
+//! The copy's own config then closes what the reviewer's git would reach
+//! through the person's global config, since an engine's commands run with
+//! it: no credential helper, no hooks, no fsmonitor, and no transport at
+//! all, so nothing is fetched or pushed from the copy with the person's
+//! keys. `core.symlinks` is off, so a link in the reviewed tree, tracked or
+//! not, is checked out as a plain file holding its target: a write "inside
+//! the copy" never follows one out of it.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -30,8 +38,27 @@ const REVIEWS_DIR: &str = "reviews";
 const TREE_DIR: &str = "tree";
 /// The empty file every copy's git reads as its global config.
 const CONFIG_FILE: &str = "gitconfig";
+/// The empty directory the copy's `core.hooksPath` names.
+const HOOKS_DIR: &str = "hooks";
 /// A checkout of a large tree takes a while; nothing here waits on a person.
 const GIT_LIMIT: Duration = Duration::from_secs(180);
+
+/// The copy's own git config, written before anything is checked out. An
+/// engine's git reads it after the person's global config, so each of these
+/// wins over whatever the person set there.
+///
+/// - `core.symlinks=false`: links become plain files holding their target.
+/// - `credential.helper=` (empty): clears every helper configured earlier.
+/// - `protocol.allow=never`: no transport, so no fetch and no push.
+/// - `core.fsmonitor=false`: no daemon started in the copy.
+///
+/// `core.hooksPath` is set separately, to an empty directory of the copy's.
+const COPY_CONFIG: [(&str, &str); 4] = [
+    ("core.symlinks", "false"),
+    ("credential.helper", ""),
+    ("protocol.allow", "never"),
+    ("core.fsmonitor", "false"),
+];
 
 /// The root holding every review copy.
 #[must_use]
@@ -52,6 +79,9 @@ pub struct ReviewCopy {
     pub root: PathBuf,
     /// The reviewer's working directory: the files after the changes.
     pub tree: PathBuf,
+    /// The empty file the copy's git, and the reviewer's, read as their
+    /// global config.
+    pub git_config: PathBuf,
 }
 
 /// Build the copy of `to` (a tree-ish in the person's repository) with
@@ -109,10 +139,17 @@ async fn materialize_inner(
     create_private_dir(root)?;
     let config = root.join(CONFIG_FILE);
     std::fs::write(&config, b"").map_err(|err| format!("could not write {CONFIG_FILE}: {err}"))?;
+    let hooks = root.join(HOOKS_DIR);
+    create_private_dir(&hooks)?;
     let tree = root.join(TREE_DIR);
     create_private_dir(&tree)?;
 
     copy_git(&tree, &config, &["init", "--quiet"]).await?;
+    for (key, value) in COPY_CONFIG {
+        copy_git(&tree, &config, &["config", key, value]).await?;
+    }
+    let hooks_path = hooks.to_string_lossy().into_owned();
+    copy_git(&tree, &config, &["config", "core.hooksPath", &hooks_path]).await?;
     let alternates = tree
         .join(".git")
         .join("objects")
@@ -129,7 +166,119 @@ async fn materialize_inner(
     Ok(ReviewCopy {
         root: root.to_path_buf(),
         tree,
+        git_config: config,
     })
+}
+
+/// What a copy of a tree holds: its files, links included, and their bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopySize {
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// How [`measure`] found a tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Measured {
+    /// The whole tree, within both limits.
+    Within(CopySize),
+    /// Listing stopped here, past a limit; the tree holds at least this.
+    TooLarge(CopySize),
+}
+
+/// Measure what a copy of `to` would hold, stopping as soon as it passes
+/// `max_files` or `max_bytes`, so a huge tree is not listed to the end.
+///
+/// The copy holds every file in the tree, including files a sparse checkout
+/// leaves out of the person's worktree.
+pub async fn measure(
+    worktree: &Path,
+    to: &str,
+    max_files: u64,
+    max_bytes: u64,
+) -> Result<Measured, String> {
+    use tokio::io::AsyncReadExt;
+
+    if to.starts_with('-') {
+        return Err("the reviewed revision is not a revision".to_owned());
+    }
+    let mut command = git_runner::git_command(Some(worktree));
+    command
+        .args(["ls-tree", "-r", "-l", "-z", "--full-tree", to])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("could not list the reviewed files: {err}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or("could not list the reviewed files")?;
+    let listing = async {
+        let mut size = CopySize::default();
+        let mut pending = Vec::new();
+        let mut chunk = vec![0_u8; 64 * 1024];
+        loop {
+            let read = stdout
+                .read(&mut chunk)
+                .await
+                .map_err(|err| format!("could not list the reviewed files: {err}"))?;
+            if read == 0 {
+                return Ok::<Measured, String>(Measured::Within(size));
+            }
+            pending.extend_from_slice(&chunk[..read]);
+            let mut start = 0;
+            while let Some(end) = pending[start..].iter().position(|byte| *byte == 0) {
+                if let Some(bytes) = blob_size(&pending[start..start + end]) {
+                    size.files += 1;
+                    size.bytes = size.bytes.saturating_add(bytes);
+                    if size.files > max_files || size.bytes > max_bytes {
+                        return Ok(Measured::TooLarge(size));
+                    }
+                }
+                start += end + 1;
+            }
+            pending.drain(..start);
+        }
+    };
+    let measured = tokio::time::timeout(GIT_LIMIT, listing)
+        .await
+        .map_err(|_| "listing the reviewed files timed out".to_owned())??;
+    if let Measured::TooLarge(_) = measured {
+        // Dropping the child kills it: the rest of the listing is not needed.
+        return Ok(measured);
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|err| format!("could not list the reviewed files: {err}"))?;
+    if !status.success() {
+        return Err(format!("git ls-tree exited with {status}"));
+    }
+    Ok(measured)
+}
+
+/// The size of one `ls-tree -l` record when it names a blob: a file or a
+/// link. A submodule's commit is not copied, so it is not counted.
+fn blob_size(record: &[u8]) -> Option<u64> {
+    let tab = record.iter().position(|byte| *byte == b'\t')?;
+    let meta = std::str::from_utf8(&record[..tab]).ok()?;
+    let mut fields = meta.split_ascii_whitespace();
+    let _mode = fields.next()?;
+    if fields.next()? != "blob" {
+        return None;
+    }
+    let _oid = fields.next()?;
+    fields.next()?.parse().ok()
+}
+
+/// Whether the person's worktree is a sparse checkout, which leaves files
+/// of the tree out of it.
+pub async fn is_sparse(worktree: &Path) -> bool {
+    person_git(worktree, &["config", "--bool", "core.sparseCheckout"])
+        .await
+        .is_ok_and(|value| value == "true")
 }
 
 /// Delete one copy. Best effort: a copy a crash leaves behind is swept at the
@@ -228,7 +377,14 @@ async fn copy_git(tree: &Path, config: &Path, args: &[&str]) -> Result<String, S
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_OBJECT_DIRECTORY")
         .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .args(["-c", "core.hooksPath=", "-c", "core.fsmonitor=false"])
+        .args([
+            "-c",
+            "core.hooksPath=",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.symlinks=false",
+        ])
         .args(args);
     run(command, args).await
 }

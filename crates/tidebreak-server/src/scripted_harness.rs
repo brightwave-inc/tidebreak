@@ -163,6 +163,8 @@ pub struct ScriptedAdapter {
     launched_project_configs: Arc<std::sync::Mutex<Vec<tidebreak_harness::ProjectConfig>>>,
     /// Working directory and permission mode each launch was handed.
     launched_sessions: Arc<std::sync::Mutex<Vec<(PathBuf, PermissionMode)>>>,
+    /// Whether each launch was read-only, and the environment it was handed.
+    launched_postures: Arc<std::sync::Mutex<Vec<(bool, Vec<(String, String)>)>>>,
     /// Files to materialize in the worktree at the start of each turn.
     writes: Vec<ScriptedWrite>,
     /// Sleep once at the start of each turn, so a caller can observe Running
@@ -214,6 +216,7 @@ impl ScriptedAdapter {
             launched_apps: Arc::new(std::sync::Mutex::new(Vec::new())),
             launched_project_configs: Arc::new(std::sync::Mutex::new(Vec::new())),
             launched_sessions: Arc::new(std::sync::Mutex::new(Vec::new())),
+            launched_postures: Arc::new(std::sync::Mutex::new(Vec::new())),
             authenticated: Arc::new(std::sync::Mutex::new(Some(true))),
             writes: Vec::new(),
             turn_delay: Duration::ZERO,
@@ -260,6 +263,16 @@ impl ScriptedAdapter {
     #[cfg(any(test, feature = "test-support"))]
     pub fn launched_sessions(&self) -> Vec<(PathBuf, PermissionMode)> {
         self.launched_sessions
+            .lock()
+            .expect("scripted launches")
+            .clone()
+    }
+
+    /// Whether each launched session was read-only, and the extra
+    /// environment it was handed, in order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn launched_postures(&self) -> Vec<(bool, Vec<(String, String)>)> {
+        self.launched_postures
             .lock()
             .expect("scripted launches")
             .clone()
@@ -591,6 +604,10 @@ impl HarnessAdapter for ScriptedAdapter {
             .lock()
             .expect("scripted launches")
             .push((spec.worktree.clone(), spec.permission_mode));
+        self.launched_postures
+            .lock()
+            .expect("scripted launches")
+            .push((spec.read_only, spec.extra_env.clone()));
         Ok(Box::new(ScriptedSession {
             sink: spec.sink,
             events: self.events.clone(),
@@ -1090,6 +1107,7 @@ mod tests {
             tool_bridge: None,
             apps: None,
             project_config: tidebreak_harness::ProjectConfig::Skip,
+            read_only: false,
         }
     }
 

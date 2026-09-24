@@ -274,6 +274,19 @@ async fn another_engine_reviews_a_copy_and_its_findings_come_back_on_the_diff() 
         reviewer.launched_project_configs(),
         vec![ProjectConfig::Skip]
     );
+    // A read-only launch, whose git reads the copy's empty global config and
+    // never prompts for credentials.
+    let [(read_only, env)] = reviewer.launched_postures().try_into().unwrap();
+    assert!(read_only, "the engine's writing tools are taken away");
+    let value = |key: &str| {
+        env.iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(value("GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
+    assert_eq!(value("GIT_CONFIG_NOSYSTEM").as_deref(), Some("1"));
+    let global = PathBuf::from(value("GIT_CONFIG_GLOBAL").unwrap());
+    assert!(global.starts_with(copy.parent().unwrap()), "{global:?}");
 
     // The reviewer read the diff it was asked about, with the chosen model.
     let inputs = reviewer.turn_inputs();
@@ -530,4 +543,135 @@ async fn one_turn_can_be_reviewed_and_the_review_names_it() {
             ..
         }]
     ));
+}
+
+/// Run a review whose engine writes `write` inside its copy, where the
+/// reviewed tree holds `link` as an untracked symlink to `target`. Returns
+/// the review and the data folder the copies live under.
+#[cfg(unix)]
+async fn write_through_a_link(
+    link: &str,
+    target: impl AsRef<std::path::Path>,
+    write: &str,
+) -> (Setup, serde_json::Value, PathBuf) {
+    let reviewer =
+        reviewer(r#"{"findings": []}"#).with_writes(&[(write, "the reviewer was here\n")]);
+    let setup = setup(&reviewer).await;
+    std::os::unix::fs::symlink(target, setup.worktree.join(link)).unwrap();
+    let started = setup
+        .started(serde_json::json!({ "harness": "codex" }))
+        .await;
+    let review = setup.finished(started["id"].as_str().unwrap()).await;
+    // <data>/code/reviews/<id>/tree
+    let copy = launched_copy(&reviewer).await;
+    let data_dir = copy.ancestors().nth(4).unwrap().to_path_buf();
+    assert!(!copy.exists(), "the copy is deleted when the review ends");
+    (setup, review, data_dir)
+}
+
+/// A link in the reviewed tree to an absolute path outside it is copied as
+/// a plain file holding its target, so a write "inside the copy" through it
+/// goes nowhere.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_to_an_absolute_path_carries_no_write_out_of_the_copy() {
+    let outside = tempfile::tempdir().unwrap();
+    let (_setup, review, _) =
+        write_through_a_link("escape", outside.path(), "escape/escaped.txt").await;
+    assert_eq!(
+        std::fs::read_dir(outside.path()).unwrap().count(),
+        0,
+        "the write followed the link out: {review}"
+    );
+}
+
+/// A relative link that climbs out of the copy, into the Tidebreak data
+/// folder the copies live under, carries no write there.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_relative_link_carries_no_write_into_the_data_folder() {
+    let (_setup, review, data_dir) =
+        write_through_a_link("up", "../../../..", "up/escaped.txt").await;
+    assert!(
+        data_dir.join("code").is_dir(),
+        "{} is the data folder",
+        data_dir.display()
+    );
+    assert!(
+        !data_dir.join("escaped.txt").exists(),
+        "the write climbed into {}: {review}",
+        data_dir.display()
+    );
+}
+
+/// A link to the person's own worktree carries no write back into it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_to_the_worktree_carries_no_write_into_it() {
+    let reviewer = reviewer(r#"{"findings": []}"#)
+        .with_writes(&[("wt/escaped.txt", "the reviewer was here\n")]);
+    let setup = setup(&reviewer).await;
+    std::os::unix::fs::symlink(&setup.worktree, setup.worktree.join("wt")).unwrap();
+    let started = setup
+        .started(serde_json::json!({ "harness": "codex" }))
+        .await;
+    let review = setup.finished(started["id"].as_str().unwrap()).await;
+    assert!(
+        !setup.worktree.join("escaped.txt").exists(),
+        "the write reached the worktree: {review}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(setup.worktree.join("README.md")).unwrap(),
+        "hello\nworld\n"
+    );
+}
+
+/// A workspace too large to copy is refused before anything runs, with a
+/// reason the person can read.
+#[tokio::test]
+async fn a_workspace_too_large_to_copy_is_refused_with_a_plain_reason() {
+    let reviewer = reviewer(r#"{"findings": []}"#);
+    let setup = setup(&reviewer).await;
+    let limits = |files, bytes| crate::code::review::CopySize { files, bytes };
+    setup.runtime.reviews.set_copy_limits(limits(1_000, 8));
+    let refused = setup.start(serde_json::json!({ "harness": "codex" })).await;
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "review_too_large", "{body}");
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("This workspace is too large to review:"),
+        "{message}"
+    );
+    assert!(message.contains("more than 8 bytes"), "{message}");
+
+    for name in ["one.md", "two.md", "three.md"] {
+        std::fs::write(setup.worktree.join(name), "note\n").unwrap();
+    }
+    setup.runtime.reviews.set_copy_limits(limits(2, 1_000_000));
+    let refused = setup.start(serde_json::json!({ "harness": "codex" })).await;
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "review_too_large", "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("it has more than 2 files"),
+        "{body}"
+    );
+    assert!(reviewer.launched_sessions().is_empty(), "nothing ran");
+    let listed: serde_json::Value = setup
+        .client
+        .get(format!(
+            "http://{}/code/workspaces/{}/reviews",
+            setup.addr, setup.workspace
+        ))
+        .bearer_auth(&*setup.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["reviews"], serde_json::json!([]), "{listed}");
 }

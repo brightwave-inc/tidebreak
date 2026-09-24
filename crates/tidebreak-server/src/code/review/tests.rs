@@ -535,6 +535,138 @@ async fn the_copy_holds_the_changes_shares_nothing_writable_and_is_deleted() {
     assert!(repo.join("src/queue.ts").exists());
 }
 
+/// Links in the reviewed tree, committed or untracked, become plain files
+/// holding their target, so a write through one fails instead of landing
+/// outside the copy. The copy's own git config, which an engine's git reads
+/// after the person's, leaves no credential helper, hook, or transport.
+#[cfg(unix)]
+#[tokio::test]
+async fn links_are_copied_as_plain_files_and_the_copy_reaches_nothing_of_the_persons() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repository(dir.path());
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join("committed-link")).unwrap();
+    git(&repo, &["add", "committed-link"]);
+    git(&repo, &["commit", "-q", "-m", "a link"]);
+    std::os::unix::fs::symlink("../../../..", repo.join("untracked-link")).unwrap();
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let to = crate::code::checkpoint::snapshot_tree(&repo).await.unwrap();
+
+    let root = dir.path().join("data/code/reviews/links");
+    let copy = materialize(&repo, &head, &to, &root).await.unwrap();
+
+    let outside_text = outside.to_string_lossy().into_owned();
+    for (name, target) in [
+        ("committed-link", outside_text.as_str()),
+        ("untracked-link", "../../../.."),
+    ] {
+        let path = copy.tree.join(name);
+        let kind = std::fs::symlink_metadata(&path).unwrap().file_type();
+        assert!(kind.is_file(), "{name} is a plain file, not a link");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), target);
+        assert!(std::fs::write(path.join("escaped.txt"), "x").is_err());
+    }
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    assert!(!dir.path().join("data/escaped.txt").exists());
+    // The committed link reads unchanged; only the new one is in the review.
+    assert_eq!(
+        git(&copy.tree, &["diff", "HEAD", "--name-only"]),
+        "untracked-link"
+    );
+
+    let config = |key: &str| git(&copy.tree, &["config", "--local", "--get", key]);
+    assert_eq!(config("core.symlinks"), "false");
+    assert_eq!(config("credential.helper"), "", "every helper is cleared");
+    assert_eq!(config("protocol.allow"), "never");
+    assert_eq!(config("core.fsmonitor"), "false");
+    let hooks = PathBuf::from(config("core.hooksPath"));
+    assert!(hooks.starts_with(&root), "{hooks:?}");
+    assert_eq!(std::fs::read_dir(&hooks).unwrap().count(), 0);
+    assert_eq!(copy.git_config, root.join("gitconfig"));
+    assert!(std::fs::read(&copy.git_config).unwrap().is_empty());
+
+    // No transport: a push from the copy never reaches the remote.
+    let remote = dir.path().join("remote.git");
+    git(dir.path(), &["init", "-q", "--bare", "remote.git"]);
+    let push = std::process::Command::new("git")
+        .args(["push", "-q"])
+        .arg(&remote)
+        .arg("HEAD:refs/heads/escaped")
+        .current_dir(&copy.tree)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap();
+    assert!(!push.status.success(), "the push went through");
+    assert_eq!(git(&remote, &["for-each-ref"]), "");
+
+    snapshot::remove(&root).await;
+}
+
+#[tokio::test]
+async fn measuring_stops_once_a_tree_is_too_large_to_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repository(dir.path());
+    std::fs::write(repo.join("NOTES.md"), "12345\n").unwrap();
+    let to = crate::code::checkpoint::snapshot_tree(&repo).await.unwrap();
+    // src/queue.ts (27 bytes) and NOTES.md (6).
+    assert_eq!(
+        measure(&repo, &to, 10, 1_000).await.unwrap(),
+        Measured::Within(CopySize {
+            files: 2,
+            bytes: 33
+        })
+    );
+    assert!(matches!(
+        measure(&repo, &to, 1, 1_000).await.unwrap(),
+        Measured::TooLarge(CopySize { files: 2, .. })
+    ));
+    assert!(matches!(
+        measure(&repo, &to, 10, 10).await.unwrap(),
+        Measured::TooLarge(_)
+    ));
+    assert!(measure(&repo, "--output=/tmp/x", 10, 10).await.is_err());
+    assert!(!is_sparse(&repo).await);
+    git(&repo, &["config", "core.sparseCheckout", "true"]);
+    assert!(is_sparse(&repo).await);
+}
+
+#[test]
+fn a_workspace_too_large_says_why_in_plain_numbers() {
+    let limits = CopySize {
+        files: MAX_COPY_FILES,
+        bytes: MAX_COPY_BYTES,
+    };
+    assert_eq!(
+        too_large_message(
+            CopySize {
+                files: 200_001,
+                bytes: 10
+            },
+            limits,
+            false
+        ),
+        "This workspace is too large to review: a review works in a copy of every file, and it has more than 200,000 files, the most a review copies."
+    );
+    let sparse = too_large_message(
+        CopySize {
+            files: 3,
+            bytes: 1_500_000_000,
+        },
+        limits,
+        true,
+    );
+    assert!(
+        sparse.contains("its files come to more than 1 GB, the most a review copies."),
+        "{sparse}"
+    );
+    assert!(
+        sparse.ends_with("Its sparse checkout leaves files out of your worktree, but the copy would hold all of them."),
+        "{sparse}"
+    );
+}
+
 #[tokio::test]
 async fn a_copy_that_cannot_be_made_leaves_nothing_behind() {
     let dir = tempfile::tempdir().unwrap();

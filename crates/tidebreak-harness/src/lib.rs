@@ -1024,6 +1024,21 @@ pub struct SessionSpec {
     /// Whether the engine loads the configuration the repository carries for
     /// it. [`ProjectConfig::Skip`] until the user trusts the repository.
     pub project_config: ProjectConfig,
+    /// A read-only session: the engine only reads. On top of the permission
+    /// mode, each adapter takes away what the engine offers for writing
+    /// files or running commands, so a person's own allow rules cannot hand
+    /// them back:
+    ///
+    /// - Claude Code launches with `--disallowedTools` for Bash, Edit, Write,
+    ///   and NotebookEdit. Deny rules win over allow rules, so Read, Grep,
+    ///   and Glob are what is left.
+    /// - opencode's session carries deny rules for `edit` and `bash`, which
+    ///   come after the agent's and the user's rules and so win.
+    /// - Grok CLI runs under its `read-only` sandbox profile (`GROK_SANDBOX`),
+    ///   which the OS enforces where Grok can apply it.
+    /// - Codex needs nothing more: its Plan posture is already the read-only
+    ///   OS sandbox.
+    pub read_only: bool,
 }
 
 /// Whether an engine loads the configuration a repository carries for it.

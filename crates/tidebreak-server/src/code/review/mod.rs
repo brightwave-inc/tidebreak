@@ -7,25 +7,31 @@
 //! (decision 0055), so the agents working in the workspace keep working while
 //! it runs.
 //!
-//! Read-only holds three ways at once:
+//! Read-only holds in layers:
 //!
-//! - The reviewer never works in the person's worktree. It works in a
-//!   disposable copy of the reviewed state ([`snapshot`]), its own git
-//!   repository with no remote that reads the person's objects through
-//!   alternates, deleted when the review ends. Whatever an engine writes
-//!   where it works lands there. This holds for every engine.
-//! - The engine runs in its own read-only posture where it has one:
-//!   Claude Code's plan mode, Codex's read-only sandbox, opencode's plan
-//!   agent. An engine with no plan mode but a structured approval channel,
-//!   Grok, runs in Ask. An engine with neither is not offered. The posture,
-//!   not the copy, is what stops a write aimed outside the copy; only
-//!   Codex enforces it with an OS sandbox.
+//! - The engine loses what it has for writing files or running commands
+//!   (`SessionSpec::read_only`), whatever the person's own rules allow:
+//!   Claude Code launches in plan mode with Bash, Edit, Write, and
+//!   NotebookEdit disallowed; Codex runs in its read-only OS sandbox;
+//!   opencode's plan agent gets deny rules for `edit` and `bash`; Grok CLI,
+//!   which has no plan mode, runs in Ask under its `read-only` sandbox
+//!   profile. An engine with neither a plan mode nor approvals Tidebreak can
+//!   refuse is not offered. This layer is what stops a write aimed outside
+//!   the copy below; the OS enforces it for Codex, and for Grok where Grok
+//!   can apply its profile.
 //! - Every approval the engine asks for is refused, with feedback telling it
 //!   to report the change as a finding instead. Claude Code gets no
 //!   permission-prompt tool at all, so print mode refuses what plan mode
 //!   would ask about. The reviewer also gets no connected apps, browser,
 //!   computer use, SSH agent, or forge credentials, and the repository's own
 //!   engine config stays unloaded.
+//! - The reviewer never works in the person's worktree. It works in a
+//!   disposable copy of the reviewed state ([`snapshot`]), its own git
+//!   repository with no remote that reads the person's objects through
+//!   alternates, deleted when the review ends. Links in the copy are plain
+//!   files, so a write inside it stays inside it, and its git has no
+//!   credential helper, hooks, or transport, so nothing is pushed from it.
+//!   A workspace too large to copy is refused before anything runs.
 //!
 //! The reviewer is asked for one JSON object of findings ([`prompt`]), read
 //! strictly ([`findings`]), and each finding is checked against the diff it
@@ -50,7 +56,9 @@ pub use findings::{
     MAX_EXPLANATION_CHARS, MAX_FINDINGS, MAX_FINDING_LINES, MAX_TITLE_CHARS,
 };
 pub use prompt::{review_prompt, ReviewScope, DEFAULT_REVIEW_FOCUS, MAX_FOCUS_CHARS};
-pub use snapshot::{materialize, review_root, reviews_root, ReviewCopy};
+pub use snapshot::{
+    is_sparse, materialize, measure, review_root, reviews_root, CopySize, Measured, ReviewCopy,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -85,6 +93,10 @@ use crate::error::ServerError;
 
 /// How long a review may run before it is stopped.
 pub const REVIEW_TIME_LIMIT: Duration = Duration::from_secs(20 * 60);
+/// The most files a review copies.
+pub const MAX_COPY_FILES: u64 = 200_000;
+/// The most bytes a review copies.
+pub const MAX_COPY_BYTES: u64 = 1_000_000_000;
 /// How long a stopped reviewer gets to wind down before it is shut down.
 const STOP_GRACE: Duration = Duration::from_secs(10);
 /// How long a finished reviewer gets to shut down.
@@ -124,6 +136,7 @@ pub fn review_permission_mode(caps: &HarnessCaps) -> Option<PermissionMode> {
 pub struct ReviewRegistry {
     entries: Mutex<HashMap<CodeReviewId, ReviewEntry>>,
     time_limit: Mutex<Option<Duration>>,
+    copy_limits: Mutex<Option<CopySize>>,
 }
 
 struct ReviewEntry {
@@ -262,6 +275,24 @@ impl ReviewRegistry {
     pub fn set_time_limit(&self, limit: Duration) {
         *self.time_limit.lock().expect("review time limit") = Some(limit);
     }
+
+    /// The most a review copies: files, and their bytes.
+    #[must_use]
+    pub fn copy_limits(&self) -> CopySize {
+        self.copy_limits
+            .lock()
+            .expect("review copy limits")
+            .unwrap_or(CopySize {
+                files: MAX_COPY_FILES,
+                bytes: MAX_COPY_BYTES,
+            })
+    }
+
+    /// Lower the copy limits, so a test can review a workspace too large.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_copy_limits(&self, limits: CopySize) {
+        *self.copy_limits.lock().expect("review copy limits") = Some(limits);
+    }
 }
 
 /// Delete the copies of reviews that are not running, such as ones a crash
@@ -382,6 +413,21 @@ impl CodeRuntime {
                 "there are no changes to review",
             ));
         }
+        let limits = self.reviews.copy_limits();
+        match measure(&worktree, &to, limits.files, limits.bytes).await {
+            Ok(Measured::Within(_)) => {}
+            Ok(Measured::TooLarge(size)) => {
+                return Err(ServerError::unprocessable_kind(
+                    "review_too_large",
+                    too_large_message(size, limits, is_sparse(&worktree).await),
+                ));
+            }
+            Err(detail) => {
+                return Err(ServerError::internal(format!(
+                    "Tidebreak could not measure the files to review: {detail}"
+                )));
+            }
+        }
         let scope = match turn_id {
             None => ReviewScope::WorkingTree {
                 base: &workspace.base_ref,
@@ -498,6 +544,8 @@ impl CodeRuntime {
 
         let (events_tx, mut events) = mpsc::unbounded_channel();
         let relay = self.review_relay(job);
+        let mut extra_env = relay.env.clone();
+        extra_env.extend(reviewer_git_env(&copy.git_config));
         let spec = SessionSpec {
             owner: job.owner.clone(),
             // No session row stands behind a review; the id is its own.
@@ -510,7 +558,7 @@ impl CodeRuntime {
             fast_mode: false,
             resume_ref: None,
             extra_argv: relay.argv.clone(),
-            extra_env: relay.env.clone(),
+            extra_env,
             relay_key_env: relay.key_env.clone(),
             env: reviewer_env(&job.probe.env),
             // No approval channel: an engine that would ask for one is
@@ -523,6 +571,9 @@ impl CodeRuntime {
             tool_bridge: None,
             apps: None,
             project_config: ProjectConfig::Skip,
+            // The engine's tools that write files or run commands are taken
+            // away, whatever the person's own rules allow.
+            read_only: true,
         };
         let session = match job.adapter.launch(spec).await {
             Ok(session) => session,
@@ -898,10 +949,78 @@ fn path_candidates(path: &str) -> Vec<String> {
 fn reviewer_env(
     env: &[(std::ffi::OsString, std::ffi::OsString)],
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    const STRIPPED: [&str; 5] = [
+        "SSH_AUTH_SOCK",
+        "SSH_AGENT_PID",
+        "SSH_ASKPASS",
+        "GIT_ASKPASS",
+        "GIT_SSH_COMMAND",
+    ];
     env.iter()
-        .filter(|(key, _)| key != "SSH_AUTH_SOCK" && key != "SSH_AGENT_PID")
+        .filter(|(key, _)| !STRIPPED.iter().any(|stripped| key == stripped))
         .cloned()
         .collect()
+}
+
+/// The reviewer's git, wherever an engine runs one: the copy's empty global
+/// config in place of the person's, no system config, and never a prompt
+/// for credentials. With the copy's own config (no helper, no transport),
+/// nothing fetches or pushes with the person's credentials.
+fn reviewer_git_env(global_config: &Path) -> [(String, String); 3] {
+    [
+        (
+            "GIT_CONFIG_GLOBAL".to_owned(),
+            global_config.to_string_lossy().into_owned(),
+        ),
+        ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
+        ("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned()),
+    ]
+}
+
+/// Why a workspace is too large to review, in the person's terms.
+fn too_large_message(size: CopySize, limits: CopySize, sparse: bool) -> String {
+    let what = if size.files > limits.files {
+        format!("it has more than {} files", group_thousands(limits.files))
+    } else {
+        format!("its files come to more than {}", format_bytes(limits.bytes))
+    };
+    let mut message = format!(
+        "This workspace is too large to review: a review works in a copy of every file, and {what}, the most a review copies."
+    );
+    if sparse {
+        message.push_str(
+            " Its sparse checkout leaves files out of your worktree, but the copy would hold all of them.",
+        );
+    }
+    message
+}
+
+fn group_thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [(u64, &str); 3] = [(1_000_000_000, "GB"), (1_000_000, "MB"), (1_000, "KB")];
+    for (unit, label) in UNITS {
+        if bytes >= unit {
+            let whole = bytes / unit;
+            let tenth = (bytes % unit) * 10 / unit;
+            return if tenth == 0 {
+                format!("{whole} {label}")
+            } else {
+                format!("{whole}.{tenth} {label}")
+            };
+        }
+    }
+    format!("{bytes} bytes")
 }
 
 /// A trimmed model id an engine can take on its argv, or `None` for the

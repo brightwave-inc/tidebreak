@@ -155,6 +155,30 @@ pub(crate) fn project_config_flags(project_config: ProjectConfig) -> Vec<String>
     }
 }
 
+/// The tools a read-only session never gets: the ones that run commands or
+/// write files. Read, Grep, and Glob remain.
+pub(crate) const READ_ONLY_DISALLOWED_TOOLS: [&str; 4] = ["Bash", "Edit", "Write", "NotebookEdit"];
+
+/// Claude Code's switches for a read-only session ([`SessionSpec::read_only`]).
+///
+/// Plan mode refuses Write and Edit, but a person's own allow rule such as
+/// `"allow": ["Bash"]` in `~/.claude/settings.json` still runs commands in
+/// plan mode. `--disallowedTools` takes the tools away instead, and a deny
+/// wins over any allow. Checked against 2.1.282.
+#[must_use]
+pub(crate) fn read_only_flags(read_only: bool) -> Vec<String> {
+    if !read_only {
+        return Vec::new();
+    }
+    let mut flags = vec!["--disallowedTools".to_owned()];
+    flags.extend(
+        READ_ONLY_DISALLOWED_TOOLS
+            .iter()
+            .map(|tool| (*tool).to_owned()),
+    );
+    flags
+}
+
 /// The headless scheduler reads `.claude/scheduled_tasks.json` whatever the
 /// setting sources say, so a launch in an untrusted repository turns it off.
 const DISABLE_CRON_ENV: &str = "CLAUDE_CODE_DISABLE_CRON";
@@ -1351,6 +1375,7 @@ impl ClaudeSession {
             self.resolved_model(turn_model).as_deref(),
         )?);
         argv.extend(project_config_flags(self.spec.project_config));
+        argv.extend(read_only_flags(self.spec.read_only));
         if let Some(config) = crate::claude::browser::mcp_launch_config(
             self.spec.approval.as_ref(),
             self.spec.browser.as_ref(),
@@ -2145,6 +2170,7 @@ mod tests {
             tool_bridge: None,
             apps: None,
             project_config: crate::ProjectConfig::Load,
+            read_only: false,
         })
     }
 
@@ -2331,6 +2357,7 @@ done
             tool_bridge: None,
             apps: None,
             project_config: crate::ProjectConfig::Load,
+            read_only: false,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         let index = plan.argv.iter().position(|arg| arg == "--effort").unwrap();
@@ -2422,6 +2449,59 @@ done
                 assert!(index < extra_index, "mode: {mode:?}");
             }
         }
+    }
+
+    /// A review launch: plan mode, none of the repository's settings or MCP
+    /// servers, no permission-prompt tool, and the tools that run commands or
+    /// write files taken away, so a person's own `"allow": ["Bash"]` rule
+    /// cannot run one. Read, Grep, and Glob stay.
+    #[test]
+    fn a_read_only_launch_takes_away_the_tools_that_write_or_run_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = session_with_mode(
+            PathBuf::from("/usr/bin/claude"),
+            dir.path(),
+            Arc::new(Discard),
+            PermissionMode::Plan,
+        );
+        session.spec.project_config = ProjectConfig::Skip;
+        session.spec.read_only = true;
+
+        let plan = session.compose_plan_for(None, None).unwrap();
+        let argv = &plan.argv;
+        let after = |flag: &str| {
+            let index = argv.iter().position(|arg| arg == flag).unwrap();
+            argv[index + 1..].to_vec()
+        };
+        assert_eq!(after("--permission-mode")[0], "plan");
+        assert_eq!(after("--setting-sources")[0], "user");
+        assert!(argv.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert_eq!(
+            after("--disallowedTools")[..4],
+            ["Bash", "Edit", "Write", "NotebookEdit"]
+        );
+        // The list ends at the next flag, if any follows.
+        assert!(after("--disallowedTools")
+            .get(4)
+            .is_none_or(|next| next.starts_with("--")));
+        for tool in ["Read", "Grep", "Glob"] {
+            assert!(
+                !argv.iter().any(|arg| arg == tool),
+                "{tool} stays: {argv:?}"
+            );
+        }
+        for absent in [
+            "--permission-prompt-tool",
+            "--mcp-config",
+            "--dangerously-skip-permissions",
+            "--allowedTools",
+        ] {
+            assert!(!argv.iter().any(|arg| arg == absent), "{absent}: {argv:?}");
+        }
+
+        session.spec.read_only = false;
+        let plan = session.compose_plan_for(None, None).unwrap();
+        assert!(!plan.argv.iter().any(|arg| arg == "--disallowedTools"));
     }
 
     #[test]
@@ -2573,6 +2653,7 @@ done
             tool_bridge: None,
             apps: None,
             project_config: crate::ProjectConfig::Load,
+            read_only: false,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         assert_eq!(
@@ -2837,6 +2918,7 @@ done
             tool_bridge: None,
             apps: None,
             project_config: crate::ProjectConfig::Load,
+            read_only: false,
         });
         let plan = session.compose_plan_for(None, None).unwrap();
         let index = plan

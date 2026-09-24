@@ -326,6 +326,7 @@ fn unit_session(sink: Arc<dyn crate::HarnessEventSink>) -> CodexSession {
         tool_bridge: None,
         apps: None,
         project_config: crate::ProjectConfig::Load,
+        read_only: false,
     })
 }
 
@@ -641,6 +642,7 @@ fn spec_for(
         tool_bridge: None,
         apps: None,
         project_config: crate::ProjectConfig::Load,
+        read_only: false,
     }
 }
 

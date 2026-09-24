@@ -387,8 +387,17 @@ pub(crate) fn compose_serve_plan(launch: ServeLaunch<'_>) -> Result<LaunchPlan, 
 /// Never composed as `--auto`. Plan selects the native `plan` agent
 /// (disallows edit tools). Ask parks bash/edit. Auto allows workspace
 /// edits and still asks for bash.
+///
+/// A read-only session ([`crate::SessionSpec::read_only`]) adds deny rules
+/// for `edit` and `bash`. The session's rules are evaluated after the
+/// agent's and the user's config, so a user's `"bash": "allow"` does not
+/// hand either back.
 #[must_use]
-pub(crate) fn session_create_body(mode: PermissionMode, model: Option<&str>) -> Value {
+pub(crate) fn session_create_body(
+    mode: PermissionMode,
+    model: Option<&str>,
+    read_only: bool,
+) -> Value {
     let mut body = match mode {
         PermissionMode::Plan => json!({ "agent": "plan" }),
         PermissionMode::Ask => json!({
@@ -425,6 +434,16 @@ pub(crate) fn session_create_body(mode: PermissionMode, model: Option<&str>) -> 
     };
     if let Some(model) = model.and_then(session_model_field) {
         body["model"] = model;
+    }
+    if read_only {
+        let deny = [
+            json!({"permission": "edit", "pattern": "*", "action": "deny"}),
+            json!({"permission": "bash", "pattern": "*", "action": "deny"}),
+        ];
+        match body.get_mut("permission").and_then(Value::as_array_mut) {
+            Some(rules) => rules.extend(deny),
+            None => body["permission"] = Value::Array(deny.to_vec()),
+        }
     }
     body
 }
@@ -788,7 +807,11 @@ impl OpencodeSession {
         }
         let path = "/session";
         let url = format!("{}{path}", self.base_url());
-        let body = session_create_body(self.spec.permission_mode, self.spec.model.as_deref());
+        let body = session_create_body(
+            self.spec.permission_mode,
+            self.spec.model.as_deref(),
+            self.spec.read_only,
+        );
         let query = self.directory_query();
         let (status, parsed) = self
             .http("POST", path, &url, Some(body), Some(query.as_slice()))
@@ -1179,6 +1202,7 @@ mod tests {
             tool_bridge: None,
             apps: None,
             project_config: crate::ProjectConfig::Load,
+            read_only: false,
         })
     }
 
@@ -1542,26 +1566,54 @@ mod tests {
         assert!(matches!(err, HarnessError::LaunchRejected(_)));
     }
 
+    /// A read-only session keeps the plan agent and denies `edit` and `bash`
+    /// last, so neither the agent's defaults nor a user's own `allow` rule
+    /// hands them back.
+    #[test]
+    fn a_read_only_session_denies_edit_and_bash_last() {
+        let body = session_create_body(PermissionMode::Plan, Some("model-gateway/glm-5.3"), true);
+        assert_eq!(body["agent"], "plan");
+        let rules = body["permission"].as_array().unwrap();
+        let denied: Vec<_> = rules
+            .iter()
+            .filter(|rule| rule["action"] == "deny" && rule["pattern"] == "*")
+            .map(|rule| rule["permission"].as_str().unwrap())
+            .collect();
+        assert_eq!(denied, ["edit", "bash"]);
+
+        // After any rule the mode itself carries.
+        let ask = session_create_body(PermissionMode::Ask, None, true);
+        let rules = ask["permission"].as_array().unwrap();
+        let last_bash = rules
+            .iter()
+            .rposition(|rule| rule["permission"] == "bash")
+            .unwrap();
+        assert_eq!(rules[last_bash]["action"], "deny");
+
+        let plain = session_create_body(PermissionMode::Plan, None, false);
+        assert!(plain.get("permission").is_none());
+    }
+
     #[test]
     fn permission_mode_mapping_matches_0033() {
         assert_eq!(
-            session_create_body(PermissionMode::Plan, None)["agent"],
+            session_create_body(PermissionMode::Plan, None, false)["agent"],
             "plan"
         );
         assert_eq!(
-            session_create_body(PermissionMode::Ask, None)["agent"],
+            session_create_body(PermissionMode::Ask, None, false)["agent"],
             "build"
         );
         assert_eq!(
-            session_create_body(PermissionMode::Auto, None)["agent"],
+            session_create_body(PermissionMode::Auto, None, false)["agent"],
             "build"
         );
-        let ask = session_create_body(PermissionMode::Ask, None);
+        let ask = session_create_body(PermissionMode::Ask, None, false);
         let rules = ask["permission"].as_array().unwrap();
         assert!(rules
             .iter()
             .any(|rule| { rule["permission"] == "bash" && rule["action"] == "ask" }));
-        let auto = session_create_body(PermissionMode::Auto, None);
+        let auto = session_create_body(PermissionMode::Auto, None, false);
         let rules = auto["permission"].as_array().unwrap();
         assert!(rules
             .iter()
@@ -1569,7 +1621,7 @@ mod tests {
         assert!(rules
             .iter()
             .any(|rule| { rule["permission"] == "bash" && rule["action"] == "ask" }));
-        let allow = session_create_body(PermissionMode::Allow, None);
+        let allow = session_create_body(PermissionMode::Allow, None, false);
         assert_eq!(allow["agent"], "build");
         let rules = allow["permission"].as_array().unwrap();
         assert!(rules.iter().all(|rule| rule["action"] == "allow"));
@@ -1583,34 +1635,39 @@ mod tests {
 
     #[test]
     fn session_model_uses_provider_and_id() {
-        let slash = session_create_body(PermissionMode::Plan, Some("anthropic/claude-opus-5"));
+        let slash =
+            session_create_body(PermissionMode::Plan, Some("anthropic/claude-opus-5"), false);
         assert_eq!(slash["model"]["providerID"], "anthropic");
         assert_eq!(slash["model"]["id"], "claude-opus-5");
         assert!(slash["model"].get("modelID").is_none());
 
-        let bare = session_create_body(PermissionMode::Allow, Some("gpt-5.6-sol"));
+        let bare = session_create_body(PermissionMode::Allow, Some("gpt-5.6-sol"), false);
         assert_eq!(bare["model"]["providerID"], "openai");
         assert_eq!(bare["model"]["id"], "gpt-5.6-sol");
 
-        let grok = session_create_body(PermissionMode::Ask, Some("grok-4.5"));
+        let grok = session_create_body(PermissionMode::Ask, Some("grok-4.5"), false);
         assert_eq!(grok["model"]["providerID"], "xai");
         assert_eq!(grok["model"]["id"], "grok-4.5");
 
-        let gemini = session_create_body(PermissionMode::Plan, Some("gemini-3-pro"));
+        let gemini = session_create_body(PermissionMode::Plan, Some("gemini-3-pro"), false);
         assert_eq!(gemini["model"]["providerID"], "google");
 
-        let pickle = session_create_body(PermissionMode::Plan, Some("big-pickle"));
+        let pickle = session_create_body(PermissionMode::Plan, Some("big-pickle"), false);
         assert_eq!(pickle["model"]["providerID"], "opencode");
         assert_eq!(pickle["model"]["id"], "big-pickle");
 
-        let gateway =
-            session_create_body(PermissionMode::Plan, Some("model-gateway/claude-opus-5"));
+        let gateway = session_create_body(
+            PermissionMode::Plan,
+            Some("model-gateway/claude-opus-5"),
+            false,
+        );
         assert_eq!(gateway["model"]["providerID"], "model-gateway");
         assert_eq!(gateway["model"]["id"], "claude-opus-5");
 
         let fireworks = session_create_body(
             PermissionMode::Plan,
             Some("accounts/fireworks/models/deepseek-v4-pro"),
+            false,
         );
         assert_eq!(fireworks["model"]["providerID"], "fireworks-ai");
         assert_eq!(
@@ -1618,11 +1675,11 @@ mod tests {
             "accounts/fireworks/models/deepseek-v4-pro"
         );
 
-        let deepseek = session_create_body(PermissionMode::Plan, Some("deepseek-v4-pro"));
+        let deepseek = session_create_body(PermissionMode::Plan, Some("deepseek-v4-pro"), false);
         assert_eq!(deepseek["model"]["providerID"], "model-gateway");
         assert_eq!(deepseek["model"]["id"], "deepseek-v4-pro");
 
-        let unknown = session_create_body(PermissionMode::Plan, Some("mystery-weights"));
+        let unknown = session_create_body(PermissionMode::Plan, Some("mystery-weights"), false);
         assert!(unknown.get("model").is_none());
     }
 

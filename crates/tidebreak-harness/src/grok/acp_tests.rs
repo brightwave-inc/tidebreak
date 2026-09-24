@@ -267,6 +267,7 @@ fn session_with(
         tool_bridge: None,
         apps: None,
         project_config,
+        read_only: false,
     };
     (Arc::new(GrokSession::new(spec, "1.0.13".into())), sink)
 }

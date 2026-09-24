@@ -342,6 +342,7 @@ impl HarnessEngine {
                 // sandbox, not on a person's machine, so the sandbox keeps
                 // loading it. Repository trust governs machine sessions.
                 project_config: tidebreak_harness::ProjectConfig::Load,
+                read_only: false,
             })
             .await
             .map_err(|error| EngineError {
