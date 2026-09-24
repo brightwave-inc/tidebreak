@@ -61,6 +61,7 @@ import {
   seedCodeComposer,
   sendCodeComposer,
   sendCodeTurn,
+  turnNamer,
   useCodeComposerStatus,
   setCodeComposerNotice,
   useCodeComposerSendStatus,
@@ -68,10 +69,12 @@ import {
 } from "./CodeSessionSend";
 import { useCodeUiStore } from "./CodeUiStore";
 import {
+  commentsReadyToSend,
   reviewSummary,
   usePendingReview,
   usePendingReviewStore,
 } from "./diff/pendingReview";
+import { messageWithReviewComments } from "./diff/reviewComments";
 import {
   codeModelVendor,
   effortLadder,
@@ -873,11 +876,21 @@ export function CodeComposer({
   const { confirm, dialog: confirmDialog } = useConfirm();
   const pendingReview = usePendingReview(reviewWorkspaceId);
   const summary = reviewSummary(pendingReview.comments, pendingReview.sending);
+  // While a turn runs, comments wait for the next turn unless the reader adds
+  // them to the steer or follow-up being written. Each turn starts with them
+  // held back.
+  const [addReviewNow, setAddReviewNow] = useState(false);
+  useEffect(() => {
+    setAddReviewNow(false);
+  }, [running]);
+  const reviewGoes = !running || addReviewNow;
   const reviewComments = useMemo<ComposerReviewComments | undefined>(() => {
     if (!reviewWorkspaceId || summary.count === 0) return undefined;
     return {
       count: summary.count,
       files: summary.files,
+      included: reviewGoes,
+      ...(running ? { onIncludedChange: setAddReviewNow } : {}),
       onRemove: () => {
         void confirm({
           title:
@@ -895,7 +908,14 @@ export function CodeComposer({
         });
       },
     };
-  }, [reviewWorkspaceId, summary.count, summary.files, confirm]);
+  }, [
+    reviewWorkspaceId,
+    summary.count,
+    summary.files,
+    reviewGoes,
+    running,
+    confirm,
+  ]);
 
   useEffect(() => {
     draftRef.current = draft;
@@ -952,15 +972,17 @@ export function CodeComposer({
     if (!session) return;
     // One send path for every code message. On the start surface it creates
     // the session first and hands this draft to that session's composer.
-    await sendCodeComposer({
+    const carriesReview = reviewGoes && reviewWorkspaceId !== undefined;
+    const sent = await sendCodeComposer({
       client,
       key: draftKey,
       session,
       workspaceFiles: workspaceFiles?.items,
-      reviewWorkspaceId,
+      reviewWorkspaceId: carriesReview ? reviewWorkspaceId : undefined,
       send: async (target, message, attachments) =>
         post(message, attachments, target),
     });
+    if (sent && carriesReview) setAddReviewNow(false);
   }
 
   async function submitOfferedPrompt(text: string) {
@@ -1026,14 +1048,35 @@ export function CodeComposer({
   async function steer() {
     const submittedDraft = draftRef.current;
     const submittedPastedTexts = pastedTexts;
-    const message = messageWithPastedText(submittedDraft, submittedPastedTexts);
-    if (!message || disabled) return;
+    const typed = messageWithPastedText(submittedDraft, submittedPastedTexts);
+    // A steer carries the comments only when the reader added them to it.
+    const reviewWorkspace =
+      reviewGoes && reviewWorkspaceId !== undefined
+        ? reviewWorkspaceId
+        : undefined;
+    const reviewReady =
+      reviewWorkspace !== undefined &&
+      commentsReadyToSend(reviewWorkspace).length > 0;
+    if ((!typed && !reviewReady) || disabled) return;
     if (!onSteer) {
       setSteerStatus(null);
       setSteerError(STEERING_UNAVAILABLE);
       setCodeComposerNotice(draftKey, null);
       return;
     }
+    const review = reviewWorkspace
+      ? usePendingReviewStore.getState().claim(reviewWorkspace)
+      : [];
+    const settleReview = (accepted: boolean) => {
+      if (!reviewWorkspace || review.length === 0) return;
+      usePendingReviewStore
+        .getState()
+        .finishSend(reviewWorkspace, review, accepted);
+      if (accepted) setAddReviewNow(false);
+    };
+    const message = messageWithReviewComments(typed, review, {
+      turnName: sessionId ? turnNamer(sessionId) : undefined,
+    });
     const request = steerRequestRef.current + 1;
     steerRequestRef.current = request;
     setSteerPending(true);
@@ -1042,6 +1085,7 @@ export function CodeComposer({
     setCodeComposerNotice(draftKey, null);
     try {
       await onSteer(message);
+      settleReview(true);
       if (steerRequestRef.current !== request) return;
       const current = useComposerDrafts.getState();
       if (
@@ -1055,6 +1099,7 @@ export function CodeComposer({
       }
       setSteerStatus("Steer sent");
     } catch (err) {
+      settleReview(false);
       if (steerRequestRef.current !== request) return;
       setSteerStatus(null);
       setSteerError(err instanceof Error ? err.message : "Could not steer");

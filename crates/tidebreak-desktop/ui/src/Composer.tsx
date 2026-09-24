@@ -13,6 +13,7 @@ import {
 } from "react";
 import {
   ArrowUpRight,
+  Check,
   ChevronDown,
   FileText,
   FolderOpen,
@@ -269,10 +270,21 @@ export type ComposerWorkspaceFiles = {
  * They are context like a pasted file: one chip says how many there are and
  * across how many files, and a message may go with only the comments and no
  * text of its own. Code mode passes these; chat has no diff to comment on.
+ *
+ * While a turn runs they never hold a message back. A steer or a queued
+ * follow-up goes without them, and they wait for the next turn, unless the
+ * reader adds them to that message.
  */
 export type ComposerReviewComments = {
   count: number;
   files: number;
+  /** Whether they go with the message being written. */
+  included: boolean;
+  /**
+   * Add them to the message being written, or leave them for the next turn.
+   * Offered while a turn runs; otherwise they always go.
+   */
+  onIncludedChange?: (included: boolean) => void;
   /** Take them off the next message; the surface asks first. */
   onRemove: () => void;
 };
@@ -552,17 +564,19 @@ function ComposerView({
   const modEnter = command ? "⌘Enter" : "Ctrl+Enter";
   const submissionText = messageWithPastedText(draft, pastedTexts?.items ?? []);
   const reviewCount = reviewComments?.count ?? 0;
-  // Comments are a message on their own: the review is what the reader wrote.
-  const hasDraft = Boolean(submissionText.trim()) || reviewCount > 0;
+  // Comments are a message on their own: the review is what the reader
+  // wrote. Comments held for the next turn are not part of this message.
+  const reviewGoes = reviewCount > 0 && (reviewComments?.included ?? false);
+  const hasDraft = Boolean(submissionText.trim()) || reviewGoes;
   const steerHasUnsupportedCharacter = active && submissionText.includes("\0");
   const steerTooLong =
     active && [...submissionText.trim()].length > MAX_STEER_CHARACTERS;
   const imageBlocker = imageSendBlocker(images);
+  // Comments are text, so they never stop a steer: it carries them when the
+  // reader added them, and leaves them for the next turn otherwise.
   const attachmentsBlockSteer =
     active &&
-    ((images?.items.length ?? 0) > 0 ||
-      (files?.items.length ?? 0) > 0 ||
-      reviewCount > 0);
+    ((images?.items.length ?? 0) > 0 || (files?.items.length ?? 0) > 0);
   const voiceWorking = voice?.state !== undefined && voice.state !== "idle";
   const canSubmit =
     !inputDisabled &&
@@ -1838,7 +1852,8 @@ function WorkspaceFileChip({
 /**
  * The diff comments that go with the next message: how many, and across
  * how many files. Each comment lives on its lines in the diff; the chip is
- * the reminder that they are about to go.
+ * the reminder that they are about to go. While a turn runs it says they
+ * wait for the next turn, and offers to add them to this message instead.
  */
 function ReviewCommentsChip({
   review,
@@ -1849,6 +1864,7 @@ function ReviewCommentsChip({
 }) {
   const comments = `${review.count} ${review.count === 1 ? "comment" : "comments"}`;
   const files = `${review.files} ${review.files === 1 ? "file" : "files"}`;
+  const choice = review.onIncludedChange;
   return (
     <li className="relative flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 py-1.5 pl-2 pr-7 text-muted-foreground">
       <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-background">
@@ -1860,7 +1876,22 @@ function ReviewCommentsChip({
         </strong>
         <small className="max-w-[18rem] truncate text-2xs">
           {comments} on {files}
+          {choice &&
+            (review.included
+              ? " · go with this message"
+              : " · wait for the next turn")}
         </small>
+        {choice && (
+          <button
+            type="button"
+            aria-pressed={review.included}
+            className="flex w-fit cursor-pointer items-center gap-1 rounded-sm text-2xs font-medium text-foreground underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => choice(!review.included)}
+          >
+            {review.included && <Check className="size-3" aria-hidden />}
+            Add to this message
+          </button>
+        )}
       </span>
       <button
         type="button"

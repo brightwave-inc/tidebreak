@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, within } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { CodeComposer } from "@/code/CodeComposer";
@@ -62,8 +62,11 @@ function comment(id: string, path: string, body: string): ReviewComment {
 
 function seed(draft: string) {
   return async () => {
+    usePendingReviewStore.setState((state) => ({
+      byWorkspace: { ...state.byWorkspace, [WORKSPACE]: [] },
+      sending: { ...state.sending, [WORKSPACE]: [] },
+    }));
     const store = usePendingReviewStore.getState();
-    store.clear(WORKSPACE);
     store.add(
       WORKSPACE,
       comment("r1", "src/code/sessionQueue.ts", "Keep the old field name."),
@@ -81,15 +84,16 @@ function seed(draft: string) {
   };
 }
 
-function ComposerReviewStory() {
+function ComposerReviewStory({ running = false }: { running?: boolean }) {
   return (
     <AppContextProvider value={app()}>
       <CodeComposer
-        running={false}
+        running={running}
         permissionMode="ask"
         sessionId="sess-review"
         reviewWorkspaceId={WORKSPACE}
         onSend={fn()}
+        onSteer={fn()}
         onInterrupt={fn()}
       />
     </AppContextProvider>
@@ -133,4 +137,37 @@ export const CommentsOnly: Story = {
 
 export const CommentsWithAMessage: Story = {
   loaders: [seed("Fix these, then run the queue tests.")],
+};
+
+/**
+ * A turn is running. A steer or a follow-up goes without the comments,
+ * which wait for the next turn, unless the reader adds them to it.
+ */
+export const WhileATurnRuns: Story = {
+  args: { running: true },
+  loaders: [seed("Also check the tray on a narrow window.")],
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.findByText("3 comments on 2 files · wait for the next turn"),
+    ).resolves.toBeVisible();
+    await expect(
+      canvas.findByRole("button", { name: "Add to this message" }),
+    ).resolves.toHaveAttribute("aria-pressed", "false");
+  },
+};
+
+/** The reader added the comments to the follow-up they are writing. */
+export const AddedToAFollowUp: Story = {
+  args: { running: true },
+  loaders: [seed("Also check the tray on a narrow window.")],
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Add to this message" }),
+    );
+    await expect(
+      canvas.findByText("3 comments on 2 files · go with this message"),
+    ).resolves.toBeVisible();
+  },
 };

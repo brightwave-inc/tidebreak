@@ -172,9 +172,10 @@ describe("CodeComposer diff comments", () => {
     );
   });
 
-  it("queues comments with a follow-up rather than steering them in", async () => {
+  it("steers without the comments, which wait for the next turn", async () => {
     seed();
     useUiStore.setState({ activeTurnSendMode: "steer" });
+    const onSteer = vi.fn().mockResolvedValue(undefined);
     renderComposer(
       <CodeComposer
         running
@@ -182,13 +183,81 @@ describe("CodeComposer diff comments", () => {
         sessionId="sess-1"
         reviewWorkspaceId="ws-1"
         onSend={vi.fn()}
-        onSteer={vi.fn()}
+        onSteer={onSteer}
         onInterrupt={vi.fn()}
       />,
     );
     expect(
-      screen.getByRole("button", { name: "Queue to include attachments" }),
-    ).toBeDisabled();
+      screen.getByText("3 comments on 2 files · wait for the next turn"),
+    ).toBeInTheDocument();
+    // Nothing typed and nothing added: there is nothing to steer with.
+    expect(
+      screen.queryByRole("button", { name: "Steer active response" }),
+    ).toBeNull();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "Also run the queue tests." },
+    });
+    const steerButton = screen.getByRole("button", {
+      name: "Steer active response",
+    });
+    expect(steerButton).toBeEnabled();
+    fireEvent.click(steerButton);
+    await waitFor(() =>
+      expect(onSteer).toHaveBeenCalledWith("Also run the queue tests."),
+    );
+    expect(usePendingReviewStore.getState().byWorkspace["ws-1"]).toHaveLength(
+      3,
+    );
+  });
+
+  it("queues a follow-up without the comments, and with them once added", async () => {
+    seed();
+    const onSend = vi.fn().mockResolvedValue(QUEUED);
+    renderComposer(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        sessionId="sess-1"
+        reviewWorkspaceId="ws-1"
+        onSend={onSend}
+        onSteer={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "Then tidy the imports." } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith("Then tidy the imports."),
+    );
+    expect(usePendingReviewStore.getState().byWorkspace["ws-1"]).toHaveLength(
+      3,
+    );
+
+    const add = screen.getByRole("button", { name: "Add to this message" });
+    expect(add).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(add);
+    expect(add).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByText("3 comments on 2 files · go with this message"),
+    ).toBeInTheDocument();
+    // The comments alone make a follow-up now.
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Queue message for after this response",
+      }),
+    );
+    await waitFor(() =>
+      expect(onSend).toHaveBeenLastCalledWith(
+        expect.stringMatching(/^<review_comments>\n/),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        usePendingReviewStore.getState().byWorkspace["ws-1"],
+      ).toBeUndefined(),
+    );
   });
 });
 

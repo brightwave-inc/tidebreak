@@ -402,7 +402,7 @@ const GATEWAY_STATUSES = new Set([502, 503, 504]);
  * How a review block names a turn's diff to the conversation it goes to:
  * "turn 3" for one of its own turns, null for another conversation's.
  */
-function turnNamer(sessionId: string): TurnNamer {
+export function turnNamer(sessionId: string): TurnNamer {
   return (turnId) => {
     const ordinal = peekCodeSession(sessionId)
       ?.store.getState()
