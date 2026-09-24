@@ -14,11 +14,11 @@ import { foldText } from "./messageSearch";
 
 /** Why the find bar searches only what an incognito chat has loaded. */
 export const INCOGNITO_FIND_NOTE =
-  "Incognito conversations are left out of search, so this finds only in the messages loaded here.";
+  "Incognito conversations are kept out of search, so this finds only in the messages loaded here.";
 
 /** Why the find bar searches only what a session shared with you has loaded. */
 export const SHARED_FIND_NOTE =
-  "Search reads only your own conversations, so in a session shared with you this finds only in what is loaded here.";
+  "Search covers only your own sessions, so this finds only in what is loaded here.";
 
 /**
  * Whether `text` holds every one of `terms`, each at the start of a word or
