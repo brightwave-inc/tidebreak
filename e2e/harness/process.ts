@@ -16,21 +16,35 @@ export function listen(server: Server): Promise<number> {
   });
 }
 
-/** Run a command and return its standard output, failing loudly on a non-zero exit. */
+/**
+ * Run a command and return its standard output, failing loudly on a non-zero
+ * exit. `timeoutMs` stops a command that hangs, such as an image pull from a
+ * registry that never answers, instead of letting it hold the run.
+ */
 export async function command(
   file: string,
   args: string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
 ): Promise<string> {
   try {
     const { stdout } = await run(file, args, {
       cwd: options.cwd,
       env: options.env ?? process.env,
       maxBuffer: 16 * 1024 * 1024,
+      timeout: options.timeoutMs ?? 0,
     });
     return stdout;
   } catch (error) {
-    const failure = error as { stderr?: string; message: string };
+    const failure = error as {
+      stderr?: string;
+      message: string;
+      killed?: boolean;
+    };
+    if (failure.killed && options.timeoutMs) {
+      throw new Error(
+        `${file} ${args.join(" ")} did not finish within ${options.timeoutMs / 1000} s.`,
+      );
+    }
     throw new Error(
       `${file} ${args.join(" ")} failed: ${failure.stderr?.trim() || failure.message}`,
     );

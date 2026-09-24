@@ -34,6 +34,16 @@ export type Machine = {
 const DEFAULT_PROVIDER: ProviderStep[] = [{ text: "Scripted answer." }];
 const DEFAULT_HARNESS = codeTurn({ reply: "Scripted engine reply." });
 
+/**
+ * Servers this worker started and has not stopped. A worker that exits
+ * without running its fixtures' teardown, because the runner was killed,
+ * still takes them down with it.
+ */
+const running = new Set<ChildProcess>();
+process.on("exit", () => {
+  for (const child of running) child.kill("SIGKILL");
+});
+
 export async function startMachine({
   services,
   root,
@@ -104,8 +114,12 @@ export async function startMachine({
   // `close` fires once the process is gone and its output is drained, which
   // is when the log can end.
   const closed = new Promise<void>((resolve) =>
-    child.once("close", () => resolve()),
+    child.once("close", () => {
+      running.delete(child);
+      resolve();
+    }),
   );
+  if (child.pid !== undefined) running.add(child);
   child.stderr?.pipe(log, { end: false });
   const stop = () => stopServer(child, closed, log);
   let url: string;

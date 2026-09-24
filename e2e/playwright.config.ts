@@ -17,6 +17,10 @@ export default defineConfig({
   // A flaky flow should fail the lane, not pass on a second try.
   retries: 0,
   timeout: 90_000,
+  // The whole run normally takes about a minute. A run that hangs stops here;
+  // Playwright then gives its teardown as long again, which still ends inside
+  // the CI step's own limit, so the flows' traces are written and uploaded.
+  globalTimeout: 5 * 60_000,
   expect: { timeout: 20_000 },
   outputDir: "test-results",
   reporter: process.env.CI ? [["list"], ["github"]] : [["list"]],
