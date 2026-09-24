@@ -281,6 +281,39 @@ describe("codeHomeSections", () => {
     expect(sections.recent).toEqual([]);
   });
 
+  it("keeps a pull request that needs attention in view when setup also failed", () => {
+    // Restoring a workspace keeps its pull request, and the setup script can
+    // still fail afterwards: the row must not hide what blocks the merge.
+    const sections = codeHomeSections({
+      repos: REPOS,
+      workspaces: [
+        workspace("red-restored", {
+          status: "setup_failed",
+          pr: pr({ number: 44, ...FAILING }),
+        }),
+        workspace("green-restored", {
+          status: "setup_failed",
+          pr: pr({ number: 45, ...READY }),
+        }),
+      ],
+      digests: {},
+    });
+    const row = (key: string) =>
+      sections.needs_you.find((item) => item.key === `workspace:${key}`);
+    expect(sections.needs_you).toHaveLength(2);
+    expect(row("red-restored")).toMatchObject({
+      status: { label: "Checks failed · Setup failed", tone: "critical" },
+      reference: { kind: "pull_request", number: 44 },
+      target: { kind: "pull_request", number: 44 },
+    });
+    // Good news waits until the setup works again.
+    expect(row("green-restored")).toMatchObject({
+      status: { label: "Setup failed", tone: "critical" },
+      target: { kind: "workspace", workspaceId: "green-restored" },
+    });
+    expect(sections.ready_to_merge).toEqual([]);
+  });
+
   it("classifies a workspace-less conversation by the same rules as a workspace", () => {
     const runningStall = {
       lifecycle: "running" as const,

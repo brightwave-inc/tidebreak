@@ -330,13 +330,11 @@ function classify({
 
   // The checkout survived, but the setup script never finished: the reader
   // retries it or fixes it from the workspace.
-  if (setupFailed) {
-    return {
-      section: "needs_you",
-      status: { label: "Setup failed", tone: "critical" },
-      glyph: { kind: "alert", tone: "critical" },
-    };
-  }
+  const setupFailedRow: Classified = {
+    section: "needs_you",
+    status: { label: "Setup failed", tone: "critical" },
+    glyph: { kind: "alert", tone: "critical" },
+  };
 
   const notice = readyToMergeNotice(digest?.attention, pr);
   if (pr) {
@@ -353,12 +351,20 @@ function classify({
     if (status.group === "attention") {
       return {
         section: "needs_you",
-        status: status.headline,
+        // A failed setup rides along instead of hiding what blocks the merge.
+        status: setupFailed
+          ? {
+              ...status.headline,
+              label: `${status.headline.label} · Setup failed`,
+            }
+          : status.headline,
         glyph,
         reference,
         target: pullRequest,
       };
     }
+    // A failed setup outranks a pull request that is ready or still checking.
+    if (setupFailed) return setupFailedRow;
     // The classifier decides readiness. A watch's "ready to merge" notice
     // only fills in while the host has not yet said whether it can merge.
     if (
@@ -380,6 +386,8 @@ function classify({
       reference,
     };
   }
+
+  if (setupFailed) return setupFailedRow;
 
   // A ready notice with no pull request state to check it against: the
   // notice is the only word, and it opens where it was written.
