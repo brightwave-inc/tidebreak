@@ -66,6 +66,15 @@ export function useChatTranscriptSearch({
   historyRef.current = historyView;
   const [pending, setPending] = useState<Reveal | null>(null);
   const latest = useRef(0);
+  // The session store holds whichever conversation is open. A page that
+  // lands after this one closed belongs to no transcript on screen, so
+  // closing it retires every jump still waiting for a page.
+  useEffect(
+    () => () => {
+      latest.current += 1;
+    },
+    [chatId],
+  );
 
   const reveal = useCallback(
     async (messageId: string, terms: readonly string[]) => {
