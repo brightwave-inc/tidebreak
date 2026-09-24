@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, waitFor, within } from "storybook/test";
 
 import type { ApiClient } from "@/api/client";
-import type { CodeWorkspaceDiff } from "@/api/types";
+import type { CodeWorkspaceDiff, QueuedCodeTurn } from "@/api/types";
+import { codeQueueApi, QueueTray } from "@/QueueTray";
 import { DiffPanel, type DiffRevertActions } from "@/code/DiffPanel";
 import {
   useDiffPreferences,
@@ -11,9 +12,11 @@ import {
 } from "@/code/diff/diffPreferences";
 import { DIFF_CHUNK_ROWS, DiffView } from "@/code/diff/DiffView";
 import { usePendingReviewStore } from "@/code/diff/pendingReview";
-import type {
-  ReviewComment,
-  ReviewCommentLine,
+import {
+  messageWithReviewComments,
+  reviewBlockOf,
+  type ReviewComment,
+  type ReviewCommentLine,
 } from "@/code/diff/reviewComments";
 import { diffRows } from "@/code/diff/diffModel";
 import { groupUnifiedDiff } from "@/code/unifiedDiff";
@@ -385,6 +388,132 @@ export const HiddenWithWhitespace: Story = {
         "Hiding whitespace leaves out the lines these comments are on.",
       ),
     ).resolves.toBeVisible();
+  },
+};
+
+/**
+ * The agent reverted a file the reader had commented on. The file stays
+ * first in the list, under its path, with its comments outdated and quoted,
+ * and they go to the agent marked outdated.
+ */
+export const FileLeftTheDiff: Story = {
+  args: {
+    diff: CHECKPOINT_DIFF,
+    path: undefined,
+    workspaceId: "ws-diff-gone",
+  },
+  loaders: [seedReview("ws-diff-gone", QUEUE_COMMENTS.slice(0, 2))],
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.findByText("No longer in this diff"),
+    ).resolves.toBeVisible();
+    await expect(canvas.findAllByText("Outdated")).resolves.toHaveLength(2);
+  },
+};
+
+/**
+ * Written with whitespace hidden, on a line the agent only re-indented. The
+ * queued message's text names the line, but not its old indentation.
+ */
+const RESTORED_COMMENT: ReviewComment = {
+  ...comment(
+    "c-restored",
+    LAYOUT_PATH,
+    [
+      {
+        kind: "context",
+        oldNo: 21,
+        newNo: 22,
+        text: "    useEffect(() => {",
+        oldText: "  useEffect(() => {",
+      },
+    ],
+    "Hooks cannot sit under a condition. Keep the effect at the top and check `inspector` inside it.",
+  ),
+  context: {
+    before: ["  if (inspector) {", "  const [open, setOpen] = useState(true);"],
+    after: [
+      '      window.addEventListener("resize", onResize);',
+      '      return () => window.removeEventListener("resize", onResize);',
+      "    }, [onResize]);",
+    ],
+  },
+};
+
+const RESTORED_MESSAGE = messageWithReviewComments(
+  "Then rerun the layout tests.",
+  [RESTORED_COMMENT],
+);
+
+/** A code session's queue holding one message, until it is deleted. */
+function queueClient(message: string): ApiClient {
+  let rows: QueuedCodeTurn[] = [
+    {
+      id: "q-review",
+      session_id: "sess-story",
+      message,
+      position: 0,
+      created_at: "2026-09-24T10:05:00.000Z",
+      updated_at: "2026-09-24T10:05:00.000Z",
+    },
+  ];
+  return {
+    listCodeQueuedTurns: async () => ({ queued: rows, paused: false }),
+    deleteCodeQueuedTurn: async (_session: string, id: string) => {
+      rows = rows.filter((row) => row.id !== id);
+    },
+  } as unknown as ApiClient;
+}
+
+function RestoredFromQueueStory({ workspaceId }: { workspaceId: string }) {
+  const [client] = useState(() => queueClient(RESTORED_MESSAGE));
+  const queue = useMemo(
+    () => codeQueueApi(client, "sess-story", { workspaceId }),
+    [client, workspaceId],
+  );
+  return (
+    <div className="flex flex-col gap-3">
+      <QueueTray queue={queue} active onStop={async () => {}} />
+      <DiffStory
+        diff={REINDENT_DIFF}
+        path={LAYOUT_PATH}
+        workspaceId={workspaceId}
+        height={420}
+      />
+    </div>
+  );
+}
+
+/**
+ * Deleting a queued message gives its comments back to the review as they
+ * were when it went, not as its text reads them: this one keeps its old
+ * indentation and the code around it, so it returns under its line.
+ */
+export const RestoredFromAQueuedMessage: Story = {
+  args: { workspaceId: "ws-diff-restored" },
+  loaders: [
+    seedReview("ws-diff-restored", []),
+    async () => {
+      usePendingReviewStore
+        .getState()
+        .keepQueued("ws-diff-restored", reviewBlockOf(RESTORED_MESSAGE)!, [
+          RESTORED_COMMENT,
+        ]);
+      return {};
+    },
+  ],
+  render: ({ workspaceId }) => (
+    <RestoredFromQueueStory workspaceId={workspaceId} />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.findByText("1 review comment")).resolves.toBeVisible();
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Delete queued message" }),
+    );
+    const card = await canvas.findByRole("article", { name: "Line 22" });
+    await expect(card.closest("[data-diff-outdated]")).toBeNull();
   },
 };
 
