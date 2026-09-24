@@ -199,50 +199,76 @@ export function readyToMergeNotice(
 }
 
 /**
- * Rank a workspace for the by-status rail. A direct need wins, then a running
- * engine, then an open PR, then done-unreviewed, then a workspace whose setup
- * script failed, then idle. Archived is last. A digest may change the rank;
- * viewing or selecting never does.
+ * What one conversation's digest asks of the reader, before its workspace or
+ * pull request adds anything: waiting on them, working right now, or neither.
  *
  * A stalled state is only a silence heuristic. While the lifecycle still says
- * running, the workspace stays with live work and the session row carries the
- * warning. A stale stalled state joins needs-you; automatic recovery stays with live work. Ready to
- * merge does not: notify and watch store it as needs-you, but it is a
- * successful pull-request state, and a merged or closed pull request makes
- * that prompt stale. Idle or ended sessions with turns join Done, matching
- * `attentionMarkForDigest`. A failed setup ranks below live work because the
- * checkout survives — but above idle, because nothing else on the card says
- * the script never finished.
+ * running, the conversation stays with live work and its row carries the
+ * warning; a stall that outlived its turn waits on the reader. Automatic
+ * recovery stays with live work. Ready to merge is not a need: notify and
+ * watch store it as needs-you, but it is a successful pull-request state.
+ *
+ * The rail's status ranks, the per-workspace digest collapse, and the Code
+ * home all classify from this, so a workspace card and a workspace-less
+ * conversation follow one rule.
  */
-export function workspaceStatusRank(
-  workspace: CodeWorkspaceSnapshot,
+export function digestActivityState(
   digest: CodeSessionDigest | undefined,
-): WorkspaceStatusRank {
-  digest = digest ? recoveryDigest(digest) : undefined;
-  if (isPutAway(workspace)) return "archived";
-  const attentionType = digest?.attention.state.type;
-  const pr = digest?.pr_state ?? workspace.pr;
-  if (
-    attentionType === "needs_you" &&
-    !isReadyToMergeAttention(digest?.attention)
-  ) {
+): "needs_you" | "running" | null {
+  if (!digest) return null;
+  digest = recoveryDigest(digest);
+  const attention = digest.attention.state.type;
+  if (attention === "needs_you" && !isReadyToMergeAttention(digest.attention)) {
     return "needs_you";
   }
-  if (digest?.lifecycle === "running" || attentionType === "fenced")
+  if (digest.lifecycle === "running" || attention === "fenced") {
     return "running";
-  if (attentionType === "stalled") return "needs_you";
+  }
+  if (attention === "stalled") return "needs_you";
+  return null;
+}
+
+/**
+ * Rank one conversation from its digest and pull request: a need, then live
+ * work, then an open PR, then done-unreviewed, then idle. Idle or ended
+ * sessions with turns join Done, matching `attentionMarkForDigest`.
+ */
+function conversationStatusRank(
+  digest: CodeSessionDigest | undefined,
+  pr: PrStateInput | undefined,
+): Exclude<WorkspaceStatusRank, "setup_failed" | "archived"> {
+  const activity = digestActivityState(digest);
+  if (activity) return activity;
   if (pr) {
     const lifecycle = pullRequestLifecycle(pr);
     if (lifecycle === "open" || lifecycle === "draft") return "pr_open";
   }
   if (
-    attentionType === "done_unreviewed" ||
-    (digest !== undefined && digest.turn_count > 0)
+    digest &&
+    (digest.attention.state.type === "done_unreviewed" || digest.turn_count > 0)
   ) {
     return "done_unreviewed";
   }
-  if (workspace.status === "setup_failed") return "setup_failed";
   return "idle";
+}
+
+/**
+ * Rank a workspace for the by-status rail: its conversation's rank
+ * (`digestActivityState` says what counts as a need and as live work), with
+ * archived last. A digest may change the rank; viewing or selecting never
+ * does. A failed setup ranks below live work because the checkout survives —
+ * but above idle, because nothing else on the card says the script never
+ * finished.
+ */
+export function workspaceStatusRank(
+  workspace: CodeWorkspaceSnapshot,
+  digest: CodeSessionDigest | undefined,
+): WorkspaceStatusRank {
+  if (isPutAway(workspace)) return "archived";
+  const rank = conversationStatusRank(digest, digest?.pr_state ?? workspace.pr);
+  return rank === "idle" && workspace.status === "setup_failed"
+    ? "setup_failed"
+    : rank;
 }
 
 export type WorkspaceCardStatus = {
@@ -400,22 +426,38 @@ export function arrangeWorkspaceSections(
   });
 }
 
+/** Rank a workspace-less conversation by the same rule as a workspace card. */
 export function sessionStatusRank(
   digest: CodeSessionDigest,
 ): WorkspaceStatusRank {
-  digest = recoveryDigest(digest);
-  const attention = digest.attention.state.type;
-  if (attention === "needs_you" || attention === "stalled") return "needs_you";
-  if (digest.lifecycle === "running" || attention === "fenced")
-    return "running";
-  if (
-    digest.pr_state &&
-    ["open", "draft"].includes(pullRequestLifecycle(digest.pr_state))
-  )
-    return "pr_open";
-  if (attention === "done_unreviewed" || digest.turn_count > 0)
-    return "done_unreviewed";
-  return "idle";
+  return conversationStatusRank(digest, digest.pr_state);
+}
+
+/**
+ * Where a conversation without a workspace came from, in words: a Slack
+ * channel or direct message, another channel's own name, or nothing for one
+ * the desktop started. Slack keys read `workspace/channel/thread`, and a
+ * direct-message channel id starts with `D`.
+ */
+export function conversationSourceLabel(
+  digest: Pick<CodeSessionDigest, "external_origin">,
+): string | undefined {
+  const origin = digest.external_origin;
+  if (!origin) return undefined;
+  if (origin.channel_kind !== "slack") return origin.channel_kind;
+  const channel = origin.external_key.split("/")[1];
+  return channel?.startsWith("D") ? "Slack direct message" : "Slack channel";
+}
+
+/** A conversation's name, or where it came from when it has none yet. */
+export function conversationTitle(
+  digest: Pick<CodeSessionDigest, "external_origin" | "title">,
+): string {
+  const source = conversationSourceLabel(digest);
+  return (
+    digest.title?.trim() ||
+    (source ? `${source} conversation` : "Untitled conversation")
+  );
 }
 
 /** Flatten sources in display order while preserving their group metadata. */

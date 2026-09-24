@@ -25,6 +25,7 @@ import {
   sessionActivityLabel,
   sessionActivityLineLabel,
   sessionRowLabel,
+  sessionStatusRank,
   readyToMergeNotice,
   workspaceCardLabel,
   workspaceCardStatus,
@@ -1238,6 +1239,42 @@ describe("workspaceStackParent", () => {
 
 describe("repository-free Slack cards", () => {
   const origin = { channel_kind: "slack", external_key: "T/C/123" };
+  it("ranks a conversation by the same rule as a workspace card", () => {
+    const stalled = {
+      state: { type: "stalled" as const, idle_secs: 90 },
+      source: "heuristic" as const,
+    };
+    const readyNotice = {
+      state: {
+        type: "needs_you" as const,
+        prompt: "#3081 is ready to merge",
+        source: "structured" as const,
+      },
+      source: "structured" as const,
+    };
+    const cases: Partial<CodeSessionDigest>[] = [
+      // A silent command in a running turn stays with live work.
+      { lifecycle: "running", attention: stalled },
+      // A stall that outlived its turn waits on the reader.
+      { lifecycle: "idle", attention: stalled },
+      // Ready to merge is a pull-request state, not a need.
+      { attention: readyNotice, pr_state: { number: 3081, state: "open" } },
+    ];
+    for (const overrides of cases) {
+      const conversation = digest("free", { workspace: null, ...overrides });
+      expect(sessionStatusRank(conversation)).toBe(
+        workspaceStatusRank(
+          workspace("free", "app"),
+          digest("free", overrides),
+        ),
+      );
+    }
+    expect(
+      cases.map((overrides) =>
+        sessionStatusRank(digest("free", { workspace: null, ...overrides })),
+      ),
+    ).toEqual(["running", "needs_you", "pr_open"]);
+  });
   it("keeps Slack conversations in the same source as Slack workspaces", () => {
     const conversation = digest("scratch", {
       workspace: null,

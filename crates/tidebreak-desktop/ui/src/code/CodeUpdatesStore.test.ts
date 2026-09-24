@@ -56,6 +56,7 @@ function digest(overrides: Partial<CodeSessionDigest> = {}): CodeSessionDigest {
 }
 
 const EMPTY_STATE: CodeUpdatesState = {
+  snapshotLoaded: false,
   conversationsByWorkspace: {},
   conversationsWithoutWorkspace: {},
   childrenByWorkspace: {},
@@ -157,6 +158,12 @@ describe("reduceCodeUpdates", () => {
   );
 
   it("replaces the map on snapshot and upserts a digest", () => {
+    const beforeSnapshot = reduceCodeUpdates(EMPTY_STATE, {
+      type: "digest",
+      digest: digest(),
+    });
+    // One digest is not the whole picture: only a snapshot says what is live.
+    expect(beforeSnapshot.snapshotLoaded).toBe(false);
     const afterSnapshot = reduceCodeUpdates(EMPTY_STATE, {
       type: "snapshot",
       sessions: [
@@ -164,6 +171,7 @@ describe("reduceCodeUpdates", () => {
         digest({ workspace: "ws-2", session: "sess-2", title: "other" }),
       ],
     });
+    expect(afterSnapshot.snapshotLoaded).toBe(true);
     expect(Object.keys(afterSnapshot.conversationsByWorkspace)).toEqual([
       "ws-1",
       "ws-2",
@@ -208,6 +216,89 @@ describe("reduceCodeUpdates", () => {
     // A waiting agent outranks a running one: it is the one that needs a person.
     expect(workspaceDigest(asked, "ws-1")?.session).toBe("sess-1");
     expect(workspaceDigest(asked, "ws-missing")).toBeUndefined();
+  });
+
+  it("never lets a sibling hide a need the card has to show", () => {
+    function collapse(...sessions: CodeSessionDigest[]) {
+      const state = reduceCodeUpdates(EMPTY_STATE, {
+        type: "snapshot",
+        sessions,
+      });
+      return workspaceDigest(state, "ws-1")?.session;
+    }
+    const running = digest({ session: "sess-running", lifecycle: "running" });
+    const done = digest({
+      session: "sess-done",
+      attention: { state: { type: "done_unreviewed" }, source: "lifecycle" },
+      turn_count: 3,
+    });
+
+    // A lost connection waiting on Try again is a need, even though its raw
+    // attention does not say so until recovery reads it.
+    expect(
+      collapse(
+        running,
+        digest({
+          session: "sess-fenced",
+          lifecycle: "fenced",
+          attention: working,
+          turn_count: 2,
+        }),
+      ),
+    ).toBe("sess-fenced");
+
+    // A turn that went quiet and stopped waits on the reader; a finished
+    // sibling does not outrank it.
+    expect(
+      collapse(
+        done,
+        digest({
+          session: "sess-stalled",
+          attention: {
+            state: { type: "stalled", idle_secs: 600 },
+            source: "heuristic",
+          },
+        }),
+      ),
+    ).toBe("sess-stalled");
+
+    // Ready to merge is good news, not a blocker: the running agent still
+    // speaks for the card.
+    expect(
+      collapse(
+        digest({
+          session: "sess-ready",
+          attention: {
+            state: {
+              type: "needs_you",
+              prompt: "#41 is ready to merge",
+              source: "structured",
+            },
+            source: "structured",
+          },
+          turn_count: 4,
+        }),
+        running,
+      ),
+    ).toBe("sess-running");
+    // With nothing running, the notice outranks a finished turn.
+    expect(
+      collapse(
+        done,
+        digest({
+          session: "sess-ready",
+          attention: {
+            state: {
+              type: "needs_you",
+              prompt: "#41 is ready to merge",
+              source: "structured",
+            },
+            source: "structured",
+          },
+          turn_count: 4,
+        }),
+      ),
+    ).toBe("sess-ready");
   });
 
   it("keeps an ended conversation so its title and PR survive", () => {
@@ -518,6 +609,30 @@ describe("clone onboarding reconciliation", () => {
 
     expect(takeSelectedCodeClone(replacement)).toBeNull();
     expect(useCodeUpdatesStore.getState().selectedClone).toBeNull();
+  });
+
+  it("stops vouching for the digests when the socket drops", () => {
+    const { client, sockets, send } = cloneClient(async (jobId) =>
+      pendingClone(jobId),
+    );
+    connectCodeUpdates(client);
+    send({ type: "snapshot", sessions: [digest()] });
+    expect(useCodeUpdatesStore.getState().snapshotLoaded).toBe(true);
+
+    sockets[0]?.onclose?.call(
+      sockets[0] as unknown as WebSocket,
+      new Event("close") as CloseEvent,
+    );
+    const dropped = useCodeUpdatesStore.getState();
+    // The last digests stay on screen; nothing claims they are current.
+    expect(dropped.snapshotLoaded).toBe(false);
+    expect(dropped.conversationsByWorkspace["ws-1"]?.["sess-1"]).toBeDefined();
+
+    // The reconnect restates the snapshot, and with it the claim.
+    expect(
+      reduceCodeUpdates(dropped, { type: "snapshot", sessions: [] })
+        .snapshotLoaded,
+    ).toBe(true);
   });
 
   it("keeps tracked clone state when live Code updates disconnect", () => {

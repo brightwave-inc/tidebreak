@@ -293,6 +293,11 @@ export const allowlist = [
   // An open Radix menu or dialog hides the rest of the page with aria-hidden
   // while that page still holds focusable controls.
   {
+    story: "code-home--repository-menu",
+    rule: "aria-hidden-focus",
+    reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",
+  },
+  {
     story: "code-workspace-card--*",
     rule: "aria-hidden-focus",
     reason: "An open menu sets aria-hidden on #storybook-root, which still holds focusable controls.",

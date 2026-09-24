@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FolderGit2, GitBranch, Plus, Sparkles } from "lucide-react";
 
 import type { HarnessKind } from "../api/types";
@@ -16,19 +16,22 @@ import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { toast } from "sonner";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { AddRepoPalette } from "./AddRepoPalette";
+import { CodeHomeRepositories, CodeHomeWork } from "./CodeHomeOverview";
+import { codeHomeSections } from "./codeHomeSections";
 import { useCodeUiStore } from "./CodeUiStore";
-import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import { useCodeUpdatesStore, useWorkspaceDigests } from "./CodeUpdatesStore";
 import { DoctorList } from "./DoctorList";
 import { RepositorySettingsDialog } from "./RepositorySettingsDialog";
 import { openEngineSignIn } from "./EngineSignIn";
-import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { harnessNeedsNoSignIn, workspaceHarnesses } from "./labels";
-import { middleTruncate } from "./workspaceCards";
+import { isPutAway } from "./workspaceCards";
 import { PaneDragBand } from "@/WindowDragStrip";
 
 /**
- * `/code` home: the doctor until some engine can run a first turn, then repo
- * registration and the registered list.
+ * `/code` home: the doctor until some engine can run a first turn, the
+ * first-run form until a repository is registered, and then what needs the
+ * reader, what is running, what is ready to merge, and recent work, with the
+ * repositories as a secondary list.
  *
  * Downloading an engine is not the whole setup. The pin Tidebreak downloads
  * still needs its own sign-in, and a reader sent straight to a workspace
@@ -53,13 +56,22 @@ function CodeHomeBody() {
     id: string;
     label: string;
   } | null>(null);
+  const settingsOrigin = useRef<HTMLElement | null>(null);
   const doctor = useCodeCatalogStore((state) => state.doctor);
   const doctorError = useCodeCatalogStore((state) => state.doctorError);
   const repos = useCodeCatalogStore((state) => state.repos);
+  const workspaces = useCodeCatalogStore((state) => state.workspaces);
   const loaded = useCodeCatalogStore((state) => state.loaded);
   const error = useCodeCatalogStore((state) => state.error);
   const refresh = useCodeCatalogStore((state) => state.refresh);
   const refreshDoctor = useCodeCatalogStore((state) => state.refreshDoctor);
+  // The rail owns the live socket; the home only reads what it delivers.
+  const digests = useWorkspaceDigests();
+  const watches = useCodeUpdatesStore((state) => state.childrenByWorkspace);
+  const conversations = useCodeUpdatesStore(
+    (state) => state.conversationsWithoutWorkspace,
+  );
+  const snapshotLoaded = useCodeUpdatesStore((state) => state.snapshotLoaded);
   const [addOpen, setAddOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const installs = useCodeUpdatesStore((state) => state.harnessInstalls);
@@ -69,18 +81,41 @@ function CodeHomeBody() {
     void refresh(client);
   }, [client, refresh]);
 
+  const sections = useMemo(
+    () =>
+      codeHomeSections({
+        repos,
+        workspaces,
+        digests,
+        watches,
+        conversations: Object.values(conversations),
+      }),
+    [repos, workspaces, digests, watches, conversations],
+  );
+  const liveWorkspaceCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const workspace of workspaces) {
+      if (isPutAway(workspace)) continue;
+      counts[workspace.repo_id] = (counts[workspace.repo_id] ?? 0) + 1;
+    }
+    return counts;
+  }, [workspaces]);
+
   // Nothing but a download stands between some engine and its first turn,
   // so the register form is what the page owes the reader.
   const usable = workspaceHarnesses(doctor?.harnesses ?? []).some(
     harnessNeedsNoSignIn,
   );
-  const showRepos = loaded && repos.length > 0;
-  const showEmpty = loaded && repos.length === 0 && usable;
+  // Work already on the rail — a shared workspace, a conversation from
+  // Slack — outranks the first-run form, even with no repository here.
+  const hasWork = sections.total > 0;
+  const showHome = loaded && (repos.length > 0 || hasWork);
+  const showEmpty = loaded && !showHome && usable;
   const showDoctor = Boolean(doctor && !usable);
   // Repos resolve before the doctor. Until one of the three settled
   // bodies can render, keep this slot filled so the empty state does not pop in.
   const showLoading =
-    !showRepos && !showEmpty && !showDoctor && !doctorError && !error;
+    !showHome && !showEmpty && !showDoctor && !doctorError && !error;
 
   async function install(kind: HarnessKind) {
     try {
@@ -119,12 +154,22 @@ function CodeHomeBody() {
       )}
     >
       {!showEmpty && (
-        <header>
-          <h1 className="text-2xl font-medium tracking-tight">Code</h1>
-          <p className="text-muted-foreground text-sm">
-            Register a local git repository, then open isolated workspaces on
-            it.
-          </p>
+        <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <div className="min-w-0">
+            <h1 className="text-2xl font-medium tracking-tight">Code</h1>
+            {!showHome && (
+              <p className="text-muted-foreground text-sm">
+                Register a local git repository, then open isolated workspaces
+                on it.
+              </p>
+            )}
+          </div>
+          {showHome && hasWork && repos.length > 0 && (
+            <Button type="button" size="sm" onClick={() => startNewWorkspace()}>
+              <Plus aria-hidden="true" />
+              New workspace
+            </Button>
+          )}
         </header>
       )}
       {error && (
@@ -178,7 +223,7 @@ function CodeHomeBody() {
           />
         </section>
       )}
-      {doctorError && repos.length === 0 && (
+      {doctorError && !showHome && (
         <div className="flex flex-1 items-center">
           <CodeRepoEmptyState onAddRepo={() => setAddOpen(true)} />
         </div>
@@ -188,71 +233,39 @@ function CodeHomeBody() {
           <CodeRepoEmptyState onAddRepo={() => setAddOpen(true)} />
         </div>
       )}
-      {showRepos && (
-        <section className="flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold">Repos</h2>
-              <p className="text-muted-foreground text-sm">
-                Pick one to open a workspace on it.
-              </p>
-            </div>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => setAddOpen(true)}
-            >
-              Add repo
-            </Button>
-          </div>
-          <ul className="flex flex-col gap-1">
-            {repos.map((repo) => (
-              <li key={repo.id} className="flex min-w-0 items-center gap-1">
-                <button
-                  type="button"
-                  className={cn(
-                    "hover:bg-muted flex min-w-0 flex-1 cursor-pointer items-baseline gap-2 rounded-md px-3 py-2 text-left text-sm",
-                    FOCUS_RING,
-                    HOVER_TINT,
-                  )}
-                  aria-label={`New workspace on ${repo.display_name}`}
-                  onClick={() => startNewWorkspace(repo.id)}
-                >
-                  <span className="min-w-0 shrink truncate font-medium">
-                    {repo.display_name}
-                  </span>
-                  {/* The tail of a path is what tells two checkouts apart. */}
-                  <span
-                    className="text-muted-foreground min-w-0 truncate font-mono text-xs"
-                    title={repo.root_path}
-                  >
-                    {middleTruncate(repo.root_path, 56)}
-                  </span>
-                </button>
-                <Button
-                  type="button"
-                  size="xs"
-                  variant="outline"
-                  onClick={() =>
-                    setSettingsRepo({
-                      id: repo.id,
-                      label: repo.display_name,
-                    })
-                  }
-                >
-                  Settings
-                </Button>
-              </li>
-            ))}
-          </ul>
-        </section>
+      {showHome && (
+        <>
+          <CodeHomeWork
+            sections={sections}
+            snapshotLoaded={snapshotLoaded}
+            onNewWorkspace={() => startNewWorkspace()}
+          />
+          <CodeHomeRepositories
+            repos={repos}
+            liveWorkspaceCounts={liveWorkspaceCounts}
+            onAddRepo={() => setAddOpen(true)}
+            onNewWorkspace={(repoId) => startNewWorkspace(repoId)}
+            onOpenSettings={(repo, origin) => {
+              settingsOrigin.current = origin;
+              setSettingsRepo({ id: repo.id, label: repo.display_name });
+            }}
+          />
+        </>
       )}
       <AddRepoPalette open={addOpen} onOpenChange={setAddOpen} />
       <RepositorySettingsDialog
         open={settingsRepo !== null}
         onOpenChange={(open) => {
           if (!open) setSettingsRepo(null);
+        }}
+        // The dialog opens from a menu that is gone by the time it closes,
+        // so hand focus back to the repository row the reader came from.
+        onCloseAutoFocus={(event) => {
+          const origin = settingsOrigin.current;
+          settingsOrigin.current = null;
+          if (!origin?.isConnected) return;
+          event.preventDefault();
+          origin.focus();
         }}
         client={client}
         repoId={settingsRepo?.id ?? null}
