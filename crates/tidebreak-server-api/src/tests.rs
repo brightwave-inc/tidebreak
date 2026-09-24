@@ -2446,6 +2446,26 @@ async fn self_host_profile_selects_object_storage_and_redacts_url_credentials() 
     assert!(!error.contains("secret"));
 }
 
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn self_host_profile_selects_a_blob_directory_on_local_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("volume").join("blobs");
+    let mut config = Config::desktop(dir.path());
+    config.profile = Profile::SelfHost;
+    config.blob_store_url = Some(url::Url::from_file_path(&root).unwrap().to_string());
+
+    let blobs = configured_blob_store(&config).await.unwrap();
+    let id = Uuid::new_v4();
+    blobs.put(id, b"self-host blob".to_vec()).await.unwrap();
+
+    assert_eq!(
+        std::fs::read(root.join(format!("{id}.blob"))).unwrap(),
+        b"self-host blob"
+    );
+    assert!(!dir.path().join("blobs").exists());
+}
+
 /// The MCP App view frame contract, at the HTTP boundary: minting requires
 /// the bearer, the frame route does not (an iframe carries no headers), the
 /// served document brings its own strict CSP, and a token redeems exactly

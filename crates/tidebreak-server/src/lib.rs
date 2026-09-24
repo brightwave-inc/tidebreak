@@ -2301,7 +2301,7 @@ pub async fn configured_blob_store(config: &Config) -> Result<Arc<dyn BlobStore>
     }
     #[cfg(feature = "postgres")]
     {
-        let store = tidebreak_core::ObjectBlobStore::from_s3_url(url)?;
+        let store = tidebreak_core::ObjectBlobStore::from_url(url)?;
         store.probe().await?;
         Ok(Arc::new(store))
     }

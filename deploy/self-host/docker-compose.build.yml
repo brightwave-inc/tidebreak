@@ -1,0 +1,18 @@
+# Build the server image from this checkout instead of pulling the published
+# release. Add this file after docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# A cold build compiles the Rust workspace and the desktop renderer, so it
+# takes a while and several GB of memory. The image is tagged
+# tidebreak-self-host:local and reports its version as 0.0.0-unreleased.
+# Without this file, `docker compose up` only pulls; it never compiles.
+
+services:
+  server:
+    image: tidebreak-self-host:local
+    build:
+      # The workspace root, so `cargo build --locked` sees the whole workspace.
+      # Dockerfile.dockerignore keeps everything but source out of the context.
+      context: ../..
+      dockerfile: deploy/self-host/Dockerfile

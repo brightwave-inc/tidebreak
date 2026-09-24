@@ -1,3 +1,5 @@
-# The operator's credential file. Never commit it; `.env` is already covered
-# by the repository-root .gitignore.
+# What setup.sh writes: the operator's credential file and the key that
+# encrypts stored secrets. Never commit either. `.env` is already covered by
+# the repository-root .gitignore.
 tokens
+secret.key

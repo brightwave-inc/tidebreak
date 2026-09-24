@@ -1,0 +1,51 @@
+# TLS in front of the Tidebreak server, for docker-compose.yml's `caddy`
+# service. That service runs only when .env sets TIDEBREAK_DOMAIN and
+# COMPOSE_PROFILES=tls; setup.sh writes both when you give it a domain.
+#
+# Caddy obtains and renews a certificate for the domain by itself. For that,
+# the domain's DNS must point at this machine, and ports 80 and 443 must reach
+# it from the internet. Certificates and the ACME account live on the
+# caddy-data volume.
+#
+# Decision record 6 puts TLS and network exposure in the operator's fronting
+# infrastructure; this file is that infrastructure. The server behind it
+# still serves plain HTTP on the compose network.
+#
+# Bearer tokens travel in two request headers: Authorization, from the CLI
+# and the API, and Sec-WebSocket-Protocol, which a browser uses on every
+# WebSocket upgrade because it cannot set Authorization there. Token-file
+# tokens do not expire, so neither header may reach a log.
+
+{
+	# Nothing changes Caddy's configuration while it runs, so its admin API
+	# stays closed. Edit this file and restart the service instead.
+	admin off
+
+	# Caddy's own log records the request, headers included, of every error
+	# it answers, such as a 502 while the server restarts. It hides
+	# Authorization by itself but not Sec-WebSocket-Protocol, so delete both
+	# before any entry is written.
+	log default {
+		format filter {
+			request>headers>Authorization delete
+			request>headers>Sec-Websocket-Protocol delete
+		}
+	}
+}
+
+{$TIDEBREAK_DOMAIN} {
+	# Access logging stays off: this site has no `log` directive, and Caddy
+	# writes no request log without one. If you add one, give it the same
+	# filter, because a site's access log does not use the default log's
+	# format:
+	#
+	#	log {
+	#		format filter {
+	#			request>headers>Authorization delete
+	#			request>headers>Sec-Websocket-Protocol delete
+	#		}
+	#	}
+
+	# WebSocket upgrades and streamed responses pass through as they are.
+	reverse_proxy server:8080
+}

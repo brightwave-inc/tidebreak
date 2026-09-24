@@ -27,7 +27,7 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 857
+- Rust crates: 858
 - Desktop UI production packages: 539
 - Distinct license texts: 594
 - Packages with no declared license: 0
@@ -2305,6 +2305,12 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE` ([L-b9b039b5058c](#l-b9b039b5058c))
 
 ### nix 0.29.0
+
+- License: `MIT`
+- Repository: https://github.com/nix-rust/nix
+- License text: `LICENSE` ([L-b9b039b5058c](#l-b9b039b5058c))
+
+### nix 0.31.3
 
 - License: `MIT`
 - Repository: https://github.com/nix-rust/nix

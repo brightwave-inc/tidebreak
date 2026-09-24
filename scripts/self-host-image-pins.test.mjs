@@ -23,6 +23,18 @@ const managedNode = readFileSync(
   new URL("../crates/tidebreak-managed-node/src/lib.rs", import.meta.url),
   "utf8",
 );
+const compose = readFileSync(
+  new URL("../deploy/self-host/docker-compose.yml", import.meta.url),
+  "utf8",
+);
+const caddyfile = readFileSync(
+  new URL("../deploy/self-host/Caddyfile", import.meta.url),
+  "utf8",
+);
+const checkPins = readFileSync(
+  new URL("../deploy/self-host/check-pins.sh", import.meta.url),
+  "utf8",
+);
 
 /** The `RUN` block that mentions `marker`, with its line continuations intact. */
 function runBlock(marker) {
@@ -141,4 +153,90 @@ test("gh comes from the project's own release, digest-pinned", () => {
   ]) {
     assert.equal(architectureBranch(block, debian).platform, platform);
   }
+});
+
+// The compose stack runs third-party images beside the server. Each one is
+// pinned by digest, so `docker compose pull` cannot swap in different bytes
+// under the same tag; the server itself follows the release in .env.
+test("every image the compose file runs is digest-pinned, except the release", () => {
+  const images = [...compose.matchAll(/^\s+image: (.+)$/gm)].map((match) => match[1]);
+  assert.ok(images.length >= 3, "postgres, server, and caddy");
+  for (const image of images) {
+    if (image.startsWith("ghcr.io/brightwave-inc/tidebreak-server:")) {
+      assert.match(image, /:\$\{TIDEBREAK_VERSION:\?/);
+      continue;
+    }
+    assert.match(image, /^[a-z0-9./-]+:[\w.-]+@sha256:[0-9a-f]{64}$/, `${image} is not digest-pinned`);
+  }
+});
+
+test("Caddy is pinned to an exact release, and check-pins.sh verifies the pin", () => {
+  const caddy = compose.match(/^\s+image: (caddy:\S+)$/m);
+  assert.ok(caddy, "docker-compose.yml runs Caddy");
+  assert.match(caddy[1], /^caddy:\d+\.\d+\.\d+-alpine@sha256:[0-9a-f]{64}$/);
+  // check-pins.sh reads this file and asks Docker Hub's official repository
+  // for the pinned index, so a typed digest fails in CI.
+  assert.match(checkPins, /docker-compose\.yml/);
+  assert.match(checkPins, /registry-1\.docker\.io\/v2\/library\/caddy\/manifests/);
+});
+
+/**
+ * The Caddyfile's top-level blocks, keyed by the line that opens each one
+ * (`{` for the global options), each as its directive lines with comments
+ * and indentation removed.
+ */
+function caddyBlocks(text) {
+  const blocks = new Map();
+  let depth = 0;
+  let current = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(/#.*$/, "").trim();
+    if (!line) {
+      continue;
+    }
+    if (depth === 0) {
+      assert.ok(line.endsWith("{"), `unexpected top-level line: ${line}`);
+      current = [];
+      blocks.set(line, current);
+    } else if (!(depth === 1 && line === "}")) {
+      current.push(line);
+    }
+    depth += (line.match(/{/g) ?? []).length - (line.match(/}/g) ?? []).length;
+  }
+  assert.equal(depth, 0, "the Caddyfile's braces balance");
+  return blocks;
+}
+
+test("the Caddyfile proxies to the server and keeps bearer tokens out of every log", () => {
+  const blocks = caddyBlocks(caddyfile);
+  const site = blocks.get("{$TIDEBREAK_DOMAIN} {");
+  assert.ok(site, "the site is the configured domain");
+  assert.ok(site.includes("reverse_proxy server:8080"));
+  // No access log: a site's own `log` would use its own format, outside the
+  // filter below.
+  assert.deepEqual(
+    site.filter((line) => /^log\b/.test(line)),
+    [],
+    "a site `log` directive would record bearer tokens",
+  );
+
+  // Caddy's default log still records the request headers of every error
+  // it answers, such as a 502 while the server restarts. Tokens ride in
+  // Authorization and, for a browser's WebSocket upgrade, in
+  // Sec-WebSocket-Protocol, so the default log must delete both.
+  const global = blocks.get("{");
+  assert.ok(global, "the Caddyfile has a global options block");
+  const log = global.indexOf("log default {");
+  assert.notEqual(log, -1, "the global options configure the default log");
+  const filter = global.indexOf("format filter {", log);
+  assert.notEqual(filter, -1, "the default log uses a filter format");
+  const closing = global.indexOf("}", filter);
+  const fields = global.slice(filter + 1, closing);
+  for (const header of ["Authorization", "Sec-Websocket-Protocol"]) {
+    assert.ok(
+      fields.includes(`request>headers>${header} delete`),
+      `the default log must delete request>headers>${header}`,
+    );
+  }
+  assert.match(compose, /- \.\/Caddyfile:\/etc\/caddy\/Caddyfile:ro\n/);
 });

@@ -5,11 +5,13 @@
 #
 # Covered: rustup-init (static.rust-lang.org publishes a .sha256 beside each
 # installer), Go (the go.dev download index), Node (SHASUMS256.txt per
-# release), and gh (the release's checksums file). Debian packages pin by
-# version and are verified by apt against the snapshot's signed index.
+# release), gh (the release's checksums file), and the Caddy image
+# docker-compose.yml pins (Docker Hub's official repository). Debian packages
+# pin by version and are verified by apt against the snapshot's signed index.
 set -euo pipefail
 
 dockerfile=${1:-$(dirname "$0")/Dockerfile}
+compose=${2:-$(dirname "$0")/docker-compose.yml}
 failures=0
 
 value() {
@@ -82,6 +84,55 @@ if [ -n "$gh_version" ]; then
     published=$(printf '%s\n' "$sums" | grep " gh_${gh_version}_${platform}.tar.gz$" | cut -c1-64)
     check "gh ${gh_version} ${platform}" "$published" "$pinned"
   done
+fi
+
+# Caddy: docker-compose.yml pins caddy:<version>@sha256:<index digest>. Docker
+# rebuilds official images under the same tag whenever their base image moves,
+# so the tag's current digest is not the test. The pinned index is: the
+# official repository must serve it, its bytes must hash to the pin, and every
+# image in it must name the pinned version.
+caddy_ref=$(grep -oE 'caddy:[0-9][^@[:space:]]*@sha256:[0-9a-f]{64}' "$compose" | head -1 || true)
+if [ -z "$caddy_ref" ]; then
+  echo "FAIL caddy: $compose pins no caddy:<version>@sha256:<digest> image" >&2
+  failures=$((failures + 1))
+else
+  caddy_version=${caddy_ref%@*}
+  caddy_version=${caddy_version#caddy:}
+  caddy_digest=${caddy_ref#*@}
+  registry_token=$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/caddy:pull" |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+  caddy_index=$(mktemp)
+  if ! curl -fsSL -o "$caddy_index" \
+    -H "Authorization: Bearer ${registry_token}" \
+    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+    "https://registry-1.docker.io/v2/library/caddy/manifests/${caddy_digest}"; then
+    echo "FAIL caddy ${caddy_version}: Docker Hub serves no library/caddy index at ${caddy_digest}" >&2
+    failures=$((failures + 1))
+  else
+    published=$(python3 - "$caddy_index" "$caddy_digest" <<'PY'
+import hashlib, json, sys
+path, digest = sys.argv[1], sys.argv[2]
+body = open(path, "rb").read()
+if "sha256:" + hashlib.sha256(body).hexdigest() != digest:
+    print("<content that does not hash to the pin>")
+    sys.exit()
+# Attestation manifests carry no platform and no version; skip them.
+versions = {
+    manifest.get("annotations", {}).get("org.opencontainers.image.version")
+    for manifest in json.loads(body).get("manifests", [])
+    if manifest.get("platform", {}).get("os") != "unknown"
+}
+print(",".join(sorted(str(version) for version in versions)))
+PY
+)
+    if [ "$published" = "$caddy_version" ]; then
+      echo "ok   caddy ${caddy_version} ${caddy_digest}"
+    else
+      echo "FAIL caddy ${caddy_version}: the index at ${caddy_digest} holds ${published:-no versioned image}" >&2
+      failures=$((failures + 1))
+    fi
+  fi
+  rm -f "$caddy_index"
 fi
 
 if [ "$failures" -ne 0 ]; then
