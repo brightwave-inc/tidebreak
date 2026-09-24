@@ -37,6 +37,15 @@ updates:
       # candidates like the Cargo ones.
       prefix: deps
       include: scope
+    ignore:
+      # The Univer presets have no 0.25.2, and every @univerjs package must
+      # stay on one version, so the family moves together at the next release.
+      - dependency-name: "@univerjs/*"
+        versions: ["0.25.2"]
+      # jsdom 30.1.0 breaks Radix menus in the DOM tests (41 failures across
+      # 13 files); later versions still come through and CI tests them.
+      - dependency-name: "jsdom"
+        versions: ["30.1.0"]
     groups:
       ui-minor-and-patch:
         update-types:
