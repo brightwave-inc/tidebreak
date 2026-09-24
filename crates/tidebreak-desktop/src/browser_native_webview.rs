@@ -11,8 +11,8 @@ const REGISTRY_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-i
 const AUDITED_PACKAGES: [(&str, &str, &str); 3] = [
     (
         "tauri",
-        "2.11.5",
-        "667b20e2726d572dea2de7370da16e188eb06008faf9a92fab7cdc46791190b5",
+        "2.11.6",
+        "6fa5bacdb9bbad5954af3d1bd6cf6ae9192cab1b2e270f4a07f904610b9e85f4",
     ),
     (
         "tauri-runtime-wry",
