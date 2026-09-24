@@ -717,7 +717,7 @@ test("PostgreSQL tests share one Cargo invocation per feature graph", () => {
   }
   assert.match(
     postgres,
-    /cargo test -p tidebreak-server --features postgres\n\s+--test postgres_store_ownership\n\s+--test postgres_deployment_secrets --locked/,
+    /cargo test -p tidebreak-server --features postgres\n\s+--test postgres_store_ownership --locked\n\s+--test postgres_deployment_secrets/,
   );
 });
 
