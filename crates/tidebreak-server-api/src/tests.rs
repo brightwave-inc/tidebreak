@@ -2387,9 +2387,10 @@ fn one_server_process_owns_a_desktop_data_directory() {
     let Err(refused) = InstanceLock::acquire(&config) else {
         panic!("a second claim must be refused");
     };
+    let refused = refused.to_string();
     assert!(
-        refused.to_string().contains("--server"),
-        "the refusal must point at attach mode: {refused}"
+        refused.contains("Quit that process") && refused.contains("--attach"),
+        "the refusal must name the ways in that work: {refused}"
     );
 
     drop(first);
