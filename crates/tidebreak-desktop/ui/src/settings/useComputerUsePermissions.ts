@@ -192,9 +192,9 @@ export function useComputerUsePermissions(
     setRestarting(true);
     setError(null);
     try {
-      // Resolves once the shell has taken the request: at once when nothing
-      // is working, or after the quit prompt when something is and the
-      // person cancels it.
+      // Resolves as soon as the shell takes the request, before it counts
+      // working agents. The app then exits and opens again, or the quit
+      // prompt asks about the agents first.
       await host.restart();
     } catch {
       if (mounted.current)
