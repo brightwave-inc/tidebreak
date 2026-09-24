@@ -771,7 +771,27 @@ test("the end-to-end lane drives the self-host build and keeps failed traces", (
     /if \[\[ "\$workspace" == true \|\| "\$ui" == true \]\]; then\n\s+e2e=true/,
   );
   assert.match(e2e, /^ {4}name: end-to-end$/m);
-  assert.match(e2e, /if: \$\{\{ needs\.changes\.outputs\.e2e == 'true' \}\}/);
+
+  // A skipped check reads as success, so a failed build must fail this lane
+  // rather than skip it: the lane runs under always() whenever its scope is
+  // on, and its first step requires the build, the way `test` requires its
+  // partitions.
+  assert.match(
+    e2e,
+    /^ {4}if: \$\{\{ always\(\) && needs\.changes\.outputs\.e2e == 'true' \}\}$/m,
+  );
+  const firstStep = e2e.split(/^ {4}steps:\n/m)[1]?.split(/\n(?= {6}- )/)[0];
+  assert.ok(firstStep, "the lane must have steps");
+  assert.match(firstStep, /- name: Require the debug server build/);
+  assert.match(
+    firstStep,
+    /BUILD_RESULT: \$\{\{ needs\.self-host-build\.result \}\}/,
+  );
+  assert.match(
+    firstStep,
+    /if \[\[ "\$BUILD_RESULT" != success \]\]; then[\s\S]*exit 1/,
+  );
+  assert.doesNotMatch(firstStep, /^ {8}if:/m);
 
   // One debug compile serves both lanes.
   assert.match(e2e, /needs: \[changes, self-host-build\]/);
@@ -784,6 +804,15 @@ test("the end-to-end lane drives the self-host build and keeps failed traces", (
   assert.ok(upload, "the lane must upload traces from failed flows");
   assert.match(upload, /if: \$\{\{ failure\(\) \}\}/);
   assert.match(upload, /path: e2e\/test-results/);
+  // A job timeout cancels the job, and `failure()` is false then. The flows
+  // step times out first, so a hung run fails the step and still uploads.
+  const jobTimeout = Number(/^ {4}timeout-minutes: (\d+)$/m.exec(e2e)?.[1]);
+  const flows = e2e.match(/- name: Run the flows[\s\S]*?(?=\n {6}- )/)?.[0];
+  const flowsTimeout = Number(/timeout-minutes: (\d+)/.exec(flows ?? "")?.[1]);
+  assert.ok(
+    flowsTimeout > 0 && flowsTimeout < jobTimeout,
+    "the flows step must time out before the job does",
+  );
   assert.doesNotMatch(e2e, /continue-on-error|\|\| true|secrets\./);
 });
 

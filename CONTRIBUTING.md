@@ -144,9 +144,20 @@ machine serves the renderer from its own origin, the way a hosted machine does
 ([decision 82](docs/decisions/0082-the-hosted-machine-serves-the-renderer.md)),
 and plays the scripted provider and coding engine instead of a model, so no
 flow reaches the network. PostgreSQL and an S3 gateway run in throwaway Docker
-containers that the run removes. Add `--headed` to watch the browser, or name
-a spec to run one flow. A failed flow leaves its Playwright trace and the
-server's logs in `e2e/test-results`.
+containers that the run removes; a run that was killed leaves them behind, and
+the next run removes them. Add `--headed` to watch the browser, or name a spec
+to run one flow. A failed flow leaves its Playwright trace and the server's
+logs in `e2e/test-results`.
+
+A flow fails when the page reaches off this computer or gets a 5xx from the
+machine. To tolerate a server error while an issue tracks it, list it under
+that issue with `test.use({ knownServerErrors })` in the flow, and delete the
+entry when the issue is fixed.
+
+In CI the lane drives the debug server that the `self-host server build` job
+uploads, which GitHub keeps for one day. To re-run the lane on a run older
+than that, use **Re-run all jobs**, which builds the server again; re-running
+the lane alone finds no server.
 
 ## Commit and PR conventions
 

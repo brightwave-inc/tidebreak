@@ -921,6 +921,9 @@ jobs:
           name: e2e-server-${{ github.run_id }}
           path: target/debug/tidebreak
           if-no-files-found: error
+          # The binary is several hundred megabytes, so it lives one day.
+          # Re-running only the end-to-end lane after that finds no binary;
+          # "Re-run all jobs" builds it again.
           retention-days: 1
           overwrite: true
       # Every download the image pins by SHA-256 is checked against the
@@ -937,14 +940,29 @@ jobs:
     # approvals, repositories, code turns, commits, and archive. Not a
     # required check yet; it becomes one once it has run green for a week.
     # `scripts/e2e.sh` runs the same flows locally.
-    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    #
+    # `always()` because a skipped check reads as success: were the server
+    # build to fail, a plain `if:` would skip this lane and pass it. Like the
+    # `test` aggregator, the lane runs whenever its scope is on and fails in
+    # its first step when the build did not succeed.
+    if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Room for the setup steps, the flows step's own limit below, and the
+    # trace upload after it.
+    timeout-minutes: 25
     env:
       # Corepack switches to e2e/package.json's pnpm inside that directory;
       # a runner has no terminal to answer its download prompt.
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
     steps:
+      - name: Require the debug server build
+        env:
+          BUILD_RESULT: ${{ needs.self-host-build.result }}
+        run: |
+          if [[ "$BUILD_RESULT" != success ]]; then
+            echo "The self-host server build ended with $BUILD_RESULT, so there is no debug server to drive." >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Download the debug server
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -979,6 +997,11 @@ jobs:
         run: pnpm exec playwright install --only-shell chromium
       - name: Run the flows
         working-directory: e2e
+        # Well inside the job's limit, so a run that hangs fails this step
+        # and still uploads its traces below; a job timeout would cancel the
+        # job instead, and `failure()` is false then. Playwright's own global
+        # timeout usually ends the run first.
+        timeout-minutes: 12
         env:
           TIDEBREAK_E2E_BINARY: ${{ runner.temp }}/e2e-server/tidebreak
           TIDEBREAK_E2E_UI_DIST: ${{ github.workspace }}/crates/tidebreak-desktop/ui/dist

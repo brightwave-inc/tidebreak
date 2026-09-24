@@ -84,7 +84,7 @@ updates:
       include: scope
 
   # The end-to-end lane's Playwright pin and lockfile. Nothing here ships, so
-  # its bumps read as `test`.
+  # its bumps read as `test`, and they arrive together in one pull request.
   - package-ecosystem: npm
     directory: "/e2e"
     schedule:
@@ -94,6 +94,10 @@ updates:
     commit-message:
       prefix: test
       include: scope
+    groups:
+      e2e:
+        patterns:
+          - "*"
 
   # Base images of the self-host server image. The Dockerfile pins each one by
   # digest, so a rebuild alone never picks up a patched base; these updates do.
