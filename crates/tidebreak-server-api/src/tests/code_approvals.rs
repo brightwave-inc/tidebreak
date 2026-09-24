@@ -1108,6 +1108,17 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
         .await
         .unwrap();
     let turn_id = json_id(&turn).parse::<TurnId>().unwrap();
+    // The send answers once the turn is accepted. Let it end first: a turn's
+    // end abandons the approvals it left pending, and the rows below are about
+    // a stale worker's completion, not the turn's own end.
+    wait_for_turn_end(
+        &client,
+        addr,
+        &token,
+        &session_id.to_string(),
+        json_id(&turn),
+    )
+    .await;
     let row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),

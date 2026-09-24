@@ -3947,11 +3947,20 @@ async fn a_service_principal_starts_a_workspace_handshake_and_an_admin_approves_
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert!(
-        matches!(
-            updates.try_recv().unwrap(),
+    // The conversation's turn may still be publishing its digests; the
+    // downgrade's notice is what this reader must get among them.
+    let mut notified = false;
+    while let Ok(update) = updates.try_recv() {
+        if matches!(
+            update,
             crate::code::bus::CodeLiveUpdate::AccessChanged(id) if id == session_id
-        ),
+        ) {
+            notified = true;
+            break;
+        }
+    }
+    assert!(
+        notified,
         "a Slack visibility downgrade must notify prior public readers"
     );
     let (status, _) = call_json(&router, "GET", &session_path, BOB_TOKEN, None).await;
