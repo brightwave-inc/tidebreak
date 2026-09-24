@@ -1386,6 +1386,32 @@ async fn a_journal_window_reads_the_events_below_its_cursor() {
     }
 }
 
+/// A chat transcript of an external engine's session tells its owner the
+/// engine keeps none, and tells anyone else nothing: they get the same 404
+/// as an id nobody has.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_transcript_of_someone_elses_session_is_not_found() {
+    let (router, _dir, repo) = two_user_code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let session = owned_session(&client, addr, ALICE_TOKEN, &repo).await;
+    let transcript = format!("/chats/{session}/messages");
+
+    assert_eq!(
+        get_status(&client, addr, ALICE_TOKEN, &transcript).await,
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &transcript).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let unknown = format!("/chats/{}/messages", uuid::Uuid::new_v4());
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &unknown).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+}
+
 /// Revoking a row severs the reader's open event socket rather than leaving
 /// it streaming a session they no longer hold.
 #[tokio::test(flavor = "multi_thread")]

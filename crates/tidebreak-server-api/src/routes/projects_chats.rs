@@ -890,7 +890,11 @@ pub async fn list_chat_messages(
         )
         .await?
         {
-            if session.harness_kind != tidebreak_core::HarnessKind::Internal {
+            // Only the owner learns what engine the session runs on; anyone
+            // else gets the same 404 an unknown id gets, below.
+            if session.harness_kind != tidebreak_core::HarnessKind::Internal
+                && session.owner == *store.owner()
+            {
                 return Err(ServerError::unprocessable_kind(
                     "transcript_unsupported",
                     "this engine does not store a chat transcript",
