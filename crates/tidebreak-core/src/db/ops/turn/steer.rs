@@ -517,8 +517,7 @@ pub(in crate::db) async fn apply_turn_steer(
         transaction.rollback().await.map_err(store_err)?;
         return Err(store_err(error));
     }
-    super::super::message_search::index_chat_message_on(&transaction, MessageId(steer.id))
-        .await?;
+    super::super::message_search::index_chat_message_on(&transaction, MessageId(steer.id)).await?;
 
     let applied = entities::code_turn_steer::Entity::update_many()
         .col_expr(

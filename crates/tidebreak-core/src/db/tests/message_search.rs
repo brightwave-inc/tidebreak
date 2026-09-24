@@ -149,10 +149,13 @@ async fn chat_messages_match_folded_words_and_the_last_word_as_a_prefix() {
         ],
         "newest first"
     );
-    assert!(page.hits.iter().all(|hit| hit.kind == MessageSearchKind::Chat
-        && hit.session_id == chat.id
-        && hit.title.as_deref() == Some("hello")
-        && !hit.archived));
+    assert!(page
+        .hits
+        .iter()
+        .all(|hit| hit.kind == MessageSearchKind::Chat
+            && hit.session_id == chat.id
+            && hit.title.as_deref() == Some("hello")
+            && !hit.archived));
     assert_eq!(marked(&page), [vec!["café"], vec!["Café"]]);
     assert!(page.indexing.complete);
 
@@ -203,7 +206,11 @@ async fn query_syntax_is_read_as_literal_words() {
         (":", 0),
         ("\u{0}", 0),
     ] {
-        assert_eq!(search(&store, &owner, query).await.hits.len(), found, "{query}");
+        assert_eq!(
+            search(&store, &owner, query).await.hits.len(),
+            found,
+            "{query}"
+        );
     }
 }
 
@@ -216,13 +223,30 @@ async fn a_search_reads_only_its_owners_conversations() {
     let bob_chat = sample_chat();
     store.create_chat_scoped(&alice, &alice_chat).await.unwrap();
     store.create_chat_scoped(&bob, &bob_chat).await.unwrap();
-    say(&store, alice_chat.id, Role::User, "shared keyword", Utc::now()).await;
-    say(&store, bob_chat.id, Role::User, "shared keyword", Utc::now()).await;
+    say(
+        &store,
+        alice_chat.id,
+        Role::User,
+        "shared keyword",
+        Utc::now(),
+    )
+    .await;
+    say(
+        &store,
+        bob_chat.id,
+        Role::User,
+        "shared keyword",
+        Utc::now(),
+    )
+    .await;
 
     for (owner, chat) in [(&alice, alice_chat.id), (&bob, bob_chat.id)] {
         let page = search(&store, owner, "keyword").await;
         assert_eq!(
-            page.hits.iter().map(|hit| hit.session_id).collect::<Vec<_>>(),
+            page.hits
+                .iter()
+                .map(|hit| hit.session_id)
+                .collect::<Vec<_>>(),
             [chat]
         );
     }
@@ -245,10 +269,17 @@ async fn deleting_a_conversation_empties_its_part_of_the_index() {
     store.delete_chat(deleted.id).await.unwrap();
 
     assert_eq!(index_rows(&store, deleted.id).await, 0);
-    assert_eq!(fts_rows(&store).await, 1, "the FTS5 terms went with the row");
+    assert_eq!(
+        fts_rows(&store).await,
+        1,
+        "the FTS5 terms went with the row"
+    );
     let page = search(&store, &owner, "gone").await;
     assert_eq!(
-        page.hits.iter().map(|hit| hit.session_id).collect::<Vec<_>>(),
+        page.hits
+            .iter()
+            .map(|hit| hit.session_id)
+            .collect::<Vec<_>>(),
         [kept.id]
     );
 }
@@ -428,11 +459,23 @@ async fn code_sessions_index_what_was_said_and_never_journal_keys() {
             parent_call_id: None,
         },
     ] {
-        seqs.push(append_event(&store, &owner, session_id, 0, &event).await.unwrap());
+        seqs.push(
+            append_event(&store, &owner, session_id, 0, &event)
+                .await
+                .unwrap(),
+        );
     }
 
     for key in [
-        "tool", "call", "delta", "message", "type", "preview", "succeeded", "outcome", "cwd",
+        "tool",
+        "call",
+        "delta",
+        "message",
+        "type",
+        "preview",
+        "succeeded",
+        "outcome",
+        "cwd",
         "repo",
     ] {
         assert!(
@@ -457,7 +500,11 @@ async fn code_sessions_index_what_was_said_and_never_journal_keys() {
         assert_eq!(hit.kind, MessageSearchKind::Code);
         assert_eq!(hit.session_id, session_id);
         assert_eq!(hit.workspace_id, Some(workspace_id));
-        assert_eq!(hit.title.as_deref(), Some("first"), "the workspace names it");
+        assert_eq!(
+            hit.title.as_deref(),
+            Some("first"),
+            "the workspace names it"
+        );
         assert_eq!(hit.source, source);
         assert_eq!(hit.event_seq, seq);
         assert_eq!(hit.turn_id, Some(turn_id));

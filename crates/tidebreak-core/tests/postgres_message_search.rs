@@ -18,10 +18,10 @@ use tidebreak_core::db::code::{
     search_repo_transcripts,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, Chat, CodeRepo, CodeWorkspace, CodeWorkspaceStatus, DbStore,
-    Event, HarnessKind, Message, MessageId, MessageSearchPage, MessageSearchRequest,
-    MessageSearchSource, OwnerId, PermissionMode, RepoId, Role, Session, SessionId, SessionKind,
-    SessionLifecycle, Store, ToolDetail, Turn, TurnId, TurnStatus, WorkspaceId,
+    Attention, AttentionSource, Chat, CodeRepo, CodeWorkspace, CodeWorkspaceStatus, DbStore, Event,
+    HarnessKind, Message, MessageId, MessageSearchPage, MessageSearchRequest, MessageSearchSource,
+    OwnerId, PermissionMode, RepoId, Role, Session, SessionId, SessionKind, SessionLifecycle,
+    Store, ToolDetail, Turn, TurnId, TurnStatus, WorkspaceId,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -254,7 +254,13 @@ async fn postgres_search_reads_literal_words_for_their_owner_only() {
     )
     .await;
     say(&store, alice_chat.id, Role::Tool, "tool output secret").await;
-    say(&store, bob_chat.id, Role::User, "deploy the café lunch order").await;
+    say(
+        &store,
+        bob_chat.id,
+        Role::User,
+        "deploy the café lunch order",
+    )
+    .await;
 
     // Folded words, the last one a prefix, for the owner alone.
     let page = search(&store, &alice, "CAFE depl").await;
@@ -293,7 +299,11 @@ async fn postgres_search_reads_literal_words_for_their_owner_only() {
         ("\\", 0),
         ("AND", 0),
     ] {
-        assert_eq!(search(&store, &alice, query).await.hits.len(), found, "{query}");
+        assert_eq!(
+            search(&store, &alice, query).await.hits.len(),
+            found,
+            "{query}"
+        );
     }
 
     // Incognito takes the conversation out of search, and back.
@@ -364,7 +374,11 @@ async fn postgres_code_search_matches_what_was_said_and_never_journal_keys() {
             parent_call_id: None,
         },
     ] {
-        seqs.push(append_event(&store, &owner, session_id, 0, &event).await.unwrap());
+        seqs.push(
+            append_event(&store, &owner, session_id, 0, &event)
+                .await
+                .unwrap(),
+        );
     }
 
     for key in ["tool", "call", "type", "message", "detail", "path", "read"] {

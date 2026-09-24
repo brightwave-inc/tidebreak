@@ -414,7 +414,7 @@ where
 
 /// Whether a stored journal event is one that can carry searchable text,
 /// read without decoding the rest of it.
-fn indexed_event_type(event: &serde_json::Value) -> bool {
+pub(in crate::db) fn indexed_event_type(event: &serde_json::Value) -> bool {
     event
         .get("type")
         .and_then(serde_json::Value::as_str)
@@ -541,8 +541,7 @@ where
         after = last.seq;
         let full = page.len() as u64 >= REBUILD_PAGE;
         for message in page {
-            if outside.contains(&TurnId(message.turn_id)) || retried_copies.contains(&message.id)
-            {
+            if outside.contains(&TurnId(message.turn_id)) || retried_copies.contains(&message.id) {
                 continue;
             }
             let terms = index_terms(&message.content);
@@ -952,7 +951,10 @@ pub(in crate::db) struct RowText {
 
 /// Read back the text every row in `rows` was indexed from, keyed by row id.
 /// A row whose source is gone is left out.
-pub(in crate::db) async fn row_texts<C>(conn: &C, rows: &[MatchedRow]) -> Result<HashMap<i64, RowText>>
+pub(in crate::db) async fn row_texts<C>(
+    conn: &C,
+    rows: &[MatchedRow],
+) -> Result<HashMap<i64, RowText>>
 where
     C: ConnectionTrait,
 {

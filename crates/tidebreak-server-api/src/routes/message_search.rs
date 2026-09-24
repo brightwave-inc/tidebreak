@@ -44,7 +44,9 @@ pub async fn search_messages(
 ) -> Result<Json<MessageSearchPage>, ServerError> {
     let words = query.q.trim();
     if words.is_empty() {
-        return Err(ServerError::bad_request("q must hold the words to search for"));
+        return Err(ServerError::bad_request(
+            "q must hold the words to search for",
+        ));
     }
     if words.chars().count() > MAX_QUERY_CHARS {
         return Err(ServerError::bad_request(format!(

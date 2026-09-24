@@ -272,7 +272,10 @@ VALUES
             .map(|hit| (hit.source, hit.snippet.as_str()))
             .collect::<Vec<_>>(),
         [
-            (crate::MessageSearchSource::Assistant, "The harbour is north."),
+            (
+                crate::MessageSearchSource::Assistant,
+                "The harbour is north."
+            ),
             (crate::MessageSearchSource::User, "where is the harbour"),
         ]
     );

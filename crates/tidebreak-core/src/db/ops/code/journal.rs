@@ -242,16 +242,21 @@ where
     C: ConnectionTrait,
 {
     let created_at = Utc::now();
-    super::super::message_search::index_code_events_on(
-        conn,
-        session_id,
-        &[(seq, &event, created_at)],
-    )
-    .await?;
+    // Only an event that can carry searchable text is kept for the index.
+    let searchable =
+        super::super::message_search::indexed_event_type(&event).then(|| event.clone());
     entities::event::Entity::insert(event_row_at(owner, session_id, seq, event, created_at))
         .exec_without_returning(conn)
         .await
         .map_err(store_err)?;
+    if let Some(event) = searchable {
+        super::super::message_search::index_code_events_on(
+            conn,
+            session_id,
+            &[(seq, &event, created_at)],
+        )
+        .await?;
+    }
     Ok(())
 }
 

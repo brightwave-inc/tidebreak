@@ -894,7 +894,10 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
     assert_eq!(snapshot.search_before_backfill, (0, 1));
     assert_eq!(
         snapshot.search_after_backfill,
-        [(tidebreak_core::MessageSearchSource::Assistant, "hello".to_owned())]
+        [(
+            tidebreak_core::MessageSearchSource::Assistant,
+            "hello".to_owned()
+        )]
     );
 }
 
@@ -1113,7 +1116,9 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
             .await
             .map_err(|error| error.to_string())?;
         if remaining != 0 {
-            return Err(format!("{remaining} conversations still wait for the index"));
+            return Err(format!(
+                "{remaining} conversations still wait for the index"
+            ));
         }
         let after = store
             .search_messages_scoped(&owner, &request)

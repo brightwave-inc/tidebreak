@@ -67,7 +67,11 @@ async fn search(router: &Router, bearer: &str, words: &str) -> tidebreak_core::M
 /// `(source, session, turn)` of every hit, newest first.
 fn hits(
     page: &tidebreak_core::MessageSearchPage,
-) -> Vec<(tidebreak_core::MessageSearchSource, SessionId, Option<TurnId>)> {
+) -> Vec<(
+    tidebreak_core::MessageSearchSource,
+    SessionId,
+    Option<TurnId>,
+)> {
     page.hits
         .iter()
         .map(|hit| (hit.source, hit.session_id, hit.turn_id))
@@ -284,7 +288,11 @@ async fn a_retried_question_is_one_hit_under_the_retry() {
 
     assert_eq!(
         hits(&search(&router, &bearer, "harbour").await),
-        [(tidebreak_core::MessageSearchSource::User, chat.id, Some(retry))]
+        [(
+            tidebreak_core::MessageSearchSource::User,
+            chat.id,
+            Some(retry)
+        )]
     );
 }
 
@@ -343,7 +351,10 @@ async fn archiving_incognito_and_deleting_through_the_routes_keep_search_current
     assert_eq!(archived.status(), StatusCode::OK);
     let page = search(&router, &bearer, "lighthouse").await;
     assert_eq!(page.hits.len(), 1);
-    assert!(page.hits[0].archived, "an archived chat is found and marked");
+    assert!(
+        page.hits[0].archived,
+        "an archived chat is found and marked"
+    );
     let restored = patch_chat(
         &router,
         &bearer,

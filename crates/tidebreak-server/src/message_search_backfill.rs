@@ -27,7 +27,8 @@ pub(crate) async fn run(db: Arc<DbStore>) {
             Ok(0) => {
                 if steps > 0 {
                     tracing::info!(
-                        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        elapsed_ms =
+                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                         "tidebreak: every conversation is in the message search index"
                     );
                 }

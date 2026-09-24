@@ -142,8 +142,8 @@ pub struct MessageSearchHit {
     #[ts(optional)]
     pub message_id: Option<MessageId>,
     /// The code journal event to scroll to: its sequence number in the
-    /// session's journal. Code hits from the journal only; a code session's
-    /// own message carries `turn_id` instead.
+    /// session's journal. Code hits from the journal only; a hit on a code
+    /// turn's input carries `turn_id` alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub event_seq: Option<i64>,
@@ -350,8 +350,7 @@ impl SearchTerms {
         let last = tokens.len().checked_sub(1);
         let mut terms: Vec<SearchTerm> = Vec::new();
         for (index, token) in tokens.into_iter().enumerate() {
-            let prefix =
-                Some(index) == last && token.folded.chars().count() >= MIN_PREFIX_CHARS;
+            let prefix = Some(index) == last && token.folded.chars().count() >= MIN_PREFIX_CHARS;
             let term = SearchTerm {
                 text: token.folded,
                 prefix,
@@ -668,12 +667,32 @@ mod tests {
     #[test]
     fn query_syntax_is_literal_text() {
         for (query, fts5, tsquery) in [
-            ("\"quoted\" words", "\"quoted\" \"words\"*", "'quoted' & 'words':*"),
-            ("a AND b OR NOT c", "\"a\" \"and\" \"b\" \"or\" \"not\" \"c\"", "'a' & 'and' & 'b' & 'or' & 'not' & 'c'"),
-            ("NEAR(one two)", "\"near\" \"one\" \"two\"*", "'near' & 'one' & 'two':*"),
-            ("-exclude col:value", "\"exclude\" \"col\" \"value\"*", "'exclude' & 'col' & 'value':*"),
+            (
+                "\"quoted\" words",
+                "\"quoted\" \"words\"*",
+                "'quoted' & 'words':*",
+            ),
+            (
+                "a AND b OR NOT c",
+                "\"a\" \"and\" \"b\" \"or\" \"not\" \"c\"",
+                "'a' & 'and' & 'b' & 'or' & 'not' & 'c'",
+            ),
+            (
+                "NEAR(one two)",
+                "\"near\" \"one\" \"two\"*",
+                "'near' & 'one' & 'two':*",
+            ),
+            (
+                "-exclude col:value",
+                "\"exclude\" \"col\" \"value\"*",
+                "'exclude' & 'col' & 'value':*",
+            ),
             ("wild* (paren", "\"wild\" \"paren\"*", "'wild' & 'paren':*"),
-            ("it's \\ back'", "\"it\" \"s\" \"back\"*", "'it' & 's' & 'back':*"),
+            (
+                "it's \\ back'",
+                "\"it\" \"s\" \"back\"*",
+                "'it' & 's' & 'back':*",
+            ),
         ] {
             let terms = SearchTerms::parse(query);
             assert_eq!(terms.fts5_match(), fts5, "{query}");
@@ -703,7 +722,10 @@ mod tests {
 
     #[test]
     fn a_long_query_keeps_the_word_being_typed() {
-        let query = (0..20).map(|n| format!("w{n}")).collect::<Vec<_>>().join(" ");
+        let query = (0..20)
+            .map(|n| format!("w{n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let terms = SearchTerms::parse(&query);
         assert_eq!(terms.terms().len(), MAX_QUERY_TERMS);
         let last = terms.terms().last().unwrap();
@@ -739,8 +761,14 @@ mod tests {
         assert_eq!(matched, ["needle"]);
         // Cut at spaces: the words on both sides are whole.
         let inner = snippet.trim_matches('…');
-        assert!(inner.starts_with("lorem") || inner.starts_with("ipsum"), "{snippet}");
-        assert!(inner.ends_with("dolor") || inner.ends_with("sit"), "{snippet}");
+        assert!(
+            inner.starts_with("lorem") || inner.starts_with("ipsum"),
+            "{snippet}"
+        );
+        assert!(
+            inner.ends_with("dolor") || inner.ends_with("sit"),
+            "{snippet}"
+        );
         assert!(inner.chars().count() <= SNIPPET_CHARS);
     }
 
