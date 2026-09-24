@@ -32,9 +32,11 @@ stored secrets as encrypted rows in its own database.
   database, and refuses to start when the file is missing, unreadable, or does
   not decode to exactly 32 bytes. It also refuses a file that its group or
   other accounts can write, because on an empty table another local account
-  could plant a key it knows. It warns, but starts, when they can only read
-  it. The check applies to the file a symlink names, since Kubernetes mounts
-  secrets through symlinks.
+  could plant a key it knows. It warns, but starts, when every account can
+  read it. Group read access passes quietly, because that is how a container's
+  server user shares the file with the host account that created it. The check
+  applies to the file a symlink names, since Kubernetes mounts secrets through
+  symlinks.
 - The `deployment_secrets` table holds one row per secret: `name` (primary
   key), `key_id`, `nonce`, `ciphertext`, and `updated_at`. The profile stores
   its credentials as one bundle, so in practice the table holds one row.
@@ -130,8 +132,8 @@ longer decrypts refusing to open, rows under another key surviving writes and
 deletes, both custody options set, the desktop profile rejecting the variable,
 and each key file case: missing, unreadable, empty, not base64, 16 and 33
 bytes, oversized, trailing whitespace accepted, writable by group or others
-refused, readable by them loaded with a warning, and a symlink judged by its
-target. The PostgreSQL lane runs the same flow against a fresh database and
+refused, readable by every account loaded with a warning, readable by its
+group loaded quietly, and a symlink judged by its target. The PostgreSQL lane runs the same flow against a fresh database and
 boots the server through `tidebreak_server::bind`, including the refusals
 under the wrong key file and over a damaged row. An implementation without
 associated data fails the moved-ciphertext test. One that checks the key only

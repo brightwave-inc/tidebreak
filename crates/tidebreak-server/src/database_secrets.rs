@@ -20,8 +20,10 @@
 //!   that names the secret, never a missing secret. Errors name secrets, never
 //!   values or the key.
 //! - A key file that accounts other than its owner can change is refused, and
-//!   one they can read draws a warning. The check follows symlinks, as a
-//!   Kubernetes secret mount is one.
+//!   one every account can read draws a warning. Group read access is how a
+//!   container's server user shares a file with the host account that made
+//!   it, so it passes quietly. The check follows symlinks, as a Kubernetes
+//!   secret mount is one.
 //!
 //! The key protects dumps and backups, not a database someone can write to:
 //! a writer can put back an older row under the same name and key, and it
@@ -96,15 +98,15 @@ impl SecretKey {
             let mode = file.metadata().map_err(unreadable)?.permissions().mode();
             match key_file_access(mode) {
                 KeyFileAccess::Private => {}
-                KeyFileAccess::ReadableByOthers => tracing::warn!(
-                    "{KEY_FILE_VARIABLE} at {shown} can be read by accounts other than its \
-                     owner. Restrict it with `chmod 400 {shown}`"
+                KeyFileAccess::ReadableByEveryone => tracing::warn!(
+                    "{KEY_FILE_VARIABLE} at {shown} can be read by every account on this \
+                     machine. Remove that access with `chmod o-r {shown}`"
                 ),
                 KeyFileAccess::WritableByOthers => {
                     return Err(AgentError::config(format!(
                         "{KEY_FILE_VARIABLE} at {shown} can be changed by accounts other than \
                          its owner, so one of them could replace the key with one they know. \
-                         Restrict it with `chmod 400 {shown}` and start Tidebreak again"
+                         Remove that access with `chmod go-w {shown}` and start Tidebreak again"
                     )));
                 }
             }
@@ -171,11 +173,11 @@ impl SecretKey {
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyFileAccess {
-    /// Only the owner.
+    /// Only the owner, and its group when the group may read it.
     Private,
-    /// Its group or everyone can read it, but not change it.
-    ReadableByOthers,
-    /// Its group or everyone can change it.
+    /// Every account can read it, but none besides the owner can change it.
+    ReadableByEveryone,
+    /// Its group or every account can change it.
     WritableByOthers,
 }
 
@@ -183,8 +185,8 @@ enum KeyFileAccess {
 fn key_file_access(mode: u32) -> KeyFileAccess {
     if mode & 0o022 != 0 {
         KeyFileAccess::WritableByOthers
-    } else if mode & 0o044 != 0 {
-        KeyFileAccess::ReadableByOthers
+    } else if mode & 0o004 != 0 {
+        KeyFileAccess::ReadableByEveryone
     } else {
         KeyFileAccess::Private
     }
@@ -874,7 +876,7 @@ mod tests {
                 message.contains("can be changed by accounts"),
                 "{mode:o}: {message}"
             );
-            assert!(message.contains("chmod 400"), "{mode:o}: {message}");
+            assert!(message.contains("chmod go-w"), "{mode:o}: {message}");
             assert!(message.contains(KEY_FILE_VARIABLE), "{mode:o}: {message}");
         }
 
@@ -886,9 +888,10 @@ mod tests {
         assert!(message.contains("can be changed by accounts"), "{message}");
     }
 
-    /// A key file others can read still loads, with a warning that says how
-    /// to restrict it. A private one loads quietly, including through a
-    /// symlink, whose own mode says nothing about the file it names.
+    /// A key file every account can read still loads, with a warning that
+    /// says how to restrict it. A private or group-readable one loads quietly,
+    /// including through a symlink, whose own mode says nothing about the file
+    /// it names.
     #[cfg(unix)]
     #[test]
     fn a_key_file_others_can_read_loads_with_a_warning() {
@@ -897,21 +900,23 @@ mod tests {
         let contents = format!("{}\n", encoded(&bytes));
         let expected = SecretKey::from_bytes(&bytes).unwrap().id().to_owned();
 
-        for mode in [0o640, 0o604, 0o644, 0o444] {
+        for mode in [0o604, 0o644, 0o444] {
             let path = key_file(dir.path(), &contents);
             set_mode(&path, mode);
             let (loaded, logged) = load_logging(&path);
             assert_eq!(loaded.unwrap().id(), expected, "{mode:o}");
             assert!(logged.contains("WARN"), "{mode:o}: {logged}");
             assert!(
-                logged.contains("can be read by accounts other than its owner"),
+                logged.contains("can be read by every account"),
                 "{mode:o}: {logged}"
             );
-            assert!(logged.contains("chmod 400"), "{mode:o}: {logged}");
+            assert!(logged.contains("chmod o-r"), "{mode:o}: {logged}");
             assert!(!logged.contains(contents.trim()), "{mode:o}: {logged}");
         }
 
-        for mode in [0o600, 0o400] {
+        // Group read access is how the container's user shares a key file
+        // with the host account that created it.
+        for mode in [0o600, 0o400, 0o640, 0o440] {
             let path = key_file(dir.path(), &contents);
             set_mode(&path, mode);
             let (loaded, logged) = load_logging(&path);
