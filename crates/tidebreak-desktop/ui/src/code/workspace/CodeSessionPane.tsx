@@ -518,7 +518,9 @@ export function CodeSessionPane({
     const requestedModel = canManage ? (model ?? undefined) : undefined;
     const recoveryAtSend = firstTurnRecovery;
     // Sending is a deliberate return to the tail: whatever the reader was
-    // reading, they now want to watch their own turn run.
+    // reading, an earlier stretch a search opened included, they now want to
+    // watch their own turn run and decide what it asks.
+    transcriptSearch.leaveHistory();
     follow.armFollow();
     follow.requestSmoothFollow();
     // Outcome and refusal both belong to the composer: it says whether the
@@ -583,6 +585,8 @@ export function CodeSessionPane({
     if (!expectedTurnId) {
       throw new Error("The active turn changed. Try steer again.");
     }
+    // A steer lands in the running turn, at the tail.
+    transcriptSearch.leaveHistory();
     await client.steerCodeSession(session.id, expectedTurnId, message);
   }
 
