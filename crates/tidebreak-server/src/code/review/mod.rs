@@ -15,18 +15,17 @@
 //!   mode with only Read, Grep, and Glob, no MCP servers, and the person's
 //!   hooks off; Codex runs in its read-only OS sandbox with web search and
 //!   the person's MCP servers off; opencode's plan agent gets rules that deny
-//!   every tool but reading, the person's own MCP servers' tools included;
-//!   Grok CLI, which has no plan mode, runs in Ask under its `read-only`
-//!   sandbox profile, and a machine where Grok cannot apply that profile
-//!   does not offer Grok for review at all ([`CodeRuntime::review_blocker`]).
-//!   An engine with neither a plan mode nor approvals Tidebreak can refuse
-//!   is not offered. This layer is what stops a write aimed outside the copy
-//!   below; the OS enforces it for Codex and Grok.
+//!   every tool but reading, the person's own MCP servers' tools included.
+//!   Grok CLI is not offered ([`CodeRuntime::review_blocker`]): it can't
+//!   turn off network access. An engine with neither a plan mode nor
+//!   approvals Tidebreak can refuse is not offered either. This layer is
+//!   what stops a write aimed outside the copy below; the OS enforces it for
+//!   Codex.
 //!
 //!   Reading is not confined: a reviewer reads what the person's account
 //!   can, as the coding engines do, except opencode's, whose rules keep it
 //!   inside the copy. What it reads leaves only through its own model
-//!   provider, with one exception the docs name for Grok.
+//!   provider.
 //! - Every approval the engine asks for is refused, with feedback telling it
 //!   to report the change as a finding instead. Claude Code gets no
 //!   permission-prompt tool at all, so print mode refuses what plan mode
@@ -323,17 +322,15 @@ impl ReviewRegistry {
 }
 
 impl CodeRuntime {
-    /// Why `adapter`'s engine cannot review read-only on this machine, when
-    /// it cannot, such as Grok CLI with no sandbox it can apply here. Asked
-    /// once per install and remembered until the probes are refreshed.
+    /// Why `adapter`'s engine cannot review read-only, when it cannot, such
+    /// as Grok CLI, which can't turn off network access. Asked once per
+    /// install and remembered until the probes are refreshed. Asked for an
+    /// engine that is not installed too: installing it would not help.
     pub async fn review_blocker(
         &self,
         adapter: &dyn HarnessAdapter,
         probe: &HarnessProbe,
     ) -> Option<String> {
-        if !probe.found {
-            return None;
-        }
         let key = (
             adapter.kind(),
             probe.binary_path.clone(),
@@ -402,8 +399,8 @@ impl CodeRuntime {
     ///
     /// Refuses before anything runs when the engine is not installed or not
     /// signed in (`422 harness_not_found`, `422 harness_not_authenticated`),
-    /// cannot review read-only here, such as Grok CLI with no sandbox it can
-    /// apply on this machine (`422 review_engine_unsupported`), or is above
+    /// cannot review read-only, such as Grok CLI, which can't turn off network
+    /// access (`422 review_engine_unsupported`), or is above
     /// the managed ceiling (`409 permission_mode_locked`); when there is
     /// nothing to review (`409 review_empty`); and while another review of the
     /// workspace runs (`409 review_running`). Returns as soon as the review is

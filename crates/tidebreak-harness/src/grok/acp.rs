@@ -227,7 +227,7 @@ fn permission_kind(value: &Value, cwd: &Path) -> ApprovalKind {
 }
 
 impl GrokSession {
-    pub(super) fn compose_acp_plan(&self, input: &TurnInput) -> Result<LaunchPlan, HarnessError> {
+    fn compose_acp_plan(&self, input: &TurnInput) -> Result<LaunchPlan, HarnessError> {
         // Reuse the relay credential and launch environment contract. ACP sends
         // prompt/session data over stdin, so no prompt or resume token enters argv.
         let mut plan = self.compose_plan(

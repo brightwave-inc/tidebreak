@@ -320,14 +320,20 @@ fn an_engine_reviews_in_plan_mode_else_in_ask_with_everything_refused_else_not_a
     );
 }
 
-#[test]
-fn each_pinned_engine_reviews_in_the_posture_the_pull_request_names() {
+/// Claude Code, Codex, and opencode review in plan mode. Grok CLI is not
+/// offered: whatever its posture, its adapter says it can't keep a review
+/// off the network.
+#[tokio::test]
+async fn each_pinned_engine_reviews_in_the_posture_the_pull_request_names() {
     let registry = tidebreak_harness::builtin_registry();
     for (kind, expected) in [
-        (HarnessKind::ClaudeCode, PermissionMode::Plan),
-        (HarnessKind::Codex, PermissionMode::Plan),
-        (HarnessKind::Opencode, PermissionMode::Plan),
-        (HarnessKind::Grok, PermissionMode::Ask),
+        (HarnessKind::ClaudeCode, Ok(PermissionMode::Plan)),
+        (HarnessKind::Codex, Ok(PermissionMode::Plan)),
+        (HarnessKind::Opencode, Ok(PermissionMode::Plan)),
+        (
+            HarnessKind::Grok,
+            Err("Grok CLI can't review read-only yet: it can't turn off network access."),
+        ),
     ] {
         let adapter = registry.get(kind).expect("a builtin adapter");
         let pin = tidebreak_harness::pin::pin_for(kind).expect("a pinned version");
@@ -341,11 +347,11 @@ fn each_pinned_engine_reviews_in_the_posture_the_pull_request_names() {
             commands: Vec::new(),
             reported_efforts: None,
         };
-        assert_eq!(
-            review_permission_mode(&adapter.capabilities(&probe)),
-            Some(expected),
-            "{kind}"
-        );
+        let posture = match adapter.read_only_blocker(&probe).await {
+            Some(reason) => Err(reason),
+            None => Ok(review_permission_mode(&adapter.capabilities(&probe)).expect("a posture")),
+        };
+        assert_eq!(posture, expected.map_err(str::to_owned), "{kind}");
     }
 }
 

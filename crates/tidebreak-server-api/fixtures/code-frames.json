@@ -405,7 +405,7 @@
           "kind": "grok",
           "relaunch_composes_permission_mode": false,
           "remediation": "Install grok-build and sign in.",
-          "review_blocked": "Grok CLI can't apply its read-only sandbox on this machine. Grok said: Landlock is not supported by this kernel",
+          "review_blocked": "Grok CLI can't review read-only yet: it can't turn off network access.",
           "stderr": "grok: command not found",
           "tier": "best_effort",
           "unrecognized_event_count": 2,

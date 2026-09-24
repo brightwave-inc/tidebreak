@@ -395,12 +395,20 @@ impl HarnessAdapter for GrokAdapter {
         )
     }
 
-    async fn read_only_blocker(&self, probe: &HarnessProbe) -> Option<String> {
-        let binary = probe.binary_path.as_deref()?;
-        read_only_sandbox_blocker(binary, &probe.env).await
+    /// Grok has no read-only session to offer yet. Its `read-only` sandbox
+    /// profile keeps a command from writing, but not from reaching the
+    /// network on macOS, and `grok agent` can turn off neither its web
+    /// search nor the MCP servers in its own config. So a command the
+    /// person's own Grok rules allow, or one of their MCP tools, could send
+    /// what the session read anywhere.
+    async fn read_only_blocker(&self, _probe: &HarnessProbe) -> Option<String> {
+        Some(READ_ONLY_UNAVAILABLE.to_owned())
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
+        if spec.read_only {
+            return Err(HarnessError::Other(READ_ONLY_UNAVAILABLE.to_owned()));
+        }
         let Some(binary) = spec.binary.as_deref().filter(|path| path.is_absolute()) else {
             return Err(HarnessError::NotFound);
         };
@@ -412,89 +420,9 @@ impl HarnessAdapter for GrokAdapter {
     }
 }
 
-/// How long the sandbox check may take.
-const SANDBOX_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
-/// Longest reason the sandbox check passes on, in characters.
-const MAX_SANDBOX_REASON_CHARS: usize = 300;
-
-/// Why Grok's `read-only` sandbox profile cannot hold on this machine, or
-/// `None` when it applies.
-///
-/// A read-only Grok session has no plan mode to fall back on: the sandbox is
-/// what keeps a command Grok runs from writing (see
-/// [`crate::grok::session::read_only_env`]). Grok applies it when it starts,
-/// and depending on the release, a profile it cannot apply is either a
-/// refusal to start or a warning and a run without it. So the check asks
-/// Grok to start under the profile, `grok inspect --json` in an empty
-/// directory, which reads no session and sends nothing, and passes only a
-/// clean start: exit 0, and no warning that the sandbox was not applied. A
-/// release without `inspect`, a timeout, or anything else fails closed.
-async fn read_only_sandbox_blocker(
-    binary: &Path,
-    env: &[(std::ffi::OsString, std::ffi::OsString)],
-) -> Option<String> {
-    const CANNOT: &str = "Grok CLI can't apply its read-only sandbox on this machine";
-    let Ok(neutral) = tempfile::tempdir() else {
-        return Some(format!("{CANNOT}: no scratch folder to check it in."));
-    };
-    let mut command = Command::new(binary);
-    command
-        .args(["inspect", "--json"])
-        .current_dir(neutral.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    command.env_clear();
-    for (key, value) in crate::filter_child_env(env.iter().cloned()) {
-        command.env(key, value);
-    }
-    command.env(DISABLE_AUTOUPDATER_ENV, "1");
-    for (key, value) in crate::grok::session::read_only_env(true) {
-        command.env(key, value);
-    }
-    let Ok(child) = crate::spawn_process_tree(&mut command) else {
-        return Some(format!("{CANNOT}: the check could not start."));
-    };
-    let output = match timeout(SANDBOX_CHECK_TIMEOUT, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(_)) => return Some(format!("{CANNOT}: the check did not finish.")),
-        Err(_) => return Some(format!("{CANNOT}: the check timed out.")),
-    };
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let said = sandbox_warning(&stderr);
-    if output.status.success() && said.is_none() {
-        return None;
-    }
-    let detail = said
-        .or_else(|| {
-            stderr
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| format!("the check exited with {}", output.status));
-    let detail: String = detail.chars().take(MAX_SANDBOX_REASON_CHARS).collect();
-    Some(format!("{CANNOT}. Grok said: {detail}"))
-}
-
-/// Grok's own line saying the sandbox was not applied, when it printed one.
-fn sandbox_warning(stderr: &str) -> Option<String> {
-    stderr
-        .lines()
-        .map(str::trim)
-        .find(|line| {
-            let lower = line.to_ascii_lowercase();
-            lower.contains("sandbox") && (lower.contains("could not") || lower.contains("without"))
-        })
-        .map(|line| {
-            line.strip_prefix("warning:")
-                .or_else(|| line.strip_prefix("error:"))
-                .unwrap_or(line)
-                .trim()
-                .to_owned()
-        })
-}
+/// Why Grok cannot run a read-only session ([`SessionSpec::read_only`]).
+pub const READ_ONLY_UNAVAILABLE: &str =
+    "Grok CLI can't review read-only yet: it can't turn off network access.";
 
 /// `grok models` — "You are logged in…" vs "You are not authenticated."
 /// Never reads tokens.
@@ -546,71 +474,59 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tidebreak_core::PermissionMode;
 
-    /// A stand-in `grok` that records how it was run and answers `inspect`
-    /// with `stderr` and `status`.
-    #[cfg(unix)]
-    fn stub_grok(dir: &Path, stderr: &str, status: i32) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let binary = dir.join("grok");
-        let record = dir.join("record");
-        std::fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$*\" \"$GROK_SANDBOX\" \"$GROK_SANDBOX_AUTO_ALLOW_BASH\" > '{}'\nprintf '%s' '{}' >&2\nexit {status}\n",
-                record.display(),
-                stderr.replace('\'', ""),
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        binary
+    struct Discard;
+
+    #[async_trait]
+    impl crate::HarnessEventSink for Discard {
+        async fn emit(&self, _event: HarnessEvent) {}
     }
 
-    /// Grok starts under its `read-only` profile, or the check fails closed:
-    /// a refusal to start, a warning that it ran without the sandbox, and a
-    /// release that has no `inspect` all block a read-only session.
-    #[cfg(unix)]
+    /// Grok cannot review: it can't turn off network access, so it has no
+    /// read-only session to offer. Asked, it says why; launched read-only
+    /// anyway, it refuses before starting anything.
     #[tokio::test]
-    async fn the_read_only_sandbox_must_apply_cleanly_or_it_blocks() {
-        let dir = tempfile::tempdir().unwrap();
-        let clean = stub_grok(dir.path(), "", 0);
-        assert_eq!(read_only_sandbox_blocker(&clean, &[]).await, None);
+    async fn grok_has_no_read_only_session_and_says_why() {
+        let probe = HarnessProbe {
+            found: true,
+            binary_path: Some(PathBuf::from("/usr/bin/grok")),
+            version: Some("1.0.40".into()),
+            authenticated: Some(true),
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: Vec::new(),
+            reported_efforts: None,
+        };
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("record")).unwrap(),
-            "inspect --json|read-only|false\n",
-            "the check runs Grok under the profile a review uses"
+            GrokAdapter.read_only_blocker(&probe).await.as_deref(),
+            Some("Grok CLI can't review read-only yet: it can't turn off network access.")
         );
-
-        let refused = stub_grok(
-            dir.path(),
-            "warning: sandbox could not be applied: socket deny resolution failed: could not resolve runtime-socket deny path /var/run/docker.sock: endpoint is a symlink\nerror: could not apply the read-only sandbox profile; see the warning above for the cause. Refusing to start with its protections missing.\n",
-            1,
-        );
-        let reason = read_only_sandbox_blocker(&refused, &[]).await.unwrap();
-        assert_eq!(
-            reason,
-            "Grok CLI can't apply its read-only sandbox on this machine. Grok said: sandbox could not be applied: socket deny resolution failed: could not resolve runtime-socket deny path /var/run/docker.sock: endpoint is a symlink"
-        );
-
-        // An older release warns and starts anyway: that is a failure too.
-        let warned = stub_grok(
-            dir.path(),
-            "warning: sandbox could not be applied: Landlock is not supported by this kernel; continuing without enforcement\n",
-            0,
-        );
-        assert!(read_only_sandbox_blocker(&warned, &[])
-            .await
-            .unwrap()
-            .contains("Landlock is not supported"));
-
-        let unknown = stub_grok(dir.path(), "error: unrecognized subcommand 'inspect'\n", 2);
-        assert_eq!(
-            read_only_sandbox_blocker(&unknown, &[]).await.unwrap(),
-            "Grok CLI can't apply its read-only sandbox on this machine. Grok said: error: unrecognized subcommand inspect"
-        );
-
-        let missing = dir.path().join("no-such-grok");
-        assert!(read_only_sandbox_blocker(&missing, &[]).await.is_some());
+        let spec = SessionSpec {
+            owner: tidebreak_core::OwnerId::local(),
+            session_id: tidebreak_core::SessionId::new(),
+            worktree: PathBuf::from("/workspace"),
+            allowed_read_roots: Vec::new(),
+            permission_mode: PermissionMode::Ask,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            resume_ref: None,
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            relay_key_env: None,
+            env: Vec::new(),
+            approval: None,
+            // A binary that would fail if anything tried to run it.
+            binary: Some(PathBuf::from("/nonexistent/grok")),
+            sink: std::sync::Arc::new(Discard),
+            browser: None,
+            native: None,
+            tool_bridge: None,
+            apps: None,
+            project_config: crate::ProjectConfig::Skip,
+            read_only: true,
+        };
+        let refused = GrokAdapter.launch(spec).await.err().expect("refused");
+        assert_eq!(refused.to_string(), READ_ONLY_UNAVAILABLE);
     }
 
     #[test]

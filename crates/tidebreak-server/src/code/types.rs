@@ -826,10 +826,10 @@ pub struct HarnessDoctorEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub sign_in_command: Option<String>,
-    /// Why this engine cannot review a workspace's changes read-only on this
-    /// machine, when it cannot, in the person's terms: Grok CLI with no
-    /// sandbox it can apply here, for one. Absent when nothing stands in
-    /// the way. Review changes lists the engine but does not offer it.
+    /// Why this engine cannot review a workspace's changes read-only, when it
+    /// cannot, in the person's terms: Grok CLI, which can't turn off network
+    /// access, for one. Absent when nothing stands in the way. Review changes
+    /// lists the engine but does not offer it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub review_blocked: Option<String>,

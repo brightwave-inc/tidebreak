@@ -144,9 +144,6 @@ impl GrokSession {
         for (key, value) in project_config_env(self.spec.project_config) {
             crate::override_env(&mut plan.env, key, value);
         }
-        for (key, value) in read_only_env(self.spec.read_only) {
-            crate::override_env(&mut plan.env, key, value);
-        }
         Ok(plan)
     }
 
@@ -247,41 +244,6 @@ pub(crate) fn project_config_env(
     match project_config {
         crate::ProjectConfig::Skip => &[("GROK_ENVRC_TIMEOUT_SECS", "0")],
         crate::ProjectConfig::Load => &[],
-    }
-}
-
-/// The sandbox profile a read-only session ([`crate::SessionSpec::read_only`])
-/// asks Grok for. Grok's `read-only` profile lets the engine and the
-/// commands it starts read everywhere and write only to `~/.grok` and the
-/// temp directories, enforced by Seatbelt on macOS and Landlock on Linux.
-/// The `agent` subcommand takes no `--sandbox` or `--deny` flag, so the
-/// profile travels in `GROK_SANDBOX`, which every entry point reads.
-///
-/// `GROK_SANDBOX_AUTO_ALLOW_BASH=false` keeps a person's
-/// `sandbox.auto_allow_bash` from running commands unasked while the
-/// profile is on: each one still asks, and a review refuses it.
-/// `GROK_WEB_FETCH=false` and `GROK_DISABLE_WEB_FETCH=1` keep the
-/// `web_fetch` tool off, and the `*_MCPS_ENABLED` switches keep Grok from
-/// importing MCP servers from Claude Code's and Cursor's configs. Grok's
-/// `web_search` runs through xAI, the provider the session already talks
-/// to, and `grok agent` has no switch for it or for the MCP servers in
-/// Grok's own config.
-///
-/// Before a read-only session starts, the adapter checks that the profile
-/// applies on this machine ([`crate::HarnessAdapter::read_only_blocker`]),
-/// and the session is refused when it does not.
-pub(crate) fn read_only_env(read_only: bool) -> &'static [(&'static str, &'static str)] {
-    if read_only {
-        &[
-            ("GROK_SANDBOX", "read-only"),
-            ("GROK_SANDBOX_AUTO_ALLOW_BASH", "false"),
-            ("GROK_WEB_FETCH", "false"),
-            ("GROK_DISABLE_WEB_FETCH", "1"),
-            ("GROK_CLAUDE_MCPS_ENABLED", "false"),
-            ("GROK_CURSOR_MCPS_ENABLED", "false"),
-        ]
-    } else {
-        &[]
     }
 }
 
@@ -975,82 +937,6 @@ mod tests {
             err,
             HarnessError::AllowedReadRootNotAbsolute(root) if root == "relative/private"
         ));
-    }
-
-    /// A read-only session asks Grok for its `read-only` sandbox profile on
-    /// every launch, the ACP one included, since `grok agent` takes no
-    /// `--sandbox` or `--deny` flag.
-    #[test]
-    fn a_read_only_session_runs_under_the_read_only_sandbox_profile() {
-        let spec = |read_only| SessionSpec {
-            owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::SessionId::new(),
-            worktree: std::path::PathBuf::from("/workspace"),
-            allowed_read_roots: Vec::new(),
-            permission_mode: PermissionMode::Ask,
-            model: None,
-            reasoning_effort: None,
-            fast_mode: false,
-            resume_ref: None,
-            extra_argv: Vec::new(),
-            // A person's own setting does not turn it off.
-            extra_env: vec![("GROK_SANDBOX".into(), "off".into())],
-            relay_key_env: None,
-            env: Vec::new(),
-            approval: None,
-            binary: Some(std::path::PathBuf::from("/usr/bin/grok")),
-            sink: std::sync::Arc::new(Discard),
-            browser: None,
-            native: None,
-            tool_bridge: None,
-            apps: None,
-            project_config: crate::ProjectConfig::Skip,
-            read_only,
-        };
-        let sandbox = |plan: &LaunchPlan| {
-            plan.env
-                .iter()
-                .filter(|(key, _)| key == "GROK_SANDBOX")
-                .map(|(_, value)| value.clone())
-                .collect::<Vec<_>>()
-        };
-        let session = GrokSession::new(spec(true), "1.0.40".into());
-        let print = session
-            .compose_plan(std::path::Path::new("/tmp/prompt.txt"), None, None)
-            .unwrap();
-        assert_eq!(sandbox(&print), ["read-only"]);
-        let acp = session
-            .compose_acp_plan(&TurnInput {
-                turn_id: None,
-                text: "review".into(),
-                model: None,
-                reasoning_effort: None,
-                fast_mode: false,
-                images: Vec::new(),
-            })
-            .unwrap();
-        assert_eq!(sandbox(&acp), ["read-only"]);
-        // Commands still ask under the profile, whatever the person's
-        // `sandbox.auto_allow_bash` says, so a review can refuse them; and
-        // the web fetch tool is off.
-        for (key, value) in [
-            ("GROK_SANDBOX_AUTO_ALLOW_BASH", "false"),
-            ("GROK_WEB_FETCH", "false"),
-            ("GROK_DISABLE_WEB_FETCH", "1"),
-        ] {
-            assert!(
-                acp.env
-                    .iter()
-                    .any(|(name, set)| name == key && set == value),
-                "{key}"
-            );
-        }
-
-        let session = GrokSession::new(spec(false), "1.0.40".into());
-        let plan = session
-            .compose_plan(std::path::Path::new("/tmp/prompt.txt"), None, None)
-            .unwrap();
-        assert_eq!(sandbox(&plan), ["off"]);
     }
 
     #[test]

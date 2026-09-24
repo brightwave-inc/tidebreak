@@ -343,18 +343,20 @@ async fn every_request_a_reviewer_makes_to_change_something_is_refused() {
 
 #[tokio::test]
 async fn an_engine_with_no_plan_mode_reviews_in_ask_and_one_with_neither_is_refused() {
-    let grok = ScriptedAdapter::new(review_script(r#"{"findings": []}"#))
-        .with_kind(HarnessKind::Grok)
+    let planless = ScriptedAdapter::new(review_script(r#"{"findings": []}"#))
+        .with_kind(HarnessKind::Codex)
         .with_plan_mode(CapLevel::Unsupported)
         .with_approvals(CapLevel::Supported);
-    let with_grok = setup(&grok).await;
-    let started = with_grok
-        .started(serde_json::json!({ "harness": "grok" }))
+    let with_planless = setup(&planless).await;
+    let started = with_planless
+        .started(serde_json::json!({ "harness": "codex" }))
         .await;
     assert_eq!(started["permission_mode"], "ask");
-    let review = with_grok.finished(started["id"].as_str().unwrap()).await;
+    let review = with_planless
+        .finished(started["id"].as_str().unwrap())
+        .await;
     assert_eq!(review["status"], "completed", "{review}");
-    assert_eq!(grok.launched_sessions()[0].1, PermissionMode::Ask);
+    assert_eq!(planless.launched_sessions()[0].1, PermissionMode::Ask);
 
     let neither = ScriptedAdapter::new(review_script(r#"{"findings": []}"#))
         .with_kind(HarnessKind::Opencode)
@@ -369,12 +371,16 @@ async fn an_engine_with_no_plan_mode_reviews_in_ask_and_one_with_neither_is_refu
     assert!(neither.launched_sessions().is_empty());
 }
 
-/// Grok reviews under its OS sandbox. On a machine where the sandbox cannot
-/// apply, the review fails closed: it is refused with Grok's own reason
-/// before anything runs, and the engine list says why Grok is unavailable.
+/// Grok CLI can't turn off network access, so it does not review: a start
+/// is refused with that reason before anything runs, and the engine list
+/// shows Grok with the reason, installed or not.
 #[tokio::test]
-async fn an_engine_whose_sandbox_cannot_apply_here_is_refused_and_listed_as_unavailable() {
-    let reason = "Grok CLI can't apply its read-only sandbox on this machine. Grok said: Landlock is not supported by this kernel";
+async fn grok_is_listed_but_never_reviews() {
+    let reason = tidebreak_harness::grok::READ_ONLY_UNAVAILABLE;
+    assert_eq!(
+        reason,
+        "Grok CLI can't review read-only yet: it can't turn off network access."
+    );
     let grok = ScriptedAdapter::new(review_script(r#"{"findings": []}"#))
         .with_kind(HarnessKind::Grok)
         .with_plan_mode(CapLevel::Unsupported)

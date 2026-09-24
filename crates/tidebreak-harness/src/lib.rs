@@ -1035,10 +1035,8 @@ pub struct SessionSpec {
     /// - opencode's session carries rules that deny every tool but reading,
     ///   the person's own MCP servers' tools included. They come after the
     ///   agent's and the user's rules and so win.
-    /// - Grok CLI runs under its `read-only` sandbox profile (`GROK_SANDBOX`),
-    ///   which the OS enforces, with web fetch off. A caller checks first that
-    ///   the profile applies here ([`HarnessAdapter::read_only_blocker`]) and
-    ///   refuses the session when it does not.
+    /// - Grok CLI refuses a read-only session: it can't turn off network
+    ///   access ([`HarnessAdapter::read_only_blocker`] says so first).
     /// - Codex's Plan posture is already the read-only OS sandbox, which also
     ///   keeps commands off the network; web search and each of the person's
     ///   MCP servers are turned off too, and a Codex that cannot list its
@@ -1146,14 +1144,10 @@ pub trait HarnessAdapter: Send + Sync {
         true
     }
 
-    /// Why a read-only session ([`SessionSpec::read_only`]) cannot start on
-    /// this machine, when something the adapter relies on for it is missing.
-    /// `None` means nothing stands in the way.
-    ///
-    /// Most engines need nothing beyond their launch flags. One that keeps a
-    /// read-only session read-only with an OS sandbox checks here that the
-    /// sandbox applies, and a caller refuses the session rather than run it
-    /// without one.
+    /// Why a read-only session ([`SessionSpec::read_only`]) cannot start,
+    /// when the engine cannot keep one read-only. `None` means nothing stands
+    /// in the way. A caller refuses the session rather than start it, and an
+    /// adapter that answers here also refuses such a launch itself.
     async fn read_only_blocker(&self, probe: &HarnessProbe) -> Option<String> {
         let _ = probe;
         None

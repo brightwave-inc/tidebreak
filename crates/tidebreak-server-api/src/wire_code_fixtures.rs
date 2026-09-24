@@ -548,7 +548,8 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                         update_available: false,
                         sign_in_command: None,
                         review_blocked: Some(
-                            "Grok CLI can't apply its read-only sandbox on this machine. Grok said: Landlock is not supported by this kernel".to_owned(),
+                            "Grok CLI can't review read-only yet: it can't turn off network access."
+                                .to_owned(),
                         ),
                     },
                 ],
