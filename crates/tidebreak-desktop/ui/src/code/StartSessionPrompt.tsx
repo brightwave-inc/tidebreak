@@ -494,6 +494,7 @@ export function StartSessionPrompt({
             }
             promptScope={workspaceId}
             workspaceFiles={workspaceFiles}
+            reviewWorkspaceId={workspaceId}
             onModelChange={(next) => {
               if (!selectedKind) return;
               setModelsByHarness((current) => ({

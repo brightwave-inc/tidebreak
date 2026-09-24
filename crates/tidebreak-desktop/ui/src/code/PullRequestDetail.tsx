@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   Bot,
@@ -79,7 +79,11 @@ import {
 import { GithubAvatar } from "./GithubAvatar";
 import { PrCheckSummary } from "./PrCheckSummary";
 import { PrCommentCard } from "./PrCommentCard";
-import { groupUnifiedDiff, patchLineKind } from "./unifiedDiff";
+import { groupUnifiedDiff } from "./unifiedDiff";
+import { diffFileKey, stepDiffFile } from "./diff/diffKeys";
+import { useDiffPreferences, type DiffLayout } from "./diff/diffPreferences";
+import { DiffView } from "./diff/DiffView";
+import { DiffViewOptions } from "./diff/DiffViewOptions";
 import {
   expandGithubEmojiShortcodes,
   fileStatusLabel,
@@ -1958,6 +1962,9 @@ function PrConversation({
 }
 
 function PrFiles({ detail }: { detail: CodeDeliveryPullRequestDetail }) {
+  const layout = useDiffPreferences((state) => state.layout);
+  const [ignoreWhitespace, setIgnoreWhitespace] = useState(false);
+  const listRef = useRef<HTMLDivElement | null>(null);
   if (detail.files.length === 0) {
     return (
       <p className="text-xs text-muted-foreground">
@@ -1981,12 +1988,38 @@ function PrFiles({ detail }: { detail: CodeDeliveryPullRequestDetail }) {
               }`}
           </span>
           <DiffStat additions={detail.additions} deletions={detail.deletions} />
+          <DiffViewOptions
+            ignoreWhitespace={ignoreWhitespace}
+            onIgnoreWhitespaceChange={setIgnoreWhitespace}
+          />
         </span>
       }
     >
-      {detail.files.map((file) => (
-        <PrFileCard key={file.path} file={file} />
-      ))}
+      {/* J and K walk the file cards the way they walk a workspace diff. */}
+      <div
+        ref={listRef}
+        className="flex flex-col gap-2.5"
+        onKeyDown={(event) => {
+          const action = diffFileKey(event.nativeEvent);
+          if (!action || !listRef.current) return;
+          event.preventDefault();
+          if (action === "toggle-whitespace") {
+            setIgnoreWhitespace((current) => !current);
+            return;
+          }
+          stepDiffFile(listRef.current, action === "next-file" ? 1 : -1);
+        }}
+      >
+        {detail.files.map((file) => (
+          <PrFileCard
+            key={file.path}
+            file={file}
+            layout={layout}
+            ignoreWhitespace={ignoreWhitespace}
+            onShowWhitespace={() => setIgnoreWhitespace(false)}
+          />
+        ))}
+      </div>
       {detail.files_truncated && (
         <p className="text-xs text-muted-foreground">
           Only the first {detail.files.length} files are shown. Open the pull
@@ -1997,13 +2030,41 @@ function PrFiles({ detail }: { detail: CodeDeliveryPullRequestDetail }) {
   );
 }
 
-function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
+function PrFileCard({
+  file,
+  layout,
+  ignoreWhitespace,
+  onShowWhitespace,
+}: {
+  file: CodeDeliveryPullRequestFile;
+  layout: DiffLayout;
+  ignoreWhitespace: boolean;
+  onShowWhitespace: () => void;
+}) {
   const [open, setOpen] = useState(false);
+  const bodyId = useId();
+  // GitHub sends each file's hunks without git's file header; the path comes
+  // from the file entry instead.
+  const group = useMemo(
+    () =>
+      file.patch
+        ? {
+            path: file.path,
+            lines: groupUnifiedDiff(file.patch).flatMap((part) => part.lines),
+          }
+        : null,
+    [file.patch, file.path],
+  );
   return (
-    <div className="overflow-hidden rounded-lg border border-border-subtle">
+    <div
+      className="overflow-hidden rounded-lg border border-border-subtle"
+      data-diff-file=""
+    >
       <button
         type="button"
         aria-expanded={open}
+        aria-controls={open ? bodyId : undefined}
+        data-diff-file-header=""
         className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left hover:bg-muted/30"
         onClick={() => setOpen((value) => !value)}
       >
@@ -2028,9 +2089,14 @@ function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
         </span>
       </button>
       {open && (
-        <div className="border-t border-border-subtle">
-          {file.patch ? (
-            <DiffPatch patch={file.patch} />
+        <div className="border-t border-border-subtle" id={bodyId}>
+          {group ? (
+            <DiffView
+              group={group}
+              layout={layout}
+              ignoreWhitespace={ignoreWhitespace}
+              onShowWhitespace={onShowWhitespace}
+            />
           ) : (
             <p className="px-3 py-2 text-xs text-muted-foreground">
               No text diff. The file is binary, or GitHub declined to render it.
@@ -2039,52 +2105,6 @@ function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
         </div>
       )}
     </div>
-  );
-}
-
-/**
- * A unified patch, colored the way a diff should be: a quiet background tint
- * per changed line and a colored sign, with the code itself kept in the
- * text fight the tint in both themes; the tint alone carries the meaning.
- */
-function DiffPatch({ patch }: { patch: string }) {
-  const lines = useMemo(
-    () => groupUnifiedDiff(patch).flatMap((group) => group.lines),
-    [patch],
-  );
-  return (
-    <pre className="overflow-x-auto py-1 font-mono text-xs leading-[1.45]">
-      {lines.map((line, index) => {
-        const kind = patchLineKind(line.kind);
-        return (
-          <code
-            key={index}
-            // `w-max min-w-full`: a block child of a scrolling <pre> otherwise
-            // sizes to the visible width, so long lines ran past their own
-            // background and scrolling right left colored stubs behind.
-            className={cn(
-              "block w-max min-w-full px-3 whitespace-pre",
-              kind === "add" && "bg-success/10",
-              kind === "remove" && "bg-critical/10",
-              kind === "hunk" && cn("bg-info/10", STATUS_TEXT.pending),
-            )}
-          >
-            {kind === "add" || kind === "remove" ? (
-              <>
-                <span
-                  className={kind === "add" ? "text-success" : "text-critical"}
-                >
-                  {line.text[0]}
-                </span>
-                {line.text.slice(1)}
-              </>
-            ) : (
-              line.text || " "
-            )}
-          </code>
-        );
-      })}
-    </pre>
   );
 }
 

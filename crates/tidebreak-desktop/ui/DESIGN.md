@@ -99,6 +99,16 @@ never read as a warning.
 If you reach for a `dark:` override on a color, first check whether a token
 already models both themes; most do.
 
+Code in a diff is document content, like the JSON viewer's colors, so it has
+its own two families. The `--diff-*` tokens are the diff's grounds: an added
+or removed row takes its status tint at half strength, the words that
+changed inside it take a stronger step of the same hue, and a row picked for
+a comment takes the info tint over whatever it wears. The `--syntax-*`
+tokens are six roles of code ink (keyword, string, comment, number, title,
+attr), used only inside code. `colorContrast.test.ts` holds every role, and
+the plain foreground, to 4.5:1 on every diff ground in both themes, so a
+role can never fight a tint. Never use a syntax color for status or chrome.
+
 ## Type
 
 The root is 14px and the scale is pinned in px, because the app is a dense
@@ -250,6 +260,24 @@ confirmation.
 It shows live work first, outputs otherwise, and collapses to a compact
 pill when a side panel is using the canvas. Do not build a second activity
 summary that duplicates outputs, folders, permissions, or agents.
+
+### Diffs
+
+`DiffView` draws every diff: the workspace against its base, one turn's
+changes, and a pull request's files. Do not build a second renderer. It
+carries one type scale (`text-md` code on 20px rows, `text-xs` line numbers),
+both gutters, one marker column the reader cannot copy, syntax color, and
+word emphasis, unified or side by side.
+
+The line numbers are how a reader comments. Where the diff takes comments,
+each number is a button in one roving tab stop: arrows move, Shift extends,
+Enter opens the editor under the lines. A diff that takes no comments draws
+plain numbers and makes the region itself focusable. Pending comments are
+cards under their last line, bordered, never shadowed. A comment whose code
+changed sits at the top of the file with its quote and a warning-toned
+Outdated pill; it never moves onto whatever now sits at its old number. A
+file that leaves the diff while it has comments stays first in the list,
+under its path and "No longer in this diff", with those comments outdated.
 
 ### Live labels
 

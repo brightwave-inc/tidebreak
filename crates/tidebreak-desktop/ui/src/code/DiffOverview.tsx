@@ -283,6 +283,23 @@ export function buildChangeTree(
   return root.map(compactDirectoryChain);
 }
 
+/**
+ * Changed paths in the order the Changes list shows them: folders before
+ * files at each level, each group by name. Stepping from one file's diff to
+ * the next follows this order, so the keys walk the list the reader sees.
+ */
+export function changedFileOrder(files: readonly CodeFileChange[]): string[] {
+  const order: string[] = [];
+  const walk = (nodes: readonly ChangeTreeNode[]) => {
+    for (const node of nodes) {
+      if (node.kind === "file") order.push(node.path);
+      else walk(node.children);
+    }
+  };
+  walk(buildChangeTree(files));
+  return order;
+}
+
 function sortChangeTree(nodes: ChangeTreeNode[]): void {
   nodes.sort((left, right) => {
     if (left.kind !== right.kind) return left.kind === "dir" ? -1 : 1;

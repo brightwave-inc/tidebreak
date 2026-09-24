@@ -7,6 +7,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +18,7 @@ import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { CodeComposer, HarnessModelMenu } from "./CodeComposer";
 import { useCodeComposerStatus } from "./CodeSessionSend";
 import { useCodeUiStore } from "./CodeUiStore";
+import { usePendingReviewStore } from "./diff/pendingReview";
 import { HttpError } from "../api/client";
 import { useComposerDrafts } from "../ComposerDrafts";
 import { readyImageAttachment } from "../ImageAttachments";
@@ -81,6 +83,7 @@ afterEach(() => {
   });
   useComposerDrafts.setState({ drafts: {}, attachments: {} });
   useCodeComposerStatus.setState({ byKey: {} });
+  usePendingReviewStore.setState({ byWorkspace: {}, sending: {} });
   window.sessionStorage.clear();
 });
 
@@ -95,6 +98,168 @@ const QUEUED = {
     updated_at: "2026-08-24T00:00:00Z",
   },
 };
+
+describe("CodeComposer diff comments", () => {
+  function seed() {
+    for (const [id, path] of [
+      ["c1", "src/queue.ts"],
+      ["c2", "src/queue.ts"],
+      ["c3", "src/lib.rs"],
+    ] as const) {
+      usePendingReviewStore.getState().add("ws-1", {
+        id,
+        author: { kind: "person" },
+        path,
+        lines: [{ kind: "add", oldNo: null, newNo: 3, text: "x = 1;" }],
+        body: `Comment ${id}`,
+        createdAt: "2026-09-24T10:00:00.000Z",
+      });
+    }
+  }
+
+  it("says how many comments go with the next message, and sends them alone", async () => {
+    seed();
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        reviewWorkspaceId="ws-1"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("3 comments on 2 files")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.stringMatching(/^<review_comments>\n/),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("3 comments on 2 files")).toBeNull(),
+    );
+    expect(
+      usePendingReviewStore.getState().byWorkspace["ws-1"],
+    ).toBeUndefined();
+  });
+
+  it("asks before taking the comments off", async () => {
+    seed();
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        reviewWorkspaceId="ws-1"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove review comments" }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Delete 3 review comments?");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Delete" }),
+    );
+    await waitFor(() =>
+      expect(
+        usePendingReviewStore.getState().byWorkspace["ws-1"],
+      ).toBeUndefined(),
+    );
+  });
+
+  it("steers without the comments, which wait for the next turn", async () => {
+    seed();
+    useUiStore.setState({ activeTurnSendMode: "steer" });
+    const onSteer = vi.fn().mockResolvedValue(undefined);
+    renderComposer(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        sessionId="sess-1"
+        reviewWorkspaceId="ws-1"
+        onSend={vi.fn()}
+        onSteer={onSteer}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText("3 comments on 2 files · wait for the next turn"),
+    ).toBeInTheDocument();
+    // Nothing typed and nothing added: there is nothing to steer with.
+    expect(
+      screen.queryByRole("button", { name: "Steer active response" }),
+    ).toBeNull();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "Also run the queue tests." },
+    });
+    const steerButton = screen.getByRole("button", {
+      name: "Steer active response",
+    });
+    expect(steerButton).toBeEnabled();
+    fireEvent.click(steerButton);
+    await waitFor(() =>
+      expect(onSteer).toHaveBeenCalledWith("Also run the queue tests."),
+    );
+    expect(usePendingReviewStore.getState().byWorkspace["ws-1"]).toHaveLength(
+      3,
+    );
+  });
+
+  it("queues a follow-up without the comments, and with them once added", async () => {
+    seed();
+    const onSend = vi.fn().mockResolvedValue(QUEUED);
+    renderComposer(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        sessionId="sess-1"
+        reviewWorkspaceId="ws-1"
+        onSend={onSend}
+        onSteer={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "Then tidy the imports." } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith("Then tidy the imports."),
+    );
+    expect(usePendingReviewStore.getState().byWorkspace["ws-1"]).toHaveLength(
+      3,
+    );
+
+    const add = screen.getByRole("button", { name: "Add to this message" });
+    expect(add).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(add);
+    expect(add).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByText("3 comments on 2 files · go with this message"),
+    ).toBeInTheDocument();
+    // The comments alone make a follow-up now.
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Queue message for after this response",
+      }),
+    );
+    await waitFor(() =>
+      expect(onSend).toHaveBeenLastCalledWith(
+        expect.stringMatching(/^<review_comments>\n/),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        usePendingReviewStore.getState().byWorkspace["ws-1"],
+      ).toBeUndefined(),
+    );
+  });
+});
 
 describe("CodeComposer", () => {
   it("sends a long paste as held message context", async () => {

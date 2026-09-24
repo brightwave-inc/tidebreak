@@ -2,60 +2,12 @@ import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 
+import { codeLanguageForFilename } from "@/codeLanguage";
 import { highlightRehypeOptions } from "@/highlightLanguages";
 
-// Map source extensions onto the highlighter's registered grammars. Extensions
-// outside that subset still open in the source viewer, with the media-type
-// fallback selecting plain text.
-const LANGUAGE_BY_EXTENSION: Readonly<Record<string, string>> = {
-  py: "python",
-  pyw: "python",
-  js: "javascript",
-  jsx: "javascript",
-  mjs: "javascript",
-  cjs: "javascript",
-  ts: "typescript",
-  tsx: "typescript",
-  mts: "typescript",
-  cts: "typescript",
-  rs: "rust",
-  go: "go",
-  java: "java",
-  c: "c",
-  h: "c",
-  cc: "cpp",
-  cpp: "cpp",
-  cxx: "cpp",
-  hpp: "cpp",
-  hxx: "cpp",
-  cs: "csharp",
-  rb: "ruby",
-  php: "php",
-  swift: "swift",
-  kt: "kotlin",
-  kts: "kotlin",
-  sh: "bash",
-  bash: "bash",
-  zsh: "bash",
-  fish: "bash",
-  sql: "sql",
-  css: "css",
-  scss: "scss",
-  sass: "scss",
-  less: "less",
-  vue: "xml",
-  svelte: "xml",
-  toml: "ini",
-  yaml: "yaml",
-  yml: "yaml",
-  xml: "xml",
-  graphql: "graphql",
-  gql: "graphql",
-  lua: "lua",
-  r: "r",
-  pl: "perl",
-  pm: "perl",
-};
+// Extensions outside the highlighter's registered grammars still open in the
+// source viewer, with the media-type fallback selecting plain text.
+export { codeLanguageForFilename };
 
 /**
  * Fence long enough that no run of backticks inside `content` can close it.
@@ -79,16 +31,6 @@ export function codeLanguageForMediaType(mediaType: string): string {
     default:
       return "plaintext";
   }
-}
-
-/** Highlight language for a source filename, when the extension identifies one. */
-export function codeLanguageForFilename(filename: string): string | null {
-  const lower = filename.toLowerCase();
-  if (["dockerfile", "makefile", "justfile"].includes(lower)) {
-    return lower === "dockerfile" ? "bash" : "makefile";
-  }
-  const extension = lower.includes(".") ? lower.split(".").pop()! : "";
-  return LANGUAGE_BY_EXTENSION[extension] ?? null;
 }
 
 /**

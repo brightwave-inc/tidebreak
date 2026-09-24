@@ -541,3 +541,89 @@ describe("component color maps (see DESIGN.md)", () => {
     expect(failures).toEqual([]);
   });
 });
+
+describe("diff grounds and syntax ink (see DESIGN.md)", () => {
+  const CODE_INKS = [
+    "foreground",
+    "syntax-keyword",
+    "syntax-string",
+    "syntax-comment",
+    "syntax-number",
+    "syntax-title",
+    "syntax-attr",
+  ];
+
+  function layer(theme: Theme, name: string, under: Rgb): Rgb {
+    return over(token(theme, name), under);
+  }
+
+  /** Every ground a line of code sits on, composited the way the view paints it. */
+  function codeGrounds(theme: Theme): Array<[string, Rgb]> {
+    const background = groundRgb(theme, "background");
+    const added = layer(theme, "diff-add-row", background);
+    const removed = layer(theme, "diff-del-row", background);
+    return [
+      ["the plain row", background],
+      ["an added row", added],
+      ["a removed row", removed],
+      ["an added word", layer(theme, "diff-add-word", added)],
+      ["a removed word", layer(theme, "diff-del-word", removed)],
+      ["a selected row", layer(theme, "diff-selected", background)],
+      ["a selected added row", layer(theme, "diff-selected", added)],
+      ["a selected removed row", layer(theme, "diff-selected", removed)],
+    ];
+  }
+
+  it("keeps code and every syntax role readable on every diff ground", () => {
+    const failures: Failure[] = [];
+    for (const theme of THEMES) {
+      for (const [label, ground] of codeGrounds(theme)) {
+        for (const ink of CODE_INKS) {
+          check(
+            failures,
+            `${theme}: --${ink} on ${label}`,
+            contrastOf(token(theme, ink), undefined, ground),
+            TEXT,
+          );
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  it("keeps markers, line numbers, and hunk headers readable", () => {
+    const failures: Failure[] = [];
+    for (const theme of THEMES) {
+      const background = groundRgb(theme, "background");
+      const added = layer(theme, "diff-add-row", background);
+      const removed = layer(theme, "diff-del-row", background);
+      const gutter = (under: Rgb) => layer(theme, "diff-gutter", under);
+      const pairs: Array<[string, string, Rgb]> = [
+        ["success-foreground", "an added row", added],
+        ["critical-foreground", "a removed row", removed],
+        [
+          "info-foreground",
+          "a hunk header",
+          layer(theme, "diff-hunk-row", background),
+        ],
+        ["muted-foreground", "the gutter", gutter(background)],
+        ["muted-foreground", "an added row's gutter", gutter(added)],
+        ["muted-foreground", "a removed row's gutter", gutter(removed)],
+        [
+          "foreground",
+          "a selected row's gutter",
+          layer(theme, "diff-selected", gutter(added)),
+        ],
+      ];
+      for (const [ink, label, ground] of pairs) {
+        check(
+          failures,
+          `${theme}: --${ink} on ${label}`,
+          contrastOf(token(theme, ink), undefined, ground),
+          TEXT,
+        );
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+});

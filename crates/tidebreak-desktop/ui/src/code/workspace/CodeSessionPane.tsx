@@ -58,7 +58,8 @@ import {
 } from "../labels";
 import { followScrollBehavior } from "@/ChatScroll";
 import { forkTranscriptFile } from "../fork";
-import { sendCodeTurn } from "../CodeSessionSend";
+import { splitReviewComments } from "../diff/reviewComments";
+import { sendCodeTurn, turnIdNamed } from "../CodeSessionSend";
 import { toast } from "sonner";
 import { useCodeUpdatesStore, useSessionDigest } from "../CodeUpdatesStore";
 import { useStreamStalled } from "@/useStreamStalled";
@@ -200,7 +201,16 @@ export function CodeSessionPane({
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | undefined>();
   const [approvalErrorId, setApprovalErrorId] = useState<string | null>(null);
-  const sessionQueue = useCodeQueueApi(client, session.id);
+  const queuedTurnFor = useCallback(
+    (diff: string) => turnIdNamed(session.id, diff),
+    [session.id],
+  );
+  const sessionQueue = useCodeQueueApi(
+    client,
+    session.id,
+    workspaceId,
+    queuedTurnFor,
+  );
   // No `?? []` fallback here: a fresh array is a new snapshot every render,
   // and zustand v5 loops on referentially unstable snapshots.
   const cachedModels = useCodeCatalogStore(
@@ -406,12 +416,16 @@ export function CodeSessionPane({
     : ["plan", "ask", "auto", "allow"];
   const steeringSupported = doctorEntry?.caps.mid_turn_steering === "supported";
   const turnRunning = busy || lifecycle === "running";
+  // Recall brings back what the reader typed. Diff comments went with the
+  // message, but they were written on the diff and are not typed again.
   const composerHistory = useMemo(
     () =>
       items
-        .flatMap((item) =>
-          item.kind === "user" && item.text.trim() ? [item.text] : [],
-        )
+        .flatMap((item) => {
+          if (item.kind !== "user") return [];
+          const typed = splitReviewComments(item.text).prose;
+          return typed.trim() ? [typed] : [];
+        })
         .reverse(),
     [items],
   );
@@ -673,6 +687,7 @@ export function CodeSessionPane({
               }
               promptScope={workspaceId ?? session.id}
               sessionId={session.id}
+              reviewWorkspaceId={workspaceId}
               history={composerHistory}
               slashCommands={doctorEntry?.commands}
               searchPaths={

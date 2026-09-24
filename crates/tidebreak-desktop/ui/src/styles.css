@@ -186,6 +186,37 @@
   --code-block-ink: oklch(0.94 0.008 95);
   --code-block-border: oklch(0.19 0.01 285);
 
+  /* The diff's grounds. A changed row takes its status tint at half
+     strength; the words that changed inside it take a stronger step of the
+     same hue, so the edit reads before the line does. A row picked for a
+     comment takes the info tint over whatever it already wears. */
+  --diff-add-row: color-mix(
+    in oklch,
+    var(--success-background) 55%,
+    transparent
+  );
+  --diff-del-row: color-mix(
+    in oklch,
+    var(--critical-background) 55%,
+    transparent
+  );
+  --diff-add-word: oklch(0.905 0.07 152);
+  --diff-del-word: oklch(0.905 0.045 20);
+  --diff-add-edge: var(--success-border);
+  --diff-del-edge: var(--critical-border);
+  --diff-hunk-row: color-mix(in oklch, var(--info-background) 45%, transparent);
+  --diff-gutter: color-mix(in oklch, var(--muted) 45%, transparent);
+  --diff-selected: color-mix(in oklch, var(--info-background) 75%, transparent);
+  /* Syntax ink for code in the diff: document content, like the JSON
+     viewer's colors, never status. colorContrast.test.ts holds every role to
+     4.5:1 on each diff ground in both themes. */
+  --syntax-keyword: oklch(0.47 0.19 300);
+  --syntax-string: oklch(0.45 0.11 150);
+  --syntax-comment: oklch(0.49 0.014 240);
+  --syntax-number: oklch(0.49 0.12 60);
+  --syntax-title: oklch(0.46 0.14 255);
+  --syntax-attr: oklch(0.47 0.15 345);
+
   /* The top reasoning rung. Violet so it does not read as another selected
      control next to the model and mode buttons. */
   --ultra-ink: oklch(0.48 0.19 295);
@@ -324,6 +355,15 @@
   --code-block-ink: oklch(0.92 0.008 95);
   --code-block-border: oklch(0.28 0.008 285);
 
+  --diff-add-word: oklch(0.37 0.08 152);
+  --diff-del-word: oklch(0.37 0.08 22);
+  --syntax-keyword: oklch(0.8 0.13 300);
+  --syntax-string: oklch(0.81 0.11 150);
+  --syntax-comment: oklch(0.75 0.014 240);
+  --syntax-number: oklch(0.82 0.11 70);
+  --syntax-title: oklch(0.8 0.11 245);
+  --syntax-attr: oklch(0.8 0.11 345);
+
   --ultra-ink: oklch(0.82 0.14 295);
   --ultra-wash: oklch(0.32 0.06 295);
   --ultra-wash-strong: oklch(0.38 0.08 295);
@@ -406,6 +446,13 @@
   --color-icon-amber: var(--icon-amber);
   --color-icon-rose: var(--icon-rose);
   --color-icon-green: var(--icon-green);
+
+  --color-syntax-keyword: var(--syntax-keyword);
+  --color-syntax-string: var(--syntax-string);
+  --color-syntax-comment: var(--syntax-comment);
+  --color-syntax-number: var(--syntax-number);
+  --color-syntax-title: var(--syntax-title);
+  --color-syntax-attr: var(--syntax-attr);
 
   --font-sans: var(--sans);
   --font-mono: var(--mono);
@@ -2490,6 +2537,63 @@ body {
     padding: 0.5rem 0.75rem;
     color: var(--muted-foreground);
     font-size: var(--text-xs);
+  }
+
+  /* ---------- Diff ---------- */
+
+  /* One line of the shared diff view: a unified row, or one side of a split
+     row. Its tint lives in a variable so the sticky gutter can repaint the
+     same stack opaquely; a gutter that floats over scrolled code has to hide
+     what passes under it. */
+  .diff-line {
+    --diff-line-tint: transparent;
+    --diff-line-pick: transparent;
+    --diff-line-edge: transparent;
+    background-image:
+      linear-gradient(var(--diff-line-pick), var(--diff-line-pick)),
+      linear-gradient(var(--diff-line-tint), var(--diff-line-tint));
+  }
+  .diff-line[data-kind="add"] {
+    --diff-line-tint: var(--diff-add-row);
+    --diff-line-edge: var(--diff-add-edge);
+  }
+  .diff-line[data-kind="del"] {
+    --diff-line-tint: var(--diff-del-row);
+    --diff-line-edge: var(--diff-del-edge);
+  }
+  .diff-line[data-kind="hunk"] {
+    --diff-line-tint: var(--diff-hunk-row);
+  }
+  .diff-line[data-kind="empty"] {
+    --diff-line-tint: var(--diff-gutter);
+  }
+  .diff-line[data-selected] {
+    --diff-line-pick: var(--diff-selected);
+  }
+
+  .diff-line .diff-gutter {
+    background-color: var(--background);
+    background-image:
+      linear-gradient(var(--diff-line-pick), var(--diff-line-pick)),
+      linear-gradient(var(--diff-gutter), var(--diff-gutter)),
+      linear-gradient(var(--diff-line-tint), var(--diff-line-tint));
+    box-shadow: inset 2px 0 var(--diff-line-edge);
+  }
+  .diff-line[data-kind="hunk"] .diff-gutter,
+  .diff-line[data-kind="meta"] .diff-gutter {
+    background-image: linear-gradient(
+      var(--diff-line-tint),
+      var(--diff-line-tint)
+    );
+  }
+  .diff-line[data-selected] .diff-gutter {
+    color: var(--foreground);
+  }
+
+  /* Word emphasis sits inside a line; `mark` would otherwise paint its own
+     yellow. */
+  .diff-line mark {
+    color: inherit;
   }
 
   /* ---------- Responsive ---------- */

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CodeTranscript } from "./CodeTranscript";
+import { messageWithReviewComments } from "./diff/reviewComments";
 import { useEngineSignInStore } from "./EngineSignIn";
 import type { CodeApprovalSnapshot } from "../api/types";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
@@ -530,6 +531,87 @@ describe("CodeTranscript", () => {
     expect(screen.queryByText(/"session": "sess-1"/)).toBeNull();
     await userEvent.click(toggle);
     expect(screen.getByText(/"session": "sess-1"/)).toBeInTheDocument();
+  });
+
+  it("folds the diff comments a message carried into one compact block", async () => {
+    const text = messageWithReviewComments("Fix these, please.", [
+      {
+        id: "c1",
+        author: { kind: "person" },
+        path: "src/queue.ts",
+        lines: [
+          { kind: "del", oldNo: 22, newNo: null, text: "const MAX = 10;" },
+          { kind: "add", oldNo: null, newNo: 23, text: "const MAX = 20;" },
+        ],
+        body: "Why double it?\nThe tray was built for ten.",
+        createdAt: "2026-08-15T00:00:00.000Z",
+      },
+    ]);
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "user",
+            id: "u-review",
+            turnId: "t1",
+            text,
+            createdAt: "2026-08-15T00:00:00.000Z",
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Fix these, please.")).toBeInTheDocument();
+    expect(screen.getByText("1 comment on 1 file")).toBeInTheDocument();
+    // One line per comment: where, and the start of what it says.
+    expect(screen.getByText("queue.ts:23")).toHaveAttribute(
+      "title",
+      "src/queue.ts:23",
+    );
+    expect(screen.getByText("Why double it?")).toBeInTheDocument();
+    expect(screen.queryByText(/review_comments/)).toBeNull();
+    expect(screen.queryByText("-const MAX = 10;")).toBeNull();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /Review comments/ }),
+    );
+    expect(screen.getByText("-const MAX = 10;")).toBeInTheDocument();
+  });
+
+  it("folds the diff comments a steer carried the same way", () => {
+    const text = messageWithReviewComments("Stop and fix this.", [
+      {
+        id: "c1",
+        author: { kind: "person" },
+        path: "src/queue.ts",
+        lines: [
+          { kind: "add", oldNo: null, newNo: 23, text: "const MAX = 20;" },
+        ],
+        body: "Why double it?",
+        createdAt: "2026-08-15T00:00:00.000Z",
+      },
+    ]);
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "user",
+            id: "u1",
+            turnId: "t1",
+            text: "Start.",
+            createdAt: "2026-08-15T00:00:00.000Z",
+          },
+          { kind: "steer", id: "s1", turnId: "t1", text },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Stop and fix this.")).toBeInTheDocument();
+    expect(screen.getByText("1 comment on 1 file")).toBeInTheDocument();
+    expect(screen.getByText("queue.ts:23")).toBeInTheDocument();
+    expect(screen.getByText("Why double it?")).toBeInTheDocument();
+    expect(screen.getByText("Steered mid-turn")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/review_comments|The person reviewing/),
+    ).toBeNull();
   });
 
   it("renders the prompt as markdown with a timestamped footer", () => {

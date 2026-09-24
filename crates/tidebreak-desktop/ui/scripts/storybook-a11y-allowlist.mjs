@@ -127,11 +127,6 @@ export const allowlist = [
     reason: "The sample web page these stories draw labels a plain div; it is story fixture content.",
   },
   {
-    story: "code-diff-detail--*",
-    rule: "aria-prohibited-attr",
-    reason: "The diff scroller carries aria-label without a role.",
-  },
-  {
     story: "code-file-viewer--*",
     rule: "aria-prohibited-attr",
     reason: "The comparison pane is a div with aria-label='Comparison' and no role.",
@@ -168,11 +163,6 @@ export const allowlist = [
     story: "code-bulk-workspace-archive--*",
     rule: "scrollable-region-focusable",
     reason: "The workspace list in the archive dialog scrolls without a focus stop.",
-  },
-  {
-    story: "code-diff-detail--*",
-    rule: "scrollable-region-focusable",
-    reason: "The horizontal diff scroller has no focus stop.",
   },
   {
     story: "code-file-viewer--*",

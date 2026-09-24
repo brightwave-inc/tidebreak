@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { DIFF_KEYS } from "./code/diff/diffKeys";
 import { shellShortcutMode } from "./code/routes";
 import { COMPOSER_KEYS } from "./ComposerKeys";
 import {
@@ -29,9 +30,12 @@ function Keycap({ children }: { children: string }) {
 function ShortcutRow({
   description,
   caps,
+  alternate,
 }: {
   description: string;
   caps: readonly string[];
+  /** Another key that does the same. */
+  alternate?: readonly string[];
 }) {
   return (
     <>
@@ -40,6 +44,14 @@ function ShortcutRow({
         {caps.map((cap) => (
           <Keycap key={cap}>{cap}</Keycap>
         ))}
+        {alternate && alternate.length > 0 && (
+          <>
+            <span className="px-0.5 text-xs text-muted-foreground">or</span>
+            {alternate.map((cap) => (
+              <Keycap key={`or-${cap}`}>{cap}</Keycap>
+            ))}
+          </>
+        )}
       </span>
     </>
   );
@@ -75,7 +87,9 @@ function GroupHeading({
  *
  * The composer's own keys close the list. The composer answers them itself
  * rather than through the shell table, and both halves of the app share them,
- * so they come from `COMPOSER_KEYS` and are listed in every mode.
+ * so they come from `COMPOSER_KEYS` and are listed in every mode. Code mode
+ * also lists the diff's keys, from `DIFF_KEYS`, which the diff answers while
+ * it has focus.
  *
  * Split from the dialog so a story can draw both modes without standing up a
  * router to answer which one the reader is in.
@@ -109,7 +123,22 @@ export function ShortcutsList({
           })}
         </Fragment>
       ))}
-      <GroupHeading first={groups.length === 0}>Composer</GroupHeading>
+      {mode === "code" && (
+        <>
+          <GroupHeading first={groups.length === 0}>Diff</GroupHeading>
+          {DIFF_KEYS.map((key) => (
+            <ShortcutRow
+              key={key.id}
+              description={key.description}
+              caps={key.keycaps(command)}
+              alternate={key.alternate}
+            />
+          ))}
+        </>
+      )}
+      <GroupHeading first={groups.length === 0 && mode !== "code"}>
+        Composer
+      </GroupHeading>
       {COMPOSER_KEYS.map((key) => (
         <ShortcutRow
           key={key.id}

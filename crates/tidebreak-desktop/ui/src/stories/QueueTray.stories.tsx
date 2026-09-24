@@ -103,6 +103,38 @@ export const QueuedTriggerEvent: Story = {
 };
 
 /**
+ * Follow-ups that carry diff comments. The row counts the comments instead
+ * of showing the block the agent reads; editing changes only the text, and
+ * deleting the message puts its comments back in the review.
+ */
+export const QueuedReviewComments: Story = {
+  args: {
+    queue: staticQueue([
+      {
+        id: "q-r1",
+        content: "Then rerun the queue tests.",
+        reviewComments: {
+          count: 3,
+          withText: (text) => text,
+          restore: () => {},
+        },
+      },
+      {
+        id: "q-r2",
+        content: "",
+        reviewComments: {
+          count: 1,
+          withText: (text) => text,
+          restore: () => {},
+        },
+      },
+    ]),
+    active: true,
+    onStop: async () => {},
+  },
+};
+
+/**
  * An empty queue renders nothing at all — the composer stays untouched until
  * the first mid-turn send. The empty frame is here so a regression that
  * renders a bare header shows up.

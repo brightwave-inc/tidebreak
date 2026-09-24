@@ -151,7 +151,13 @@ describe("PullRequestDetailSheet", () => {
     await userEvent.click(screen.getByRole("tab", { name: /Files/ }));
     await userEvent.click(screen.getByTitle("q.sql"));
     const deleted = await screen.findByText(/-- keep/);
-    expect(deleted.closest("code")).toHaveClass("bg-critical/10");
+    expect(deleted.closest("[data-kind]")).toHaveAttribute("data-kind", "del");
+    // The same view the workspace diff uses, with its gutters.
+    const row = deleted.closest("[data-kind]");
+    expect(row?.closest("[data-diff-view]")).not.toBeNull();
+    expect(row?.querySelector('[data-diff-gutter="old"]')?.textContent).toBe(
+      "1",
+    );
   });
 
   it("lists every check, failures first", async () => {

@@ -3,6 +3,7 @@ import type { LayoutState } from "@/panel/panelTypes";
 import {
   type CodeEditorRegion,
   openCodeEditor,
+  replaceCodeEditor,
   splitCodeChromeLayout,
 } from "../codeChrome";
 import { copyPlainText } from "@/ClipboardCopyButton";
@@ -70,6 +71,17 @@ export function useEditorTabs({
     setLayout(openCodeEditor(layout, { type: "diff", path }));
   }
 
+  /** Show another file's diff in the tab showing `from`, for J and K. */
+  function stepFileDiff(from: string, to: string, turnId?: string) {
+    setLayout(
+      replaceCodeEditor(
+        layout,
+        { type: "diff", path: from, ...(turnId ? { turnId } : {}) },
+        { type: "diff", path: to, ...(turnId ? { turnId } : {}) },
+      ),
+    );
+  }
+
   function requestNewTab(region: CodeEditorRegion) {
     setQuickOpenTarget(region);
     setQuickOpenRequest((request) => request + 1);
@@ -124,6 +136,7 @@ export function useEditorTabs({
     openFile,
     openTurnDiff,
     openFileDiff,
+    stepFileDiff,
     quickOpenRequest,
     quickOpenTarget,
     newTabMenuRequest,

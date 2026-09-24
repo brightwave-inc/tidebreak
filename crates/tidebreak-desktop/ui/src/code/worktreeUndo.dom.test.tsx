@@ -9,9 +9,11 @@ import { CommitBox, commitFailure } from "./CommitBox";
 import { DiffOverviewContent } from "./DiffOverview";
 import { DiffPanel } from "./DiffPanel";
 import { CheckpointRestoreRow, TurnReviewCard } from "./TurnReviewCard";
+import { diffHunks, groupUnifiedDiff } from "./unifiedDiff";
 import {
   restoreConfirmation,
   revertFileConfirmation,
+  revertHunkConfirmation,
   useWorktreeUndo,
   type WorktreeUndoClient,
 } from "./worktreeUndo";
@@ -79,6 +81,63 @@ describe("reverting from the diff", () => {
         ].join("\n"),
       }),
     );
+  });
+
+  it("says a revert with whitespace hidden also puts back the hidden lines, and still sends the whole hunk", async () => {
+    const MIXED = [
+      "diff --git a/src/lib.rs b/src/lib.rs",
+      "index 1111111..2222222 100644",
+      "--- a/src/lib.rs",
+      "+++ b/src/lib.rs",
+      "@@ -1,3 +1,3 @@",
+      "-fn one() {}",
+      "+fn one() { todo!() }",
+      "-\tfn two() {}",
+      "+    fn two() {}",
+      " fn three() {}",
+      "",
+    ].join("\n");
+    const onRevertHunk = vi.fn().mockResolvedValue(true);
+    render(
+      <DiffPanel
+        client={diffClient(MIXED)}
+        workspaceId="ws-1"
+        file="src/lib.rs"
+        revert={{ onRevertFile: vi.fn(), onRevertHunk }}
+      />,
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Hide whitespace changes" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Revert the change at lines 1 to 3 of src/lib.rs",
+      }),
+    );
+
+    const [request, hunk] = onRevertHunk.mock.calls[0]!;
+    expect(request).toEqual({
+      path: "src/lib.rs",
+      turnId: undefined,
+      kind: "modified",
+      hiddenWhitespaceLines: 1,
+    });
+    // The server still gets the hunk exactly as git wrote it.
+    expect(hunk.text).toBe(MIXED.split("\n").slice(4, 10).join("\n"));
+
+    render(
+      <p>
+        {
+          revertHunkConfirmation(
+            request,
+            diffHunks(groupUnifiedDiff(MIXED)[0]!)[0]!,
+          ).description
+        }
+      </p>,
+    );
+    expect(
+      screen.getByText(/That includes 1 line whose only change is whitespace/),
+    ).toBeVisible();
   });
 
   it("offers no revert for a hunk the size cap cut short", async () => {

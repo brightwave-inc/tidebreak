@@ -18,6 +18,7 @@ import {
   mergeEditorSplit,
   moveEditorTab,
   openCodeEditor,
+  replaceCodeEditor,
   adoptAgentBrowser,
   removedCodeBrowserIds,
   removedCodeTerminalIds,
@@ -635,5 +636,29 @@ describe("agent browser placement", () => {
       expect(adoptAgentBrowser(layout, "agent-1")).toBe(layout);
       expect(codeBrowserIds(layout)).toEqual(["agent-1"]);
     }
+  });
+});
+
+describe("replaceCodeEditor", () => {
+  const a = { type: "diff" as const, path: "src/a.ts" };
+  const b = { type: "diff" as const, path: "src/b.ts" };
+  const c = { type: "diff" as const, path: "src/c.ts" };
+
+  it("shows the next file's diff in the same tab", () => {
+    const layout = openCodeEditor(openCodeEditor(EMPTY_LAYOUT, a), c);
+    const stepped = replaceCodeEditor(
+      focusEditorTab(layout, 0, "primary"),
+      a,
+      b,
+    );
+    expect(stepped.tabs).toEqual([b, c]);
+    expect(stepped.tabs[stepped.activeIndex]).toEqual(b);
+  });
+
+  it("focuses the next file's tab when it is already open", () => {
+    const layout = openCodeEditor(openCodeEditor(EMPTY_LAYOUT, a), b);
+    const stepped = replaceCodeEditor(focusEditorTab(layout, 0), a, b);
+    expect(stepped.tabs).toEqual([a, b]);
+    expect(stepped.tabs[stepped.activeIndex]).toEqual(b);
   });
 });

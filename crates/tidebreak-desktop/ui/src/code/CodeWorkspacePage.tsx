@@ -495,6 +495,7 @@ function CodeWorkspaceBody({
     openFile,
     openTurnDiff,
     openFileDiff,
+    stepFileDiff,
     quickOpenRequest,
     quickOpenTarget,
     newTabMenuRequest,
@@ -614,6 +615,9 @@ function CodeWorkspaceBody({
             file={panel.path}
             contentRevision={contentRevision}
             revert={diffRevert}
+            onStepFile={(next) => {
+              if (panel.path) stepFileDiff(panel.path, next, panel.turnId);
+            }}
             onOpenFile={(path) => openFile(path, undefined, region)}
             onOpenInEditor={
               hostAccess && canOpenInExternalEditor()

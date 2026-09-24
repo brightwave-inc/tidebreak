@@ -711,10 +711,11 @@ of its own: registering one opens the new-workspace dialog, and picking one on
   (diffstat, duration, async narrative slot), `CodeComposer` (text,
   permission-mode selector, interrupt), `CodeInspector`, `WorkspacePrList`,
   and `pullRequestPresentation.ts` (pull-request state and presentation),
-  `DiffPanel`/`FilesPanel` (server-produced unified diffs styled with the
-  semantic status tokens; per-file grouping; per-turn anchoring; Revert file
-  and Revert hunk), `DiffOverview` (the changed-file list with each file's
-  revert and discard), `CommitBox` (Source control's commit),
+  `DiffPanel`/`FilesPanel` (server-produced unified diffs drawn by the shared
+  `DiffView`, per-file grouping, per-turn anchoring, Revert file and Revert
+  hunk, and line comments; see [Reviewing the diff](#reviewing-the-diff)),
+  `DiffOverview` (the changed-file list with each file's revert and
+  discard), `CommitBox` (Source control's commit),
   `worktreeUndo.tsx` (the confirmations and flows for restore, revert, and
   discard, behind one shared dialog),
   `FileViewer` (Monaco over the tree/search/blob routes, with the editor
@@ -728,6 +729,81 @@ of its own: registering one opens the new-workspace dialog, and picking one on
   in the repository's settings.
 - Wire: generated types plus hand-written validators in
   `ui/src/code/parsers.ts`, per [`docs/wire-types.md`](wire-types.md).
+
+## Reviewing the diff
+
+`code/diff/DiffView.tsx` draws the workspace diff, a turn's diff, and a pull
+request's files, so all three read the same way.
+
+- Syntax color comes from highlight.js, the highlighter the transcript and
+  the output viewer already ship. Grammars load on first use, one chunk per
+  language. Each side of a hunk is highlighted as one run: removed and
+  unchanged lines for the old side, added and unchanged lines for the new.
+  A comment or string that spans lines inside a hunk parses as it does in
+  the file, and a hunk that starts inside one can misread only up to its own
+  end. A file over 10,000 diff lines, a hunk over 2,500 lines (its removed,
+  added, and unchanged lines together), and a hunk with a line over 1,000
+  characters stay plain. The highlighter's core loads with the first
+  grammar, not with the app. Recently highlighted hunks are kept by a hash
+  of their text, within a budget of 2,000,000 characters, so a refresh
+  recalls the hunks it did not change; a hunk over a cap keeps nothing.
+- Word emphasis pairs each removed line with the added line in the same
+  place in its change, and marks the tokens that differ. Lines with less
+  than 30% of their visible characters in common keep only the row tint.
+- Hide whitespace is worked out from the diff rather than asked of git
+  again, so it also works on a pull request's diff, which GitHub produced.
+  Inside each change, a removed and an added line that differ only in
+  whitespace become one context row, as `git diff -w` shows them, and a hunk
+  left with no change goes. Whitespace means what it means to `-w`: spaces,
+  tabs, carriage returns, and a final newline. A no-break space or a
+  byte-order mark is a change. Reverting a hunk with whitespace hidden still
+  reverts the hunk git wrote, and the confirmation says how many hidden
+  lines go back with it.
+- Split view is the reader's remembered choice. Below 800 pixels the view
+  draws unified.
+- A long diff mounts one chunk of 60 rows on its first frame and one more
+  each frame after, as a transition React renders in slices. Each chunk
+  colors its own hunks, and a refresh recalls the hunks it did not change.
+  The `Code/Diff review/Very long file` story measures a 5,000-line diff in
+  the browser.
+- J and K move to the next and previous file, as on GitHub (`]` and `[`
+  work too, as on GitLab); on one file's diff they show the next changed
+  file in the same tab. W hides whitespace changes.
+
+Clicking a line number, or dragging across several in one hunk, opens a
+comment editor under them; the keyboard does the same with the arrows,
+Shift, and Enter. Comments wait in the workspace's pending review
+(`code/diff/pendingReview.ts`), kept in local storage so a reload or a
+restart keeps them. The code composer counts them, and a message can be the
+comments alone. The next message from any of the workspace's conversations
+carries them in one `<review_comments>` block after the typed text: for
+each comment, the path, the diff it was written on (the working tree, or a
+turn), the new and old line spans, the quoted lines with diff markers, and
+the comment. A quote stops at 200 lines and says so. The send claims the
+comments in the step that reads them, so two conversations sending at once
+never both carry them, and drops them once the server accepts the message;
+a refusal anywhere on the way leaves them pending. The transcript reads the
+block back and folds it into one compact list.
+
+A comment holds on to its code, not its line numbers
+(`code/diff/commentAnchor.ts`). Each refresh looks for the quoted lines;
+where they appear more than once, the three lines on each side when the
+comment was written pick the place. When an agent adds a line above, the
+comment moves with its line and the review records the new numbers. When
+the quoted code changes or leaves the diff, the comment moves to the top of
+the file as outdated, with its original quote, and the block marks it
+`outdated`. An open comment editor follows its lines the same way and keeps
+what was typed.
+
+While a turn runs, comments never hold a message back. A steer or a queued
+follow-up goes without them, and the composer says they wait for the next
+turn, unless the reader adds them to that message. A queued message that
+carries comments shows them as a count in the queue tray; its edit box
+edits only the text, and deleting it puts the comments back in the review.
+
+Each comment records who wrote it. Today that is always the person; a
+second engine's review pass can later fill the same pending review with its
+own findings.
 
 ## Editing files
 
