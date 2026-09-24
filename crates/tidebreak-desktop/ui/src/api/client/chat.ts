@@ -154,7 +154,7 @@ export function withChatApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
     async markNotificationsRead(ids: string[]): Promise<number> {
       const body = await this.json<unknown>("/notifications/read", {
         method: "POST",
-        headers: this.headers(),
+        headers: this.headers(true),
         body: JSON.stringify({ ids }),
       });
       return parseMarked(body);
