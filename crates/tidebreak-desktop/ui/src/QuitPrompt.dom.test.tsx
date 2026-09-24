@@ -40,6 +40,39 @@ describe("QuitPrompt", () => {
     expect(onChoose.mock.calls).toEqual([["safe_point"], ["stop"], ["cancel"]]);
   });
 
+  it("says restart when the person asked to restart", async () => {
+    const user = userEvent.setup();
+    const onChoose = vi.fn();
+    const { rerender } = render(
+      <QuitPrompt
+        prompt={{ phase: "asking", agents: 2, waitingForYou: 0 }}
+        restart
+        onChoose={onChoose}
+      />,
+    );
+
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Restart while 2 agents are working?");
+    expect(dialog).not.toHaveTextContent("Quit");
+    await user.click(
+      screen.getByRole("button", {
+        name: "Restart when they reach a safe point",
+      }),
+    );
+    expect(onChoose).toHaveBeenCalledWith("safe_point");
+
+    rerender(
+      <QuitPrompt
+        prompt={{ phase: "waiting", agents: 2, waitingForYou: 0 }}
+        restart
+        onChoose={onChoose}
+      />,
+    );
+    expect(
+      screen.getByRole("region", { name: "Restarting" }),
+    ).toHaveTextContent("Restarting when 2 agents reach a safe point");
+  });
+
   it("speaks of one agent in the singular", () => {
     render(
       <QuitPrompt

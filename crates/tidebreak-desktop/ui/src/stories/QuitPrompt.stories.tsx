@@ -8,10 +8,12 @@ function QuitPromptStory({
   prompt,
   error,
   answering,
+  restart = false,
 }: {
   prompt: QuitPromptState;
   error: string | null;
   answering: boolean;
+  restart?: boolean;
 }) {
   return (
     <div className="h-screen bg-page-background p-8">
@@ -29,6 +31,7 @@ function QuitPromptStory({
       <QuitPrompt
         prompt={prompt}
         error={error}
+        restart={restart}
         answering={answering}
         onChoose={fn()}
         onOpenInbox={fn()}
@@ -53,6 +56,17 @@ type Story = StoryObj<typeof meta>;
 
 /** The first question: how many agents are working, and three choices. */
 export const Asking: Story = {};
+
+/**
+ * A restart the person asked for, such as the one that applies Screen
+ * Recording, asks the same question in its own words.
+ */
+export const Restarting: Story = {
+  args: {
+    prompt: { phase: "asking", agents: 1, waitingForYou: 0 },
+    restart: true,
+  },
+};
 
 export const OneAgent: Story = {
   args: { prompt: { phase: "asking", agents: 1, waitingForYou: 0 } },

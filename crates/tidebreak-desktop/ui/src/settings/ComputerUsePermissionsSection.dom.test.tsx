@@ -28,6 +28,7 @@ function host(overrides: Partial<ComputerUsePermissionHost> = {}) {
     status: vi.fn().mockResolvedValue(missing),
     request: vi.fn().mockResolvedValue({ ...missing, accessibility: true }),
     openSettings: vi.fn().mockResolvedValue(undefined),
+    restart: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }

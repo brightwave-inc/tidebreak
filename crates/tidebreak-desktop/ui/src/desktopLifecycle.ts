@@ -27,6 +27,8 @@ export type QuitPromptUpdate = {
   request: number;
   prompt: QuitPromptState;
   error: string | null;
+  /** The person asked to restart, so the app opens again once it quits. */
+  restart?: boolean;
 };
 
 export type QuitChoice = "stop" | "safe_point" | "cancel";
@@ -46,6 +48,9 @@ function isQuitPromptUpdate(value: unknown): value is QuitPromptUpdate {
   const prompt = update.prompt as Record<string, unknown> | null;
   if (typeof update.request !== "number" || !prompt) return false;
   if (update.error !== null && typeof update.error !== "string") return false;
+  if (update.restart !== undefined && typeof update.restart !== "boolean") {
+    return false;
+  }
   switch (prompt.phase) {
     case "idle":
     case "stopping":

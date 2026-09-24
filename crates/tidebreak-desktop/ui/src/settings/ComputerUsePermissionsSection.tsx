@@ -4,6 +4,7 @@ import {
   type ComputerUsePermissionHost,
 } from "@/computerUsePermissions";
 import { ComputerUsePermissionRows } from "./ComputerUsePermissionRows";
+import { ComputerUseRestartOffer } from "./ComputerUseRestartOffer";
 import { SettingsError, SettingsSection } from "./primitives";
 import { useComputerUsePermissions } from "./useComputerUsePermissions";
 
@@ -22,9 +23,12 @@ export function ComputerUsePermissionsSection({
     requesting,
     opening,
     busy,
+    restartSuggested,
+    restarting,
     refresh,
     request,
     openSettings,
+    restart,
   } = useComputerUsePermissions(host);
 
   return (
@@ -69,9 +73,16 @@ export function ComputerUsePermissionsSection({
               />
               <p role="status" className="text-sm text-muted-foreground">
                 {missing
-                  ? "Enable the missing permissions, then return here. If macOS asks you to quit and reopen Tidebreak, do that before retrying the task."
+                  ? "Turn on the missing permissions, then return here. Tidebreak also asks for them the first time a task needs one."
                   : "macOS permissions are ready. Each task still asks for access to the apps it needs."}
               </p>
+              {restartSuggested && (
+                <ComputerUseRestartOffer
+                  restarting={restarting}
+                  disabled={busy && !restarting}
+                  onRestart={() => void restart()}
+                />
+              )}
             </>
           )}
           {error && <SettingsError>{error}</SettingsError>}

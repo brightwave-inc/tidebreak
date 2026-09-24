@@ -42,12 +42,20 @@ const MENU_COMMAND_SHORTCUTS = {
   ShellShortcutAction | Record<ShellShortcutMode, ShellShortcutAction>
 >;
 
-export type MenuCommand = keyof typeof MENU_COMMAND_SHORTCUTS | "documentation";
+/** Menu items that run no shortcut: the shell handles each one itself. */
+const MENU_COMMANDS_WITHOUT_SHORTCUTS = [
+  "documentation",
+  "install-cli-command",
+] as const;
+
+export type MenuCommand =
+  | keyof typeof MENU_COMMAND_SHORTCUTS
+  | (typeof MENU_COMMANDS_WITHOUT_SHORTCUTS)[number];
 
 /** Every command the native menu raises. `menu.rs` names the same set. */
 export const MENU_COMMANDS: readonly MenuCommand[] = [
   ...(Object.keys(MENU_COMMAND_SHORTCUTS) as MenuCommand[]),
-  "documentation",
+  ...MENU_COMMANDS_WITHOUT_SHORTCUTS,
 ];
 
 export function isMenuCommand(value: unknown): value is MenuCommand {
@@ -63,15 +71,16 @@ export function isMenuCommand(value: unknown): value is MenuCommand {
  * The keyboard's modal guard holds here too. A menu item is only a way to
  * press its chord, so it acts behind an open dialog exactly when the chord
  * would: the palette's own item closes the palette, and nothing else reaches
- * past a dialog the reader is still deciding in. Documentation is not a
- * shortcut, so it resolves to none.
+ * past a dialog the reader is still deciding in. Documentation and the
+ * command install are not shortcuts, so they resolve to none.
  */
 export function menuCommandShortcut(
   command: MenuCommand,
   context: { modalOpen: boolean; mode: ShellShortcutMode },
 ): ShellShortcutAction | null {
-  if (command === "documentation") return null;
-  const target = MENU_COMMAND_SHORTCUTS[command];
+  if (!(command in MENU_COMMAND_SHORTCUTS)) return null;
+  const target =
+    MENU_COMMAND_SHORTCUTS[command as keyof typeof MENU_COMMAND_SHORTCUTS];
   const action = typeof target === "string" ? target : target[context.mode];
   const def = shellShortcutFor(action, context.mode);
   if (!def) return null;
