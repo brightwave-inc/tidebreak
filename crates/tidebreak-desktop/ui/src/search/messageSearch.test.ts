@@ -92,8 +92,8 @@ describe("what a hit opens", () => {
   });
 
   it("names an untitled conversation the way the rail does", () => {
-    expect(hitTitle({ kind: "chat", title: "  " })).toBe("New work");
-    expect(hitTitle({ kind: "code" })).toBe("Untitled session");
+    expect(hitTitle({ kind: "chat", title: "  " })).toBe("New conversation");
+    expect(hitTitle({ kind: "code" })).toBe("Untitled conversation");
   });
 });
 

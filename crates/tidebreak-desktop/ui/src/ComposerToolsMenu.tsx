@@ -205,8 +205,8 @@ export function ComposerToolsMenu({
               <span className="min-w-0 flex-1">
                 <span className="block">Memory incognito</span>
                 <span className="block text-xs text-muted-foreground">
-                  Keep this chat out of memory: nothing is injected and nothing
-                  is captured.
+                  Keep this conversation out of memory: nothing is injected and
+                  nothing is captured.
                 </span>
               </span>
               <Switch

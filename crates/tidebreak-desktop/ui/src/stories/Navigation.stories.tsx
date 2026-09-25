@@ -466,7 +466,7 @@ function DeleteConfirmationStory({
       title: "Delete Quarterly board deck?",
       description: deletionDescription({ folders, outputs }),
       alternativeLabel: "Archive",
-      confirmLabel: "Delete work",
+      confirmLabel: "Delete conversation",
       destructive: true,
     });
   }, [decide, folders, outputs]);

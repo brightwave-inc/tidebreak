@@ -90,8 +90,8 @@ export function WorkArchivePage() {
             )}
           </div>
           <p className="mt-0.5 text-sm text-muted-foreground">
-            Archived work keeps its messages and outputs. Open it, bring it back
-            to your list, or delete it.
+            Archived conversations keep their messages and outputs. Open one,
+            bring it back to your list, or delete it.
           </p>
         </header>
         <div className="min-h-0 flex-1 overflow-auto">
@@ -132,7 +132,7 @@ function ArchiveBody({
           <EmptyTitle>The archive needs a newer server</EmptyTitle>
           <EmptyDescription>
             This window is attached to a server that predates the archive.
-            Update that server to archive work and bring it back.
+            Update that server to archive conversations and bring them back.
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -166,17 +166,17 @@ function ArchiveBody({
           <EmptyMedia variant="icon">
             <Archive />
           </EmptyMedia>
-          <EmptyTitle>No archived work</EmptyTitle>
+          <EmptyTitle>No archived conversations</EmptyTitle>
           <EmptyDescription>
-            Archive work from its menu in the rail. It keeps everything and
-            stays out of your list until you bring it back.
+            Archive a conversation from its menu in the rail. It keeps
+            everything and stays out of your list until you bring it back.
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
     );
   }
   return (
-    <ul aria-label="Archived work" className="flex flex-col">
+    <ul aria-label="Archived conversations" className="flex flex-col">
       {archived.map((chat) => (
         <ArchivedRow key={chat.id} chat={chat} />
       ))}
@@ -189,7 +189,7 @@ function ArchivedRow({ chat }: { chat: Chat }) {
   const { unarchiveChat, deleteChat } = useApp();
   const projects = useProjectListStore((state) => state.projects);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
-  const title = chat.title?.trim() || "New work";
+  const title = chat.title?.trim() || "New conversation";
   const project = chat.project_id
     ? projects.find((candidate) => candidate.id === chat.project_id)
     : undefined;

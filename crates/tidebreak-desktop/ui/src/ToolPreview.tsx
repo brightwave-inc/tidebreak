@@ -58,7 +58,7 @@ export function toolPreviewPresentation(
     const headline = preview.path;
     return {
       headline,
-      detail: `${headline}\n# written into this work's workspace`,
+      detail: `${headline}\n# written into this conversation's workspace`,
     };
   }
   if (preview.tool === "web_extract") {

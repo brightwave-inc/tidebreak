@@ -26,10 +26,10 @@ describe("matchesChatSearch", () => {
   });
 
   it("searches an untitled chat under the name it is shown by", () => {
-    // The list labels these "New work", so that is what searching for them has
+    // The list labels these "New conversation", so that is what searching for them has
     // to find — matching nothing would make them unreachable.
     expect(matchesChatSearch(chat(null), "new")).toBe(true);
-    expect(matchesChatSearch(chat("   "), "new work")).toBe(true);
+    expect(matchesChatSearch(chat("   "), "new conversation")).toBe(true);
     expect(matchesChatSearch(chat(null), "roadmap")).toBe(false);
   });
 

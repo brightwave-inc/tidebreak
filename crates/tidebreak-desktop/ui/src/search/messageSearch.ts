@@ -49,7 +49,7 @@ export function snippetSegments(
 export function hitTitle(hit: Pick<MessageSearchHit, "title" | "kind">) {
   const title = hit.title?.trim();
   if (title) return title;
-  return hit.kind === "chat" ? "New work" : "Untitled session";
+  return hit.kind === "chat" ? "New conversation" : "Untitled conversation";
 }
 
 /** Who wrote the matched text, as a reader would say it. */

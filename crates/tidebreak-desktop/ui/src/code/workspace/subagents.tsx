@@ -82,7 +82,7 @@ export function subagentEmptyState(status: CodeSubagentStatus | undefined): {
       return {
         title: "Subagent unavailable",
         description:
-          "This link no longer matches a captured Task in the parent session.",
+          "This link no longer matches a captured Task in the parent conversation.",
       };
   }
 }

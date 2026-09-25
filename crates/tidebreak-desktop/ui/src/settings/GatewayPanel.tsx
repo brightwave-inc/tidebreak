@@ -818,8 +818,8 @@ function MachineSections({
             ) : (
               <p className="text-sm text-muted-foreground">
                 You opened this machine in your browser. Closing the tab stops
-                watching; the work here keeps running, and the Tidebreak desktop
-                app can attach to the same machine.
+                watching; your conversations and agents keep running, and the
+                Tidebreak desktop app can attach to the same machine.
               </p>
             )}
           </>

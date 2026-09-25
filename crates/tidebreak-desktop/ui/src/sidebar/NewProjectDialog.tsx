@@ -84,7 +84,7 @@ export function NewProjectDialog({
         <DialogHeader className="gap-1 pr-6">
           <DialogTitle className="text-base">New project</DialogTitle>
           <DialogDescription className="text-xs leading-relaxed">
-            Name it. New work will open inside it.
+            Name it. New conversations will open inside it.
           </DialogDescription>
         </DialogHeader>
 

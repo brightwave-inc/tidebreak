@@ -27,7 +27,7 @@ describe("memorySummary", () => {
       "Off",
     );
     expect(memorySummary({ settings: on, digest: digest(4) }, true)).toBe(
-      "Off for this chat",
+      "Off for this conversation",
     );
     expect(memorySummary({ settings: on, digest: digest(0) }, false)).toBe(
       "On · nothing approved yet",

@@ -242,7 +242,7 @@ export function useCodeTranscriptSearch({
         return;
       }
       if (target.eventSeq === undefined) {
-        toast.message("That message is no longer in this session.");
+        toast.message("That message is no longer in this conversation.");
         return;
       }
       try {
@@ -263,8 +263,8 @@ export function useCodeTranscriptSearch({
             itemForEvent(view.items, target)
               ? "That message is in a subagent's work. Open the subagent to read it."
               : opened.callStartMissing
-                ? "That tool call started too far back in this session to open here."
-                : "That message is no longer in this session.",
+                ? "That tool call started too far back in this conversation to open here."
+                : "That message is no longer in this conversation.",
           );
           return;
         }

@@ -996,7 +996,7 @@ function maybeNotify(
   const client = activeClient;
   const sessionId = digest.session;
   void presentNeedsYou({
-    name: digest.title.trim() || "Code session",
+    name: digest.title.trim() || "Untitled conversation",
     href: `/code/w/${workspaceId}`,
     viewing: previous.viewedWorkspaceId === workspaceId,
     question: () =>

@@ -802,7 +802,7 @@ export const EditingMessage: Story = {
 
 /**
  * The answer being replaced wrote files and used a connected app, so the edit
- * says before sending that it starts a new chat.
+ * says before sending that it starts a new conversation.
  */
 export const EditThatStartsNewChat: Story = {
   args: {
@@ -864,7 +864,7 @@ export const RetryWithModel: Story = {
 
 /**
  * The answer on screen ran commands, so Regenerate says before sending that
- * the new answer starts a new chat, and this one stays as it is.
+ * the new answer starts a new conversation, and this one stays as it is.
  */
 export const RegenerateThatStartsNewChat: Story = {
   args: {

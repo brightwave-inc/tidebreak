@@ -165,8 +165,8 @@ function branchedRerunMessage(
 ): string {
   const started =
     rerun === "edit"
-      ? "Your edit started a new chat"
-      : "The new answer is in a new chat";
+      ? "Your edit started a new conversation"
+      : "The new answer is in a new conversation";
   return effects.length > 0
     ? `${started}, because the answer it replaces changed things outside this one.`
     : `${started}.`;
@@ -681,9 +681,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     setRerunPending(true);
     try {
       const branch = await client.branchTurn(chatId, turnId);
-      await openNewChat(branch.id, "Branched into a new chat.", branch);
+      await openNewChat(branch.id, "Branched into a new conversation.", branch);
     } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not branch this chat."));
+      toast.error(
+        friendlyErrorMessage(err, "Could not branch this conversation."),
+      );
     } finally {
       setRerunPending(false);
     }
@@ -1106,7 +1108,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       <div
         className="routed-surface-loading"
         role="status"
-        aria-label="Loading work"
+        aria-label="Loading conversation"
       />
     );
   }

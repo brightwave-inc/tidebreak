@@ -19,7 +19,7 @@ import type { PaletteRow } from "./CommandPalette";
  */
 
 /** The untitled fallback the rails already use, so the palette agrees with them. */
-const UNTITLED = "New chat";
+const UNTITLED = "New conversation";
 
 /**
  * Recent conversations, as rows that open them.
@@ -87,7 +87,7 @@ export function chatNavigationPaletteRows(input: {
     {
       id: "navigate:new-chat",
       section: "actions",
-      label: "Start new work",
+      label: "Start a new conversation",
       keywords: "new chat conversation",
       icon: Plus,
       shortcut: "new-chat",

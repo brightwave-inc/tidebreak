@@ -1302,7 +1302,7 @@ export const ManagedSlackWorkspace: Story = {
       body.queryByRole("menuitem", { name: "Toggle terminal" }),
     ).not.toBeInTheDocument();
     await expect(
-      body.queryByRole("menuitem", { name: "New session" }),
+      body.queryByRole("menuitem", { name: "New conversation" }),
     ).not.toBeInTheDocument();
   },
 };

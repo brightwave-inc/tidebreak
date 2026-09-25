@@ -32,11 +32,14 @@ import {
 import { cn } from "@/lib/utils";
 import { RecentChatRow } from "./RecentChatRow";
 
-/** Case-insensitive match on the title, with untitled work matching "new work". */
+/**
+ * Case-insensitive match on the title, with an untitled conversation matching
+ * "new conversation".
+ */
 export function matchesChatSearch(chat: Chat, query: string): boolean {
   const trimmed = query.trim().toLowerCase();
   if (!trimmed) return true;
-  const title = chat.title?.trim() || "New work";
+  const title = chat.title?.trim() || "New conversation";
   return title.toLowerCase().includes(trimmed);
 }
 
@@ -230,7 +233,7 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
           {hiddenAttention && (
             <span
               className="text-warning ml-auto shrink-0"
-              title="Work needs attention"
+              title="A conversation needs attention"
             >
               <CircleAlert aria-hidden="true" size={15} />
             </span>
@@ -249,14 +252,14 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
           <DropdownMenuContent align="start">
             <DropdownMenuItem onSelect={() => setFiltering(!filtering)}>
               <ListFilter />
-              {filtering ? "Hide filter" : "Filter work"}
+              {filtering ? "Hide filter" : "Filter conversations"}
             </DropdownMenuItem>
             {archiveAvailable && (
               <DropdownMenuItem
                 onSelect={() => void navigate({ to: "/archive" })}
               >
                 <Archive />
-                Archived work
+                Archived conversations
               </DropdownMenuItem>
             )}
           </DropdownMenuContent>
@@ -264,7 +267,7 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
         <button
           type="button"
           className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-          aria-label={creatingChat ? "Starting…" : "New work"}
+          aria-label={creatingChat ? "Starting…" : "New conversation"}
           disabled={creatingChat || deletingChatId !== null}
           onClick={newChat}
         >
@@ -276,8 +279,8 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
         <div ref={filterRef} className="shrink-0 px-1 pt-1 pb-1.5">
           <SearchInput
             size="sm"
-            placeholder="Filter work"
-            aria-label="Filter work"
+            placeholder="Filter conversations"
+            aria-label="Filter conversations"
             value={query}
             onValueChange={setQuery}
           />
@@ -291,7 +294,11 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
           aria-label="Work list"
         >
           {!chatsLoaded ? (
-            <PanelLoading variant="list" label="Loading work" rows={8} />
+            <PanelLoading
+              variant="list"
+              label="Loading conversations"
+              rows={8}
+            />
           ) : (
             <>
               {groups.map((group, index) => {
@@ -352,7 +359,7 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
               })}
               {listed.length === 0 && query.trim() && (
                 <p className="px-2 py-1 text-xs text-muted-foreground">
-                  No work title contains that.
+                  No conversation title contains that.
                 </p>
               )}
             </>

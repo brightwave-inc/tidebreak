@@ -32,7 +32,7 @@ test("a new chat streams its answer and keeps it across a reload", async ({
   await expect(
     page
       .getByRole("group", { name: "Today" })
-      .getByRole("button", { name: /^New work/ }),
+      .getByRole("button", { name: /^New conversation/ }),
   ).toBeVisible();
 
   // The tab holds its bearer in memory alone, so a reload signs in again, and

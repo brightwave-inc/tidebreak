@@ -62,7 +62,7 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
   const justNamed = useChatListStore(
     (state) => state.derivedTitleChatId === chat.id,
   );
-  const title = chat.title?.trim() || "New work";
+  const title = chat.title?.trim() || "New conversation";
   const displayTitle = useTypewriterOnce(title, justNamed);
 
   return (
@@ -91,7 +91,7 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
           <Input
             className="col-start-1 row-start-1 h-auto max-w-sm min-w-0 px-2 py-1 text-sm"
             autoFocus
-            aria-label="Work title"
+            aria-label="Conversation title"
             value={renameDraft}
             disabled={savingTitle}
             onChange={(event) => setRenameDraft(event.target.value)}
@@ -109,7 +109,7 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
           />
         </div>
       ) : (
-        <WithTooltip label="Rename work">
+        <WithTooltip label="Rename conversation">
           <button
             type="button"
             className="min-w-0 truncate font-medium hover:underline cursor-pointer"
@@ -129,7 +129,7 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
             disabled={deletingChatId !== null}
           >
             <Ellipsis className="size-4" />
-            <span className="sr-only">Work menu</span>
+            <span className="sr-only">Conversation menu</span>
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">

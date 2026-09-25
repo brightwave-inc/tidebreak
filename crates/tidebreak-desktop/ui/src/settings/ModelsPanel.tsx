@@ -68,14 +68,14 @@ const ROLES: {
     // A model picked in any conversation outranks this one for new work
     // (decision 21 keeps that last pick apart from this setting), so the
     // hint says so instead of promising this model to every new chat.
-    hint: "New work starts on the model you picked most recently in any conversation. Until you pick one, it starts on this model. When the two differ, the composer names both.",
+    hint: "New conversations start on the model you picked most recently in any conversation. Until you pick one, they start on this model. When the two differ, the composer names both.",
   },
   {
     role: "utility",
     title: "Background work",
-    hint: "Work Tidebreak does on its own — compacting a long conversation, for instance — runs here, so it is not billed at your conversation model. Left automatic, it picks the cheapest model your configured providers serve; with none available, that work is skipped rather than moved onto your work model.",
+    hint: "Work Tidebreak does on its own — compacting a long conversation, for instance — runs here, so it is not billed at your conversation model. Left automatic, it picks the cheapest model your configured providers serve; with none available, that work is skipped rather than moved onto your conversation model.",
     managedHint:
-      "Work Tidebreak does on its own — compacting a long conversation, for instance — runs here, so it is not billed at your conversation model. Left automatic, it picks the smallest model your gateway serves; with none available, that work is skipped rather than moved onto your work model.",
+      "Work Tidebreak does on its own — compacting a long conversation, for instance — runs here, so it is not billed at your conversation model. Left automatic, it picks the smallest model your gateway serves; with none available, that work is skipped rather than moved onto your conversation model.",
   },
 ];
 

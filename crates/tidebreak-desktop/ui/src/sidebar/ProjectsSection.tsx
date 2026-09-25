@@ -219,7 +219,7 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
                       disabled={creatingChat || deletingChatId !== null}
                       onClick={() => newChatInProject(project.id)}
                     >
-                      New work
+                      New conversation
                     </button>
                   )}
                 </div>
@@ -318,7 +318,7 @@ function ProjectRow({
       <button
         type="button"
         className="cursor-pointer rounded p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 disabled:pointer-events-none"
-        aria-label={`New work in ${title}`}
+        aria-label={`New conversation in ${title}`}
         disabled={mutating}
         onClick={onNewChat}
       >
@@ -340,7 +340,7 @@ function ProjectRow({
         <DropdownMenuContent align="end" side="right">
           <DropdownMenuItem onSelect={onNewChat}>
             <SquarePen />
-            New work
+            New conversation
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={onOpenInstructions}>
             <ScrollText />

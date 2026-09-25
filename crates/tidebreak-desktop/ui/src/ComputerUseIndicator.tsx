@@ -91,8 +91,8 @@ export function ComputerUseIndicatorView({
   const resumeOnly = snapshot.halted || (!showActive && hasStoppedSessions);
   const stoppedLabel =
     stoppedSessions === 1
-      ? "Computer control is stopped for 1 session"
-      : `Computer control is stopped for ${stoppedSessions} sessions`;
+      ? "Computer control is stopped for 1 conversation"
+      : `Computer control is stopped for ${stoppedSessions} conversations`;
   const [pendingControls, setPendingControls] = useState<
     ReadonlySet<"stop" | "resume">
   >(new Set());
@@ -175,7 +175,7 @@ export function ComputerUseIndicatorView({
                 {snapshot.halted
                   ? "Resume only when you want the agent to continue."
                   : resumeOnly
-                    ? "Resume when you want these sessions to continue."
+                    ? "Resume when you want these conversations to continue."
                     : foregroundRequired && liveAction
                       ? computerUseModeLabel(liveAction)
                       : liveAction
@@ -185,8 +185,8 @@ export function ComputerUseIndicatorView({
               {!snapshot.halted && !resumeOnly && hasStoppedSessions && (
                 <p className="text-muted-foreground text-2xs">
                   {stoppedSessions === 1
-                    ? "1 session has stopped computer control."
-                    : `${stoppedSessions} sessions have stopped computer control.`}
+                    ? "1 conversation has stopped computer control."
+                    : `${stoppedSessions} conversations have stopped computer control.`}
                 </p>
               )}
             </div>
@@ -196,7 +196,7 @@ export function ComputerUseIndicatorView({
                 variant="outline"
                 disabled={pendingControls.size > 0}
                 onClick={() => run("resume")}
-                aria-label="Resume stopped sessions"
+                aria-label="Resume stopped conversations"
               >
                 {pendingControls.has("resume") ? "Resuming…" : "Resume"}
               </Button>

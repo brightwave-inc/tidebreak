@@ -29,7 +29,7 @@ export function WebSearchProviderRequiredCard() {
     <AttentionCard
       title="Web search needs a provider"
       titleId={titleId}
-      subtitle="Add a web search provider in Settings, or switch this chat to a Claude, GPT, or Gemini model to search through it directly."
+      subtitle="Add a web search provider in Settings, or switch this conversation to a Claude, GPT, or Gemini model to search through it directly."
     >
       <div className="flex flex-wrap gap-2">
         <Button

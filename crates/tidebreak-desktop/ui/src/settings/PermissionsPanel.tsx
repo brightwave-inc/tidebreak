@@ -235,13 +235,13 @@ export function levelLabel(
       : `Everything in project ${shortOpaqueId(statement.level.project_id)}`;
   }
   if (isMissingSubject(statement, known)) {
-    return `Deleted work ${shortOpaqueId(statement.level.chat_id)}`;
+    return `Deleted conversation ${shortOpaqueId(statement.level.chat_id)}`;
   }
   const taskLabel =
     statement.resource.kind === "host_app" ||
     statement.resource.kind === "host_screen"
       ? "Task"
-      : "Work";
+      : "Conversation";
   return title || `${taskLabel} ${shortOpaqueId(statement.level.chat_id)}`;
 }
 
@@ -563,7 +563,7 @@ export function PermissionsPanel({
         !error && (
           <p className="text-sm text-muted-foreground">
             {chat
-              ? "Nothing saved for this work yet. When you answer an approval with “always allow” or connect a folder, it appears here."
+              ? "Nothing saved for this conversation yet. When you answer an approval with “always allow” or connect a folder, it appears here."
               : "Nothing saved yet. When you answer an approval with “always allow” or connect a folder, it appears here."}
           </p>
         )}
@@ -585,7 +585,7 @@ export function PermissionsPanel({
       {unreadableFolders.length > 0 && (
         <SettingsSection
           title="Revoked folder access"
-          description="These folders are still connected to this work, but the agent cannot read them. Grant read access to make one usable again — the host asks you to confirm."
+          description="These folders are still connected to this conversation, but the agent cannot read them. Grant read access to make one usable again — the host asks you to confirm."
         >
           <div className="flex flex-col gap-4">
             {unreadableFolders.map((folder) => (
@@ -618,8 +618,8 @@ export function PermissionsPanel({
         <div>
           <h2 className="text-sm font-medium">Permissions</h2>
           <p className="text-muted-foreground mt-1 text-sm">
-            What this work can do without asking. Project-wide approvals that
-            reach it are included. Revoke anything to be asked again.
+            What this conversation can do without asking. Project-wide approvals
+            that reach it are included. Revoke anything to be asked again.
           </p>
         </div>
         {body}

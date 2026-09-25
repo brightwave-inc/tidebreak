@@ -253,7 +253,7 @@ export function CommandPaletteDialog({
           })
         : []),
       ...(workspaceId
-        ? [findPaletteRow(findInConversation, "Find in this session")]
+        ? [findPaletteRow(findInConversation, "Find in this conversation")]
         : []),
       ...codeNavigationPaletteRows({
         navigate: go,

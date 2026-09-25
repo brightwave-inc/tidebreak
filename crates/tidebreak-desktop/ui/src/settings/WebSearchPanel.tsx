@@ -284,7 +284,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
 
           <SettingsSection
             title="Search mode"
-            description="Which search work gets. Automatic prefers the provider configured below, and falls back to the model's own search when no provider here is ready."
+            description="Choose how Tidebreak searches the web. Automatic prefers the provider configured below, and falls back to the model's own search when no provider here is ready."
           >
             <SettingsField
               label="Search mode"
@@ -438,7 +438,7 @@ function webSearchState(config: WebSearchConfigInfo | null): {
     return {
       kind: "neutral",
       label: "Off",
-      description: "Work cannot search the web.",
+      description: "Tidebreak cannot search the web.",
     };
   }
   if (config?.mode === "vendor") {
@@ -446,7 +446,7 @@ function webSearchState(config: WebSearchConfigInfo | null): {
       kind: "ready",
       label: "Built-in search",
       description:
-        "Work searches through the model it is running on. Claude, GPT, and Gemini models can; a model on another provider cannot search at all.",
+        "Tidebreak searches through the conversation's model. Claude, GPT, and Gemini models can; a model on another provider cannot search at all.",
     };
   }
   if (!config?.provider) {
@@ -455,7 +455,7 @@ function webSearchState(config: WebSearchConfigInfo | null): {
           kind: "ready",
           label: "Built-in search only",
           description:
-            "No provider is selected here, so work searches through the model it is running on. Claude, GPT, and Gemini models can.",
+            "No provider is selected here, so Tidebreak searches through the conversation's model. Claude, GPT, and Gemini models can.",
         }
       : {
           kind: "neutral",
@@ -488,7 +488,7 @@ function webSearchState(config: WebSearchConfigInfo | null): {
     label: config.mode === "automatic" ? "Built-in search" : "Not configured",
     description:
       config.mode === "automatic"
-        ? `${missing} Until then, work searches through the model it is running on.`
+        ? `${missing} Until then, Tidebreak searches through the conversation's model.`
         : missing,
   };
 }

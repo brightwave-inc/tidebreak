@@ -49,7 +49,7 @@ export const PALETTE_SECTION_ORDER: readonly PaletteSection[] = [
 export const PALETTE_SECTION_LABELS: Record<PaletteSection, string> = {
   suggested: "Suggested",
   workspaces: "Workspaces",
-  chats: "Recent work",
+  chats: "Recent conversations",
   actions: "Actions",
   ship: "Ship",
   files: "Files",

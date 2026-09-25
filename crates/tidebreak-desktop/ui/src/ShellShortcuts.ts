@@ -209,7 +209,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     id: "new-chat",
     codes: ["KeyN"],
     mod: true,
-    description: "Start new work",
+    description: "Start a new conversation",
     group: "Work",
     scope: "chat",
     allowInEditable: true,

@@ -207,5 +207,8 @@ export function chatDeletionErrorMessage(error: unknown): string {
   if (error instanceof HttpError && error.kind === "chat_roots_attached") {
     return "Disconnect connected folders before deleting this conversation.";
   }
-  return friendlyErrorMessage(error, "Could not delete this work. Try again.");
+  return friendlyErrorMessage(
+    error,
+    "Could not delete this conversation. Try again.",
+  );
 }

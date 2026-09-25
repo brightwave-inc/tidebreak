@@ -61,7 +61,9 @@ it("summarizes activity on its face and opens the chat-scoped places", async () 
 
   // With the whole canvas available, the useful places are visible without a
   // disclosure click and the summary falls back to what the chat produced.
-  expect(screen.getByLabelText("Work activity")).toHaveTextContent("2 outputs");
+  expect(screen.getByLabelText("Conversation activity")).toHaveTextContent(
+    "2 outputs",
+  );
   await userEvent.click(await screen.findByText("Outputs"));
   expect(onOpenOutputs).toHaveBeenCalled();
 
@@ -76,14 +78,18 @@ it("folds the open card down to an icon and restores it", async () => {
   renderChip({ outputCount: 2 });
 
   await userEvent.click(
-    screen.getByRole("button", { name: "Collapse work activity" }),
+    screen.getByRole("button", { name: "Collapse conversation activity" }),
   );
-  expect(screen.queryByLabelText("Work activity")).not.toBeInTheDocument();
+  expect(
+    screen.queryByLabelText("Conversation activity"),
+  ).not.toBeInTheDocument();
 
   await userEvent.click(
-    screen.getByRole("button", { name: "Expand work activity" }),
+    screen.getByRole("button", { name: "Expand conversation activity" }),
   );
-  expect(screen.getByLabelText("Work activity")).toHaveTextContent("2 outputs");
+  expect(screen.getByLabelText("Conversation activity")).toHaveTextContent(
+    "2 outputs",
+  );
 });
 
 /**
@@ -100,7 +106,9 @@ it("counts live background runs and opens the agents table", async () => {
     compact: true,
   });
 
-  const chip = screen.getByRole("button", { name: "Work activity: 2 running" });
+  const chip = screen.getByRole("button", {
+    name: "Conversation activity: 2 running",
+  });
   await userEvent.click(chip);
   await userEvent.click(screen.getByText("2 of 3 running"));
   expect(onOpenAgents).toHaveBeenCalled();
@@ -120,7 +128,7 @@ it("shows the memory row only when the route computed one, and opens settings fr
       memory={{ summary: "2 records in context", onOpen }}
     />,
   );
-  expect(screen.getByLabelText("Work activity")).toHaveTextContent(
+  expect(screen.getByLabelText("Conversation activity")).toHaveTextContent(
     "2 records in context",
   );
   await userEvent.click(screen.getByText("Memory"));

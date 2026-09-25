@@ -145,7 +145,7 @@ describe("message actions", () => {
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
   });
 
-  it("says before sending that an edit of an answer that acted starts a new chat", async () => {
+  it("says before sending that an edit of an answer that acted starts a new conversation", async () => {
     const user = userEvent.setup();
     await renderList({
       turnActions: actions(),
@@ -158,15 +158,15 @@ describe("message actions", () => {
     await user.click(screen.getByRole("button", { name: "Edit" }));
     expect(
       screen.getByText(
-        "Your edit replaces an answer that wrote files and used connected apps, so it starts a new chat. This chat stays as it is.",
+        "Your edit replaces an answer that wrote files and used connected apps, so it starts a new conversation. This conversation stays as it is.",
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Send in new chat" }),
+      screen.getByRole("button", { name: "Send in a new conversation" }),
     ).toBeDisabled();
   });
 
-  it("asks before regenerating an answer that acted, then answers in a new chat", async () => {
+  it("asks before regenerating an answer that acted, then answers in a new conversation", async () => {
     const user = userEvent.setup();
     const turnActions = actions();
     await renderList({
@@ -178,11 +178,13 @@ describe("message actions", () => {
     expect(turnActions.onRegenerate).not.toHaveBeenCalled();
     expect(
       await screen.findByText(
-        "This answer wrote files, so answering again starts a new chat. This chat stays as it is.",
+        "This answer wrote files, so answering again starts a new conversation. This conversation stays as it is.",
       ),
     ).toBeInTheDocument();
     await user.click(
-      screen.getByRole("menuitem", { name: "Regenerate in new chat" }),
+      screen.getByRole("menuitem", {
+        name: "Regenerate in a new conversation",
+      }),
     );
     expect(turnActions.onRegenerate).toHaveBeenCalledWith("t2", undefined);
   });

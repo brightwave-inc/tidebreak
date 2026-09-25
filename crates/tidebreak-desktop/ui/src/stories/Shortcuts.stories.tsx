@@ -7,7 +7,7 @@ import { ShortcutsList } from "@/ShortcutsDialog";
  * on, with the composer's own keys listed last in every mode.
  *
  * The list is per mode because one chord can mean two things: Cmd+N is a
- * conversation in chat and a workspace in code. `command` is fixed per story
+ * conversation in Work and a workspace in Code. `command` is fixed per story
  * rather than read from the browser, so the keycaps look the same wherever the
  * story is opened.
  */

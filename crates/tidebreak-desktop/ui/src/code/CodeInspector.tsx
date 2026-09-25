@@ -427,7 +427,7 @@ export function WorkspaceFilesUnavailable({
         </EmptyMedia>
         <EmptyTitle>Files are in the sandbox</EmptyTitle>
         <EmptyDescription>
-          Ask in chat to inspect files or changes.{" "}
+          Ask in the conversation to inspect files or changes.{" "}
           {hasPr
             ? "You can also review the pull request."
             : "When the task opens a pull request, you can review it here."}
@@ -708,7 +708,7 @@ export function PrTab({
 
   function attachComment(comment: PullRequestComment) {
     offerComposerPrompt(workspaceId, commentChatContext(comment));
-    toast.success("Review comment attached to chat");
+    toast.success("Review comment attached to the conversation");
   }
 
   async function refresh() {
@@ -1105,7 +1105,7 @@ function CommentRow({
           <DropdownMenuContent align="end" className="w-52">
             <DropdownMenuItem onSelect={onAttach}>
               <MessageSquareReply />
-              Attach to chat
+              Attach to conversation
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onToggleResolved}>
               {resolved ? <RotateCcw /> : <CircleCheck />}

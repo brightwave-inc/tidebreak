@@ -140,7 +140,7 @@ export function workspaceCommands(input: {
   }
   const items: WorkspaceCommand[] = [
     { id: "open", label: "Open workspace" },
-    { id: "new-session", label: "New session" },
+    { id: "new-session", label: "New conversation" },
     { id: "rename", label: "Rename…" },
     { id: "copy-branch", label: "Copy branch name" },
     worktreePathCommand(input.canOpenWorktree ?? canOpenLocalCodeWorktree()),
@@ -563,7 +563,7 @@ export function useWorkspaceCardCommands(): {
           : {
               title: `Archive ${count} workspaces?`,
               description:
-                "They leave the rail and collect in Archive. Worktrees and branches go away; Tidebreak saves a bundle so restore still rebuilds the work.",
+                "They leave the rail and collect in Archive. Worktrees and branches go away; Tidebreak saves a bundle so restore still rebuilds each workspace.",
               confirmLabel: "Archive",
               destructive: false,
             },
@@ -982,7 +982,7 @@ export function useWorkspaceCardCommands(): {
           .then(() =>
             toast.success("Diagnostic details copied", {
               description:
-                "Includes the session, turns, and what happened along the way. Review it before sharing.",
+                "Includes the conversation, its turns, and what happened along the way. Review it before sharing.",
             }),
           )
           .catch((error) =>

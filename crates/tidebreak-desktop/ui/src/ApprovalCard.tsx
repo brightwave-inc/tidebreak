@@ -134,8 +134,8 @@ export function ApprovalCard({
         note={
           canRemember && grantScope === "project" ? (
             <p className="text-muted-foreground text-xs">
-              Saved answers apply to all work in this project. Review them under
-              Settings → Permissions.
+              Saved answers apply to every conversation in this project. Review
+              them under Settings → Permissions.
             </p>
           ) : undefined
         }
@@ -266,7 +266,8 @@ export function grantLadder(
   // The label names the level the server will actually write. A chat filed
   // under a project grants across it, and saying "this chat" while writing
   // something wider is the one thing a consent label must never do.
-  const where = scope === "project" ? "in this project" : "in this work";
+  const where =
+    scope === "project" ? "in this project" : "in this conversation";
   return grantRungs.flatMap((grant): ApprovalOption[] => {
     if (grant === "whole_tool") {
       return [

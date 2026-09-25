@@ -157,7 +157,7 @@ describe("PermissionsPanel", () => {
     screen.getByText("Computer-use fixture (dev.tidebreak.fixture)");
     screen.getByText("Control, read, and capture this app");
     expect(screen.queryByText(/Nothing saved/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Deleted work/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Deleted conversation/)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
     await userEvent.click(
       await screen.findByRole("button", { name: "Revoke", hidden: false }),
@@ -165,7 +165,7 @@ describe("PermissionsPanel", () => {
     await waitFor(() =>
       expect(revokeCapabilityConsent).toHaveBeenCalledWith(savedAppStatement),
     );
-    await screen.findByText(/Nothing saved for this work yet/);
+    await screen.findByText(/Nothing saved for this conversation yet/);
   });
 
   it("keeps native session grants in their original task", () => {
@@ -431,11 +431,11 @@ describe("PermissionsPanel", () => {
 describe("permissions labeling and chat filter", () => {
   it("names a missing chat subject as deleted", () => {
     expect(levelLabel(execStatement, { chatIds: new Set() })).toBe(
-      "Deleted work 222222…2222",
+      "Deleted conversation 222222…2222",
     );
     // shortOpaqueId keeps first 6 and last 4 for long ids.
     expect(levelLabel(execStatement, { chatIds: new Set() })).toBe(
-      "Deleted work 222222…2222",
+      "Deleted conversation 222222…2222",
     );
   });
 

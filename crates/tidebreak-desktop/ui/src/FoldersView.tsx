@@ -158,7 +158,10 @@ export function FoldersView({ chat }: { chat: Chat }) {
       useRefreshSignals.getState().signal("folderAccess");
     } catch (err) {
       toast.error(
-        hostErrorMessage(err, "The future chat setting could not be changed."),
+        hostErrorMessage(
+          err,
+          "Could not change whether this folder joins future conversations.",
+        ),
       );
     } finally {
       setWorking(false);
@@ -209,7 +212,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
     const accepted = await confirm({
       title: `Forget ${folder.displayName}?`,
       description:
-        "Tidebreak removes this folder from every chat and withdraws its access everywhere. To use it again, connect it from scratch.",
+        "Tidebreak removes this folder from every conversation and withdraws its access everywhere. To use it again, connect it from scratch.",
       confirmLabel: "Forget",
       destructive: true,
     });
@@ -297,8 +300,8 @@ export function FoldersView({ chat }: { chat: Chat }) {
               <EmptyTitle>No folders connected</EmptyTitle>
               <EmptyDescription>
                 Connect a folder once to let Tidebreak read and write it in this
-                chat and future chats. You can still disconnect it from one chat
-                or forget it everywhere.
+                conversation and future ones. You can still disconnect it from
+                one conversation or forget it everywhere.
               </EmptyDescription>
             </EmptyHeader>
             <EmptyContent>{connectButton}</EmptyContent>
@@ -459,7 +462,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
                     badge={
                       <Badge variant="outline" size="sm">
                         {folder.availableInFutureChats
-                          ? "Future chats"
+                          ? "Future conversations"
                           : "Previously approved"}
                       </Badge>
                     }
@@ -545,13 +548,13 @@ export function FutureChatToggle({
   return (
     <div className="flex items-center justify-between gap-3 border-b border-subtle pb-2">
       <div className="min-w-0">
-        <p className="text-sm font-medium">Available in future chats</p>
+        <p className="text-sm font-medium">Available in future conversations</p>
         <p className="text-xs text-muted-foreground">
-          Tidebreak attaches this folder before a new chat starts.
+          Tidebreak attaches this folder before a new conversation starts.
         </p>
       </div>
       <Switch
-        aria-label={`Available in future chats for ${folder.displayName}`}
+        aria-label={`Available in future conversations for ${folder.displayName}`}
         checked={folder.availableInFutureChats}
         disabled={disabled}
         onCheckedChange={onChange}

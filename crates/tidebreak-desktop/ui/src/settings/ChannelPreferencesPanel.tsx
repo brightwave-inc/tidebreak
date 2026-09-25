@@ -91,7 +91,7 @@ export function ChannelPreferencesPanel({
           if (!harness) return [];
           if (!available.harnesses.includes(harness)) {
             throw new Error(
-              "The saved harness is unavailable for this channel. Choose an available harness.",
+              "The saved engine is unavailable for this channel. Choose an available engine.",
             );
           }
           const catalog = await client.getChannelHarnessCatalog(
@@ -155,7 +155,7 @@ export function ChannelPreferencesPanel({
   return (
     <SettingsPanel
       title="Configure Tidebreak"
-      description="Choose how Tidebreak works in this Slack channel. Model, engine, and instructions apply to new conversations. Existing work keeps its settings."
+      description="Choose how Tidebreak works in this Slack channel. Model, engine, and instructions apply to new conversations. Existing conversations keep their settings."
       busy={loading || saving}
     >
       {loading ? (
@@ -233,7 +233,7 @@ export function ChannelPreferencesPanel({
                   <SelectItem value="inherit">
                     {preferences.harness === "internal"
                       ? "Use instance default"
-                      : "Use harness default"}
+                      : "Use engine default"}
                   </SelectItem>
                   {preferences.model &&
                     !models.some((m) => m.id === preferences.model) && (
@@ -254,7 +254,7 @@ export function ChannelPreferencesPanel({
           <SettingsSection title="Subscriptions">
             <SettingsField
               label="Channel subscription preference"
-              hint="For new conversations, prefer the starter’s eligible subscription when they have agreed to sponsor channel work. Otherwise, use Gateway defaults. Repository and tool access stay with the channel’s connection."
+              hint="For new conversations, prefer the starter’s eligible subscription when they have agreed to sponsor channel conversations. Otherwise, use Gateway defaults. Repository and tool access stay with the channel’s connection."
             >
               <Select
                 value={

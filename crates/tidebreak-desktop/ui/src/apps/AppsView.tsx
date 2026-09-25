@@ -114,8 +114,7 @@ export function AppsView({
                 <EmptyTitle>No apps yet</EmptyTitle>
                 <EmptyDescription>
                   Ask Tidebreak to build a mini app in a conversation. Each app
-                  stays here so you can open it again without re-running the
-                  work.
+                  stays here so you can open it again without rebuilding it.
                 </EmptyDescription>
               </EmptyHeader>
             </Empty>

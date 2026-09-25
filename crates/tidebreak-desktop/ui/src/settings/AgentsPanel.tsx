@@ -230,7 +230,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
         description="How many delegated agents can run at once, and when they report back."
       >
         <SettingsField
-          label="Active background agents per work"
+          label="Background agents per conversation"
           hint="A spawn beyond this limit fails immediately. Wait for a running agent to finish, then try again."
           error={fieldError?.field === "limit" ? fieldError.message : undefined}
         >

@@ -103,7 +103,7 @@ export function ProviderModelsSection({
     const confirmed = await confirm({
       title: `Remove ${modelName(model)}?`,
       description:
-        "Model pickers stop offering it. Chats that use it need another model before their next turn.",
+        "Model pickers stop offering it. Conversations that use it need another model before their next turn.",
       confirmLabel: "Remove model",
       destructive: true,
     });

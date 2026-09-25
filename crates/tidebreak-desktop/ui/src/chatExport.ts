@@ -26,12 +26,16 @@ export async function exportChatConversation(
     if (host.local) {
       const saved = await host.save(request);
       if (saved)
-        toast.success("Exported this work", { description: saved.path });
+        toast.success("Exported this conversation", {
+          description: saved.path,
+        });
       return;
     }
     const file = await client.downloadConversationExport(request);
     downloadBlob(file.blob, file.fileName);
   } catch (error) {
-    toast.error(friendlyErrorMessage(error, "Could not export this work."));
+    toast.error(
+      friendlyErrorMessage(error, "Could not export this conversation."),
+    );
   }
 }

@@ -458,7 +458,7 @@ export function HomeRoute({
       composerDraftActions.clearDraft(draftKey);
     } catch (err) {
       setError(
-        `Could not start work: ${friendlyErrorMessage(err, "Try again.")}`,
+        `Could not start a conversation: ${friendlyErrorMessage(err, "Try again.")}`,
       );
     } finally {
       chatListActions.setCreatingChat(false);
@@ -570,7 +570,7 @@ export function HomeRoute({
                 <Folder aria-hidden="true" className="size-3.5 shrink-0" />
                 {/* The project's name is what truncates, so a narrow pane
                     still says where the work goes. */}
-                <span className="shrink-0">New work in</span>
+                <span className="shrink-0">New conversation in</span>
                 <span className="min-w-0 truncate font-medium text-foreground">
                   {project.title?.trim() || "Untitled project"}
                 </span>

@@ -771,7 +771,7 @@ export function ChatView({
         {hydrationError ? (
           <Empty role="alert" className="h-full">
             <EmptyHeader>
-              <EmptyTitle>Could not load this work</EmptyTitle>
+              <EmptyTitle>Could not load this conversation</EmptyTitle>
               <EmptyDescription className="break-words [overflow-wrap:anywhere]">
                 {hydrationError}
               </EmptyDescription>

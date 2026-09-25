@@ -239,7 +239,7 @@ export function workspaceWorkflowModel(
           ...common,
           remote: true,
           detail:
-            "This checkout runs in a sandbox. Review its pull request on GitHub or continue the task in chat.",
+            "This checkout runs in a sandbox. Review its pull request on GitHub or continue the task in the conversation.",
           primary: pr?.url ? "open_pr" : undefined,
           secondary: [],
         }
@@ -250,7 +250,7 @@ export function workspaceWorkflowModel(
           summary: "Sandbox workspace",
           title: "Checkout runs in a sandbox",
           detail:
-            "Continue the task in chat to commit, push, or create a pull request. Its status appears here once published.",
+            "Continue the task in the conversation to commit, push, or create a pull request. Its status appears here once published.",
           secondary: [],
         };
   }
@@ -592,7 +592,7 @@ export function resolveWorkflowShortcut(
     }
     return {
       blocked:
-        "This checkout runs in a sandbox. Continue the task in chat or open its pull request on GitHub.",
+        "This checkout runs in a sandbox. Continue the task in the conversation or open its pull request on GitHub.",
     };
   }
   // The review rail is chrome, not a Git operation: it opens whatever else is

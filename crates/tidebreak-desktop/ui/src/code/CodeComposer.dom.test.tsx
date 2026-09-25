@@ -554,7 +554,7 @@ describe("CodeComposer", () => {
     expect(trigger).toBeDisabled();
     await user.hover(trigger.parentElement!);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "Set when the session started — start a new session to change it",
+      "Set when the session started — start a new conversation to change it",
     );
   });
 
