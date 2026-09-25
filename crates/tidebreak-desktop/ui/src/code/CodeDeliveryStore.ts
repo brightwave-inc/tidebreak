@@ -11,6 +11,7 @@ import type {
   CodeGitHubRepositoryRef,
   CodeGitHubRepositoryTarget,
 } from "../api/types";
+import { friendlyErrorMessage } from "../lib/utils";
 
 const STORAGE_KEY = "tidebreak.code-delivery";
 const STORAGE_VERSION = 2;
@@ -213,9 +214,10 @@ function persist(state: CodeDeliveryStore): string | null {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     return null;
   } catch (error) {
-    return error instanceof Error
-      ? error.message
-      : "Could not save delivery settings on this device.";
+    return friendlyErrorMessage(
+      error,
+      "Could not save delivery settings on this device.",
+    );
   }
 }
 
@@ -427,9 +429,7 @@ export function rememberedPullRequestPage(
 }
 
 function deliveryErrorMessage(error: unknown): string {
-  return error instanceof Error
-    ? error.message
-    : "Could not load GitHub repositories.";
+  return friendlyErrorMessage(error, "Could not load GitHub repositories.");
 }
 
 export function codeDeliveryRepositoryKey(

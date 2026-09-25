@@ -58,6 +58,12 @@ export type LiveResource<T> = {
   /** The last value that loaded, kept in place while a refresh is running. */
   data: T | null;
   error: string | null;
+  /**
+   * The workspace is archived, so `error` is the archived message: a state
+   * the reader changes by restoring the workspace, which a retry cannot.
+   * Resources that never read a workspace leave it out.
+   */
+  archived?: boolean;
   /** A load is in flight, whether or not there is already data to show. */
   refreshing: boolean;
   /** Refresh now, skipping the debounce. Resolves when the load settles. */
@@ -102,6 +108,7 @@ export function useLiveResource<T>({
   // a caller must not take one file's contents for another's.
   const [dataKey, setDataKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [archived, setArchived] = useState(false);
   const [refreshing, setRefreshing] = useState(true);
 
   const keyRef = useRef(key);
@@ -141,10 +148,13 @@ export function useLiveResource<T>({
         setData(next);
         setDataKey(loadKey);
         setError(null);
+        setArchived(false);
       } catch (err) {
         if (generation !== generationRef.current) return;
+        const isArchived = isWorkspaceArchivedError(err);
+        setArchived(isArchived);
         setError(
-          isWorkspaceArchivedError(err)
+          isArchived
             ? WORKSPACE_ARCHIVED_MESSAGE
             : friendlyErrorMessage(err, errorMessageRef.current),
         );
@@ -170,6 +180,7 @@ export function useLiveResource<T>({
     setData(value);
     setDataKey(keyRef.current);
     setError(null);
+    setArchived(false);
     setRefreshing(false);
   }, []);
 
@@ -180,6 +191,7 @@ export function useLiveResource<T>({
     setData(null);
     setDataKey(null);
     setError(null);
+    setArchived(false);
     setRefreshing(enabled);
     if (enabled) void run();
     return () => {
@@ -214,6 +226,7 @@ export function useLiveResource<T>({
   return {
     data: dataKey === key ? data : null,
     error,
+    archived,
     refreshing,
     refresh: run,
     adopt,

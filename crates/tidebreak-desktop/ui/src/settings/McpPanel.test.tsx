@@ -733,10 +733,9 @@ describe("McpPanel", () => {
     // disabled toggle is explained rather than passing unknown off as
     // unmounted.
     expect(
-      await screen.findByText(
-        /Could not read the MCP server list: mcp backend unavailable/,
-      ),
+      await screen.findByText("Could not read the MCP server list"),
     ).toBeInTheDocument();
+    expect(screen.getByText("mcp backend unavailable")).toBeInTheDocument();
     expect(
       await screen.findByRole("switch", {
         name: "Connect example-security-tools",
@@ -786,10 +785,9 @@ describe("McpPanel", () => {
       await vi.advanceTimersByTimeAsync(15_100);
     });
     expect(
-      screen.getByText(
-        /Could not read the MCP server list: mcp backend unavailable/,
-      ),
+      screen.getByText("Could not read the MCP server list"),
     ).toBeInTheDocument();
+    expect(screen.getByText("mcp backend unavailable")).toBeInTheDocument();
     const row = mountRow("example-security-tools");
     expect(within(row).getByText(/3 tools available/)).toBeInTheDocument();
     const toggle = within(row).getByRole("switch");

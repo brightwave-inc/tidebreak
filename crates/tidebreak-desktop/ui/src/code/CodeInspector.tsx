@@ -98,6 +98,7 @@ import {
   pullRequestLifecycle,
 } from "./prState";
 import { Notice, NoticeRetryButton } from "@/components/ui/notice";
+import { useRetry } from "@/components/ui/useRetry";
 
 export type InspectorTab = "files" | "source" | "pr";
 
@@ -315,6 +316,7 @@ export function CodeInspector({
               remote={remote}
               error={prResource?.error}
               onRetry={prResource ? () => void prResource.refresh() : undefined}
+              retrying={prResource?.refreshing ?? false}
               hasPr={Boolean(pr)}
               onReview={() => setTab("pr")}
             />
@@ -344,6 +346,7 @@ export function CodeInspector({
                 onRetry={
                   prResource ? () => void prResource.refresh() : undefined
                 }
+                retrying={prResource?.refreshing ?? false}
                 hasPr={Boolean(pr)}
                 onReview={() => setTab("pr")}
               />
@@ -373,6 +376,7 @@ export function WorkspaceFilesUnavailable({
   remote = false,
   error,
   onRetry,
+  retrying = false,
   hasPr = false,
   onReview,
   archived = false,
@@ -381,6 +385,8 @@ export function WorkspaceFilesUnavailable({
   error?: string | null;
   /** Reads the workspace again after `error`. */
   onRetry?: () => void;
+  /** That read is running, so the Retry waits for it. */
+  retrying?: boolean;
   hasPr?: boolean;
   onReview?: () => void;
   archived?: boolean;
@@ -398,7 +404,9 @@ export function WorkspaceFilesUnavailable({
         tone="critical"
         title="Could not load this workspace"
         className="m-4 w-auto"
-        action={onRetry && <NoticeRetryButton onClick={onRetry} />}
+        action={
+          onRetry && <NoticeRetryButton pending={retrying} onClick={onRetry} />
+        }
       >
         {error}
       </Notice>
@@ -672,11 +680,10 @@ export function PrTab({
       setCommentsError(null);
     } catch (err) {
       if (requestId !== commentsRequestId.current) return;
-      setCommentsError(
-        friendlyErrorMessage(err, "Could not load review comments"),
-      );
+      setCommentsError(friendlyErrorMessage(err, "Try again in a moment."));
     }
   }, [client, prNumber, workspaceId]);
+  const commentsRetry = useRetry(loadComments);
 
   useEffect(() => {
     setComments(null);
@@ -749,7 +756,7 @@ export function PrTab({
       toast.success(auto ? "Auto-merge enabled" : "Merged");
     } catch (err) {
       if (err instanceof HttpError && err.kind === "pr_not_mergeable") {
-        setMergeError(err.message);
+        setMergeError(friendlyErrorMessage(err, "Could not merge"));
       } else {
         toast.error(friendlyErrorMessage(err, "Could not merge"));
       }
@@ -952,7 +959,8 @@ export function PrTab({
         comments={comments}
         error={commentsError}
         preferences={commentPreferences}
-        onRetry={() => void loadComments()}
+        retrying={commentsRetry.pending}
+        onRetry={commentsRetry.retry}
         onAttach={attachComment}
         onHide={(key) =>
           updateCommentPreferences((current) => ({
@@ -979,6 +987,7 @@ function CommentsSection({
   comments,
   error,
   preferences,
+  retrying,
   onRetry,
   onAttach,
   onHide,
@@ -988,6 +997,7 @@ function CommentsSection({
   comments: PullRequestComment[] | null;
   error: string | null;
   preferences: ReviewCommentPreferences;
+  retrying: boolean;
   onRetry: () => void;
   onAttach: (comment: PullRequestComment) => void;
   onHide: (key: string) => void;
@@ -1028,7 +1038,9 @@ function CommentsSection({
           tone="critical"
           density="compact"
           title="Could not load comments"
-          action={<NoticeRetryButton size="xs" onClick={onRetry} />}
+          action={
+            <NoticeRetryButton size="xs" pending={retrying} onClick={onRetry} />
+          }
         >
           {error}
         </Notice>

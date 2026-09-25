@@ -77,7 +77,7 @@ export function SessionRecoveryNotice({
       className="mx-4 mt-3 w-auto"
       action={
         canRetry && (
-          <NoticeRetryButton disabled={retrying} onClick={() => void retry()}>
+          <NoticeRetryButton pending={retrying} onClick={() => void retry()}>
             {retrying
               ? "Trying again…"
               : missingOutput

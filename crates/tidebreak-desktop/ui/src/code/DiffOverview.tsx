@@ -135,7 +135,7 @@ export function DiffOverviewContent({
     LiveResource<CodeWorkspaceFiles>,
     "data" | "error" | "refreshing"
   > &
-    Partial<Pick<LiveResource<CodeWorkspaceFiles>, "refresh">>;
+    Partial<Pick<LiveResource<CodeWorkspaceFiles>, "refresh" | "archived">>;
   turnId?: string;
   /** Ordinal label for the scoped turn. Never a raw id. */
   turnLabel?: string;
@@ -148,7 +148,7 @@ export function DiffOverviewContent({
    */
   commit?: (files: CodeWorkspaceFiles | null) => ReactNode;
 }) {
-  const { data: payload, error, refreshing, refresh } = resource;
+  const { data: payload, error, archived, refreshing, refresh } = resource;
 
   const scopeCaption = turnId
     ? (turnLabel ?? "This turn")
@@ -196,13 +196,14 @@ export function DiffOverviewContent({
       </header>
       {error && (
         <Notice
-          tone="critical"
+          tone={archived ? "neutral" : "critical"}
           docked="top"
           className="shrink-0"
           action={
-            refresh && (
+            refresh &&
+            !archived && (
               <NoticeRetryButton
-                disabled={refreshing}
+                pending={refreshing}
                 onClick={() => void refresh()}
               />
             )

@@ -257,7 +257,9 @@ function RenderedWorkbook({
         errorState={(error) => (
           <DocumentViewerState variant="error" className="h-full">
             <span className="block">This workbook could not be read.</span>
-            <span className="mt-1 block text-xs">{error.message}</span>
+            <span className="mt-1 block text-xs">
+              {friendlyErrorMessage(error, "Its contents are not readable.")}
+            </span>
           </DocumentViewerState>
         )}
         experimentalCanvas

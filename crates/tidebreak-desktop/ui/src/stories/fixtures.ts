@@ -3235,7 +3235,7 @@ export const failureFixtures = {
   unreachable: new TypeError("Load failed"),
   /** A proxy or a restarting server: no JSON body, only the status text. */
   unavailable: new HttpError(503, "503: Service Unavailable"),
-  /** The server's own refusal, of a kind the renderer words itself. */
+  /** The server's own refusal, naming what it could not find. */
   notFound: new HttpError(404, "404: app app_7f3c not found", "not_found", {
     kind: "not_found",
     message: "app app_7f3c not found",

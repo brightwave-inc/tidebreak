@@ -92,7 +92,7 @@ export function CodeAnalyticsBody() {
       setError(null);
     } catch (caught) {
       if (request !== requestSequence.current) return;
-      setError(friendlyErrorMessage(caught, "Could not load code analytics."));
+      setError(friendlyErrorMessage(caught, "Try again in a moment."));
     } finally {
       if (request === requestSequence.current) {
         setLoading(false);
@@ -167,7 +167,11 @@ export function CodeAnalyticsBody() {
         {loading && !report ? (
           <AnalyticsSkeleton />
         ) : error && !report ? (
-          <AnalyticsError message={error} onRetry={() => void refresh()} />
+          <AnalyticsError
+            message={error}
+            retrying={refreshing}
+            onRetry={() => void refresh()}
+          />
         ) : report && report.totals.turns === 0 ? (
           <AnalyticsEmpty quota={quota.report} />
         ) : report ? (
@@ -175,6 +179,7 @@ export function CodeAnalyticsBody() {
             {error && (
               <AnalyticsRefreshError
                 message={error}
+                retrying={refreshing}
                 onRetry={() => void refresh()}
               />
             )}
@@ -524,7 +529,7 @@ function QuotaCard({
                 action={
                   <NoticeRetryButton
                     size="xs"
-                    disabled={quota.refreshing}
+                    pending={quota.refreshing}
                     onClick={() => void quota.refresh()}
                   />
                 }
@@ -825,9 +830,11 @@ function AnalyticsSkeleton() {
 
 function AnalyticsError({
   message,
+  retrying,
   onRetry,
 }: {
   message: string;
+  retrying: boolean;
   onRetry: () => void;
 }) {
   return (
@@ -835,7 +842,7 @@ function AnalyticsError({
       tone="critical"
       title="Could not load code analytics"
       className="mx-auto max-w-2xl"
-      action={<NoticeRetryButton onClick={onRetry} />}
+      action={<NoticeRetryButton pending={retrying} onClick={onRetry} />}
     >
       {message}
     </Notice>
@@ -844,9 +851,11 @@ function AnalyticsError({
 
 function AnalyticsRefreshError({
   message,
+  retrying,
   onRetry,
 }: {
   message: string;
+  retrying: boolean;
   onRetry: () => void;
 }) {
   return (
@@ -854,7 +863,9 @@ function AnalyticsRefreshError({
       tone="critical"
       density="compact"
       className="mx-auto mb-4 max-w-[1500px]"
-      action={<NoticeRetryButton size="xs" onClick={onRetry} />}
+      action={
+        <NoticeRetryButton size="xs" pending={retrying} onClick={onRetry} />
+      }
     >
       {message}
     </Notice>

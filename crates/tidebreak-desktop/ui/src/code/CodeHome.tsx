@@ -27,6 +27,7 @@ import { harnessNeedsNoSignIn, workspaceHarnesses } from "./labels";
 import { isPutAway } from "./workspaceCards";
 import { PaneDragBand } from "@/WindowDragStrip";
 import { Notice, NoticeRetryButton } from "@/components/ui/notice";
+import { useRetry } from "@/components/ui/useRetry";
 
 /**
  * `/code` home: the doctor until some engine can run a first turn, the
@@ -66,6 +67,9 @@ function CodeHomeBody() {
   const error = useCodeCatalogStore((state) => state.error);
   const refresh = useCodeCatalogStore((state) => state.refresh);
   const refreshDoctor = useCodeCatalogStore((state) => state.refreshDoctor);
+  // The catalog keeps its failure on screen until a read answers, so its
+  // Retry waits for that answer.
+  const catalogRetry = useRetry(() => refresh(client));
   // The rail owns the live socket; the home only reads what it delivers.
   const digests = useWorkspaceDigests();
   const watches = useCodeUpdatesStore((state) => state.childrenByWorkspace);
@@ -177,7 +181,12 @@ function CodeHomeBody() {
         <Notice
           tone="critical"
           title="Could not load your repositories and workspaces"
-          action={<NoticeRetryButton onClick={() => void refresh(client)} />}
+          action={
+            <NoticeRetryButton
+              pending={catalogRetry.pending}
+              onClick={catalogRetry.retry}
+            />
+          }
         >
           {error}
         </Notice>
@@ -188,7 +197,7 @@ function CodeHomeBody() {
           title="The coding engine check did not answer"
           action={
             <NoticeRetryButton
-              disabled={refreshing}
+              pending={refreshing}
               onClick={() => void onRefresh()}
             >
               {refreshing ? "Re-checking…" : "Re-check"}

@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -1302,7 +1302,7 @@ function DocxViewerContent({
       } catch (error) {
         if (isCurrent) {
           setLoadError(
-            error instanceof Error ? error.message : "Unknown DOCX load error",
+            friendlyErrorMessage(error, "The document could not be read."),
           );
           setIsLoadingDocument(false);
         }

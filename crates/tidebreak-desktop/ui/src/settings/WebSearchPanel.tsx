@@ -70,18 +70,22 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
     null,
   );
   const [removing, setRemoving] = useState<WebSearchProviderKind | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  /** The first read failed; Try again bumps the attempt to read again. */
-  const [loadFailed, setLoadFailed] = useState(false);
+  /** Why the settings did not load; Try again reads them once more. */
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  /** Why a save did not go through. */
+  const [error, setError] = useState<string | null>(null);
+  /** Why a value cannot be saved, shown under its field. */
+  const [providerError, setProviderError] = useState<string | null>(null);
+  const [timeoutError, setTimeoutError] = useState<string | null>(null);
+  const [searxngError, setSearxngError] = useState<string | null>(null);
   const configRef = useRef<WebSearchConfigInfo | null>(null);
   const writeSeq = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setError(null);
-    setLoadFailed(false);
+    setLoadError(null);
     void (async () => {
       try {
         const [nextConfig, nextCredentials] = await Promise.all([
@@ -98,8 +102,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
         setSearxngBaseUrl(nextConfig.searxng_base_url ?? "");
       } catch (err) {
         if (!cancelled) {
-          setError(friendlyErrorMessage(err, "Try again in a moment."));
-          setLoadFailed(true);
+          setLoadError(friendlyErrorMessage(err, "Try again in a moment."));
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -182,16 +185,19 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
     if (nextProvider && providerNeedsKey(nextProvider)) {
       const ready = credentials.find((row) => row.provider === nextProvider);
       if (!ready?.has_credential) {
-        setError(
+        setProviderError(
           `${providerLabel(nextProvider)} needs an API key before you can make it active.`,
         );
         return;
       }
     }
     if (nextProvider === SEARXNG_PROVIDER && !searxngBaseUrl.trim()) {
-      setError("SearXNG needs an instance URL before you can make it active.");
+      setProviderError(
+        "SearXNG needs an instance URL before you can make it active.",
+      );
       return;
     }
+    setProviderError(null);
     setProvider(nextProvider);
     await persistConfig({ provider: nextProvider || null });
   }
@@ -203,9 +209,10 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       MAX_WEB_SEARCH_TIMEOUT_SECONDS,
     );
     if ("error" in timeout) {
-      setError(timeout.error);
+      setTimeoutError(timeout.error);
       return;
     }
+    setTimeoutError(null);
     await persistConfig({ timeout_ms: timeout.timeoutMs });
   }
 
@@ -215,13 +222,14 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
     if (!trimmed) {
       if (confirmed?.provider === SEARXNG_PROVIDER) {
         setSearxngBaseUrl(confirmed.searxng_base_url ?? "");
-        setError("SearXNG needs an instance URL.");
+        setSearxngError("SearXNG needs an instance URL.");
         return;
       }
       if (!confirmed?.searxng_base_url) return;
       await persistConfig({ searxng_base_url: null });
       return;
     }
+    setSearxngError(null);
     if (trimmed === (confirmed?.searxng_base_url ?? "")) return;
     await persistConfig({ searxng_base_url: trimmed });
   }
@@ -255,6 +263,13 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
         <p className="text-sm text-muted-foreground">
           Loading web-search settings…
         </p>
+      ) : loadError ? (
+        <SettingsError
+          title="Could not load web-search settings"
+          onRetry={() => setLoadAttempt((count) => count + 1)}
+        >
+          {loadError}
+        </SettingsError>
       ) : !config ? (
         <p className="text-sm text-muted-foreground">
           Web-search settings are unavailable.
@@ -326,6 +341,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
             <SettingsField
               label="SearXNG instance URL"
               hint="For example http://localhost:8888. A loopback or private address is expected here. If SearXNG is the active provider, the URL is required."
+              error={searxngError ?? undefined}
             >
               <Input
                 type="url"
@@ -346,6 +362,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
             <ActiveProviderField
               value={provider}
               disabled={working}
+              error={providerError}
               onChange={(next) => void saveProvider(next)}
               options={[
                 ...credentials.map((credential) => ({
@@ -365,6 +382,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
               maxSeconds={MAX_WEB_SEARCH_TIMEOUT_SECONDS}
               value={timeoutSeconds}
               disabled={working}
+              error={timeoutError}
               onChange={setTimeoutSeconds}
               onBlur={() => void saveTimeout()}
             />
@@ -383,15 +401,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
           </p>
         </>
       )}
-      {error && (
-        <SettingsError
-          onRetry={
-            loadFailed ? () => setLoadAttempt((count) => count + 1) : undefined
-          }
-        >
-          {error}
-        </SettingsError>
-      )}
+      {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>
   );
 }

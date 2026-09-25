@@ -130,6 +130,7 @@ export function DiffPanel({
   const {
     data: payload,
     error,
+    archived,
     refreshing,
     refresh,
   } = useLiveResource({
@@ -366,21 +367,26 @@ export function DiffPanel({
           turnLabel={turnLabel}
         />
       )}
-      {error && (
-        <Notice
-          tone="critical"
-          docked="top"
-          className="shrink-0"
-          action={
-            <NoticeRetryButton
-              disabled={refreshing}
-              onClick={() => void refresh()}
-            />
-          }
-        >
-          {error}
-        </Notice>
-      )}
+      {error &&
+        (archived ? (
+          <Notice tone="neutral" docked="top" className="shrink-0">
+            {error}
+          </Notice>
+        ) : (
+          <Notice
+            tone="critical"
+            docked="top"
+            className="shrink-0"
+            action={
+              <NoticeRetryButton
+                pending={refreshing}
+                onClick={() => void refresh()}
+              />
+            }
+          >
+            {error}
+          </Notice>
+        ))}
       {payload?.truncated && (
         <p className="text-muted-foreground border-b px-3 py-2 text-xs">
           This diff was truncated. Open a single file for the rest.

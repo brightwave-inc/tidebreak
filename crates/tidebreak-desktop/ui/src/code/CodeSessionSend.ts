@@ -31,6 +31,7 @@ import {
 } from "./diff/reviewComments";
 import { messageWithWorkspaceFiles } from "./fork";
 import type { CodeTurnSubmission } from "./parsers";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 /** One published image a turn carries. */
 export type CodeTurnImage = { blob_id: string; media_type: string };
@@ -176,7 +177,7 @@ export function codeSendFailure(error: unknown): string {
   if (error instanceof HttpError && error.kind === "queue_full") {
     return "The queue is full. Delete a queued message or wait for one to run.";
   }
-  return error instanceof Error ? error.message : "Could not send that turn";
+  return friendlyErrorMessage(error, "Could not send that turn");
 }
 
 /**

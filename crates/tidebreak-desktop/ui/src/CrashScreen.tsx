@@ -7,6 +7,7 @@ import { friendlyErrorMessage } from "@/lib/utils";
 import { copyPlainText } from "./ClipboardCopyButton";
 import { hasNativeHost } from "./host";
 import { BootBrand } from "./Logomark";
+import { scrubLogText } from "./rendererErrors";
 import { WindowDragStrip } from "./WindowDragStrip";
 
 /**
@@ -23,6 +24,31 @@ export function currentRoutePath(): string {
   return path || "/";
 }
 
+/** The bounds the renderer's own log uses for the same fields. */
+const REPORT_MESSAGE_CHARS = 1_000;
+const REPORT_STACK_CHARS = 8_000;
+const REPORT_ROUTE_CHARS = 500;
+
+/**
+ * Routes whose parameter is a one-time capability rather than an address: the
+ * nonce a channel's connect card carries, and the id an admin's workspace
+ * grant link carries. Either one in a pasted report would let a reader act
+ * on it.
+ */
+const CAPABILITY_ROUTES = [
+  /^(\/connect\/)[^/]+/,
+  /^(\/workspace-grant\/)[^/]+/,
+];
+
+/** A route as a report may carry it: capabilities and credentials removed. */
+export function reportRoutePath(path: string): string {
+  let redacted = path;
+  for (const route of CAPABILITY_ROUTES) {
+    redacted = redacted.replace(route, "$1[redacted]");
+  }
+  return scrubLogText(redacted, REPORT_ROUTE_CHARS);
+}
+
 /** Code mode has its own home; everywhere else, home is the Work home. */
 export function homePathFor(pathname: string): "/" | "/code" {
   return pathname === "/code" || pathname.startsWith("/code/") ? "/code" : "/";
@@ -32,7 +58,11 @@ export function homePathFor(pathname: string): "/" | "/code" {
  * The diagnostic payload for a crash, as a formatted JSON document.
  *
  * Built from named fields, like the boot screen's report, so nothing carrying
- * a token can be spread into it by accident.
+ * a token can be spread into it by accident. The message, stacks, and route
+ * go through the same scrub the renderer's log uses (`scrubLogText`), so a
+ * token inside an error, a URL's userinfo or query, or a connect nonce in the
+ * route never reaches the clipboard: the notice beside the control promises
+ * "No credentials."
  */
 export function crashDebugReport(input: {
   error: unknown;
@@ -46,21 +76,29 @@ export function crashDebugReport(input: {
     input.error instanceof Error
       ? {
           name: input.error.name,
-          message: input.error.message,
-          stack: input.error.stack ?? null,
+          message: scrubLogText(input.error.message, REPORT_MESSAGE_CHARS),
+          stack: input.error.stack
+            ? scrubLogText(input.error.stack, REPORT_STACK_CHARS)
+            : null,
         }
       : {
           name: null,
-          message: friendlyErrorMessage(input.error, "No message"),
+          message: scrubLogText(
+            friendlyErrorMessage(input.error, "No message"),
+            REPORT_MESSAGE_CHARS,
+          ),
           stack: null,
         };
+  const componentStack = input.componentStack?.trim();
   return JSON.stringify(
     {
       capturedAt: input.capturedAt,
       appVersion: input.appVersion,
-      route: input.route,
+      route: reportRoutePath(input.route),
       error,
-      componentStack: input.componentStack?.trim() || null,
+      componentStack: componentStack
+        ? scrubLogText(componentStack, REPORT_STACK_CHARS)
+        : null,
       userAgent: input.userAgent,
     },
     null,

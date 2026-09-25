@@ -21,6 +21,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "./lib/utils";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 type ChangeClient = Pick<
   ApiClient,
@@ -380,10 +381,7 @@ function RevisionPreview({
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        const message =
-          error instanceof Error
-            ? error.message.replace(/^\d+:\s*/, "")
-            : "Preview unavailable.";
+        const message = friendlyErrorMessage(error, "Preview unavailable.");
         setLoaded({ status: "error", message });
       });
     return () => {

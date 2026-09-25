@@ -17,6 +17,7 @@ import {
   userItemId,
   type CodeSessionDeps,
   type CodeSessionState,
+  credentialRefusalNotice,
 } from "./CodeSessionReducer";
 
 const NOW = "2026-08-15T12:00:00.000Z";
@@ -346,24 +347,51 @@ describe("turn lifecycle", () => {
     });
   });
 
-  it("paints a refused credential borrow as a warning with its remedy", () => {
+  it("paints a refused credential borrow as a warning that says its remedy once", () => {
     const { state } = play([
       { type: "turn_started", turn_id: "t1" },
       {
         type: "credential_refused",
         reason: "connection_ended",
-        message: "no live gateway delegation",
-        remediation: "Reconnect this session from Slack.",
+        message:
+          "this external connection has no live gateway delegation; reconnect it from Slack",
+        remediation:
+          "Reconnect this session from Slack; a newer connect or a revoke ended the one it used.",
       },
       { type: "turn_completed", usage: NO_USAGE },
     ]);
     const notice = state.items.find((item) => item.kind === "notice");
-    expect(notice).toMatchObject({
-      kind: "notice",
-      level: "warning",
-      message:
-        "Push refused: no live gateway delegation Reconnect this session from Slack.",
-    });
+    expect(notice).toMatchObject({ kind: "notice", level: "warning" });
+    const message = (notice as { message: string }).message;
+    expect(message).toBe(
+      "Push refused: this session's Slack connection ended when it was revoked or replaced by a newer one. Reconnect the session from Slack, then push again.",
+    );
+    expect(message.match(/reconnect/gi)).toHaveLength(1);
+    expect(message).not.toMatch(/delegation/);
+  });
+
+  it("keeps the link a not-connected refusal carries, and the reason a forge gave", () => {
+    expect(
+      credentialRefusalNotice({
+        reason: "not_connected",
+        message:
+          "To use GitHub as yourself here, connect your GitHub account at the Model Gateway: https://gateway.example.com/connect",
+        remediation:
+          "Connect your GitHub account at the gateway, then push again.",
+      }),
+    ).toBe(
+      "Push refused. To use GitHub as yourself here, connect your GitHub account at the Model Gateway: https://gateway.example.com/connect. Then push again.",
+    );
+    expect(
+      credentialRefusalNotice({
+        reason: "forge_refused",
+        message: "The installation is suspended",
+        remediation:
+          "Read the reason above; if it names the deployment, ask an administrator.",
+      }),
+    ).toBe(
+      "Push refused: The installation is suspended. If this names the deployment, ask an administrator.",
+    );
   });
 
   it("closes a refused turn as completed with its usage", () => {

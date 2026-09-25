@@ -157,7 +157,7 @@ export function RepositoryTriggerRules({
           action={
             <NoticeRetryButton
               size="xs"
-              disabled={loading}
+              pending={loading}
               onClick={() => void load()}
             />
           }

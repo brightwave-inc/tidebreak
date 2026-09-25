@@ -194,7 +194,8 @@ function ExtractedText({
 
   if (info.content.length === 0) {
     return (
-      <DocumentViewerState variant="error">
+      // An empty result, not a failure: it reads as a plain message.
+      <DocumentViewerState>
         No text could be read out of this document.
       </DocumentViewerState>
     );

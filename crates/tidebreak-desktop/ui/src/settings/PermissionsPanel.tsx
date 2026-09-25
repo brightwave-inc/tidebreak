@@ -545,7 +545,13 @@ export function PermissionsPanel({
 
   const body = (
     <>
-      {error && <SettingsError>{error}</SettingsError>}
+      {error && (
+        <SettingsError
+          onRetry={statements === null ? () => void reload() : undefined}
+        >
+          {error}
+        </SettingsError>
+      )}
       {statements === null && !error && (
         <p role="status" className="text-sm text-muted-foreground">
           Loading saved approvals…

@@ -1741,7 +1741,7 @@ function ProbeFailure({
     <Notice
       tone="warning"
       action={
-        <NoticeRetryButton disabled={busy} onClick={onRetry}>
+        <NoticeRetryButton pending={busy} onClick={onRetry}>
           {busy ? "Trying again…" : action}
         </NoticeRetryButton>
       }

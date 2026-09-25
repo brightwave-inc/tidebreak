@@ -1632,15 +1632,17 @@ function ComposerView({
         </p>
       )}
       {footerNote}
+      {/* What the draft still needs is validation, not a failure: it reads
+          as text under the field, not as a notice. */}
       {steerTooLong && (
-        <Notice tone="critical" density="compact">
+        <span className="text-xs text-critical" role="alert">
           Guidance is too long.
-        </Notice>
+        </span>
       )}
       {steerHasUnsupportedCharacter && (
-        <Notice tone="critical" density="compact">
+        <span className="text-xs text-critical" role="alert">
           Guidance contains an unsupported character.
-        </Notice>
+        </span>
       )}
       {attachError && (
         <Notice tone="critical" density="compact">
@@ -1661,12 +1663,12 @@ function ComposerView({
         </Notice>
       )}
       {images?.unsupportedModel && images.items.length > 0 && (
-        <Notice tone="critical" density="compact">
+        <span className="text-xs text-critical" role="alert">
           {images.unsupportedModel}
           {
             " can’t read images. Choose a model that accepts image input, or remove the attached image."
           }
-        </Notice>
+        </span>
       )}
       {confirmDialog}
     </form>

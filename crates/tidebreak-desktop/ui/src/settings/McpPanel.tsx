@@ -586,6 +586,9 @@ export function McpPanel({
   // toggle would be a write against unknown state, so the rows say so.
   const [serversKnown, setServersKnown] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  // A server-list read is in flight, so a Retry waits for it rather than
+  // sending another.
+  const [listReading, setListReading] = useState(false);
   // Bumped by the Retry affordance; re-runs the list effect immediately and
   // restarts its cadence.
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -751,6 +754,7 @@ export function McpPanel({
   useEffect(() => {
     const read = async () => {
       const request = ++requestRef.current;
+      setListReading(true);
       try {
         const result = await client.listMcpServers();
         if (request !== requestRef.current) return;
@@ -762,6 +766,8 @@ export function McpPanel({
         if (request !== requestRef.current) return;
         setListError(errorMessage(err));
         setLoading(false);
+      } finally {
+        if (request === requestRef.current) setListReading(false);
       }
     };
     void read();
@@ -1156,6 +1162,7 @@ export function McpPanel({
       entitledSlugs={apps?.supported === true ? entitledSlugs : null}
       appsFailed={appsFailed}
       listError={listError}
+      listReading={listReading}
       working={working}
       onRetry={() => {
         // One error surface: a retry that recovers the list must not leave a
@@ -1197,23 +1204,16 @@ export function McpPanel({
           </p>
         )}
         {listError !== null && endpointSlugs.length > 0 && (
-          <div className="flex items-center justify-between gap-4">
-            <SettingsError>
-              Could not read the MCP server list: {listError}
-            </SettingsError>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={working}
-              onClick={() => {
-                setError(null);
-                setRefreshNonce((nonce) => nonce + 1);
-              }}
-            >
-              <RefreshCw size={14} />
-              Try again
-            </Button>
-          </div>
+          <SettingsError
+            title="Could not read the MCP server list"
+            onRetry={() => {
+              setError(null);
+              setRefreshNonce((nonce) => nonce + 1);
+            }}
+            retrying={listReading || working}
+          >
+            {listError}
+          </SettingsError>
         )}
         {loading && !serversKnown ? (
           <p className="text-sm text-muted-foreground">Loading endpoints…</p>
@@ -1222,6 +1222,7 @@ export function McpPanel({
           endpointSlugs.length === 0 ? (
           <McpLoadFailure
             error={listError}
+            retrying={listReading}
             onRetry={() => {
               setError(null);
               setRefreshNonce((nonce) => nonce + 1);
@@ -1328,6 +1329,7 @@ export function McpPanel({
       ) : listError !== null && !serversKnown && !endpointsVisible ? (
         <McpLoadFailure
           error={listError}
+          retrying={listReading}
           onRetry={() => {
             setError(null);
             setRefreshNonce((nonce) => nonce + 1);
@@ -1885,13 +1887,19 @@ function storedByServer(stored: McpImportStored[]): Array<[string, string[]]> {
  */
 function McpLoadFailure({
   error,
+  retrying,
   onRetry,
 }: {
   error: string;
+  retrying: boolean;
   onRetry: () => void;
 }) {
   return (
-    <SettingsError title="Could not load MCP servers" onRetry={onRetry}>
+    <SettingsError
+      title="Could not load MCP servers"
+      onRetry={onRetry}
+      retrying={retrying}
+    >
       {error}
     </SettingsError>
   );
@@ -2008,6 +2016,7 @@ function GatewayEndpoints({
   entitledSlugs,
   appsFailed,
   listError,
+  listReading,
   working,
   onRetry,
   onToggle,
@@ -2023,6 +2032,8 @@ function GatewayEndpoints({
   entitledSlugs: ReadonlySet<string> | null;
   appsFailed: boolean;
   listError: string | null;
+  /** A list read is in flight; the Retry waits for it. */
+  listReading: boolean;
   working: boolean;
   onRetry: () => void;
   onToggle: (slug: string, mounted: boolean) => void;
@@ -2054,20 +2065,13 @@ function GatewayEndpoints({
         </p>
       )}
       {listError !== null && (
-        <div className="flex items-center justify-between gap-4">
-          <SettingsError>
-            Could not read the MCP server list: {listError}
-          </SettingsError>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={working}
-            onClick={onRetry}
-          >
-            <RefreshCw size={14} />
-            Try again
-          </Button>
-        </div>
+        <SettingsError
+          title="Could not read the MCP server list"
+          onRetry={onRetry}
+          retrying={listReading || working}
+        >
+          {listError}
+        </SettingsError>
       )}
       {slugs.length > 0 && (
         <ul className="flex flex-col gap-2">

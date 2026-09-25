@@ -1143,7 +1143,9 @@ export function PptxViewerPreview({
 
   const handleError = React.useCallback(
     (error: PptxViewerError) => {
-      setLoadError(error.message);
+      setLoadError(
+        friendlyErrorMessage(error, "The presentation could not be read."),
+      );
       setIsLoading(false);
       onError?.(error);
     },

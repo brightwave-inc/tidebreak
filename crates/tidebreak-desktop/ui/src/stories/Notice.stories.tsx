@@ -88,7 +88,12 @@ export const WithAction: Story = {
       <Notice
         tone="warning"
         title={TONE_COPY.warning.title}
-        action={<NoticeRetryButton onClick={fn()}>Re-check</NoticeRetryButton>}
+        action={
+          // A retry that is running waits for its answer.
+          <NoticeRetryButton pending onClick={fn()}>
+            Re-checking…
+          </NoticeRetryButton>
+        }
       >
         {TONE_COPY.warning.body}
       </Notice>
@@ -214,36 +219,49 @@ export const NarrowPanel: Story = {
   },
 };
 
-/** Docked to a pane edge: a strip across it, with the tone kept on the edge. */
+/**
+ * Docked to a bar inside a pane, as a strip across it, where the app docks
+ * them: under a file's header, and under the browser's address bar.
+ */
 export const Docked: Story = {
   render: () => (
-    <div className="mx-auto flex h-72 w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-border bg-background">
-      <div className="flex h-9 shrink-0 items-center border-b border-border px-3 text-sm font-medium">
-        src/main.rs
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+      <div className="flex h-60 flex-col overflow-hidden rounded-xl border border-border bg-background">
+        <div className="flex h-9 shrink-0 items-center border-b border-border px-3 text-sm font-medium">
+          src/main.rs
+        </div>
+        <Notice
+          tone="warning"
+          docked="top"
+          role="alert"
+          action={
+            <>
+              <Button type="button" size="sm" variant="outline" onClick={fn()}>
+                Reload
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={fn()}>
+                Keep my changes
+              </Button>
+            </>
+          }
+        >
+          This file changed on disk.
+        </Notice>
+        <pre className="min-h-0 flex-1 overflow-auto p-3 font-mono text-xs text-muted-foreground">
+          {'fn main() {\n    println!("hello");\n}'}
+        </pre>
       </div>
-      <Notice
-        tone="warning"
-        docked="top"
-        role="alert"
-        action={
-          <>
-            <Button type="button" size="sm" variant="outline" onClick={fn()}>
-              Reload
-            </Button>
-            <Button type="button" size="sm" variant="outline" onClick={fn()}>
-              Keep my changes
-            </Button>
-          </>
-        }
-      >
-        This file changed on disk.
-      </Notice>
-      <pre className="min-h-0 flex-1 overflow-auto p-3 font-mono text-xs text-muted-foreground">
-        {'fn main() {\n    println!("hello");\n}'}
-      </pre>
-      <Notice tone="critical" docked="bottom" density="compact">
-        That address is not a valid URL.
-      </Notice>
+      <div className="flex h-44 flex-col overflow-hidden rounded-xl border border-border bg-background">
+        <div className="flex h-10 shrink-0 items-center px-2">
+          <div className="flex h-7 min-w-0 flex-1 items-center rounded-md border border-critical-border bg-background px-2 font-mono text-xs">
+            localhost:30o0
+          </div>
+        </div>
+        <Notice tone="critical" docked="bottom" density="compact">
+          That address is not a valid URL.
+        </Notice>
+        <div className="min-h-0 flex-1 bg-page-background" />
+      </div>
     </div>
   ),
 };
@@ -280,12 +298,17 @@ export const FailureCopy: Story = {
     <Column>
       {(
         [
-          ["Network", failureFixtures.unreachable],
-          ["Server restarting", failureFixtures.unavailable],
-          ["Not found", failureFixtures.notFound],
-          ["Server refusal", failureFixtures.conflict],
+          ["Network", failureFixtures.unreachable, undefined],
+          ["Server restarting", failureFixtures.unavailable, undefined],
+          // The caller knows what "not found" means here, so it says so.
+          [
+            "Not found, worded by the caller",
+            failureFixtures.notFound,
+            { not_found: "This file is no longer in the project." },
+          ],
+          ["Server refusal", failureFixtures.conflict, undefined],
         ] as const
-      ).map(([label, failure]) => (
+      ).map(([label, failure, kindCopy]) => (
         <section
           key={label}
           aria-label={label}
@@ -297,7 +320,7 @@ export const FailureCopy: Story = {
             title="Could not load the project's files"
             action={<NoticeRetryButton onClick={fn()} />}
           >
-            {friendlyErrorMessage(failure, "Try again in a moment.")}
+            {friendlyErrorMessage(failure, "Try again in a moment.", kindCopy)}
           </Notice>
         </section>
       ))}

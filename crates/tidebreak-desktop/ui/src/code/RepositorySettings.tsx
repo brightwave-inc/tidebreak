@@ -233,7 +233,7 @@ export function RepositorySettings({
             action={
               <NoticeRetryButton
                 size="xs"
-                disabled={loading}
+                pending={loading}
                 onClick={() => void load()}
               />
             }

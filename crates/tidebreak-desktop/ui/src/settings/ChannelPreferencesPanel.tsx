@@ -14,6 +14,7 @@ import {
   SettingsField,
   SettingsPanel,
   SettingsSection,
+  SettingsFieldError,
 } from "./primitives";
 import { SUBSCRIPTION_PREFERENCES_UNAVAILABLE } from "./inferencePreferences";
 import type {
@@ -327,9 +328,9 @@ export function ChannelPreferencesPanel({
               />
             </SettingsField>
             {tooLong && (
-              <SettingsError>
+              <SettingsFieldError>
                 Shorten the instructions to 8,192 bytes before saving.
-              </SettingsError>
+              </SettingsFieldError>
             )}
           </SettingsSection>
           <SettingsSection title="Access">

@@ -64,6 +64,7 @@ import {
   type BrowserSession,
 } from "./browserSession";
 import { Notice, NoticeRetryButton } from "@/components/ui/notice";
+import { useRetry } from "@/components/ui/useRetry";
 
 const SLOW_LOAD_MS = 15_000;
 const NATIVE_REVEAL_FALLBACK_MS = 100;
@@ -1141,6 +1142,9 @@ function CodeBrowserTabSession({
     await runHostCommand("reload");
   }
 
+  // The failure stays until the browser opens, so its Retry waits for that.
+  const nativeRetry = useRetry(retryNativeCreate);
+
   async function retryNativeCreate() {
     const url = sessionRef.current.url;
     if (!url || !host.available()) return;
@@ -1356,7 +1360,8 @@ function CodeBrowserTabSession({
             <BrowserFallback
               error={session.error}
               hasUrl={Boolean(session.url)}
-              onRetry={session.url ? () => void retryNativeCreate() : undefined}
+              onRetry={session.url ? nativeRetry.retry : undefined}
+              retrying={nativeRetry.pending}
               onOpenExternal={
                 session.url ? () => void openExternal() : undefined
               }
@@ -1372,11 +1377,13 @@ export function BrowserFallback({
   error,
   hasUrl,
   onRetry,
+  retrying = false,
   onOpenExternal,
 }: {
   error: string | null;
   hasUrl: boolean;
   onRetry?: () => void;
+  retrying?: boolean;
   onOpenExternal?: () => void;
 }) {
   if (error) {
@@ -1390,7 +1397,9 @@ export function BrowserFallback({
             hasUrl &&
             (onRetry || onOpenExternal) && (
               <>
-                {onRetry && <NoticeRetryButton onClick={onRetry} />}
+                {onRetry && (
+                  <NoticeRetryButton pending={retrying} onClick={onRetry} />
+                )}
                 {onOpenExternal && (
                   <Button
                     type="button"

@@ -14,6 +14,7 @@ import {
 } from "react";
 
 import { Button, type ButtonProps } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
 /** The status vocabulary from DESIGN.md, plus `neutral` for plain notes. */
@@ -79,9 +80,12 @@ export type NoticeProps = Omit<HTMLAttributes<HTMLDivElement>, "title"> & {
    */
   icon?: LucideIcon | ReactElement | null;
   /**
-   * Docks the notice to the top or bottom edge of a pane, as a strip across
-   * it: square corners, no side border, and one hairline where it meets the
-   * pane's content. The tone keeps its leading edge.
+   * Docks the notice to a bar inside a pane, as a strip across the pane:
+   * square corners, no side border, and one hairline where it meets the
+   * pane's content. `top` hangs under a header; `bottom` sits on the bar
+   * above it, such as an address bar. The tone keeps its leading edge. Dock
+   * it between bars and content, never into a pane's rounded corner, which
+   * would bend the edge into a bracket.
    */
   docked?: "top" | "bottom";
   /** `compact` sets the notice in the dense chrome size (`text-xs`). */
@@ -150,12 +154,12 @@ export function Notice({
           data-slot="notice-edge"
           className={cn(
             "pointer-events-none absolute w-[2px]",
-            // Between the corners' curves, so the bar stays straight.
-            docked
-              ? "inset-y-0 start-0"
-              : compact
-                ? "inset-y-[4px] -start-px rounded-full"
-                : "inset-y-[7px] -start-px rounded-full",
+            // Clear of the corners' curves, so the bar stays straight: the
+            // notice's own corners, or the corners of the pane a docked strip
+            // meets at its end.
+            "rounded-full",
+            docked ? "start-0" : "-start-px",
+            compact ? "inset-y-(--radius-md)" : "inset-y-(--radius-lg)",
             toneStyle.edge,
           )}
         />
@@ -206,8 +210,9 @@ export function Notice({
           data-slot="notice-action"
           className={cn(
             "flex shrink-0 flex-wrap items-center gap-2",
-            // Past the icon column, so a wrapped action lines up with the text.
-            Icon && (compact ? "ms-[22px]" : "ms-[26px]"),
+            // Past the icon column (its size plus the gap), so a wrapped
+            // action lines up with the text.
+            Icon && (compact ? "ms-5.5" : "ms-6.5"),
           )}
         >
           {action}
@@ -240,17 +245,32 @@ export function NoticeDetail({
 
 /**
  * The Retry a failure offers: it re-runs whatever failed to load. Wire it to
- * the panel's own reload or refetch, never to a page reload.
+ * the panel's own reload or refetch, never to a page reload, and pass
+ * `pending` while that runs: the button disables itself and swaps its glyph
+ * for the spinner, so a second click never sends a second request.
  */
 export function NoticeRetryButton({
   children = "Try again",
   size = "sm",
   variant = "outline",
+  pending = false,
+  disabled,
   ...props
-}: ButtonProps) {
+}: ButtonProps & { pending?: boolean }) {
   return (
-    <Button type="button" size={size} variant={variant} {...props}>
-      <RotateCw aria-hidden="true" />
+    <Button
+      type="button"
+      size={size}
+      variant={variant}
+      disabled={pending || disabled}
+      aria-busy={pending || undefined}
+      {...props}
+    >
+      {pending ? (
+        <Spinner aria-hidden="true" />
+      ) : (
+        <RotateCw aria-hidden="true" />
+      )}
       {children}
     </Button>
   );

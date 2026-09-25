@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { HttpError } from "../api/client/http";
-import { UNREACHABLE_SERVER_MESSAGE } from "../lib/utils";
+import { friendlyErrorMessage, UNREACHABLE_SERVER_MESSAGE } from "../lib/utils";
 import {
   SettingsError,
   SettingsField,
@@ -33,18 +33,19 @@ describe("SettingsField", () => {
 });
 
 describe("SettingsError", () => {
-  it("shows the message without the name String(err) puts in front", () => {
+  it("shows the message the formatter worded, and words it no further", () => {
     render(
       <>
         <SettingsError>
-          {String(new Error("Could not reach the gateway."))}
+          {friendlyErrorMessage(
+            new HttpError(409, "409: That name is taken."),
+            "fallback",
+          )}
         </SettingsError>
         <SettingsError>
-          {String(new HttpError(409, "409: That name is taken."))}
+          {friendlyErrorMessage(new TypeError("Failed to fetch"), "fallback")}
         </SettingsError>
-        <SettingsError>
-          {String(new TypeError("Failed to fetch"))}
-        </SettingsError>
+        {/* Wording that merely looks like an error name stays as written. */}
         <SettingsError>Errors: two fields are empty.</SettingsError>
       </>,
     );
@@ -52,7 +53,6 @@ describe("SettingsError", () => {
     expect(
       screen.getAllByRole("alert").map((line) => line.textContent),
     ).toEqual([
-      "Could not reach the gateway.",
       "That name is taken.",
       UNREACHABLE_SERVER_MESSAGE,
       "Errors: two fields are empty.",
@@ -88,5 +88,28 @@ describe("SettingsStatus", () => {
     render(<SettingsStatus tone={tone} label="Verdict" description="Why." />);
 
     expect(screen.getByRole("status")).toHaveAttribute("data-tone", noticeTone);
+  });
+});
+
+describe("SettingsField error", () => {
+  it("puts validation under its field as text, marks the control, and offers no retry", () => {
+    render(
+      <SettingsField
+        label="Timeout (seconds)"
+        error="Timeout must be between 1 and 60 seconds."
+      >
+        <input />
+      </SettingsField>,
+    );
+
+    const message = screen.getByRole("alert");
+    expect(message).toHaveTextContent(
+      "Timeout must be between 1 and 60 seconds.",
+    );
+    expect(message).not.toHaveAttribute("data-slot", "notice");
+    expect(within(message).queryByRole("button")).toBeNull();
+    const control = screen.getByRole("textbox", { name: "Timeout (seconds)" });
+    expect(control).toHaveAttribute("aria-invalid", "true");
+    expect(control.getAttribute("aria-describedby")).toContain(message.id);
   });
 });

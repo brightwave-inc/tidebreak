@@ -26,6 +26,7 @@ import {
   SettingsField,
   SettingsPanel,
   SettingsSection,
+  SettingsFieldError,
 } from "./primitives";
 import { friendlyErrorMessage } from "@/lib/utils";
 
@@ -105,18 +106,23 @@ export function ModelsPanel({
   const [saving, setSaving] = useState<ModelRole | null>(null);
   const [retention, setRetention] = useState<PromptCacheRetention | null>(null);
   const [savingRetention, setSavingRetention] = useState(false);
+  /** Why a save did not go through. */
   const [error, setError] = useState<string | null>(null);
-  /** A read failed; Try again bumps the attempt to read again. */
-  const [loadFailed, setLoadFailed] = useState(false);
+  /**
+   * Why the roles or the cache setting did not load. Each read clears its own
+   * failure when it starts, and Try again runs both.
+   */
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [retentionError, setRetentionError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const loadError = catalogError ?? retentionError;
 
   // `managed` is a dependency on purpose: a policy flip mid-session re-reads
   // the catalog, so the page reshapes without a manual refresh.
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setError(null);
-    setLoadFailed(false);
+    setCatalogError(null);
     void (async () => {
       try {
         const next = await client.listModels();
@@ -126,8 +132,7 @@ export function ModelsPanel({
         }
       } catch (err) {
         if (!cancelled) {
-          setError(friendlyErrorMessage(err, "Try again in a moment."));
-          setLoadFailed(true);
+          setCatalogError(friendlyErrorMessage(err, "Try again in a moment."));
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -167,6 +172,7 @@ export function ModelsPanel({
   // the model catalog, so it loads on its own read.
   useEffect(() => {
     let cancelled = false;
+    setRetentionError(null);
     void client
       .getSettings()
       .then((settings) => {
@@ -174,8 +180,9 @@ export function ModelsPanel({
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(friendlyErrorMessage(err, "Try again in a moment."));
-          setLoadFailed(true);
+          setRetentionError(
+            friendlyErrorMessage(err, "Try again in a moment."),
+          );
         }
       });
     return () => {
@@ -237,6 +244,14 @@ export function ModelsPanel({
       }
       busy={loading}
     >
+      {loadError && (
+        <SettingsError
+          title="Could not load model settings"
+          onRetry={() => setLoadAttempt((count) => count + 1)}
+        >
+          {loadError}
+        </SettingsError>
+      )}
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading model settings…</p>
       ) : (
@@ -305,15 +320,7 @@ export function ModelsPanel({
           </Select>
         </SettingsField>
       </SettingsSection>
-      {error && (
-        <SettingsError
-          onRetry={
-            loadFailed ? () => setLoadAttempt((count) => count + 1) : undefined
-          }
-        >
-          {error}
-        </SettingsError>
-      )}
+      {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>
   );
 }
@@ -441,11 +448,11 @@ function ManagedModelRoleRow({
         </Select>
       </SettingsField>
       {incompatiblePin && (
-        <SettingsError>
+        <SettingsFieldError>
           The saved model “{selected?.display_name ?? info.selection}” cannot
           enforce the strict structured responses this role requires. Pick a
           compatible model or return to automatic.
-        </SettingsError>
+        </SettingsFieldError>
       )}
     </SettingsSection>
   );
@@ -581,23 +588,23 @@ function ModelRoleRow({
         </Select>
       </SettingsField>
       {retiredGatewayPin ? (
-        <SettingsError>
+        <SettingsFieldError>
           The saved model “{info.selection}” came from a model gateway, and this
           profile is not connected to one. Pick a model here, or connect from
           your gateway&apos;s page.
-        </SettingsError>
+        </SettingsFieldError>
       ) : incompatiblePin ? (
-        <SettingsError>
+        <SettingsFieldError>
           The saved model “{selected?.display_name ?? info.selection}” cannot
           enforce the strict structured responses this role requires. Pick a
           compatible model or return to automatic.
-        </SettingsError>
+        </SettingsFieldError>
       ) : (
         unresolvedSelection && (
-          <SettingsError>
+          <SettingsFieldError>
             The saved model “{info.selection}” is not uniquely registered. Add
             it under the OpenAI-compatible provider, then choose it here.
-          </SettingsError>
+          </SettingsFieldError>
         )
       )}
     </SettingsSection>

@@ -39,6 +39,7 @@ export function TimeoutSecondsField({
   maxSeconds,
   value,
   disabled,
+  error,
   onChange,
   onBlur,
 }: {
@@ -47,6 +48,8 @@ export function TimeoutSecondsField({
   maxSeconds: number;
   value: string;
   disabled?: boolean;
+  /** Why the typed value cannot be saved. */
+  error?: string | null;
   onChange: (value: string) => void;
   onBlur?: () => void;
 }) {
@@ -54,6 +57,7 @@ export function TimeoutSecondsField({
     <SettingsField
       label={`${label} (seconds)`}
       hint={`Between ${minSeconds} and ${maxSeconds} seconds.`}
+      error={error ?? undefined}
     >
       <Input
         type="number"
@@ -103,15 +107,18 @@ export function ActiveProviderField<Kind extends string>({
   options,
   value,
   disabled,
+  error,
   onChange,
 }: {
   options: ProviderOption<Kind>[];
   value: Kind | "";
   disabled?: boolean;
+  /** Why the chosen provider cannot be made active yet. */
+  error?: string | null;
   onChange: (value: Kind | "") => void;
 }) {
   return (
-    <SettingsField label="Provider">
+    <SettingsField label="Provider" error={error ?? undefined}>
       <Select
         value={value === "" ? NO_PROVIDER : value}
         disabled={disabled}

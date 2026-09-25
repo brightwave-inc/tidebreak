@@ -229,11 +229,8 @@ export function ChannelsPanel({
       {grants !== null && error && (
         <SettingsError
           title={refreshFailed ? "Could not refresh grants" : undefined}
-          onRetry={
-            refreshFailed && !loading && !working
-              ? () => void reload()
-              : undefined
-          }
+          onRetry={refreshFailed ? () => void reload() : undefined}
+          retrying={loading || working}
         >
           {error}
         </SettingsError>

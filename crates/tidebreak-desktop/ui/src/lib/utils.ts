@@ -1,11 +1,7 @@
 import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 
-import {
-  HttpError,
-  WORKSPACE_ARCHIVED_KIND,
-  WORKSPACE_ARCHIVED_MESSAGE,
-} from "../api/client/http";
+import { HttpError } from "../api/client/http";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -24,28 +20,23 @@ export const SERVER_UNAVAILABLE_MESSAGE =
   "Tidebreak's server is not answering right now. Try again in a moment.";
 
 /**
- * Renderer copy for the server error kinds whose own text is written for a
- * log rather than for a reader. A kind listed here wins over the server's
- * message; a caller can add or override kinds for its own context.
+ * Renderer copy for the server error kinds whose text is never written for a
+ * reader. Every other kind keeps the server's message, because that message
+ * is usually the one detail the reader can act on ("Sign in to save your
+ * subscription preference.", "No pull request exists for this branch.").
+ *
+ * Each entry is checked against the server: `store` wraps a persistence
+ * failure ("store error: …"), `serde` a JSON parse failure, and `secret` a
+ * keychain backend failure, which the server itself redacts wherever an
+ * operator cannot fix it. A caller that knows more passes its own copy.
  */
 export const ERROR_KIND_COPY: Readonly<Record<string, string>> = {
-  internal:
-    "Tidebreak hit an internal error. Try again, and restart the app if it keeps happening.",
   store:
     "Tidebreak could not read its local data. Try again, and restart the app if it keeps happening.",
   serde:
     "Tidebreak could not read part of its data. Try again, and restart the app if it keeps happening.",
   secret:
     "Tidebreak could not read its saved credentials. Check that your keychain is unlocked, then try again.",
-  unauthorized:
-    "Tidebreak could not confirm this window's access. Reload the window, then try again.",
-  not_found: "Tidebreak could not find that. It may have been deleted.",
-  not_implemented: "This Tidebreak server does not support that.",
-  rate_limited:
-    "The provider is limiting requests right now. Wait a moment, then try again.",
-  overloaded:
-    "The provider is overloaded right now. Wait a moment, then try again.",
-  [WORKSPACE_ARCHIVED_KIND]: WORKSPACE_ARCHIVED_MESSAGE,
 };
 
 /**
@@ -65,6 +56,9 @@ const STATUS_TEXT =
 /** `Error: `, `TypeError: `, `HttpError: ` — the class name `String(err)` adds. */
 const ERROR_NAME_PREFIX = /^(?:[A-Z][A-Za-z]*)?Error:\s*/;
 
+/** `HttpError: 409: …`, the way `String(err)` spells an `HttpError`. */
+const STRINGIFIED_HTTP_ERROR = /^HttpError:\s*(\d{3}):\s*([\s\S]*)$/;
+
 /**
  * A caught value as something worth showing a reader.
  *
@@ -74,11 +68,16 @@ const ERROR_NAME_PREFIX = /^(?:[A-Z][A-Za-z]*)?Error:\s*/;
  *
  * - A request that never reached the server reads as
  *   {@link UNREACHABLE_SERVER_MESSAGE}.
- * - An `HttpError` whose kind has renderer copy (the caller's `kindCopy`
- *   first, then {@link ERROR_KIND_COPY}) reads as that copy.
- * - Otherwise an `HttpError` reads as the server's own message, with the
- *   client's `"409: "` status prefix stripped. Server detail is already
- *   bounded (git stderr up to 4 KB), so it is not capped.
+ * - An `HttpError` reads as the server's own message, started as a sentence
+ *   and with the client's `"409: "` status prefix stripped. Server detail is
+ *   already bounded (git stderr up to 4 KB), so it is not capped. The
+ *   caller's `kindCopy` wins for the kinds it names, then
+ *   {@link ERROR_KIND_COPY} for the few kinds whose text is never for a
+ *   reader.
+ * - A response with nothing but its status (no message, or only the reason
+ *   phrase a proxy wrote) reads as {@link SERVER_UNAVAILABLE_MESSAGE} for a
+ *   5xx and as `fallback` otherwise, whether it arrives as an `HttpError` or
+ *   as the string `String(err)` made of one.
  * - Anything else reads as its message without the `Error:` prefix, capped
  *   at 240 characters so a toast stays readable; past that, or when there is
  *   no message at all, the reader gets `fallback`.
@@ -104,10 +103,7 @@ export function friendlyErrorMessage(
     if (message.startsWith(prefix)) {
       message = message.slice(prefix.length).trim();
     }
-    if (!message || STATUS_TEXT.test(message)) {
-      return error.status >= 500 ? SERVER_UNAVAILABLE_MESSAGE : fallback;
-    }
-    return sentenceStart(message);
+    return serverMessage(error.status, message, fallback);
   }
   if (isTimeout(error)) return SERVER_TIMEOUT_MESSAGE;
   const raw =
@@ -117,15 +113,39 @@ export function friendlyErrorMessage(
         ? error
         : error == null
           ? ""
-          : String(error);
+          : // raw-error-ok: the formatter itself reads an unknown value.
+            String(error);
   const named = raw.trim();
-  let message = named.replace(ERROR_NAME_PREFIX, "").trim();
-  // A stringified `HttpError` ("HttpError: 409: …") keeps its status prefix.
-  if (/^HttpError:/.test(named)) {
-    message = message.replace(/^\d{3}:\s*/, "").trim();
+  // A stringified `HttpError` keeps its status; read it the way the error
+  // itself would have been read.
+  const stringified = STRINGIFIED_HTTP_ERROR.exec(named);
+  if (stringified) {
+    return serverMessage(
+      Number(stringified[1]),
+      stringified[2].trim(),
+      fallback,
+    );
   }
+  const message = named.replace(ERROR_NAME_PREFIX, "").trim();
   if (FETCH_FAILURE.test(message)) return UNREACHABLE_SERVER_MESSAGE;
+  if (STATUS_TEXT.test(message)) return fallback;
   return message && message.length <= 240 ? message : fallback;
+}
+
+/**
+ * What the server said, once the status is off it: its own message as a
+ * sentence, or, when it said nothing a reader can use, the copy for its
+ * status.
+ */
+function serverMessage(
+  status: number,
+  message: string,
+  fallback: string,
+): string {
+  if (!message || STATUS_TEXT.test(message)) {
+    return status >= 500 ? SERVER_UNAVAILABLE_MESSAGE : fallback;
+  }
+  return sentenceStart(message);
 }
 
 /** Names that stay lowercase at the start of a sentence. */
@@ -144,7 +164,7 @@ const LOWERCASE_NAMES = new Set([
  * in sentences. Capitalize a plain first word, and leave anything that looks
  * like an identifier (`api_key`, `git:`, `iOS`) as the server wrote it.
  */
-function sentenceStart(message: string): string {
+export function sentenceStart(message: string): string {
   const first = /^([a-z]+)(?=\s)/.exec(message)?.[1];
   if (!first || LOWERCASE_NAMES.has(first)) return message;
   return message[0].toUpperCase() + message.slice(1);

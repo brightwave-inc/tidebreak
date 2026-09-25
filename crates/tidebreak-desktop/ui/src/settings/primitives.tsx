@@ -13,7 +13,7 @@ import {
   type NoticeTone,
 } from "@/components/ui/notice";
 import { PaneDragBand } from "@/WindowDragStrip";
-import { friendlyErrorMessage } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 
 /**
  * A whole settings surface: the page title, an optional description, and the
@@ -62,25 +62,52 @@ export function SettingsPanel({
  * `status` is a short reading about the value, such as how much of a size
  * limit it uses. It sits at the right end of the hint's row, under the
  * control's right edge.
+ *
+ * `error` says why the value cannot be saved. It sits directly under the
+ * control in critical ink and marks the control invalid; a failure to load or
+ * save the panel is a `SettingsError` instead.
  */
 export function SettingsField({
   label,
   hint,
   status,
+  error,
   children,
 }: {
   label: string;
   hint?: ReactNode;
   status?: ReactNode;
+  error?: ReactNode;
   children: ReactNode;
 }) {
   const hintId = useId();
+  const errorId = useId();
+  const describedBy = [hint ? hintId : null, error ? errorId : null].filter(
+    Boolean,
+  );
   const control =
-    hint && isValidElement<{ "aria-describedby"?: string }>(children)
+    describedBy.length > 0 &&
+    isValidElement<{
+      "aria-describedby"?: string;
+      "aria-invalid"?: boolean;
+      className?: string;
+    }>(children)
       ? cloneElement(children, {
-          "aria-describedby": [children.props["aria-describedby"], hintId]
+          "aria-describedby": [
+            children.props["aria-describedby"],
+            ...describedBy,
+          ]
             .filter(Boolean)
             .join(" "),
+          ...(error
+            ? {
+                "aria-invalid": true,
+                className: cn(
+                  children.props.className,
+                  "aria-invalid:border-critical-border",
+                ),
+              }
+            : {}),
         })
       : children;
   const hintElement = hint && (
@@ -94,6 +121,7 @@ export function SettingsField({
         <span className="settings-field-label">{label}</span>
         {control}
       </label>
+      {error && <SettingsFieldError id={errorId}>{error}</SettingsFieldError>}
       {status ? (
         <div className="flex items-start justify-between gap-4">
           {hintElement}
@@ -190,20 +218,43 @@ export function SettingsStatus({
 }
 
 /**
- * A failure on a settings surface, as a critical `Notice`. When the failure is
- * the panel's own load, pass `onRetry` so the reader can run it again. A
- * string goes through `friendlyErrorMessage`, so a message a caller
- * stringified keeps no `Error:` or `HttpError: 409:` prefix.
+ * Why a value on a settings surface cannot be saved, in critical ink beside
+ * the field or form it belongs to. Validation is part of editing, not a
+ * failure, so it never takes the notice shape and never offers a retry.
+ */
+export function SettingsFieldError({
+  id,
+  children,
+}: {
+  id?: string;
+  children: ReactNode;
+}) {
+  return (
+    <p id={id} className="text-sm text-critical break-words" role="alert">
+      {children}
+    </p>
+  );
+}
+
+/**
+ * A failure on a settings surface: a load or a save that did not go through,
+ * as a critical `Notice`. When the failure is the panel's own load, pass
+ * `onRetry` so the reader can run it again. The message arrives worded by
+ * `friendlyErrorMessage`; this renders it as given. A value the reader can
+ * fix is a `SettingsFieldError`, not this.
  */
 export function SettingsError({
   children,
   title,
   onRetry,
+  retrying = false,
   className,
 }: {
   children: ReactNode;
   title?: ReactNode;
   onRetry?: () => void;
+  /** The retry is running: its button waits instead of sending another. */
+  retrying?: boolean;
   className?: string;
 }) {
   return (
@@ -211,11 +262,11 @@ export function SettingsError({
       tone="critical"
       title={title}
       className={className}
-      action={onRetry && <NoticeRetryButton onClick={onRetry} />}
+      action={
+        onRetry && <NoticeRetryButton pending={retrying} onClick={onRetry} />
+      }
     >
-      {typeof children === "string"
-        ? friendlyErrorMessage(children, children)
-        : children}
+      {children}
     </Notice>
   );
 }

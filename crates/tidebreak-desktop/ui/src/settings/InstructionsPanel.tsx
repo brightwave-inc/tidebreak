@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
 import type { ApiClient } from "@/api/client";
-import { Button } from "@/components/ui/button";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { InstructionsField } from "./InstructionsField";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
@@ -58,12 +57,12 @@ export function InstructionsPanel({ client }: { client: InstructionsClient }) {
             Loading your instructions…
           </p>
         ) : (
-          <div className="flex flex-col items-start gap-3">
-            <SettingsError>{error}</SettingsError>
-            <Button type="button" variant="outline" size="sm" onClick={load}>
-              Try again
-            </Button>
-          </div>
+          <SettingsError
+            title="Could not load your instructions"
+            onRetry={load}
+          >
+            {error}
+          </SettingsError>
         )
       ) : (
         <SettingsSection title="Personal instructions">

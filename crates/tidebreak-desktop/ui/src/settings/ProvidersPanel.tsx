@@ -26,6 +26,7 @@ import {
   SettingsPanel,
   SettingsSection,
   SettingsStatus,
+  SettingsFieldError,
 } from "./primitives";
 import { ProviderIcon } from "../ProviderIcons";
 import { providerLabel } from "../ModelSelection";
@@ -201,6 +202,8 @@ function ProviderRow({
   // catches up with it.
   const [ranTest, setRanTest] = useState<ProviderTestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** The HTTP consent a save needs and does not have yet. */
+  const [consentError, setConsentError] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
   const acceptsBaseUrl = providerTakesBaseUrl(info.kind);
   const requiresCredential = providerRequiresCredential(info.kind);
@@ -288,11 +291,12 @@ function ProviderRow({
       loopbackIpHttpHost(baseUrl) !== null &&
       (info.has_credential || trimmedKey !== "");
     if (acceptsBaseUrl && sendsKeyOverHttp && !allowLoopbackHttp) {
-      setError(
+      setConsentError(
         `Confirm that Tidebreak may send the key over HTTP to ${hostMachineLabel()}, or use HTTPS.`,
       );
       return;
     }
+    setConsentError(null);
     setSaving(true);
     setError(null);
     let saved: ProviderInfo;
@@ -489,12 +493,18 @@ function ProviderRow({
                 <Checkbox
                   checked={allowLoopbackHttp}
                   disabled={saving}
-                  onCheckedChange={(checked) =>
-                    setAllowLoopbackHttp(checked === true)
-                  }
+                  onCheckedChange={(checked) => {
+                    setAllowLoopbackHttp(checked === true);
+                    if (checked === true) setConsentError(null);
+                  }}
                 />
                 Send the key in clear text to this loopback address
               </Label>
+              {consentError && (
+                <div className="mt-2">
+                  <SettingsFieldError>{consentError}</SettingsFieldError>
+                </div>
+              )}
             </Notice>
           )}
           {(info.kind === "fireworks" ||

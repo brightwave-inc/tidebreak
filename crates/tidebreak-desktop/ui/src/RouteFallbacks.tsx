@@ -4,7 +4,7 @@ import {
   useRouter,
   useRouterState,
 } from "@tanstack/react-router";
-import { Compass, House, RotateCw } from "lucide-react";
+import { Compass, House, RefreshCw, RotateCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -98,6 +98,14 @@ export function RoutePaneError({ error, reset, info }: ErrorComponentProps) {
           </NoticeDetail>
         </Notice>
         <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => window.location.reload()}
+          >
+            <RefreshCw aria-hidden="true" />
+            Reload window
+          </Button>
           <Button
             size="sm"
             variant="ghost"

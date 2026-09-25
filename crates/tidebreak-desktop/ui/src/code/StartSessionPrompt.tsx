@@ -67,7 +67,7 @@ export function SetupFailedBanner({
       title="The setup script failed"
       className="mx-4 mt-3 w-auto"
       action={
-        <NoticeRetryButton disabled={retrying} onClick={onRetry}>
+        <NoticeRetryButton pending={retrying} onClick={onRetry}>
           Retry setup
         </NoticeRetryButton>
       }

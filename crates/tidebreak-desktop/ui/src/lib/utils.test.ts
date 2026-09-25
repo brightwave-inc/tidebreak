@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { HttpError, WORKSPACE_ARCHIVED_MESSAGE } from "../api/client/http";
+import { HttpError } from "../api/client/http";
 import {
   friendlyErrorMessage,
   SERVER_TIMEOUT_MESSAGE,
@@ -90,7 +90,7 @@ describe("friendlyErrorMessage", () => {
     const error = serverError(409, "approval already decided", "conflict");
     expect(String(error)).toBe("HttpError: 409: approval already decided");
     expect(friendlyErrorMessage(String(error), "fallback")).toBe(
-      "approval already decided",
+      "Approval already decided",
     );
     expect(friendlyErrorMessage(error, "fallback")).toBe(
       "Approval already decided",
@@ -100,19 +100,50 @@ describe("friendlyErrorMessage", () => {
     );
   });
 
-  it("prefers renderer copy for a known kind over the server's text", () => {
-    expect(
-      friendlyErrorMessage(
-        serverError(409, "workspace ws_1 is archived", "workspace_archived"),
-        "Could not read the file",
-      ),
-    ).toBe(WORKSPACE_ARCHIVED_MESSAGE);
-    expect(
-      friendlyErrorMessage(
-        serverError(500, "database is locked (code 5)", "store"),
+  it("keeps the server's message for every kind that writes one for people", () => {
+    // Each of these is a message the server sends today, under the kind it
+    // sends it with. Canned copy in their place told the reader nothing.
+    for (const [status, kind, message] of [
+      [
+        500,
+        "internal",
+        "OpenAI transcription failed with status 401 Unauthorized",
+      ],
+      [
+        500,
+        "internal",
+        "local voice input is available only in the desktop app",
+      ],
+      [500, "internal", "code mode is not configured on this server"],
+      [401, "unauthorized", "Sign in to save your subscription preference."],
+      [404, "not_found", "No pull request exists for this branch."],
+      [404, "not_found", "file not found: src/main.rs"],
+      [
+        409,
+        "workspace_archived",
+        "This workspace is archived. Its files come back when you restore it.",
+      ],
+    ] as const) {
+      const shown = friendlyErrorMessage(
+        serverError(status, message, kind),
         "fallback",
-      ),
-    ).toMatch(/^Tidebreak could not read its local data\./);
+      );
+      expect(shown.toLowerCase(), kind).toBe(message.toLowerCase());
+      expect(shown, kind).not.toMatch(/^\d{3}:|HttpError/);
+    }
+  });
+
+  it("uses renderer copy only for kinds whose text is written for a log", () => {
+    for (const [kind, message, copy] of [
+      ["store", "store error: database is locked (code 5)", /local data/],
+      ["serde", "missing field `id` at line 1 column 2", /part of its data/],
+      ["secret", "secret error: errSecInteractionNotAllowed", /credentials/],
+    ] as const) {
+      expect(
+        friendlyErrorMessage(serverError(500, message, kind), "fallback"),
+        kind,
+      ).toMatch(copy);
+    }
   });
 
   it("lets a caller's kind copy win over the shared copy and the server's text", () => {
@@ -132,6 +163,22 @@ describe("friendlyErrorMessage", () => {
         "Could not load the document",
       ),
     ).toBe(SERVER_UNAVAILABLE_MESSAGE);
+  });
+
+  it("reads a stringified status-only HttpError the way it reads the error", () => {
+    expect(
+      friendlyErrorMessage("HttpError: 503: Service Unavailable", "fallback"),
+    ).toBe(SERVER_UNAVAILABLE_MESSAGE);
+    expect(
+      friendlyErrorMessage("HttpError: 400: Bad Request", "fallback"),
+    ).toBe("fallback");
+    expect(friendlyErrorMessage("HttpError: 502: ", "fallback")).toBe(
+      SERVER_UNAVAILABLE_MESSAGE,
+    );
+    // A reason phrase alone says nothing a reader can act on.
+    expect(
+      friendlyErrorMessage(new Error("Service Unavailable"), "fallback"),
+    ).toBe("fallback");
   });
 
   it("falls back for a bodiless 4xx rather than showing its status text", () => {

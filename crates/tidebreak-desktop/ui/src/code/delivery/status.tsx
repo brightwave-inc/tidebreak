@@ -108,9 +108,12 @@ export function PartialErrorBanner({
 
 export function RepositoryRefreshWarning({
   message,
+  retrying = false,
   onRetry,
 }: {
   message: string;
+  /** Discovery is running again; the Retry waits for it. */
+  retrying?: boolean;
   onRetry: () => void;
 }) {
   return (
@@ -119,7 +122,9 @@ export function RepositoryRefreshWarning({
       docked="top"
       density="compact"
       className="shrink-0 px-5"
-      action={<NoticeRetryButton size="xs" onClick={onRetry} />}
+      action={
+        <NoticeRetryButton size="xs" pending={retrying} onClick={onRetry} />
+      }
     >
       GitHub repository discovery is stale: {message}
     </Notice>

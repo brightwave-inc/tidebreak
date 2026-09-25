@@ -242,6 +242,13 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
     >
       {error && (
         <SettingsError
+          // With no report and no read running, the engine check itself
+          // failed; anything later is a save that did not go through.
+          title={
+            report === null && !loading
+              ? "Could not check the coding engines"
+              : undefined
+          }
           onRetry={
             report === null && !loading ? () => void load(false) : undefined
           }

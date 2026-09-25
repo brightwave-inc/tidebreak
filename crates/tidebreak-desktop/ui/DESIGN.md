@@ -151,8 +151,9 @@ computer-use HUD. Cards on a surface take a border, not a shadow.
 
 ## Shape and controls
 
-`--radius` is 8px; the derived steps (4, 6, 8, 12) and full pills are the
-whole radius vocabulary. Status chips and badges are pills; cards are
+`--radius` is 0.5rem, 7px at the 14px root; the derived steps `sm`, `md`,
+`lg`, and `xl` (3, 5, 7, and 11px) and full pills are the whole radius
+vocabulary. Status chips and badges are pills; cards are
 `rounded-xl` at most.
 
 Controls sit on the two pinned heights, `h-control` (32px) and
@@ -350,11 +351,13 @@ button alone.
 ### Notices and errors
 
 `Notice` (`components/ui/notice.tsx`) is the one shape a notice or a failure
-takes: a neutral surface with a hairline border and the 8px radius (6px when
-compact), the tone on a straight 2px bar along the leading edge and on the
-icon, the message in normal ink, and an action slot. The bar runs between
-the corners, so it never bends around them into a bracket. It speaks the status tones (`critical`, `warning`, `info`,
-`success`) plus `neutral`. Do not fill a notice with a status color, and do
+takes: a neutral surface with a hairline border and the `lg` radius (`md`
+when compact), the tone on a straight 2px bar along the leading edge and on
+the icon, the message in normal ink, and an action slot. The bar stops one
+radius short of each end, so it never bends around a corner into a bracket,
+whether the corner is the notice's own or the pane's a docked strip meets.
+It speaks the status tones (`critical`, `warning`, `info`, `success`) plus
+`neutral`. Do not fill a notice with a status color, and do
 not draw a notice box by hand: `stylesContract.test.ts` rejects the retired
 `notice-surface`, `.message-notice`, `.message-turn-failure`, and
 `.settings-status` classes. `Components/Notice` in Storybook shows every tone,
@@ -364,15 +367,29 @@ the action slot, long text, and a narrow panel.
   let the body say what happened and what to do next. Do not apologize.
 - A panel-level failure inside an Index or Resource detail surface is a
   critical notice whose action is `NoticeRetryButton`, wired to the panel's
-  own reload or refetch, never to a page reload. An empty index is not a
-  failure: it keeps `EmptyMedia variant="icon"` and never becomes an error
-  box.
+  own reload or refetch, never to a page reload. While that reload runs,
+  pass `pending` (or use `useRetry`) so the button waits instead of sending
+  another request, unless the reload clears the failure as it starts. An
+  empty index is not a failure: it keeps `EmptyMedia variant="icon"` and
+  never becomes an error box, and a result with nothing in it is a plain
+  message, not a red alert.
+- Validation is not a failure. Why a value cannot be saved sits under its
+  field in critical ink (`SettingsField`'s `error`, or `SettingsFieldError`)
+  and never offers a retry. A load or a save that did not go through is a
+  `SettingsError`, the settings notice.
+- A state the reader cannot fix by retrying, such as an archived workspace,
+  is a `neutral` notice with no Retry.
 - Word every failure with `friendlyErrorMessage` from `lib/utils.ts`. It drops
   the class name and status code `String(err)` shows, words a request that
   never reached the server as "Tidebreak could not reach its server. Check
-  that the app is running, then try again.", and prefers renderer copy for a
-  known `HttpError.kind`. Pass kind copy for your own context, such as a
-  missing app. `errorMessagesContract.test.ts` rejects `String(err)`.
+  that the app is running, then try again.", and keeps the server's own
+  message, because that is usually the detail the reader can act on. Renderer
+  copy replaces it only for the kinds whose text is never written for a
+  reader (`store`, `serde`, `secret`); pass kind copy where your context knows
+  more, such as a missing app. `errorMessagesContract.test.ts` rejects
+  `String(err)`, `` `${err}` ``, `err.toString()`, `JSON.stringify(err)`, and
+  concatenating a caught value, except on a line marked
+  `raw-error-ok: <reason>`.
 - `docked="top"` or `"bottom"` fits a notice to a pane edge as a strip.
   `density="compact"` sets it in the dense chrome size for transcripts,
   composers, and rows. Put machine output under the message in

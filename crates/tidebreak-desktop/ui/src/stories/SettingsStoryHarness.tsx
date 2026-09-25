@@ -23,6 +23,7 @@ import {
 import { useVoiceInputStore } from "@/VoiceInputStore";
 import {
   discoveredAnthropicModels,
+  failureFixtures,
   harnessDoctor,
   mcpDirectoryServer,
   mcpDirectoryServers,
@@ -509,7 +510,9 @@ function createSettingsStoryClient(
   const read = <T,>(value: T): Promise<T> => {
     if (state === "loading") return pending();
     if (state === "failed") {
-      return Promise.reject(new Error("Settings could not be loaded."));
+      // A read that never reached the server, the way WebKit reports it, so
+      // the failed stories show the formatter's wording rather than a label.
+      return Promise.reject(failureFixtures.unreachable);
     }
     return Promise.resolve(value);
   };

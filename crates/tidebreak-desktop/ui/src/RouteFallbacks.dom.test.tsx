@@ -12,7 +12,10 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const reportRendererError = vi.hoisted(() => vi.fn());
-vi.mock("./rendererErrors", () => ({ reportRendererError }));
+vi.mock("./rendererErrors", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./rendererErrors")>()),
+  reportRendererError,
+}));
 // The Work rail needs the whole app's context; the frame is what is under test.
 vi.mock("./sidebar/AppSidebar", () => ({
   AppSidebar: () => <nav aria-label="Work rail">Work rail</nav>,
@@ -125,6 +128,15 @@ describe("RoutePaneError", () => {
     const alert = await within(pane).findByRole("alert");
     expect(alert).toHaveTextContent("This page hit an unexpected error");
     expect(alert).toHaveTextContent("the page exploded");
+    // The copy offers a reload, so the pane offers the button too.
+    for (const name of [
+      "Try again",
+      "Reload window",
+      "Go home",
+      "Copy debug info",
+    ]) {
+      expect(within(pane).getByRole("button", { name })).toBeTruthy();
+    }
     expect(screen.getByRole("navigation", { name: "Work rail" })).toBeTruthy();
     expect(reportRendererError).toHaveBeenCalledWith(
       "render",

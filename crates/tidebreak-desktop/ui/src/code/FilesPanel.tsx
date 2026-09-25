@@ -86,6 +86,7 @@ export function FilesPanel({
   const {
     data: tree,
     error,
+    archived,
     refreshing,
     refresh,
   } = useLiveResource({
@@ -326,8 +327,10 @@ export function FilesPanel({
       )}
       {!searchMode &&
         error &&
-        (error === WORKSPACE_ARCHIVED_MESSAGE ? (
-          <p className="text-muted-foreground px-3 py-2 text-sm">{error}</p>
+        (archived ? (
+          <Notice tone="neutral" docked="top" className="shrink-0">
+            {error}
+          </Notice>
         ) : (
           <Notice
             tone="critical"
@@ -335,7 +338,7 @@ export function FilesPanel({
             className="shrink-0"
             action={
               <NoticeRetryButton
-                disabled={refreshing}
+                pending={refreshing}
                 onClick={() => void refresh()}
               />
             }
@@ -346,9 +349,9 @@ export function FilesPanel({
       {searchMode &&
         searchError &&
         (searchError === WORKSPACE_ARCHIVED_MESSAGE ? (
-          <p className="text-muted-foreground px-3 py-2 text-sm">
+          <Notice tone="neutral" docked="top" className="shrink-0">
             {searchError}
-          </p>
+          </Notice>
         ) : (
           <Notice tone="critical" docked="top" className="shrink-0">
             {searchError}

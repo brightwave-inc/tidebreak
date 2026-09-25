@@ -205,7 +205,7 @@ export function DocumentDetailRoot({
           className="mx-6 mb-3 w-auto shrink-0"
           action={
             <NoticeRetryButton
-              disabled={downloading}
+              pending={downloading}
               onClick={() => void onDownload()}
             />
           }

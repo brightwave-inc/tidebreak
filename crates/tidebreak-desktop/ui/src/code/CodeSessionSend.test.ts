@@ -14,6 +14,7 @@ import {
 import { userItemId } from "./CodeSessionReducer";
 import { usePendingReviewStore } from "./diff/pendingReview";
 import { reviewBlockOf, type ReviewComment } from "./diff/reviewComments";
+import { UNREACHABLE_SERVER_MESSAGE } from "@/lib/utils";
 
 const uploadImageAttachment = vi.hoisted(() => vi.fn());
 
@@ -309,7 +310,8 @@ describe("sendCodeComposer", () => {
     expect(URL.revokeObjectURL).not.toHaveBeenCalled();
     expect(useCodeComposerStatus.getState().byKey["sess-new"]).toEqual({
       sending: false,
-      notice: "engine crashed on spawn",
+      // The server's reason, started as a sentence.
+      notice: "Engine crashed on spawn",
     });
   });
 
@@ -399,7 +401,7 @@ describe("sendCodeComposer", () => {
         "look at this",
       );
       expect(useCodeComposerStatus.getState().byKey["sess-1"]?.notice).toBe(
-        "Failed to fetch",
+        UNREACHABLE_SERVER_MESSAGE,
       );
     });
   });

@@ -592,7 +592,7 @@ export const Notices: Story = {
       {
         id: "notice-error",
         role: "error",
-        text: "The connection closed before the response completed. Check the connection and try again.",
+        text: "The connection closed before the response completed. Send the message again to continue.",
       },
       blockedMessages[2],
       { id: "notice-compaction", role: "compaction" },

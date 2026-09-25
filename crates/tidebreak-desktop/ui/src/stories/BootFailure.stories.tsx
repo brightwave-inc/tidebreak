@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
+import { HttpError } from "@/api";
 import { BootFailure } from "@/BootFailure";
 
 /**
@@ -57,7 +58,16 @@ export const LocalServerFailed: Story = {
  */
 export const LocalCatalogFailed: Story = {
   args: {
-    error: new Error("500: could not read the model catalog"),
+    // The catalog read fails the way the HTTP client raises it.
+    error: new HttpError(
+      500,
+      "500: could not read the model catalog",
+      "internal",
+      {
+        kind: "internal",
+        message: "could not read the model catalog",
+      },
+    ),
     attachment: { attachment: "local", baseUrl: null, gatewayAuth: false },
   },
 };

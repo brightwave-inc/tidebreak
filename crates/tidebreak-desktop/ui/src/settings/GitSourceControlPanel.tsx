@@ -45,6 +45,8 @@ export function GitSourceControlPanel({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Bumped by Try again, so the settings are read once more. */
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -61,9 +63,7 @@ export function GitSourceControlPanel({
       })
       .catch((caught: unknown) => {
         if (!cancelled) {
-          setError(
-            friendlyErrorMessage(caught, "Could not load Git settings."),
-          );
+          setError(friendlyErrorMessage(caught, "Try again in a moment."));
         }
       })
       .finally(() => {
@@ -72,7 +72,7 @@ export function GitSourceControlPanel({
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, loadAttempt]);
 
   async function save(
     update: Parameters<
@@ -142,7 +142,17 @@ export function GitSourceControlPanel({
       description="Choose how Tidebreak updates local branches and names new code workspaces."
       busy={loading || saving}
     >
-      {error && <SettingsError>{error}</SettingsError>}
+      {error &&
+        (settings ? (
+          <SettingsError>{error}</SettingsError>
+        ) : (
+          <SettingsError
+            title="Could not load Git settings"
+            onRetry={() => setLoadAttempt((count) => count + 1)}
+          >
+            {error}
+          </SettingsError>
+        ))}
       {loading && !settings ? (
         <p className="text-sm text-muted-foreground">Loading Git settings…</p>
       ) : (

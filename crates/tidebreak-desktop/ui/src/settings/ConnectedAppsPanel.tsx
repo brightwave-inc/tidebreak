@@ -45,6 +45,7 @@ import {
   SettingsPanel,
   SettingsSection,
   usedByLabel,
+  SettingsFieldError,
 } from "./primitives";
 import { Notice } from "@/components/ui/notice";
 import { friendlyErrorMessage } from "@/lib/utils";
@@ -1120,7 +1121,7 @@ export function ConnectedAppsPanel({
             {previewing && <Spinner className="size-3.5" />}
             {previewing ? "Loading…" : "Select operations…"}
           </Button>
-          {formError && <SettingsError>{formError}</SettingsError>}
+          {formError && <SettingsFieldError>{formError}</SettingsFieldError>}
         </div>
       )}
       {draft.preview !== null && (
@@ -1189,7 +1190,7 @@ export function ConnectedAppsPanel({
         </SettingsField>
       )}
       {formError && draft.source !== "paste" && (
-        <SettingsError>{formError}</SettingsError>
+        <SettingsFieldError>{formError}</SettingsFieldError>
       )}
       <div className="flex gap-2">
         <Button

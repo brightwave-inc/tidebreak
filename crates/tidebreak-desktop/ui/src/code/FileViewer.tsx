@@ -134,7 +134,7 @@ export function FileViewer({
     load,
     errorMessage: "Could not open that file",
   });
-  const { data, error, refreshing, adopt } = resource;
+  const { data, error, archived, refreshing, adopt } = resource;
   const draft = useCodeFileDraft(workspaceId, path);
   const editing = draft !== undefined;
   const dirty = draft !== undefined && isCodeFileDraftDirty(draft);
@@ -413,21 +413,28 @@ export function FileViewer({
           Your changes are not saved. {draft.save.message}
         </Notice>
       )}
-      {error && (
-        <Notice
-          tone="critical"
-          docked="top"
-          className="shrink-0"
-          action={
-            <NoticeRetryButton
-              disabled={refreshing}
-              onClick={() => void resource.refresh()}
-            />
-          }
-        >
-          {error}
-        </Notice>
-      )}
+      {error &&
+        (archived ? (
+          // Archived is a state the reader changes by restoring the
+          // workspace, not a failure a retry can clear.
+          <Notice tone="neutral" docked="top" className="shrink-0">
+            {error}
+          </Notice>
+        ) : (
+          <Notice
+            tone="critical"
+            docked="top"
+            className="shrink-0"
+            action={
+              <NoticeRetryButton
+                pending={refreshing}
+                onClick={() => void resource.refresh()}
+              />
+            }
+          >
+            {error}
+          </Notice>
+        ))}
       {!data && !error && !draft && (
         <div className="flex flex-col gap-2 px-3 py-3" aria-hidden="true">
           <Skeleton className="h-4 w-1/3" />

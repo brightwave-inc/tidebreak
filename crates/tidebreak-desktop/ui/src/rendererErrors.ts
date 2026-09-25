@@ -189,6 +189,7 @@ function errorMessage(error: unknown): string {
   if (typeof error === "string") return error || "An empty error";
   if (typeof error === "function") return "Function (not an Error)";
   if (typeof error === "symbol") return "Symbol (not an Error)";
+  // raw-error-ok: a log line, scrubbed before it is written, never shown.
   if (typeof error !== "object" || error === null) return String(error);
   try {
     const { message, name } = error as { message?: unknown; name?: unknown };

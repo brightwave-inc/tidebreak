@@ -191,8 +191,8 @@ export function ConvertedOfficeViewer({
         <span className="block">
           This {kind} could not be converted for preview.
         </span>
-        {error?.message ? (
-          <span className="mt-1 block">{error.message}</span>
+        {error && friendlyErrorMessage(error, "") ? (
+          <span className="mt-1 block">{friendlyErrorMessage(error, "")}</span>
         ) : null}
         {error instanceof OfficeConversionError ? (
           <details className="mt-3 w-full text-left">

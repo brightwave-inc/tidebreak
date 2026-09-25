@@ -10,6 +10,7 @@ import {
   SettingsField,
   SettingsPanel,
   SettingsSection,
+  SettingsFieldError,
 } from "./primitives";
 
 /** The form's own shape: percentages, because that is what the fields show. */
@@ -88,31 +89,40 @@ export function CompactionPanel({ client }: { client: ApiClient }) {
   const [form, setForm] = useState<CompactionForm | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
+  /** Why the settings did not load; Try again reads them once more. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  /** Why the typed values cannot be saved, shown under the fields. */
+  const [invalid, setInvalid] = useState<string | null>(null);
+  /** Why a save did not go through. */
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    setLoadError(null);
     void client
       .getSettings()
       .then((settings) => {
         if (!cancelled) setForm(toCompactionForm(settings.compaction));
       })
       .catch((caught) => {
-        if (!cancelled)
-          setError(friendlyErrorMessage(caught, "Could not read settings."));
+        if (!cancelled) {
+          setLoadError(friendlyErrorMessage(caught, "Try again in a moment."));
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, loadAttempt]);
 
   async function save() {
     if (!form) return;
     const result = compactionUpdateFrom(form);
     if ("error" in result) {
-      setError(result.error);
+      setInvalid(result.error);
       return;
     }
+    setInvalid(null);
     setSaving(true);
     setError(null);
     try {
@@ -141,8 +151,16 @@ export function CompactionPanel({ client }: { client: ApiClient }) {
     <SettingsPanel
       title="Context"
       description="How long conversations run before the agent summarizes what is behind them."
-      busy={form === null}
+      busy={form === null && loadError === null}
     >
+      {loadError && (
+        <SettingsError
+          title="Could not load the context settings"
+          onRetry={() => setLoadAttempt((count) => count + 1)}
+        >
+          {loadError}
+        </SettingsError>
+      )}
       <SettingsSection
         title="When conversations compact"
         description="Where compaction starts, and how much of the conversation stays in full."
@@ -207,6 +225,7 @@ export function CompactionPanel({ client }: { client: ApiClient }) {
             </>
           )}
         </div>
+        {invalid && <SettingsFieldError>{invalid}</SettingsFieldError>}
       </SettingsSection>
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>

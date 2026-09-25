@@ -3,6 +3,7 @@ import { userEvent, within } from "storybook/test";
 import type { ApiClient, GatewayStatus, McpServerInfo } from "@/api";
 import { McpPanel } from "@/settings/McpPanel";
 import {
+  failureFixtures,
   mcpDirectoryServer,
   mcpDirectoryServers,
   mcpOauthAuthorizing,
@@ -77,8 +78,10 @@ export const LoadFailure: Story = {
   args: {
     client: {
       ...stubClient([]),
+      // A read that never reached the server; the notice's title names
+      // what failed.
       listMcpServers: async () => {
-        throw new Error("MCP servers could not be loaded.");
+        throw failureFixtures.unreachable;
       },
     } as unknown as ApiClient,
   },

@@ -48,16 +48,19 @@ afterEach(() => {
 });
 
 describe("BootFailure", () => {
-  it("names the machine it could not reach and keeps the raw error", () => {
+  it("names the machine it could not reach and words the error for the reader", () => {
     renderFailure();
 
     const screenRoot = screen.getByRole("alert");
     expect(screenRoot).toHaveTextContent(
       "Could not reach https://tidebreak.example.com.",
     );
-    // The raw string still matters — it is what a reader pastes into a bug
-    // report — it just no longer stands alone as the entire screen.
-    expect(screenRoot).toHaveTextContent("TypeError: Load failed");
+    expect(screenRoot).toHaveTextContent(
+      "Tidebreak could not reach its server.",
+    );
+    // The raw error belongs to the copied report, not the screen.
+    expect(screenRoot).not.toHaveTextContent("TypeError");
+    expect(screenRoot).not.toHaveTextContent("Load failed");
   });
 
   it("offers a way back to this computer only when attached to another one", async () => {
@@ -105,6 +108,20 @@ describe("BootFailure", () => {
 });
 
 describe("bootDebugReport", () => {
+  it("scrubs a credential out of the error it copies", () => {
+    const token = ["tidebreak", "-token.", "k3Jd8sLq".repeat(4)].join("");
+    const copied = bootDebugReport({
+      stage: "connect",
+      error: new Error(`refused Authorization: Bearer ${token}`),
+      attachment: remote,
+      appVersion: "0.58.0",
+      capturedAt: "2026-08-21T12:49:00.000Z",
+      userAgent: null,
+    });
+    expect(copied).not.toContain(token);
+    expect(JSON.parse(copied).error.message).toContain("refused");
+  });
+
   const report = (over: Record<string, unknown> = {}) =>
     bootDebugReport({
       stage: "catalog",
