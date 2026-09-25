@@ -43,7 +43,7 @@ const MENU_COMMAND_EVENT: &str = "desktop-menu-command";
 /// name the renderer receives, so the two sides share one vocabulary;
 /// `ui/src/nativeMenu.ts` lists the same names and a test there reads this
 /// list to keep them in step.
-const RENDERER_COMMANDS: [&str; 10] = [
+const RENDERER_COMMANDS: [&str; 14] = [
     MENU_NEW_ID,
     MENU_COMMAND_PALETTE_ID,
     MENU_SETTINGS_ID,
@@ -54,6 +54,30 @@ const RENDERER_COMMANDS: [&str; 10] = [
     MENU_KEYBOARD_SHORTCUTS_ID,
     MENU_DOCUMENTATION_ID,
     MENU_INSTALL_CLI_ID,
+    MENU_RELEASE_NOTES_ID,
+    MENU_REPORT_PROBLEM_ID,
+    MENU_SHOW_LOGS_ID,
+    MENU_EXPORT_DIAGNOSTICS_ID,
+];
+
+/// The Help menu, in order: `(id, label, accelerator)`, with `None` for a
+/// separator. Getting help and reporting a problem both start here, and on
+/// a failed boot this menu is still there when the window has nothing else.
+/// Every item is a renderer command: the renderer opens the pages, runs the
+/// Report a problem dialog, and says how a save went.
+const HELP_MENU: [Option<(&str, &str, Option<&str>)>; 8] = [
+    Some((MENU_DOCUMENTATION_ID, "Documentation", None)),
+    Some((MENU_RELEASE_NOTES_ID, "Release Notes", None)),
+    Some((
+        MENU_KEYBOARD_SHORTCUTS_ID,
+        "Keyboard Shortcuts",
+        Some("CmdOrCtrl+/"),
+    )),
+    None,
+    Some((MENU_REPORT_PROBLEM_ID, "Report a Problem…", None)),
+    None,
+    Some((MENU_SHOW_LOGS_ID, "Show Logs", None)),
+    Some((MENU_EXPORT_DIAGNOSTICS_ID, "Export Diagnostics…", None)),
 ];
 
 const MENU_CHECK_FOR_UPDATES_ID: &str = "check-for-updates";
@@ -73,6 +97,14 @@ const MENU_ZOOM_OUT_ID: &str = "zoom-out";
 const MENU_RELOAD_ID: &str = "reload-app";
 const MENU_KEYBOARD_SHORTCUTS_ID: &str = "keyboard-shortcuts";
 const MENU_DOCUMENTATION_ID: &str = "documentation";
+/// The release notes for the version you run.
+const MENU_RELEASE_NOTES_ID: &str = "release-notes";
+/// Saves the diagnostics report and opens a prefilled GitHub issue.
+const MENU_REPORT_PROBLEM_ID: &str = "report-problem";
+/// Opens this computer's logs folder.
+const MENU_SHOW_LOGS_ID: &str = "show-logs";
+/// Saves the diagnostics report to a file you pick.
+const MENU_EXPORT_DIAGNOSTICS_ID: &str = "export-diagnostics";
 const MENU_QUIT_ID: &str = "quit";
 const MENU_SHOW_WINDOW_ID: &str = "show-main-window";
 
@@ -208,20 +240,13 @@ pub(crate) fn install_app_menu(app: &tauri::App) -> tauri::Result<()> {
         ],
     )?;
 
-    let help_menu = Submenu::with_id_and_items(
-        handle,
-        HELP_SUBMENU_ID,
-        "Help",
-        true,
-        &[
-            &item(
-                MENU_KEYBOARD_SHORTCUTS_ID,
-                "Keyboard Shortcuts",
-                Some("CmdOrCtrl+/"),
-            )?,
-            &item(MENU_DOCUMENTATION_ID, "Documentation", None)?,
-        ],
-    )?;
+    let help_menu = Submenu::with_id(handle, HELP_SUBMENU_ID, "Help", true)?;
+    for entry in HELP_MENU {
+        match entry {
+            Some((id, text, accelerator)) => help_menu.append(&item(id, text, accelerator)?)?,
+            None => help_menu.append(&PredefinedMenuItem::separator(handle)?)?,
+        }
+    }
 
     let menu = Menu::with_items(
         handle,
@@ -291,6 +316,32 @@ fn renderer_command(id: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Help is where a person looks when something goes wrong, and on a
+    /// failed boot it is the only menu with anything to offer.
+    #[test]
+    fn the_help_menu_offers_help_and_a_way_to_report_a_problem() {
+        let items: Vec<(&str, &str)> = HELP_MENU
+            .iter()
+            .flatten()
+            .map(|(id, label, _)| (*id, *label))
+            .collect();
+        assert_eq!(
+            items,
+            [
+                (MENU_DOCUMENTATION_ID, "Documentation"),
+                (MENU_RELEASE_NOTES_ID, "Release Notes"),
+                (MENU_KEYBOARD_SHORTCUTS_ID, "Keyboard Shortcuts"),
+                (MENU_REPORT_PROBLEM_ID, "Report a Problem…"),
+                (MENU_SHOW_LOGS_ID, "Show Logs"),
+                (MENU_EXPORT_DIAGNOSTICS_ID, "Export Diagnostics…"),
+            ]
+        );
+        // The renderer carries out every one of them, so each must reach it.
+        for (id, _) in items {
+            assert_eq!(renderer_command(id), Some(id), "{id}");
+        }
+    }
 
     #[test]
     fn hands_the_renderer_only_the_commands_it_carries_out() {

@@ -3,6 +3,26 @@ import { fn } from "storybook/test";
 
 import { HttpError } from "@/api";
 import { BootFailure } from "@/BootFailure";
+import type { BootFailureKind } from "@/bootRecovery";
+
+const DATA_DIR =
+  "/Users/alex/Library/Application Support/io.brightwave.tidebreak";
+
+const LOCAL = {
+  attachment: "local",
+  baseUrl: null,
+  gatewayAuth: false,
+} as const;
+
+/** A local server that did not start, the way the desktop reports it. */
+function localFailure(kind: BootFailureKind, error: string) {
+  return {
+    stage: "connect" as const,
+    attachment: LOCAL,
+    error,
+    local: { kind, stopped: false, dataDir: DATA_DIR },
+  };
+}
 
 /**
  * The screen the shell falls back to when it cannot reach the API it is
@@ -22,6 +42,9 @@ const meta = {
     appVersion: "0.58.0",
     onRetry: fn(),
     onWorkLocally: fn(async () => {}),
+    onRestart: fn(async () => {}),
+    onRevealDataDir: fn(async () => {}),
+    onReportProblem: fn(),
     writeClipboard: fn(async () => {}),
     attachment: {
       attachment: "remote",
@@ -109,4 +132,82 @@ export const HostedDiscoveryUnavailable: Story = {
         "If the connection still fails, contact your administrator.",
     ),
   },
+};
+
+/**
+ * Another process holds the data folder's lock, such as `tidebreak serve`.
+ * Try again runs the boot again, so quitting that process is enough.
+ */
+export const LocalDataFolderInUse: Story = {
+  args: localFailure(
+    "instance_lock",
+    `configuration error: another Tidebreak process is already running on the data directory ${DATA_DIR}. Quit that process and try again, or set TIDEBREAK_DATA_DIR to another folder.`,
+  ),
+};
+
+/** A newer version wrote this profile, so this one sends you to it. */
+export const LocalDataFromNewerVersion: Story = {
+  args: localFailure(
+    "newer_version",
+    "This Tidebreak profile was written by a newer version. Install that version or later, or restore a backup.",
+  ),
+};
+
+/** The schema marker is from another lifecycle, or damaged. */
+export const LocalDataNotRecognized: Story = {
+  args: localFailure(
+    "unrecognized_data",
+    'configuration error: refusing to open local SQLite database for schema marker lifecycle "v2", epoch 1',
+  ),
+};
+
+/** The 1.0 product-major guard: a build that shipped without a lifecycle. */
+export const LocalVersionCannotOpenData: Story = {
+  args: localFailure(
+    "unsupported_version",
+    "configuration error: this build is major version 2, and no local profile lifecycle is defined for it",
+  ),
+};
+
+/** Opening or updating the database failed; the host's words follow. */
+export const LocalMigrationFailed: Story = {
+  args: localFailure(
+    "migration",
+    "store error: could not open or update the local database: Migration Error: no such table: turn",
+  ),
+};
+
+/** The disk has no room for the database to open. */
+export const LocalDiskFull: Story = {
+  args: localFailure(
+    "disk_full",
+    "store error: could not open or update the local database: database or disk is full",
+  ),
+};
+
+/** The keychain refused, or is locked. */
+export const LocalKeychainLocked: Story = {
+  args: localFailure("keychain", "secret error: the keychain is locked"),
+};
+
+/** A failure with no sentence of its own keeps the host's words. */
+export const LocalUnknownFailure: Story = {
+  args: localFailure("unknown", "server error: the listener could not bind"),
+};
+
+/**
+ * The server started, then its accept loop died. Nothing can start it again
+ * inside this process, so the screen offers a restart.
+ */
+export const LocalServerStopped: Story = {
+  args: {
+    ...localFailure("unknown", "server error: connection reset"),
+    local: { kind: "unknown", stopped: true, dataDir: DATA_DIR },
+  },
+};
+
+/** A mapped failure at the minimum window. */
+export const LocalDataFolderInUseMinimumWindow: Story = {
+  ...LocalDataFolderInUse,
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
 };

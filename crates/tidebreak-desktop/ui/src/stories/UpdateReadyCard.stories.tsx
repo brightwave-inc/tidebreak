@@ -21,7 +21,7 @@ function UpdateReadyCardStory({
     | "failed"
     | "ready";
   version: string | null;
-  /** Why the last download of an offered release failed. */
+  /** Why the last download, or the last restart, did not happen. */
   error?: string | null;
 }) {
   const [visible, setVisible] = useState(true);
@@ -43,6 +43,7 @@ function UpdateReadyCardStory({
         {visible && status === "ready" && (
           <UpdateReadyCard
             version={version}
+            error={error}
             onRestart={fn()}
             onDismiss={dismiss}
           />
@@ -67,6 +68,7 @@ function UpdateReadyCardStory({
           <UpdateReadyCard
             status="failed"
             message={CHECK_FAILED}
+            onRetry={fn()}
             onDismiss={dismiss}
           />
         )}
@@ -128,5 +130,19 @@ export const AvailableDownloadFailed: Story = {
     version: "0.115.0",
     error:
       "Not enough disk space to download the update. Free up space, then try again.",
+  },
+};
+
+/**
+ * Restart and update was refused: a code turn was still running when the
+ * restart's wait ran out. The card keeps the desktop's reason and the action
+ * it needs, and still offers the restart.
+ */
+export const RestartRefused: Story = {
+  args: {
+    status: "ready",
+    version: "0.117.0",
+    error:
+      "A code session is still working on a turn. Stop the running turn, or let it finish, then restart. The update stays ready.",
   },
 };

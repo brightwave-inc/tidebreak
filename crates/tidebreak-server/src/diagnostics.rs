@@ -975,6 +975,17 @@ pub async fn get_export(State(state): State<AppState>) -> Result<Response, Serve
         .map_err(|_| ServerError::internal("could not build diagnostic export response"))
 }
 
+/// The export bundle for a profile whose server is not running: a boot that
+/// failed, or a server that stopped. The same builder and allowlist as
+/// `GET /diagnostics/export`, with a snapshot of this process in place of a
+/// running server's, so it carries no request or model measurements. The
+/// logs, `boot-failures.log` above all, are what explains a failed boot.
+pub fn export_without_server(data_dir: &Path, profile: Profile) -> Result<Vec<u8>, String> {
+    let snapshot = Diagnostics::new().snapshot(profile);
+    let metrics = render_openmetrics(&snapshot);
+    build_bundle(data_dir, &snapshot, &metrics)
+}
+
 /// Renderer errors one server writes before it starts refusing them.
 const RENDERER_ERROR_BURST: u32 = 20;
 
@@ -1969,6 +1980,49 @@ mod tests {
         assert!(names.contains(&"snapshot.json".to_owned()));
         assert!(!names.iter().any(|name| name.contains("tidebreak.db")));
         assert!(!names.iter().any(|name| name.contains("secret")));
+    }
+
+    /// A boot that failed has no server to ask, so the desktop builds the
+    /// bundle itself. It must read exactly what the route reads: the boot
+    /// failure log that explains the failure, and nothing outside the
+    /// allowlist.
+    #[test]
+    fn an_export_without_a_server_reads_the_same_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        std::fs::write(dir.path().join("logs/tidebreak.log"), b"human log").unwrap();
+        std::fs::write(
+            dir.path().join("boot-failures.log"),
+            b"store error: could not open or update the local database\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("tidebreak.db"), b"private database").unwrap();
+        std::fs::write(dir.path().join("secret.txt"), b"private secret").unwrap();
+
+        let bytes = export_without_server(dir.path(), Profile::Desktop).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut names = (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name().to_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "README.txt",
+                "logs/boot-failures.log",
+                "logs/tidebreak.log",
+                "manifest.json",
+                "metrics.prom",
+                "snapshot.json",
+            ]
+        );
+        let mut boot_failures = String::new();
+        archive
+            .by_name("logs/boot-failures.log")
+            .unwrap()
+            .read_to_string(&mut boot_failures)
+            .unwrap();
+        assert!(boot_failures.contains("could not open or update"));
     }
 
     async fn observe_for_test(

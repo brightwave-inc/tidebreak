@@ -9,6 +9,8 @@ body:
       value: |
         Thanks for helping improve Tidebreak. Please search existing issues first.
         For security vulnerabilities, use private vulnerability reporting instead of this form.
+
+        The fastest way to file one is from the app: choose **Help → Report a Problem…**, or **Report a problem…** in Settings → Updates. Tidebreak saves a diagnostics report for you and opens this form with the version, operating system, and architecture filled in.
   - type: textarea
     id: problem
     attributes:
@@ -31,31 +33,34 @@ body:
     id: version
     attributes:
       label: Tidebreak version
-      description: Find this in the app's About panel or release name.
-      placeholder: v0.x.y or commit SHA
+      description: Report a Problem… fills this in. Otherwise, find it in Settings → Updates, or run `tidebreak --version` for a server.
+      placeholder: 0.117.0 or a commit SHA
     validations:
       required: true
-  - type: dropdown
-    id: platform
+  - type: input
+    id: os
     attributes:
-      label: Platform
-      options:
-        - macOS (Apple Silicon)
-        - macOS (Intel)
-        - Windows (x86_64)
-        - Windows (ARM64)
-        - Linux (x86_64)
-        - Linux (ARM64)
-        - Headless / server
-        - Other / built from source
+      label: Operating system
+      description: Tidebreak ships for macOS and as a self-hosted server. For a server, name the host system and whether it runs in Docker.
+      placeholder: macOS 15.6
     validations:
       required: true
+  - type: input
+    id: arch
+    attributes:
+      label: Architecture
+      description: arm64 for Apple silicon, x86_64 for Intel.
+      placeholder: arm64
   - type: textarea
     id: diagnostics
     attributes:
       label: Diagnostics
-      description: Paste relevant logs or attach a debug bundle after checking it for sensitive data.
-      render: shell
+      description: >-
+        Attach the diagnostics report. Report a Problem… saves one for you, and
+        Help → Export Diagnostics… saves one on its own. From a terminal, run
+        `tidebreak diagnostics export ./tidebreak-diagnostics.zip`. The report
+        holds recent logs, never conversations or credentials, but logs can name
+        folders on your computer, so look it over before you attach it.
   - type: checkboxes
     id: checks
     attributes:

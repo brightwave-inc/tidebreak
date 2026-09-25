@@ -42,10 +42,19 @@ const MENU_COMMAND_SHORTCUTS = {
   ShellShortcutAction | Record<ShellShortcutMode, ShellShortcutAction>
 >;
 
-/** Menu items that run no shortcut: the shell handles each one itself. */
+/**
+ * Menu items that run no shortcut. The shell opens Documentation and the
+ * command install; the Report a problem host (`ReportProblemDialog.tsx`)
+ * answers the rest of Help, because it stays mounted when the app itself
+ * failed to boot or crashed.
+ */
 const MENU_COMMANDS_WITHOUT_SHORTCUTS = [
   "documentation",
   "install-cli-command",
+  "release-notes",
+  "report-problem",
+  "show-logs",
+  "export-diagnostics",
 ] as const;
 
 export type MenuCommand =

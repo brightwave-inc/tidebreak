@@ -12,6 +12,7 @@ import { toast } from "sonner";
 
 import {
   ApiClient,
+  type Attachment,
   type Chat,
   type ModelInfo,
   type Project,
@@ -95,8 +96,16 @@ import { useDesktopNavigation } from "./DesktopNavigation";
 import {
   hasMacOverlayTitlebar,
   hasNativeHost,
+  revealDataDirectory,
   setAttachedRemotely,
 } from "./host";
+import {
+  localBootFailure,
+  retryLocalBoot,
+  type LocalBootFailure,
+} from "./bootRecovery";
+import { SERVER_STOPPED_EVENT, useServerHealth } from "./connectionState";
+import { openReportProblem } from "./reportProblem";
 import { friendlyErrorMessage } from "./lib/utils";
 import { useInterfaceZoom } from "./InterfaceZoom";
 import { BootBrand } from "./Logomark";
@@ -141,7 +150,7 @@ import { stillFollowing, updateCardFor, updateNoticeKey } from "./updateCard";
 import { UpdateReadyCard } from "./UpdateReadyCard";
 import { FloatingNotices } from "./FloatingNotices";
 import { UncleanExitNotice } from "./UncleanExitNotice";
-import { useUncleanExitNotice } from "./desktopLifecycle";
+import { restartTidebreak, useUncleanExitNotice } from "./desktopLifecycle";
 import { rendererErrors } from "./rendererErrors";
 
 /**
@@ -262,6 +271,8 @@ export function AppShell() {
   const [bootFailure, setBootFailure] = useState<{
     stage: BootStage;
     error: unknown;
+    /** What the desktop knows when its own server did not start. */
+    local?: LocalBootFailure | null;
   } | null>(null);
   // Bumped by the boot screen's "Try again". Boot is otherwise a mount-once
   // effect, so without this a reader who fixed the cause — reconnected the
@@ -371,6 +382,13 @@ export function AppShell() {
     dismissedKey: dismissedUpdateVersion,
     appVersion,
   });
+
+  // The local server's accept loop died after it started. Its sockets only
+  // saw a drop, which reads like a slow server, so every connection notice
+  // now says it stopped and offers a restart.
+  useNativeHostEvent(SERVER_STOPPED_EVENT, () =>
+    useServerHealth.getState().markStopped(),
+  );
 
   // Help > Documentation. Listened for here rather than beside the shortcuts
   // the other menu items run: those wait behind the sign-in gate, and the
@@ -594,11 +612,13 @@ export function AppShell() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      let attachedTo: Attachment | null = null;
       // Asked before the connection, and independently of it: this is the
       // shell's own record of the address, so it still answers when the
       // attachment it describes is exactly what failed to connect.
       try {
         const state = await remoteMachineState();
+        attachedTo = state.attachment;
         if (!cancelled) {
           setBootAttachment({
             attachment: state.attachment,
@@ -655,7 +675,11 @@ export function AppShell() {
           setHostedSignIn({ discovery: err.discovery, failure: err.failure });
           return;
         }
-        setBootFailure({ stage: "connect", error: err });
+        // The server inside this app says which known failure stopped it,
+        // so the screen can name it and offer the action that helps.
+        const local = attachedTo === "local" ? await localBootFailure() : null;
+        if (cancelled) return;
+        setBootFailure({ stage: "connect", error: err, local });
       }
     })();
     return () => {
@@ -1193,7 +1217,7 @@ export function AppShell() {
       title: "Restart Tidebreak to update?",
       // Decision 0080: the restart brings work to a safe point itself, so
       // the reader does not have to wait for it first.
-      description: `${version ? `Version ${version}` : "The update"} is ready. Tidebreak closes and reopens to install it. Running chats continue after the restart. Code sessions finish their current turn first. If a turn is still running after a short wait, Tidebreak stays open so you can try again later.`,
+      description: `${version ? `Version ${version}` : "The update"} is ready. Tidebreak closes and reopens to install it. Running conversations continue after the restart. Code sessions finish their current turn first. If a turn is still running after a short wait, Tidebreak stays open so you can try again later.`,
       confirmLabel: "Restart and update",
     });
     if (confirmed) await desktopUpdates.restart();
@@ -1222,6 +1246,32 @@ export function AppShell() {
     setInfo(null);
     setStatus("starting…");
     setBootAttempt((attempt) => attempt + 1);
+  }
+
+  /**
+   * The boot screen's Try again. A local server that failed to start runs
+   * its boot again first; without that, asking for the server again only
+   * read back the failure the first boot latched.
+   */
+  async function retryAfterBootFailure() {
+    const failure = bootFailure;
+    if (
+      failure?.stage === "connect" &&
+      failure.local &&
+      !failure.local.stopped
+    ) {
+      try {
+        await retryLocalBoot();
+      } catch (err) {
+        setBootFailure({
+          stage: "connect",
+          error: err,
+          local: (await localBootFailure()) ?? failure.local,
+        });
+        return;
+      }
+    }
+    retryBoot();
   }
 
   /**
@@ -1373,8 +1423,18 @@ export function AppShell() {
         error={bootFailure.error}
         attachment={bootAttachment}
         appVersion={appVersion}
-        onRetry={retryBoot}
+        local={bootFailure.local}
+        onRetry={retryAfterBootFailure}
         onWorkLocally={workOnThisComputer}
+        onRestart={restartTidebreak}
+        onRevealDataDir={() =>
+          revealDataDirectory().catch((err: unknown) => {
+            toast.error(
+              friendlyErrorMessage(err, "Could not open the data folder."),
+            );
+          })
+        }
+        onReportProblem={() => openReportProblem()}
       />
     );
   }
@@ -1469,6 +1529,7 @@ export function AppShell() {
               <UpdateReadyCard
                 status="failed"
                 message={updateCard.message}
+                onRetry={checkForUpdatesExplicitly}
                 onDismiss={() => setExplicitUpdateCheck(null)}
               />
             )}

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::watch;
 use unicode_general_category::{get_general_category, GeneralCategory};
@@ -71,6 +71,7 @@ mod office_install;
 mod office_pdf;
 #[cfg(target_os = "macos")]
 mod office_sandbox;
+mod problem_report;
 mod profile_data;
 mod quit;
 mod remote;
@@ -120,17 +121,175 @@ impl NativeServerInfo {
     }
 }
 
-/// What booting the embedded server produced: the bound server info, or the
-/// boot error. Delivered over the same channel the success case uses so the
-/// renderer can display the actual cause — a GUI launch has no visible
-/// stderr, and every failure (store error, keychain, instance lock) used to
-/// collapse into a bare "server failed to start".
-type BootOutcome = Result<NativeServerInfo, String>;
+/// What booting the embedded server produced: the bound server info, or why
+/// it is not serving. Delivered over the same channel the success case uses
+/// so the renderer can display the actual cause — a GUI launch has no
+/// visible stderr, and every failure (store error, keychain, instance lock)
+/// used to collapse into a bare "server failed to start".
+type BootOutcome = Result<NativeServerInfo, ServerDown>;
+
+/// Why the embedded server is not serving.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServerDown {
+    /// The error, as the host wrote it.
+    error: String,
+    /// Whether the server had bound before it failed. A boot that never
+    /// bound left nothing running, so it can run again in this process. A
+    /// server that bound and then stopped may still have work winding down,
+    /// and host access already holds its handles, so only a restart starts
+    /// it again without risking two servers over one data folder.
+    bound: bool,
+}
+
+/// Raised to the window when the embedded server stops after it bound: the
+/// accept loop died. Until then the window only saw its sockets drop, which
+/// looks exactly like a server that is slow to answer.
+const SERVER_STOPPED_EVENT: &str = "desktop-server-stopped";
+
+/// What a retry answers when only a restart can start the server again.
+const SERVER_RESTART_REQUIRED: &str =
+    "Tidebreak's server stopped after it started. Restart Tidebreak to start it again.";
 
 struct AppState {
     /// Filled once the accept loop is bound or boot has failed; awaited by
     /// `server_info`.
     info_rx: watch::Receiver<Option<BootOutcome>>,
+}
+
+/// Runs the embedded server's boot, and runs it again when a boot that never
+/// bound is retried.
+///
+/// Boot used to run once per process and latch its error, so the boot
+/// screen's Try again read the same failure back forever: a person who had
+/// freed disk space, or quit the other process holding the data folder,
+/// still had to quit and reopen the app.
+pub(crate) struct ServerBoot {
+    /// The outcome `server_info` waits on, `None` while a boot runs.
+    info_tx: watch::Sender<Option<BootOutcome>>,
+    /// Unblocks deep-link pairing once a server binds.
+    store_tx: watch::Sender<Option<tidebreak_server::PairingHandle>>,
+}
+
+/// What asking for another boot found.
+#[derive(Debug, PartialEq, Eq)]
+enum RetryStart {
+    /// The failure is cleared, and the caller runs the boot.
+    Started,
+    /// A boot is running already; `server_info` waits for it.
+    AlreadyBooting,
+    /// The server is up, so there is nothing to retry.
+    AlreadyServing,
+    /// The server bound and then stopped: only a restart starts it again.
+    RestartRequired,
+}
+
+impl ServerBoot {
+    fn new(
+        info_tx: watch::Sender<Option<BootOutcome>>,
+        store_tx: watch::Sender<Option<tidebreak_server::PairingHandle>>,
+    ) -> Self {
+        Self { info_tx, store_tx }
+    }
+
+    /// Record what a boot produced, for `server_info` and everything else
+    /// that waits on it.
+    fn publish(&self, outcome: BootOutcome) {
+        self.info_tx.send_replace(Some(outcome));
+    }
+
+    /// Clear a failure that left nothing running, so exactly one caller runs
+    /// the boot again. The check and the clear happen under the channel's
+    /// own lock, so two retries at once start one boot, not two.
+    fn begin_retry(&self) -> RetryStart {
+        let mut start = RetryStart::AlreadyBooting;
+        self.info_tx.send_if_modified(|outcome| {
+            start = match outcome {
+                None => RetryStart::AlreadyBooting,
+                Some(Ok(_)) => RetryStart::AlreadyServing,
+                Some(Err(down)) if down.bound => RetryStart::RestartRequired,
+                Some(Err(_)) => RetryStart::Started,
+            };
+            if start == RetryStart::Started {
+                *outcome = None;
+            }
+            start == RetryStart::Started
+        });
+        start
+    }
+
+    /// Start another boot if the last one failed before binding. `start`
+    /// runs the boot, and is called only when this call cleared the failure.
+    fn retry(&self, start: impl FnOnce()) -> Result<(), &'static str> {
+        match self.begin_retry() {
+            RetryStart::Started => {
+                start();
+                Ok(())
+            }
+            RetryStart::AlreadyBooting | RetryStart::AlreadyServing => Ok(()),
+            RetryStart::RestartRequired => Err(SERVER_RESTART_REQUIRED),
+        }
+    }
+}
+
+/// Why the local server is not serving, as the boot screen needs it.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalBootFailure {
+    /// Which known failure the error is, for the screen's sentence and the
+    /// action it offers.
+    kind: tidebreak_server::boot_failure::BootFailureKind,
+    /// The server bound and then stopped, so the screen offers a restart
+    /// rather than another boot.
+    stopped: bool,
+    /// The profile's data folder, which still holds every conversation.
+    data_dir: String,
+}
+
+impl LocalBootFailure {
+    fn new(down: &ServerDown, data_dir: &Path) -> Self {
+        Self {
+            kind: tidebreak_server::boot_failure::classify_boot_failure(&down.error),
+            stopped: down.bound,
+            data_dir: data_dir.display().to_string(),
+        }
+    }
+}
+
+/// Why the embedded server is not serving: which known failure it is,
+/// whether it stopped after it bound, and where the data folder is. `None`
+/// while a boot runs and once the server is up.
+#[tauri::command]
+async fn local_boot_failure(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<Option<LocalBootFailure>, String> {
+    let down = match state.info_rx.borrow().clone() {
+        Some(Err(down)) => down,
+        _ => return Ok(None),
+    };
+    Ok(Some(LocalBootFailure::new(&down, &data_dir(&app)?)))
+}
+
+/// Run the embedded server's boot again after a boot that failed before it
+/// bound: the boot screen's Try again.
+///
+/// Answers once a boot is under way, whether this call started it or one
+/// already was, or when the server is already up; `server_info` then waits
+/// for the outcome. A server that bound and later stopped is refused, with
+/// the reason, because only a restart can start it again safely.
+#[tauri::command]
+async fn retry_server_boot(
+    app: tauri::AppHandle,
+    boot: tauri::State<'_, Arc<ServerBoot>>,
+) -> Result<(), String> {
+    // Resolved before the failure is cleared: a retry that cleared it and
+    // then failed here would leave `server_info` waiting on nothing.
+    let data = data_dir(&app)?;
+    let boot = boot.inner().clone();
+    boot.retry(|| {
+        tauri::async_runtime::spawn(boot_and_publish(app, boot.clone(), data));
+    })
+    .map_err(str::to_owned)
 }
 
 /// Return the API the renderer should use.
@@ -749,8 +908,8 @@ fn present_native_notification(
 async fn wait_server_info(state: &Arc<AppState>) -> Result<NativeServerInfo, String> {
     let mut rx = state.info_rx.clone();
     loop {
-        if let Some(outcome) = rx.borrow().clone() {
-            return outcome;
+        if let Some(outcome) = rx.borrow_and_update().clone() {
+            return outcome.map_err(|down| down.error);
         }
         rx.changed()
             .await
@@ -1011,6 +1170,7 @@ pub fn run() {
     // Filled once the embedded server binds; the deep-link pairing handler
     // waits on it, because a provision link often launches the app.
     let (store_tx, store_rx) = watch::channel(None);
+    let boot = Arc::new(ServerBoot::new(info_tx, store_tx));
 
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
@@ -1031,12 +1191,17 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(window_state::plugin())
         .manage(state)
+        .manage(boot.clone())
         .manage(deep_link::PairingStore::new(store_rx))
         .manage(documents::PendingLibraryDrop::default())
         .manage(updater::UpdateManager::default())
         .manage(quit::QuitController::default())
         .invoke_handler(tauri::generate_handler![
             server_info,
+            retry_server_boot,
+            local_boot_failure,
+            problem_report::problem_report_facts,
+            problem_report::reveal_logs_directory,
             remote_machine_state,
             connect_remote_machine,
             connect_gateway_remote_machine,
@@ -1171,15 +1336,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             quit::install_terminate_hook(&handle);
 
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = boot_server(handle, &info_tx, store_tx, data.clone()).await {
-                    // stderr for terminal launches, the app-data log for
-                    // GUI launches, and the watch channel for the window.
-                    eprintln!("tidebreak-desktop: {error}");
-                    log_boot_failure(&data, &error);
-                    let _ = info_tx.send(Some(Err(error)));
-                }
-            });
+            tauri::async_runtime::spawn(boot_and_publish(handle, boot, data));
             Ok(())
         })
         .build(context)
@@ -1263,13 +1420,52 @@ fn log_boot_failure(data_dir: &Path, error: &str) {
     tidebreak_server::logging::append_boot_failure(data_dir, error);
 }
 
+/// Boot the embedded server, then say what happened: the error to stderr,
+/// the boot failure log, and `server_info`, and a server that stopped after
+/// it bound to the open window as well.
+async fn boot_and_publish(app: tauri::AppHandle, boot: Arc<ServerBoot>, data_dir: PathBuf) {
+    let Err(down) = boot_server(app.clone(), &boot, data_dir.clone()).await else {
+        return;
+    };
+    // stderr for terminal launches, the app-data log for GUI launches, and
+    // the watch channel for the window.
+    eprintln!("tidebreak-desktop: {}", down.error);
+    log_boot_failure(&data_dir, &down.error);
+    let stopped = down.bound;
+    boot.publish(Err(down));
+    if stopped {
+        if let Err(error) = app.emit(SERVER_STOPPED_EVENT, ()) {
+            eprintln!("tidebreak-desktop: could not tell the window the server stopped: {error}");
+        }
+    }
+}
+
 /// Bind the local API and park the accept loop for the life of the process.
+///
+/// A failure says whether the server had bound: before that nothing is left
+/// running and the boot can run again, and after it only a restart is safe.
 async fn boot_server(
     app: tauri::AppHandle,
-    info_tx: &watch::Sender<Option<BootOutcome>>,
-    store_tx: watch::Sender<Option<tidebreak_server::PairingHandle>>,
+    boot: &ServerBoot,
     data_dir: PathBuf,
-) -> Result<(), String> {
+) -> Result<(), ServerDown> {
+    let server = bind_server(app.clone(), data_dir.clone())
+        .await
+        .map_err(|error| ServerDown {
+            error,
+            bound: false,
+        })?;
+    serve_bound_server(app, boot, server, data_dir)
+        .await
+        .map_err(|error| ServerDown { error, bound: true })
+}
+
+/// Everything up to a bound listener. Leaves nothing running when it fails,
+/// which is what makes a failed boot safe to run again.
+async fn bind_server(
+    app: tauri::AppHandle,
+    data_dir: PathBuf,
+) -> Result<tidebreak_server::Server, String> {
     let client_executor_id = app.state::<host_access::HostAccess>().client_executor_id();
     let mut config = Config::desktop(data_dir.clone());
     config.exec_scripts_dir = Some(exec_scripts_dir(&app)?);
@@ -1321,20 +1517,29 @@ async fn boot_server(
     // Native computer use for code sessions rides the same trusted bridge
     // executable. The adapter is installed on every platform; it reports
     // unavailable off macOS, so no channel is minted there.
-    let computer_runtime = Arc::new(computer_runtime_adapter::DesktopComputerRuntime::new(
-        app.clone(),
-        app.path()
-            .app_cache_dir()
-            .map_err(|error| error.to_string())?,
-        app.path().home_dir().map_err(|error| error.to_string())?,
-    ));
-    app.manage(computer_runtime.clone());
+    // A retried boot reuses the runtime the first attempt managed: the exit
+    // handler shuts down the managed one, and a second would never be.
+    let computer_runtime =
+        match app.try_state::<Arc<computer_runtime_adapter::DesktopComputerRuntime>>() {
+            Some(runtime) => runtime.inner().clone(),
+            None => {
+                let runtime = Arc::new(computer_runtime_adapter::DesktopComputerRuntime::new(
+                    app.clone(),
+                    app.path()
+                        .app_cache_dir()
+                        .map_err(|error| error.to_string())?,
+                    app.path().home_dir().map_err(|error| error.to_string())?,
+                ));
+                app.manage(runtime.clone());
+                runtime
+            }
+        };
     let native_runtime: Arc<dyn tidebreak_server::NativeRuntime> = computer_runtime;
     let native_binding = tidebreak_server::NativeChannelBinding::new(
         native_runtime,
         desktop_sibling_exe("tidebreak")?,
     );
-    let server = tidebreak_server::bind_configured_with_desktop_foreground_browser_executor(
+    tidebreak_server::bind_configured_with_desktop_foreground_browser_executor(
         config,
         client_executor_id,
         folder_grants,
@@ -1346,7 +1551,17 @@ async fn boot_server(
         Some(native_binding),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())
+}
+
+/// Hand a bound server to host access and the window, then run its accept
+/// loop until it stops.
+async fn serve_bound_server(
+    app: tauri::AppHandle,
+    boot: &ServerBoot,
+    server: tidebreak_server::Server,
+    data_dir: PathBuf,
+) -> Result<(), String> {
     app.state::<host_access::HostAccess>()
         .initialize_store(server.store())?;
     app.state::<host_access::HostAccess>()
@@ -1364,7 +1579,7 @@ async fn boot_server(
         }
     });
     // Unblock any pairing task parked on a deep link that arrived pre-boot.
-    let _ = store_tx.send(Some(server.pairing_handle()));
+    boot.store_tx.send_replace(Some(server.pairing_handle()));
     // Let restart-to-update park sessions at a safe point before installing.
     app.state::<host_access::HostAccess>()
         .initialize_update_quiesce(server.update_quiesce())?;
@@ -1387,7 +1602,7 @@ async fn boot_server(
         token,
         executor_token,
     };
-    let _ = info_tx.send(Some(Ok(info)));
+    boot.publish(Ok(info));
     let recovery_app = app.clone();
     tauri::async_runtime::spawn(async move {
         client_execution::recover_folder_access_receipts(recovery_app).await;
@@ -1704,15 +1919,164 @@ mod server_info_tests {
 
     #[tokio::test]
     async fn wait_server_info_returns_the_published_boot_error() {
-        let (tx, rx) = watch::channel(None);
-        let state = Arc::new(AppState { info_rx: rx });
-        tx.send(Some(Err("store error: migration file missing".to_string())))
-            .unwrap();
+        let (boot, state) = boot_fixture();
+        boot.publish(Err(ServerDown {
+            error: "store error: migration file missing".to_string(),
+            bound: false,
+        }));
         let error = wait_server_info(&state)
             .await
             .err()
             .expect("the published boot error reaches the renderer");
         assert_eq!(error, "store error: migration file missing");
+    }
+
+    fn boot_fixture() -> (ServerBoot, Arc<AppState>) {
+        let (info_tx, info_rx) = watch::channel(None);
+        let (store_tx, _store_rx) = watch::channel(None);
+        (
+            ServerBoot::new(info_tx, store_tx),
+            Arc::new(AppState { info_rx }),
+        )
+    }
+
+    fn served() -> NativeServerInfo {
+        NativeServerInfo {
+            base_url: "http://127.0.0.1:1234".to_owned(),
+            token: "renderer-bearer".to_owned(),
+            executor_token: "native-credential".to_owned(),
+        }
+    }
+
+    const LOCKED: &str = "configuration error: another Tidebreak process is already running \
+                          on the data directory /tmp/profile. Quit that process and try again.";
+
+    /// One boot attempt the way `boot_and_publish` runs one: a failure is
+    /// published for `server_info`, a server that binds publishes itself.
+    async fn attempt(boot: &ServerBoot, outcome: Result<(), ServerDown>, attempts: &mut u32) {
+        *attempts += 1;
+        match outcome {
+            Ok(()) => boot.publish(Ok(served())),
+            Err(down) => boot.publish(Err(down)),
+        }
+    }
+
+    /// The boot screen's Try again used to re-read a latched error: the boot
+    /// ran once per process, so quitting the other process that held the
+    /// data folder still left the app on the same failure. Now a failure
+    /// that never bound clears, the boot runs again, and its outcome is what
+    /// `server_info` answers.
+    #[tokio::test]
+    async fn a_boot_that_never_bound_runs_again_and_its_new_outcome_reaches_the_window() {
+        let (boot, state) = boot_fixture();
+        let mut attempts = 0;
+        attempt(
+            &boot,
+            Err(ServerDown {
+                error: LOCKED.to_owned(),
+                bound: false,
+            }),
+            &mut attempts,
+        )
+        .await;
+        // Reading it again changes nothing: the failure stays until a retry.
+        for _ in 0..2 {
+            assert_eq!(
+                wait_server_info(&state).await.err().as_deref(),
+                Some(LOCKED)
+            );
+        }
+
+        let mut started = false;
+        assert_eq!(boot.retry(|| started = true), Ok(()));
+        assert!(started, "the retry runs the boot again");
+        // `server_info` waits for the new attempt instead of the old answer.
+        let waiting = tokio::spawn({
+            let state = state.clone();
+            async move { wait_server_info(&state).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "server_info answered before the boot"
+        );
+
+        attempt(&boot, Ok(()), &mut attempts).await;
+        let info = waiting
+            .await
+            .unwrap()
+            .expect("the second boot's server reaches the window");
+        assert_eq!(info.base_url, "http://127.0.0.1:1234");
+        assert_eq!(attempts, 2);
+    }
+
+    /// A retry pressed twice, or pressed while a boot runs, starts no second
+    /// boot: two servers over one data folder is the failure the instance
+    /// lock exists to stop.
+    #[test]
+    fn a_retry_while_a_boot_runs_or_the_server_serves_starts_nothing() {
+        let (boot, _state) = boot_fixture();
+        boot.publish(Err(ServerDown {
+            error: LOCKED.to_owned(),
+            bound: false,
+        }));
+        assert_eq!(boot.begin_retry(), RetryStart::Started);
+        assert_eq!(boot.begin_retry(), RetryStart::AlreadyBooting);
+        let mut started = false;
+        assert_eq!(boot.retry(|| started = true), Ok(()));
+        assert!(!started);
+
+        boot.publish(Ok(served()));
+        assert_eq!(boot.begin_retry(), RetryStart::AlreadyServing);
+        assert_eq!(boot.retry(|| started = true), Ok(()));
+        assert!(!started);
+    }
+
+    /// A server that bound and then stopped may still have work winding
+    /// down in this process, so it is never booted again in place. The
+    /// failure stays for the screen, which offers a restart instead.
+    #[tokio::test]
+    async fn a_server_that_stopped_after_binding_asks_for_a_restart() {
+        let (boot, state) = boot_fixture();
+        boot.publish(Err(ServerDown {
+            error: "server error: accept loop failed".to_owned(),
+            bound: true,
+        }));
+        let mut started = false;
+        assert_eq!(boot.retry(|| started = true), Err(SERVER_RESTART_REQUIRED));
+        assert!(!started);
+        assert_eq!(
+            wait_server_info(&state).await.err().as_deref(),
+            Some("server error: accept loop failed")
+        );
+    }
+
+    #[test]
+    fn the_boot_screen_learns_the_kind_whether_it_stopped_and_the_data_folder() {
+        let folder = Path::new("/Users/example/Library/Application Support/io.example");
+        let locked = LocalBootFailure::new(
+            &ServerDown {
+                error: LOCKED.to_owned(),
+                bound: false,
+            },
+            folder,
+        );
+        assert_eq!(
+            serde_json::to_value(&locked).unwrap(),
+            serde_json::json!({
+                "kind": "instance_lock",
+                "stopped": false,
+                "dataDir": "/Users/example/Library/Application Support/io.example",
+            })
+        );
+        let stopped = LocalBootFailure::new(
+            &ServerDown {
+                error: "server error: accept loop failed".to_owned(),
+                bound: true,
+            },
+            folder,
+        );
+        assert!(stopped.stopped);
     }
 
     #[test]

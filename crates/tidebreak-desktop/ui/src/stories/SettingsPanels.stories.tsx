@@ -145,6 +145,7 @@ function SettingsShowcase({
       onDownload={fn(async () => updateState)}
       onRestart={fn(async () => {})}
       onAutomaticDownloadsChange={fn()}
+      onReportProblem={fn()}
     />
   );
 }

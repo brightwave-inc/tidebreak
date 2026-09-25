@@ -100,8 +100,8 @@ describe("UpdateReadyCard", () => {
       />,
     );
 
-    expect(screen.getByLabelText("You're up to date")).toHaveTextContent(
-      "Tidebreak 0.114.0 is the latest version.",
+    expect(screen.getByLabelText("Tidebreak is up to date")).toHaveTextContent(
+      "You're on the latest version, 0.114.0.",
     );
     expect(screen.queryByRole("button", { name: "Download" })).toBeNull();
   });
@@ -117,10 +117,39 @@ describe("UpdateReadyCard", () => {
       />,
     );
 
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Not enough disk space to download the update. Free up space, then try again.",
+    const failure = screen.getByRole("alert");
+    expect(failure).toHaveTextContent(
+      "Not enough disk space to download the update",
     );
+    expect(failure).toHaveTextContent("Free up space, then try again.");
     expect(screen.getByRole("button", { name: "Download" })).toBeEnabled();
+  });
+
+  it("shows a refused restart with the action it needs, and keeps the restart", async () => {
+    const user = userEvent.setup();
+    const onRestart = vi.fn();
+    render(
+      <UpdateReadyCard
+        version="0.117.0"
+        error="A code session is still working on a turn. Stop the running turn, or let it finish, then restart. The update stays ready."
+        onRestart={onRestart}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    const refusal = screen.getByRole("status");
+    expect(refusal).toHaveTextContent(
+      "A code session is still working on a turn",
+    );
+    expect(refusal).toHaveTextContent(
+      "Stop the running turn, or let it finish, then restart.",
+    );
+    // A refusal is not a failure: the update is still ready to install.
+    expect(refusal).toHaveAttribute("data-tone", "warning");
+    await user.click(
+      screen.getByRole("button", { name: "Restart and update" }),
+    );
+    expect(onRestart).toHaveBeenCalledOnce();
   });
 
   it("reports why a check failed", () => {
@@ -137,6 +166,21 @@ describe("UpdateReadyCard", () => {
     ).toHaveTextContent(
       "Tidebreak could not reach the update server. Check your internet connection and try again.",
     );
+  });
+
+  it("runs a failed check again from the card", async () => {
+    const user = userEvent.setup();
+    const onRetry = vi.fn();
+    render(
+      <UpdateReadyCard
+        status="failed"
+        message="Could not check for updates. Try again later."
+        onRetry={onRetry}
+        onDismiss={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Try again/ }));
+    expect(onRetry).toHaveBeenCalledOnce();
   });
 
   it("splits an update error into what failed and why", () => {

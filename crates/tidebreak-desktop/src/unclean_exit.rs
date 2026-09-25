@@ -150,28 +150,23 @@ pub(crate) fn dismiss_unclean_exit_notice(markers: State<'_, Arc<RunMarkerState>
     markers.dismiss();
 }
 
-/// Save the embedded server's diagnostics bundle to a file the person picks.
-/// `Ok(false)` means they cancelled the save dialog.
+/// What a diagnostics report that could not be built says.
+const BUILD_FAILED: &str = "Could not build the diagnostics report";
+
+/// Save the diagnostics bundle to a file the person picks. `Ok(false)` means
+/// they cancelled the save dialog.
+///
+/// The running server builds it when there is one. A boot that failed, or a
+/// server that stopped, leaves no server to ask, and that is exactly when a
+/// report matters most, so the shell then builds the same bundle from the
+/// same allowlist itself (`export_without_server`).
 #[tauri::command]
 pub(crate) async fn save_diagnostics_report(
     app: AppHandle,
     server: State<'_, Arc<crate::AppState>>,
     host_access: State<'_, HostAccess>,
 ) -> Result<bool, String> {
-    let info = crate::wait_server_info(server.inner()).await?;
-    let response = crate::documents::local_client()
-        .get(format!("{}/diagnostics/export", info.base_url))
-        .bearer_auth(&info.token)
-        .send()
-        .await
-        .map_err(|_| "Could not build the diagnostics report".to_owned())?;
-    if !response.status().is_success() {
-        return Err("Could not build the diagnostics report".to_owned());
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| "Could not build the diagnostics report".to_owned())?;
+    let bytes = diagnostics_bundle(&app, server.inner()).await?;
     let filename = format!(
         "tidebreak-diagnostics-{}.zip",
         chrono::Local::now().format("%Y-%m-%d-%H%M")
@@ -183,6 +178,53 @@ pub(crate) async fn save_diagnostics_report(
     crate::chat_debug::write_bundle(&destination, &bytes)
         .map_err(|_| "Could not save the diagnostics report".to_owned())?;
     Ok(true)
+}
+
+/// The diagnostics bundle, from the running server when there is one.
+async fn diagnostics_bundle(
+    app: &AppHandle,
+    server: &Arc<crate::AppState>,
+) -> Result<Vec<u8>, String> {
+    let serving = server.info_rx.borrow().clone();
+    if let Some(Ok(info)) = serving {
+        match server_export(&info).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) => eprintln!(
+                "tidebreak-desktop: the server could not export diagnostics, building them here: {error}"
+            ),
+        }
+    }
+    let data_dir = crate::data_dir(app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tidebreak_server::diagnostics_export::export_without_server(
+            &data_dir,
+            tidebreak_core::Profile::Desktop,
+        )
+    })
+    .await
+    .map_err(|_| BUILD_FAILED.to_owned())?
+    .map_err(|error| {
+        eprintln!("tidebreak-desktop: could not build diagnostics without a server: {error}");
+        BUILD_FAILED.to_owned()
+    })
+}
+
+/// `GET /diagnostics/export` from the running server.
+async fn server_export(info: &crate::NativeServerInfo) -> Result<Vec<u8>, String> {
+    let response = crate::documents::local_client()
+        .get(format!("{}/diagnostics/export", info.base_url))
+        .bearer_auth(&info.token)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("the export answered {}", response.status()));
+    }
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| error.to_string())
 }
 
 async fn pick_report_path(app: &AppHandle, filename: &str) -> Result<Option<PathBuf>, String> {

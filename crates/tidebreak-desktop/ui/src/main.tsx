@@ -8,6 +8,7 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { hydrateComposerDraftFromHostedReentry } from "./ComposerDrafts";
 import { captureHandoffToken } from "./hostedSession";
 import { refuseStrayFileDrops } from "./ImageAttachments";
+import { ReportProblemHost } from "./ReportProblemDialog";
 import { rendererErrors } from "./rendererErrors";
 import { createAppRouter } from "./router";
 import { initTheme } from "./theme";
@@ -36,6 +37,10 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
       <DesktopQuitPromptHost
         onOpenInbox={() => void router.navigate({ to: "/code/inbox" })}
       />
+    </ErrorBoundary>
+    {/* Outside it too, so a failed boot or a crash can report a problem. */}
+    <ErrorBoundary fallback={null}>
+      <ReportProblemHost />
     </ErrorBoundary>
   </React.StrictMode>,
 );

@@ -61,13 +61,7 @@ impl CodeRuntime {
             let remaining = deadline_at.saturating_duration_since(Instant::now());
             match tokio::time::timeout(remaining, worktree_turn.lock()).await {
                 Ok(guard) => drop(guard),
-                Err(_) => {
-                    return Err(
-                        "A code session is still working on a turn. Try again once it \
-                                finishes — the update stays ready."
-                            .to_owned(),
-                    );
-                }
+                Err(_) => return Err(turn_still_running(1)),
             }
         }
         // Past every turn boundary; now wait for the workers to park their
@@ -82,16 +76,7 @@ impl CodeRuntime {
                 return Ok(());
             }
             if deadline_at.is_some_and(|deadline_at| Instant::now() >= deadline_at) {
-                return Err(if busy == 1 {
-                    "A code session is still working on a turn. Try again once it finishes — \
-                     the update stays ready."
-                        .to_owned()
-                } else {
-                    format!(
-                        "{busy} code sessions are still working on turns. Try again once they \
-                         finish — the update stays ready."
-                    )
-                });
+                return Err(turn_still_running(busy));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -1174,6 +1159,22 @@ fn trigger_actor(name: &str, context: Option<tidebreak_core::TriggerTurnContext>
     }
 }
 
+/// Why a restart to update gave up on `busy` code turns still running at its
+/// deadline, and what the person does next. The update card shows it as it
+/// is: the first sentence is the card's title, and the rest is the action.
+fn turn_still_running(busy: usize) -> String {
+    if busy == 1 {
+        "A code session is still working on a turn. Stop the running turn, or let it \
+         finish, then restart. The update stays ready."
+            .to_owned()
+    } else {
+        format!(
+            "{busy} code sessions are still working on turns. Stop the running turns, or \
+             let them finish, then restart. The update stays ready."
+        )
+    }
+}
+
 /// Whether `session` keeps a quiesce waiting, and why: `Some(true)` mid-turn,
 /// `Some(false)` idle with an engine child that has not parked yet, `None`
 /// at a safe point.
@@ -1215,6 +1216,19 @@ mod safe_point_tests {
             execution_location: ExecutionLocation::Machine,
             acts_as: None,
         }
+    }
+
+    /// The refusal names the action, because the update card shows it as the
+    /// way forward and a code turn is never interrupted for an update.
+    #[test]
+    fn a_turn_still_running_says_what_to_do_about_it() {
+        assert_eq!(
+            turn_still_running(1),
+            "A code session is still working on a turn. Stop the running turn, or let it \
+             finish, then restart. The update stays ready."
+        );
+        assert!(turn_still_running(3).starts_with("3 code sessions are still working"));
+        assert!(turn_still_running(3).contains("Stop the running turns"));
     }
 
     /// A quiesce waits for turns and for engine children to park, and a quit

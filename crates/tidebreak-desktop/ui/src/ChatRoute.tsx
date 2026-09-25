@@ -19,6 +19,7 @@ import { useChatListStore } from "./ChatListStore";
 import { useOpenChat } from "./useOpenChat";
 import { useComposerAttachments, useComposerDrafts } from "./ComposerDrafts";
 import { ChatSessionController } from "./ChatSessionController";
+import type { SocketConnectionState } from "./connectionState";
 import {
   applyTerminalHydration,
   type ChatSessionEffect,
@@ -183,14 +184,8 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
  */
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
-  const {
-    client,
-    models,
-    defaultModelKey,
-    providers,
-    setStatus,
-    catalogLoaded,
-  } = useApp();
+  const { client, models, defaultModelKey, providers, catalogLoaded } =
+    useApp();
   const { managed } = useManagedPolicy();
   const modelSettingsNav = useModelSettingsNav();
   const noModelCanRun = noRunnableModel(models, catalogLoaded);
@@ -218,6 +213,10 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const handleEventsRef = useRef<(events: readonly SequencedEvent[]) => void>(
     () => {},
   );
+  // The event socket's state, for the connection notice above the composer,
+  // and the controller that owns it, for that notice's Retry now.
+  const [connection, setConnection] = useState<SocketConnectionState>("live");
+  const controllerRef = useRef<ChatSessionController | null>(null);
   const terminalHydrationGenerationRef = useRef(0);
   // Steering reads the draft synchronously, from outside a render. The route
   // deliberately does not subscribe to the draft — a keystroke re-renders the
@@ -337,20 +336,19 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         const generation = ++terminalHydrationGenerationRef.current;
         void refreshTerminalTranscript(generation);
       },
-      onConnectionState: (connectionState) =>
-        setStatus(
-          (current) =>
-            `${withoutConnectionState(current)} · ${connectionState}`,
-        ),
+      onConnectionState: setConnection,
     });
+    controllerRef.current = controller;
     controller.start();
     return () => {
       controller.dispose();
+      if (controllerRef.current === controller) controllerRef.current = null;
+      setConnection("live");
       // Leaving the conversation settles its name: coming back to it should show
       // the title, not type it out a second time.
       chatListActions.clearDerivedTitle();
     };
-  }, [client, chatId, hydrated, setStatus]);
+  }, [client, chatId, hydrated]);
 
   function updateSession(
     update: (state: ChatSessionState) => ChatSessionState,
@@ -1265,6 +1263,10 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             }
             voice.resetInputUsed();
           }}
+          connection={connection}
+          onRetryConnection={() =>
+            controllerRef.current?.retryNow() ?? Promise.resolve()
+          }
           onSend={onSend}
           onQueue={onQueue}
           onRetryTurn={retryTurn}
@@ -1429,10 +1431,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       </MarkdownLinkProvider>
     </div>
   );
-}
-
-function withoutConnectionState(status: string): string {
-  return status.replace(/ · (?:live|reconnecting)$/, "");
 }
 
 /**

@@ -106,6 +106,15 @@ export function useApp(): AppContextValue {
 }
 
 /**
+ * The app context, or `null` outside the shell. For the few surfaces a
+ * story or a test renders without one, where the shell's facts only add to
+ * what they show.
+ */
+export function useOptionalApp(): AppContextValue | null {
+  return useContext(AppContext);
+}
+
+/**
  * Whether this window works on a machine other than this computer.
  *
  * The one gate for host authority. Attaching and detaching both reload the

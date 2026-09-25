@@ -32,16 +32,16 @@ pub(crate) use core::{
     task_plan_tool, InstanceLock, HOST_MAX_CONNECTIONS,
 };
 pub use core::{
-    code_execution, connectors, consent, deprovision_provisioned_gateway, deprovision_target,
-    ensure_home_dir, host_folders, listen_endpoint, logging, media_type, openapi_catalog,
-    output_files, profile_data, register_pending_pairing, register_replacing_pairing,
-    rehome_configured_secrets, rest_executor, sandbox_container_run, sandbox_docker, secret_rehome,
-    voice_transcription, web_search, workspace_config, AppState, BrowserChannelBinding,
-    BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope, ClientExecutionWake,
-    DeprovisionTarget, DurableOperationStore, LocalVoiceError, LocalVoiceRunner, LocalVoiceState,
-    LocalVoiceStatus, NativeChannelBinding, NativeRuntime, NativeRuntimeError, NativeRuntimeScope,
-    PairingError, PairingHandle, PendingRegistration, QuitProgress, Server, ServerError,
-    ServerStop, UpdateQuiesce,
+    boot_failure, code_execution, connectors, consent, deprovision_provisioned_gateway,
+    deprovision_target, ensure_home_dir, host_folders, listen_endpoint, logging, media_type,
+    openapi_catalog, output_files, profile_data, register_pending_pairing,
+    register_replacing_pairing, rehome_configured_secrets, rest_executor, sandbox_container_run,
+    sandbox_docker, secret_rehome, voice_transcription, web_search, workspace_config, AppState,
+    BrowserChannelBinding, BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope,
+    ClientExecutionWake, DeprovisionTarget, DurableOperationStore, LocalVoiceError,
+    LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus, NativeChannelBinding, NativeRuntime,
+    NativeRuntimeError, NativeRuntimeScope, PairingError, PairingHandle, PendingRegistration,
+    QuitProgress, Server, ServerError, ServerStop, UpdateQuiesce,
 };
 
 /// How the server resolves and starts a local MCP command, for the desktop's
@@ -53,6 +53,12 @@ pub mod mcp_stdio {
         defaulted_names, is_bare_command, resolve_stdio_executable, resolve_stdio_executable_on,
         FORWARDED_BY_DEFAULT,
     };
+}
+
+/// The diagnostics export for a profile whose server is not running, which
+/// the desktop builds itself when a boot failed and there is no route to ask.
+pub mod diagnostics_export {
+    pub use tidebreak_server_core::diagnostics::export_without_server;
 }
 
 pub mod routes;

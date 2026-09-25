@@ -155,3 +155,24 @@ The `UneffMePreparing`, `FailedTurnFilesIssue`, `EngineErrorFilesIssue`, and
 `PastedTextFolded` stories show each surface. A plausible wrong
 implementation that still gated on the checkout would fail the menu test; one
 that cloned would fail the page test's clone assertion.
+
+## Amendment (2026-09-24): one Report a problem
+
+Report a problem is now one flow across the app. The Help menu, the boot
+screen, a crash screen, Settings → Updates, and a workspace all open the same
+dialog. It saves the diagnostics report to a file the person picks, then opens
+a GitHub issue prefilled with the version, operating system, and architecture,
+and nothing else.
+
+A workspace's Report a problem… and the transcript's File an issue open that
+dialog too, with one more choice: Ask an agent. That choice is the flow this
+record describes. The agent starts with the session's debug report as pasted
+text, asks what went wrong, and files the issue with the person. So the
+session's context goes where this record puts it, into the agent's first
+turn, never into the issue's address. The command id stays `uneff-me`, and
+`uneff` still finds it in the command palette.
+
+The dialog comes first because the zip and the prefilled issue work in every
+state the app can be in, including a boot that never reached a server, while
+the agent needs a working engine and a session. A person who wants the agent
+is one click further away than before.

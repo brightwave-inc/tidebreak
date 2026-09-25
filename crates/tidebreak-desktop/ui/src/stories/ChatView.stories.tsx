@@ -35,6 +35,7 @@ import {
   type UserQuestionAnswer,
 } from "@/api";
 import { ChatView } from "@/ChatView";
+import type { SocketConnectionState } from "@/connectionState";
 import { useChatSessionStore } from "@/ChatSessionStore";
 import { initialChatSessionState } from "@/ChatSessionReducer";
 import {
@@ -511,6 +512,8 @@ type StoryScenario = {
   agentProgress?: Record<string, AgentRunProgress>;
   agentRunsError?: string;
   nativeHost?: boolean;
+  /** The event socket, for the connection notice above the composer. */
+  connection?: SocketConnectionState;
 };
 
 function pendingDecision(): Promise<void> {
@@ -921,6 +924,8 @@ function StoryChat({
             onRetryTurn={retryTurn}
             onOpenAgentPanel={fn()}
             onOpenOutput={fn()}
+            connection={scenario.connection}
+            onRetryConnection={fn(async () => {})}
           />
         </div>
       </div>
@@ -1246,5 +1251,22 @@ export const HydrationRetry: Story = {
     await expect(canvas.getByRole("textbox")).toHaveValue(
       "Keep this draft while the conversation loads.",
     );
+  },
+};
+
+/**
+ * The socket dropped mid-turn: the quiet line above the composer says so
+ * while it reconnects. After 30 seconds it becomes the notice in
+ * `Composer/Connection notice`.
+ */
+export const Reconnecting: Story = {
+  args: {
+    scenario: {
+      id: "reconnecting",
+      messages: baseMessages,
+      busy: true,
+      activeTurnId: ACTIVE_TURN_ID,
+      connection: "reconnecting",
+    },
   },
 };

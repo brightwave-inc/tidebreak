@@ -30,7 +30,9 @@ import {
 import {
   acquireCodeSessionFromClient,
   releaseCodeSession,
+  retryCodeSessionConnection,
 } from "../CodeSessionRegistry";
+import { ConnectionStatus } from "@/ConnectionNotice";
 import {
   applySessionTreeSnapshot,
   applyTurnRewrite,
@@ -44,7 +46,6 @@ import {
   useFirstTurnRecovery,
 } from "./firstTurnRecovery";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
-import { STATUS_TEXT } from "../statusTone";
 import {
   codeModelsFromHarnessListing,
   useCodeCatalogStore,
@@ -642,17 +643,6 @@ export function CodeSessionPane({
             />
           </TranscriptFindOverlay>
         )}
-        {connectionState === "reconnecting" && (
-          <p
-            role="status"
-            className={cn(
-              STATUS_TEXT.pending,
-              "pointer-events-none absolute inset-x-0 top-2 z-[1] text-center text-xs [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none",
-            )}
-          >
-            Reconnecting to the session…
-          </p>
-        )}
         <CodeTranscript
           key={historyItems ? "history" : "live"}
           items={historyItems ?? transcriptItems}
@@ -716,6 +706,16 @@ export function CodeSessionPane({
         >
           <ArrowDown size={16} />
         </button>
+      </div>
+      {/* The same notice a conversation shows above its composer, so a
+          dropped session socket reads the same in both halves of the app. */}
+      <div className="shrink-0 px-[clamp(0.5rem,4%,5rem)] empty:hidden">
+        <ConnectionStatus
+          connection={connectionState}
+          onRetryNow={() => retryCodeSessionConnection(session.id)}
+          // As wide as the composer it sits on, like the queue tray.
+          className="mx-auto mb-2 w-full max-w-3xl"
+        />
       </div>
       {composerOverride}
       {!canContribute && !composerOverride && (

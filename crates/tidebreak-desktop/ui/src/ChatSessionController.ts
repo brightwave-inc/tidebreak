@@ -103,6 +103,10 @@ type HeldText = {
 export class ChatSessionController {
   private disposed = false;
   private socket: WebSocket | null = null;
+  /** The socket opened and has not dropped since. */
+  private live = false;
+  /** Callers of {@link retryNow} waiting for the attempt to settle. */
+  private settleWaiters: (() => void)[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   private replayFrames: SequencedEvent[] = [];
@@ -115,9 +119,38 @@ export class ChatSessionController {
     this.connect();
   }
 
+  /**
+   * Reconnect now instead of when the backoff next fires: the connection
+   * notice's Retry now. The backoff starts over from its first step.
+   *
+   * Resolves once this attempt opens or fails, so the button can wait for
+   * its answer. A live socket has nothing to retry, and an attempt already
+   * under way is not doubled: the call waits for that one.
+   */
+  retryNow(): Promise<void> {
+    if (this.disposed || this.live) return Promise.resolve();
+    const settled = new Promise<void>((resolve) => {
+      this.settleWaiters.push(resolve);
+    });
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+      this.connect();
+    }
+    return settled;
+  }
+
+  private settle(): void {
+    const waiters = this.settleWaiters;
+    this.settleWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+
   /** Close the socket and silence every callback and pending timer, forever. */
   dispose(): void {
     this.disposed = true;
+    this.settle();
     this.cancelReplayFlush();
     this.replayFrames = [];
     this.replayText = null;
@@ -199,10 +232,14 @@ export class ChatSessionController {
 
   private scheduleReconnect(): void {
     if (this.disposed || this.reconnectTimer !== null) return;
+    this.live = false;
     // The next socket resumes from the reducer's cursor, so anything held
     // back has to land first or the reconnect would skip past it.
     this.flushReplay();
     this.options.onConnectionState("reconnecting");
+    // The attempt a Retry now waited for has failed; the next one is on the
+    // backoff again.
+    this.settle();
     const delay = this.reconnectDelayMs;
     this.reconnectDelayMs = nextReconnectDelay(this.reconnectDelayMs);
     this.reconnectTimer = setTimeout(() => {
@@ -245,8 +282,10 @@ export class ChatSessionController {
     this.socket = socket;
     socket.onopen = () => {
       if (this.disposed || this.socket !== socket) return;
+      this.live = true;
       this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
       this.options.onConnectionState("live");
+      this.settle();
     };
     socket.onerror = () => {
       if (this.disposed || this.socket !== socket) return;

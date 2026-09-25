@@ -25,6 +25,7 @@ pub mod auth;
 mod blob_orphan_auditor;
 mod blob_retirement_worker;
 #[doc(hidden)]
+pub mod boot_failure;
 pub mod bus;
 pub mod chat_titling;
 pub mod chatgpt_runtime;

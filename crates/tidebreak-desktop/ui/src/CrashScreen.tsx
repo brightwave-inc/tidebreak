@@ -8,6 +8,7 @@ import { copyPlainText } from "./ClipboardCopyButton";
 import { hasNativeHost } from "./host";
 import { BootBrand } from "./Logomark";
 import { scrubLogText } from "./rendererErrors";
+import { openReportProblem } from "./reportProblem";
 import { WindowDragStrip } from "./WindowDragStrip";
 
 /**
@@ -166,6 +167,11 @@ export type CrashScreenProps = {
   componentStack?: string | null;
   onReload: () => void;
   onGoHome: () => void;
+  /**
+   * Open Report a problem. The dialog is mounted beside the app, so it opens
+   * over a crash that took the whole window.
+   */
+  onReportProblem?: () => void;
   /** Injectable for tests; defaults to the real clipboard. */
   writeClipboard?: (text: string) => Promise<void>;
 };
@@ -181,6 +187,7 @@ export function CrashScreen({
   componentStack,
   onReload,
   onGoHome,
+  onReportProblem = () => openReportProblem(),
   writeClipboard,
 }: CrashScreenProps) {
   const report = useCopyCrashReport({ error, componentStack, writeClipboard });
@@ -203,6 +210,9 @@ export function CrashScreen({
         <Button size="sm" variant="outline" onClick={onGoHome}>
           <House aria-hidden="true" />
           Go home
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onReportProblem}>
+          Report a problem…
         </Button>
         <Button size="sm" variant="ghost" onClick={() => void report.copy()}>
           {report.label}
