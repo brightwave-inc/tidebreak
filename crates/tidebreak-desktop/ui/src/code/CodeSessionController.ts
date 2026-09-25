@@ -78,6 +78,10 @@ export class CodeSessionController {
   private hydrated = false;
   private socket: WebSocket | null = null;
   private connection: object | null = null;
+  /** The socket opened and has not dropped since. */
+  private live = false;
+  /** Callers of {@link retryNow} waiting for the attempt to settle. */
+  private settleWaiters: (() => void)[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   private turnRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -196,6 +200,7 @@ export class CodeSessionController {
   /** Close the socket and silence every callback and pending timer, forever. */
   dispose(): void {
     this.disposed = true;
+    this.settle();
     this.connection = null;
     this.turnRefreshRequested = false;
     this.cancelReplayFlush();
@@ -301,13 +306,45 @@ export class CodeSessionController {
     return true;
   }
 
+  /**
+   * Reconnect now instead of when the backoff next fires: the connection
+   * notice's Retry now. The backoff starts over from its first step.
+   *
+   * Resolves once this attempt opens or fails, so the button can wait for
+   * its answer. A live socket has nothing to retry, and an attempt already
+   * under way is not doubled: the call waits for that one.
+   */
+  retryNow(): Promise<void> {
+    if (this.disposed || this.live) return Promise.resolve();
+    const settled = new Promise<void>((resolve) => {
+      this.settleWaiters.push(resolve);
+    });
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+      this.connect();
+    }
+    return settled;
+  }
+
+  private settle(): void {
+    const waiters = this.settleWaiters;
+    this.settleWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+
   private scheduleReconnect(): void {
     if (this.disposed || this.reconnectTimer !== null) return;
+    this.live = false;
     // A failed initial socket must not strand the reader behind a skeleton.
     // Publish any replay already received, then expose the durable snapshot
     // while the normal reconnect loop keeps trying in the background.
     this.flushReplay();
     this.options.onConnectionState("reconnecting");
+    // The attempt a Retry now waited for has failed; the next one is on the
+    // backoff again.
+    this.settle();
     const delay = this.reconnectDelayMs;
     this.reconnectDelayMs = nextReconnectDelay(this.reconnectDelayMs);
     this.reconnectTimer = setTimeout(() => {
@@ -344,8 +381,10 @@ export class CodeSessionController {
     this.socket = socket;
     socket.onopen = () => {
       if (this.disposed || this.connection !== connection) return;
+      this.live = true;
       this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
       this.options.onConnectionState("live");
+      this.settle();
       // The protocol has no explicit replay-complete frame. If this session
       // has no journal rows, the same quiet window used for a replay burst is
       // the only boundary needed before revealing the transcript.

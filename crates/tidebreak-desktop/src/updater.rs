@@ -63,6 +63,12 @@ const UPDATE_PREFERENCE_SAVE_ERROR: &str = "Could not save the setting. Try agai
 const UPDATE_DISK_FULL_ERROR: &str =
     "Not enough disk space to download the update. Free up space, then try again.";
 const UPDATE_SAVE_ERROR: &str = "Could not save the update on this computer. Try again later.";
+/// A restart refused because a check or a download holds the updater. The
+/// update card shows every refusal as it is, so each one is a sentence.
+const UPDATE_BUSY_ERROR: &str =
+    "Tidebreak is still checking for updates. Try again when the check finishes.";
+const UPDATE_NOT_READY_ERROR: &str =
+    "No update is ready to install. Check for updates, then try again.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -944,7 +950,7 @@ async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
         .busy
         .swap(true, Ordering::AcqRel)
     {
-        return Err("An update check is already in progress".to_owned());
+        return Err(UPDATE_BUSY_ERROR.to_owned());
     }
 
     let staged = {
@@ -957,7 +963,7 @@ async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
         let mut staged = manager.staged.lock().expect("staged update mutex poisoned");
         if !can_restart(&state, staged.is_some()) {
             manager.busy.store(false, Ordering::Release);
-            return Err("no update is ready to install".to_owned());
+            return Err(UPDATE_NOT_READY_ERROR.to_owned());
         }
         staged
             .take()

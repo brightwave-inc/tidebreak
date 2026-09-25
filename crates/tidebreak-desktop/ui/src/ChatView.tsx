@@ -69,6 +69,8 @@ import { useTranscriptVisible } from "./TranscriptVisibility";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useOutputWritebackRequests } from "./useOutputWritebackRequests";
 import { useToolApprovals } from "./useToolApprovals";
+import { ConnectionStatus } from "./ConnectionNotice";
+import type { SocketConnectionState } from "./connectionState";
 import { QueueTray, useChatQueueApi } from "./QueueTray";
 import { useTurnControls } from "./useTurnControls";
 import { usePlanApprovals } from "./usePlanApprovals";
@@ -145,6 +147,14 @@ export type ChatViewProps = {
   /** Open one background run's panel beside the conversation. */
   onOpenAgentPanel?: (runId: string) => void;
   onOpenOutput?: (outputId: string) => void;
+  /**
+   * The conversation's event socket. While it is down, a notice above the
+   * composer says so; absent, as in stories of a settled transcript, none
+   * shows.
+   */
+  connection?: SocketConnectionState;
+  /** Reconnect the socket now: the notice's Retry now. */
+  onRetryConnection?: () => Promise<void>;
 };
 
 /**
@@ -186,6 +196,8 @@ export function ChatView({
   branchOrigin,
   onOpenAgentPanel,
   onOpenOutput,
+  connection,
+  onRetryConnection,
 }: ChatViewProps) {
   const transcriptVisible = useTranscriptVisible();
   const composerPlugins = useComposerPlugins(client);
@@ -830,6 +842,14 @@ export function ChatView({
       </div>
 
       <div className="px-[clamp(0.5rem,4%,5rem)] pb-2" ref={promptSlotRef}>
+        {connection && onRetryConnection && (
+          <ConnectionStatus
+            connection={connection}
+            onRetryNow={onRetryConnection}
+            // As wide as the composer it sits on, like the queue tray.
+            className="mx-auto mb-2 w-full max-w-3xl"
+          />
+        )}
         <ChatPromptAnnouncer question={waitingPrompt} />
         {taskPlan !== null && (
           <div className="pb-2">

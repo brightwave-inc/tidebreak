@@ -39,6 +39,7 @@ import { PermissionsPanel } from "./PermissionsPanel";
 import { ModelsPanel } from "./ModelsPanel";
 import { ProvidersPanel } from "./ProvidersPanel";
 import { UpdatesPanel } from "./UpdatesPanel";
+import { openReportProblem } from "../reportProblem";
 import { WebSearchPanel } from "./WebSearchPanel";
 import { VoiceTranscriptionPanel } from "./VoiceTranscriptionPanel";
 import { CodingHarnessesPanel } from "./CodingHarnessesPanel";
@@ -204,6 +205,7 @@ function UpdatesSection() {
       onAutomaticDownloadsChange={(enabled) =>
         void updatePreferences.setAutomaticDownloads(enabled)
       }
+      onReportProblem={() => openReportProblem()}
     />
   );
 }

@@ -42,10 +42,19 @@ const MENU_COMMAND_SHORTCUTS = {
   ShellShortcutAction | Record<ShellShortcutMode, ShellShortcutAction>
 >;
 
-/** Menu items that run no shortcut: the shell handles each one itself. */
+/**
+ * Menu items that run no shortcut. The shell opens Documentation and the
+ * command install; the Report a problem host (`ReportProblemDialog.tsx`)
+ * answers the rest of Help, because it stays mounted when the app itself
+ * failed to boot or crashed.
+ */
 const MENU_COMMANDS_WITHOUT_SHORTCUTS = [
   "documentation",
   "install-cli-command",
+  "release-notes",
+  "report-problem",
+  "show-logs",
+  "export-diagnostics",
 ] as const;
 
 export type MenuCommand =
@@ -95,13 +104,21 @@ export function menuCommandShortcut(
  * caller's lifetime instead of being torn down and rebound every time a
  * callback changes identity between renders. Outside the desktop app there is
  * no host to raise anything, so nothing is registered at all.
+ *
+ * Registration is asynchronous, so an event raised before it finishes is
+ * missed. `onListening` runs once the listener is in place: a caller whose
+ * event reports lasting state reads that state there, and from then on no
+ * change can slip past.
  */
 export function useNativeHostEvent(
   event: string,
   handler: (payload: unknown) => void,
+  onListening?: () => void,
 ): void {
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
+  const onListeningRef = useRef(onListening);
+  onListeningRef.current = onListening;
   useEffect(() => {
     if (!isTauri()) return;
     let cancelled = false;
@@ -109,8 +126,12 @@ export function useNativeHostEvent(
     void listen<unknown>(event, ({ payload }) =>
       handlerRef.current(payload),
     ).then((stop) => {
-      if (cancelled) stop();
-      else unlisten = stop;
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlisten = stop;
+      onListeningRef.current?.();
     });
     return () => {
       cancelled = true;

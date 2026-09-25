@@ -136,6 +136,17 @@ export function useQuitPrompt(): QuitPromptController {
   return { update, answering, answer };
 }
 
+/**
+ * Quit Tidebreak and open it again, through the quit prompt: working agents
+ * are asked about first, the way the Quit menu item asks (decision 80). The
+ * way back from a server that stopped after it started, which nothing in the
+ * running process can start again safely.
+ */
+export async function restartTidebreak(): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("restart_app");
+}
+
 /** The previous run of the app, which ended without a clean exit. */
 export type UncleanExit = {
   startedAt: string | null;

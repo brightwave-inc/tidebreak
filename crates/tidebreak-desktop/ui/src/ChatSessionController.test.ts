@@ -136,6 +136,45 @@ describe("ChatSessionController", () => {
     expect(h.sockets).toHaveLength(4);
   });
 
+  it("retries at once on Retry now and starts the backoff over", async () => {
+    const h = harness();
+    h.controller.start();
+    h.latest().onclose?.();
+    vi.advanceTimersByTime(INITIAL_RECONNECT_DELAY_MS);
+    h.latest().onclose?.();
+    vi.advanceTimersByTime(INITIAL_RECONNECT_DELAY_MS * 2);
+    h.latest().onclose?.();
+    // The backoff is at 1 s now; Retry now does not wait for it.
+    expect(h.sockets).toHaveLength(3);
+
+    let settled = false;
+    const retried = h.controller.retryNow().then(() => (settled = true));
+    expect(h.sockets).toHaveLength(4);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    // The attempt fails: the promise settles, and the next retry is back on
+    // the first step of the backoff rather than the 2 s one.
+    h.latest().onclose?.();
+    await retried;
+    expect(settled).toBe(true);
+    vi.advanceTimersByTime(INITIAL_RECONNECT_DELAY_MS);
+    expect(h.sockets).toHaveLength(5);
+  });
+
+  it("settles Retry now when the retried socket opens", async () => {
+    const h = harness();
+    h.controller.start();
+    h.latest().onclose?.();
+    const retried = h.controller.retryNow();
+    h.latest().onopen?.();
+    await retried;
+    expect(h.states).toEqual(["reconnecting", "live"]);
+    // Live: another press has nothing to retry and opens nothing.
+    await h.controller.retryNow();
+    expect(h.sockets).toHaveLength(2);
+  });
+
   it("treats error as close-and-recover even when close never fires", () => {
     const h = harness();
     h.controller.start();

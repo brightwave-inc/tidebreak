@@ -6,12 +6,30 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BootFailure,
   bootDebugReport,
+  bootFailureCopy,
+  displayDataDir,
+  LATEST_RELEASE_URL,
   type BootAttachment,
 } from "./BootFailure";
+import type { BootFailureKind, LocalBootFailure } from "./bootRecovery";
 
 vi.mock("./host", () => ({
   hasMacOverlayTitlebar: () => false,
+  hasNativeHost: () => true,
 }));
+
+const openInBrowser = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("./openInBrowser", () => ({ openInBrowser }));
+
+const DATA_DIR =
+  "/Users/example/Library/Application Support/io.brightwave.tidebreak";
+
+function localFailure(
+  kind: BootFailureKind,
+  over: Partial<LocalBootFailure> = {},
+): LocalBootFailure {
+  return { kind, stopped: false, dataDir: DATA_DIR, ...over };
+}
 
 const remote: BootAttachment = {
   attachment: "remote",
@@ -90,6 +108,114 @@ describe("BootFailure", () => {
     expect(onRetry).toHaveBeenCalledOnce();
   });
 
+  it("runs the boot again from Try again, and waits for it", async () => {
+    const user = userEvent.setup();
+    let finish = () => {};
+    const onRetry = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    renderFailure({
+      attachment: local,
+      stage: "connect",
+      local: localFailure("instance_lock"),
+      onRetry,
+    });
+
+    await user.click(screen.getByRole("button", { name: /Try again/ }));
+    expect(onRetry).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: /Try again/ })).toBeDisabled();
+    finish();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Try again/ })).toBeEnabled(),
+    );
+  });
+
+  it("names a known failure and the action it needs", () => {
+    renderFailure({
+      attachment: local,
+      stage: "connect",
+      error: new Error(
+        "configuration error: another Tidebreak process is already running on the data directory",
+      ),
+      local: localFailure("instance_lock"),
+    });
+    const screenRoot = screen.getByRole("alert");
+    expect(screenRoot).toHaveTextContent(
+      "Another Tidebreak is using your data.",
+    );
+    expect(screenRoot).toHaveTextContent("Quit it, then try again.");
+    // The CLI's advice is for a terminal, not for this screen.
+    expect(screenRoot).not.toHaveTextContent("--attach");
+    expect(screenRoot).not.toHaveTextContent("TIDEBREAK_DATA_DIR");
+  });
+
+  it("says the conversations are still on disk, and where", async () => {
+    const user = userEvent.setup();
+    const onRevealDataDir = vi.fn();
+    renderFailure({
+      attachment: local,
+      stage: "connect",
+      local: localFailure("disk_full"),
+      onRevealDataDir,
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Your conversations are still on disk at ~/Library/Application Support/io.brightwave.tidebreak.",
+    );
+    await user.click(screen.getByRole("button", { name: /Show/ }));
+    expect(onRevealDataDir).toHaveBeenCalledOnce();
+
+    // Another machine's data is not on this computer.
+    cleanup();
+    renderFailure({ local: localFailure("disk_full") });
+    expect(screen.getByRole("alert")).not.toHaveTextContent("still on disk");
+  });
+
+  it("offers a restart, not another boot, when the server stopped after starting", async () => {
+    const user = userEvent.setup();
+    const onRetry = vi.fn();
+    const onRestart = vi.fn(async () => {});
+    renderFailure({
+      attachment: local,
+      stage: "connect",
+      local: localFailure("unknown", { stopped: true }),
+      onRetry,
+      onRestart,
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Tidebreak's server stopped.",
+    );
+    expect(
+      screen.queryByRole("button", { name: /Try again/ }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Restart Tidebreak/ }));
+    expect(onRestart).toHaveBeenCalledOnce();
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
+  it("sends data from a newer version to the latest release", async () => {
+    const user = userEvent.setup();
+    renderFailure({
+      attachment: local,
+      stage: "connect",
+      local: localFailure("newer_version"),
+    });
+    await user.click(
+      screen.getByRole("button", { name: /Get the latest version/ }),
+    );
+    expect(openInBrowser).toHaveBeenCalledWith(LATEST_RELEASE_URL);
+  });
+
+  it("offers Report a problem", async () => {
+    const user = userEvent.setup();
+    const onReportProblem = vi.fn();
+    renderFailure({ onReportProblem });
+    await user.click(screen.getByRole("button", { name: "Report a problem…" }));
+    expect(onReportProblem).toHaveBeenCalledOnce();
+  });
+
   it("copies the debug report and says so", async () => {
     const user = userEvent.setup();
     const writeClipboard = vi.fn(async (_text: string) => {});
@@ -104,6 +230,67 @@ describe("BootFailure", () => {
     expect(
       await screen.findByRole("button", { name: "Copied" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("bootFailureCopy", () => {
+  it("gives every known local failure its own sentence and action", () => {
+    const kinds: BootFailureKind[] = [
+      "instance_lock",
+      "newer_version",
+      "unrecognized_data",
+      "unsupported_version",
+      "migration",
+      "disk_full",
+      "keychain",
+    ];
+    const headlines = new Set<string>();
+    for (const kind of kinds) {
+      const copy = bootFailureCopy({
+        stage: "connect",
+        error: new Error("store error: raw host text"),
+        attachment: local,
+        local: localFailure(kind),
+      });
+      headlines.add(copy.headline);
+      // The host's log fragment stays out of the sentence a person reads.
+      expect(copy.body, kind).not.toContain("store error");
+    }
+    expect(headlines.size).toBe(kinds.length);
+    for (const kind of [
+      "newer_version",
+      "unrecognized_data",
+      "unsupported_version",
+    ] as const) {
+      expect(
+        bootFailureCopy({
+          stage: "connect",
+          error: null,
+          attachment: local,
+          local: localFailure(kind),
+        }).primary,
+      ).toBe("latest");
+    }
+  });
+
+  it("keeps the host's words for a failure it cannot name", () => {
+    const copy = bootFailureCopy({
+      stage: "connect",
+      error: "server error: the listener could not bind",
+      attachment: local,
+      local: localFailure("unknown"),
+    });
+    expect(copy.headline).toBe("Tidebreak could not start.");
+    // Without the error kind the host puts in front of its message.
+    expect(copy.body).toBe("The listener could not bind");
+  });
+
+  it("writes the home folder as ~", () => {
+    expect(displayDataDir(DATA_DIR)).toBe(
+      "~/Library/Application Support/io.brightwave.tidebreak",
+    );
+    expect(displayDataDir("/home/example/.tidebreak")).toBe("~/.tidebreak");
+    expect(displayDataDir("/var/lib/tidebreak")).toBe("/var/lib/tidebreak");
   });
 });
 

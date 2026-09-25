@@ -21,6 +21,37 @@ afterEach(() => {
 });
 
 describe("CodeSessionController", () => {
+  it("retries a dropped session socket at once on Retry now", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const states: string[] = [];
+    const controller = new CodeSessionController({
+      openSocket: (_after, onFrame) => {
+        const socket = new FakeSocket(onFrame);
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      getAfter: () => 0,
+      onEvents: () => undefined,
+      onConnectionState: (state) => states.push(state),
+    });
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]?.onclose?.();
+    expect(states).toEqual(["reconnecting"]);
+    expect(sockets).toHaveLength(1);
+
+    // No wait for the backoff: the retry opens a socket now and settles when
+    // that socket opens.
+    const retried = controller.retryNow();
+    expect(sockets).toHaveLength(2);
+    sockets[1]?.onopen?.();
+    await retried;
+    expect(states).toEqual(["reconnecting", "live"]);
+
+    controller.dispose();
+  });
+
   it("reveals an empty transcript after the initial socket stays quiet", async () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];

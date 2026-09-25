@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 import { Spinner } from "@/components/ui/spinner";
 import { openInBrowser } from "@/openInBrowser";
 
@@ -39,6 +40,8 @@ type UpdateReadyCardProps =
       /** The check you asked for failed; `message` says why. */
       status: "failed";
       message: string;
+      /** Run the check again. */
+      onRetry?: () => void;
       onDismiss: () => void;
     }
   | {
@@ -99,10 +102,10 @@ function cardCopy(props: UpdateReadyCardProps): {
       };
     case "up-to-date":
       return {
-        title: "You're up to date",
+        title: "Tidebreak is up to date",
         description: props.version
-          ? `Tidebreak ${props.version} is the latest version.`
-          : "You have the latest version of Tidebreak.",
+          ? `You're on the latest version, ${props.version}.`
+          : "You're on the latest version.",
       };
     case "failed": {
       const { title, detail } = splitUpdateMessage(props.message);
@@ -154,6 +157,35 @@ function CardIcon({ status }: { status: UpdateReadyCardProps["status"] }) {
   }
 }
 
+/**
+ * Why the last restart or download did not happen, on the card that offers
+ * it again. The desktop words these as what failed, then what to do, so the
+ * first sentence is the title and the rest is the action: "A code session
+ * is still working on a turn." / "Stop the running turn, or let it finish,
+ * then restart."
+ *
+ * A restart that was refused leaves the update ready, and the person can
+ * clear the cause, so it is a warning. A download that failed is a failure.
+ */
+function UpdateErrorNotice({
+  status,
+  message,
+}: {
+  status: UpdateReadyCardProps["status"];
+  message: string;
+}) {
+  const { title, detail } = splitUpdateMessage(message);
+  return (
+    <Notice
+      tone={status === "available" ? "critical" : "warning"}
+      title={title}
+      className="mt-3"
+    >
+      {detail}
+    </Notice>
+  );
+}
+
 export function UpdateReadyCard(props: UpdateReadyCardProps) {
   const { onDismiss } = props;
   const status = props.status ?? "ready";
@@ -187,16 +219,16 @@ export function UpdateReadyCard(props: UpdateReadyCardProps) {
           {description && (
             <p className="mt-1 text-sm text-muted-foreground">{description}</p>
           )}
-          {error && (
-            <p
-              className="mt-2 text-sm break-words text-critical-foreground"
-              role="alert"
-            >
-              {error}
-            </p>
-          )}
         </div>
       </div>
+
+      {error && <UpdateErrorNotice status={status} message={error} />}
+
+      {props.status === "failed" && props.onRetry && (
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <NoticeRetryButton onClick={props.onRetry} />
+        </div>
+      )}
 
       {offersRelease && (
         <div className="mt-4 flex flex-wrap items-center gap-2">

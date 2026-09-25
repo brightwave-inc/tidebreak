@@ -2335,6 +2335,12 @@ body {
     text-wrap: pretty;
   }
 
+  /* The sentence under a boot screen's headline, at a reading width. */
+  .boot .boot-message {
+    max-width: min(34rem, 100%);
+    text-wrap: pretty;
+  }
+
   .boot .boot-error-detail {
     max-width: 34rem;
     font-family: var(--mono);

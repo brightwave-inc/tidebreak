@@ -153,11 +153,27 @@ where
     F: Future<Output = Result<DbStore>>,
 {
     let needs_marker = prepare_for_product_major(&config.data_dir, product_major).await?;
-    let store = connector(config.database_url()?).await?;
+    let store = connector(config.database_url()?)
+        .await
+        .map_err(database_failure)?;
     if needs_marker {
         write_current_marker(&config.data_dir)?;
     }
     Ok(store)
+}
+
+/// A database this build could not open or bring up to date, worded so the
+/// boot screen can tell it from the other store failures a boot can hit
+/// ([`crate::boot_failure`]). A refusal that already speaks for itself, such
+/// as a database a newer build wrote, passes through unchanged.
+fn database_failure(error: AgentError) -> AgentError {
+    match error {
+        AgentError::Store(detail) => AgentError::Store(format!(
+            "{}: {detail}",
+            crate::boot_failure::DATABASE_FAILURE
+        )),
+        other => other,
+    }
 }
 
 /// Prepare the SQLite files and return whether a current marker must be
@@ -616,6 +632,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::boot_failure::{classify_boot_failure, BootFailureKind};
     use crate::code;
 
     fn chat() -> Chat {
@@ -1228,6 +1245,10 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("refusing to open"));
+        assert_eq!(
+            classify_boot_failure(&error.to_string()),
+            BootFailureKind::UnrecognizedData
+        );
 
         let unchanged = DbStore::connect(&config.database_url().unwrap())
             .await
@@ -1270,7 +1291,12 @@ mod tests {
         })
         .await;
 
-        assert!(result.is_err());
+        let error = result.err().expect("the failed connect is reported");
+        assert_eq!(
+            classify_boot_failure(&error.to_string()),
+            BootFailureKind::Migration,
+            "{error}"
+        );
         assert!(!dir.path().join(MARKER_FILE).exists());
     }
 
@@ -1379,6 +1405,10 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("major version 2"), "{error}");
+        assert_eq!(
+            classify_boot_failure(&error.to_string()),
+            BootFailureKind::UnsupportedVersion
+        );
         assert_eq!(std::fs::read(database).unwrap(), b"database");
         assert_eq!(std::fs::read(vector).unwrap(), b"vector");
         for sidecar in sqlite_files(&dir.path().join(DATABASE_FILE))
@@ -1431,6 +1461,10 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("refusing to open"));
+        assert_eq!(
+            classify_boot_failure(&error.to_string()),
+            BootFailureKind::UnrecognizedData
+        );
 
         let unchanged = DbStore::connect(&config.database_url().unwrap())
             .await

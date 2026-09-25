@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { friendlyErrorMessage } from "./lib/utils";
+
 const UPDATE_STATE_EVENT = "desktop-update-state";
 /** Raised by the native "Check for Updates…" menu item. */
 export const UPDATE_CHECK_REQUESTED_EVENT = "desktop-update-check-requested";
@@ -148,10 +150,17 @@ export function useDesktopUpdates(): DesktopUpdatesController {
   const restart = useCallback(async () => {
     try {
       await restartForDesktopUpdate();
-    } catch {
+    } catch (reason) {
+      // The desktop says why it refused, such as a code turn still running
+      // at its deadline, and the update state it sends carries the same
+      // sentence. Keep it: this used to replace it with a line that said
+      // nothing about what to do.
       setState((current) => ({
         ...current,
-        error: UPDATE_RESTART_ERROR,
+        error: friendlyErrorMessage(
+          reason,
+          current.error ?? UPDATE_RESTART_ERROR,
+        ),
       }));
     }
   }, []);

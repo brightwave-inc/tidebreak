@@ -10,6 +10,20 @@ profiles.
 
 ## Export diagnostics
 
+In the desktop app, choose **Help → Export Diagnostics…** to save the export
+to a file you pick. **Help → Report a Problem…** saves the same file and then
+opens a GitHub issue with the app version, operating system, and architecture
+filled in, and nothing else; you attach the file yourself. Windows and Linux
+builds have no menu bar, so Settings → Updates offers Report a problem… too,
+and so do the boot screen and the crash screen. **Help → Show Logs** opens the
+profile's `logs` folder.
+
+The desktop saves the export even when its server never started or has
+stopped, which is when a report matters most. With no server to ask, the app
+builds the bundle itself from the same allowlist. Its snapshot then describes
+the app process alone, with no request or model measurements, and the logs,
+`boot-failures.log` above all, say what went wrong.
+
 With `TIDEBREAK_DATA_DIR` unset, the command reads the running Tidebreak app:
 
 ```sh

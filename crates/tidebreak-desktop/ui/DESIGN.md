@@ -410,6 +410,13 @@ the action slot, long text, and a narrow panel.
   `String(err)`, `` `${err}` ``, `err.toString()`, `JSON.stringify(err)`, and
   concatenating a caught value, except on a line marked
   `raw-error-ok: <reason>`.
+- A lost connection to the server is `ConnectionStatus`
+  (`ConnectionNotice.tsx`), above the composer and as wide as it, in a
+  conversation and a code session alike: an `info` line while the socket
+  reconnects, a `warning` notice with Retry now once it has been down for 30
+  seconds (plus Work on this computer on another machine), and a `critical`
+  notice with Restart Tidebreak when the local server stopped. Do not build a
+  second reconnect indicator.
 - `docked="top"` or `"bottom"` fits a notice to a pane edge as a strip.
   `density="compact"` sets it in the dense chrome size for transcripts,
   composers, and rows. Put machine output under the message in
@@ -421,7 +428,13 @@ content. Compaction stays a plain text event in the same column.
 
 A page that crashes keeps its rail: every route under a layout sets
 `errorComponent: RoutePaneError`, which says so in the pane with Try again, Go
-home, and Copy debug info. A crash in the shell or a layout takes the window
+home, Report a problem…, and Copy debug info. A crash in the shell or a layout takes the window
 through `RouteCrashScreen`, the same screen the app-wide `ErrorBoundary`
 draws. An address no route answers renders `RouteNotFound`: an `Empty` state
 with a way home, inside the frame.
+
+Every way to report a problem opens `ReportProblemDialog`: the Help menu, the
+boot screen, both crash screens, Settings → Updates, and a workspace's menu.
+It is mounted beside the app, so it still opens when the app never booted or
+crashed. Do not add a second report flow; a surface with more context, such as
+a workspace's session, adds a choice to the dialog instead.

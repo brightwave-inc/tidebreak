@@ -58,6 +58,7 @@ import {
   uneffPreparationSteps,
   uneffSessionSettings,
 } from "./uneffMe";
+import { openReportProblem } from "../reportProblem";
 import { bulkArchiveWorkspaces } from "./bulkWorkspaceArchive";
 import { RepositorySettingsDialog } from "./RepositorySettingsDialog";
 
@@ -993,7 +994,10 @@ export function useWorkspaceCardCommands(): {
         return;
       }
       case "uneff-me": {
-        void runUneffMe(context);
+        // Report a problem is one dialog wherever it starts. From a
+        // workspace it adds the agent path, which takes this session's
+        // debug report along (decision 81).
+        openReportProblem({ askAgent: () => void runUneffMe(context) });
         return;
       }
       case "open-pr": {

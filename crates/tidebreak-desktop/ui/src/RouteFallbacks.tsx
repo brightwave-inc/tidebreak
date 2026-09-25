@@ -19,6 +19,7 @@ import { Notice, NoticeDetail } from "@/components/ui/notice";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { CrashScreen, homePathFor, useCopyCrashReport } from "./CrashScreen";
 import { reportRendererError } from "./rendererErrors";
+import { openReportProblem } from "./reportProblem";
 import { RouteFrame, useInsideRouteFrame } from "./RouteFrame";
 import { AppSidebar } from "./sidebar/AppSidebar";
 import { PaneDragBand } from "./WindowDragStrip";
@@ -90,8 +91,8 @@ export function RoutePaneError({ error, reset, info }: ErrorComponentProps) {
           }
         >
           <p>
-            Try the page again. If it keeps failing, reload the window or copy
-            the debug info for a bug report.
+            Try the page again. If it keeps failing, reload the window or report
+            the problem.
           </p>
           <NoticeDetail>
             {friendlyErrorMessage(error, "No error message was recorded.")}
@@ -117,6 +118,9 @@ export function RoutePaneError({ error, reset, info }: ErrorComponentProps) {
           >
             <House aria-hidden="true" />
             Go home
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => openReportProblem()}>
+            Report a problem…
           </Button>
           <Button size="sm" variant="ghost" onClick={() => void report.copy()}>
             {report.label}

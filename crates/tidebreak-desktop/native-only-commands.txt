@@ -24,6 +24,8 @@
 
 # Shell bootstrap and native window control
 server_info: hands the renderer the embedded server's address and per-launch token — the handshake that makes every HTTP route reachable, so it cannot itself be one.
+retry_server_boot: runs the embedded server's boot again after it failed before binding; the server it would ask is the one that is not running.
+local_boot_failure: says which known failure stopped the embedded server and where its data folder is, for the boot screen; the server that failed cannot answer for itself.
 request_user_attention: native window attention hint when a parked question needs the user.
 is_window_focused: reports main-window focus; document.hidden is the tab, not the window.
 present_native_notification: posts an OS banner and asks for notification permission on first unfocused present.
@@ -108,6 +110,8 @@ restart_app: quits through that same prompt and opens the app again, so macOS ap
 unclean_exit_notice: reports that the previous desktop process ended without its exit handler, which only the shell's own run marker records.
 dismiss_unclean_exit_notice: clears that notice for this run.
 save_diagnostics_report: writes the diagnostics export to a file chosen in the native save dialog.
+problem_report_facts: reads this computer's operating system version and architecture for a bug report's prefill; only the native shell knows the machine it runs on.
+reveal_logs_directory: opens this computer's logs folder in its file manager; a headless server cannot open desktop UI.
 
 # TODO(record 7): commands that predate the gate and do not fit the native-only
 # set. Each should become a server route with a CLI client; until then they are

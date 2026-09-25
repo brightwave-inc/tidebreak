@@ -25,6 +25,7 @@ pub mod auth;
 mod blob_orphan_auditor;
 mod blob_retirement_worker;
 #[doc(hidden)]
+pub mod boot_failure;
 pub mod bus;
 pub mod chat_titling;
 pub mod chatgpt_runtime;
@@ -2085,15 +2086,10 @@ async fn bind_inner(
     // or an unexpected return, starts the worker again after a capped wait,
     // and reports its health in the diagnostics snapshot.
     let worker_health = state.diagnostics.worker_health();
-    let queued_turn_promoter = {
-        let state = state.clone();
-        let promoter = route_runtime.queued_turn_promoter;
-        worker_supervisor::spawn_supervised(
-            worker_health.clone(),
-            "queued_turn_promoter",
-            move || promoter(state.clone(), std::time::Duration::from_secs(5)),
-        )
-    };
+    // Taken now and started below, once every step that can still fail has
+    // passed: a boot that fails and is retried must leave nothing running.
+    let promoter_state = state.clone();
+    let promoter = route_runtime.queued_turn_promoter;
     let server_store = state.store.clone();
     let client_execution_wake = state.events.client_execution_wake();
     let data_dir = state.config.data_dir.clone();
@@ -2118,6 +2114,23 @@ async fn bind_inner(
     // start so a connection lost during boot cannot leave a duplicate runtime
     // alive beside the process that acquires the released lease.
     store_ownership.verify().await?;
+    // Publish before workers start answering so an attach racing boot sees a
+    // file that matches the bound address. It carries the primary bearer and
+    // the narrow local-import capability, never the executor credential. See
+    // decisions 0009 and 0016. It is the last step that can fail, so it runs
+    // before any background task starts: a boot that fails here and is
+    // retried leaves no promoter, MCP server, or engine child behind.
+    let listen_endpoint = listen_endpoint::ListenEndpointGuard::publish(
+        data_dir,
+        &format!("http://{local_addr}"),
+        token.as_ref(),
+        local_import_token.as_ref(),
+    )?;
+    let queued_turn_promoter = worker_supervisor::spawn_supervised(
+        worker_health.clone(),
+        "queued_turn_promoter",
+        move || promoter(promoter_state.clone(), std::time::Duration::from_secs(5)),
+    );
     // The saved MCP servers connect in the background, each publishing its
     // tools as it comes up, so a slow or unreachable server never holds the
     // port closed. A turn that starts first waits briefly for them; see
@@ -2142,16 +2155,6 @@ async fn bind_inner(
     // pip or host-tool downloads. Built-in plugins still start warming on
     // the first open; nothing waits on this pass.
     code_execution.spawn_dependency_provisioning();
-    // Publish before workers start answering so an attach racing boot sees a
-    // file that matches the bound address. It carries the primary bearer and
-    // the narrow local-import capability, never the executor credential. See
-    // decisions 0009 and 0016.
-    let listen_endpoint = listen_endpoint::ListenEndpointGuard::publish(
-        data_dir,
-        &format!("http://{local_addr}"),
-        token.as_ref(),
-        local_import_token.as_ref(),
-    )?;
 
     let turn_worker = supervise_worker(&worker_health, "turn_worker", turn_worker, |worker| {
         worker.run()

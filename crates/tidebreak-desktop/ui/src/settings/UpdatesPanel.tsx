@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { CircleCheck, Download, RefreshCw, RotateCw } from "lucide-react";
+import {
+  CircleCheck,
+  Download,
+  LifeBuoy,
+  RefreshCw,
+  RotateCw,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
@@ -74,6 +80,7 @@ export function UpdatesPanel({
   onDownload,
   onRestart,
   onAutomaticDownloadsChange,
+  onReportProblem,
 }: {
   state: DesktopUpdateState;
   /** The most recent explicit check confirmed the app is current. */
@@ -88,6 +95,11 @@ export function UpdatesPanel({
   onDownload: () => Promise<unknown>;
   onRestart: () => Promise<void>;
   onAutomaticDownloadsChange: (enabled: boolean) => void;
+  /**
+   * Open Report a problem. It lives here as well as in the Help menu because
+   * Windows and Linux builds have no menu bar.
+   */
+  onReportProblem?: () => void;
 }) {
   const [reportedVersion, setReportedVersion] = useState<string | null>(null);
   const version = appVersion ?? reportedVersion;
@@ -177,6 +189,20 @@ export function UpdatesPanel({
         </SettingsField>
         {preferencesError && <SettingsError>{preferencesError}</SettingsError>}
       </SettingsSection>
+
+      {onReportProblem && (
+        <SettingsSection
+          title="Report a problem"
+          description="Save a diagnostics report and open a GitHub issue with your version, operating system, and architecture filled in."
+        >
+          <div>
+            <Button type="button" variant="outline" onClick={onReportProblem}>
+              <LifeBuoy />
+              Report a problem…
+            </Button>
+          </div>
+        </SettingsSection>
+      )}
 
       <SettingsSection title="About">
         <div className="flex items-center justify-between gap-4">

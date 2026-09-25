@@ -2,7 +2,11 @@
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MENU_COMMAND_EVENT, useShellMenuCommands } from "./nativeMenu";
+import {
+  MENU_COMMAND_EVENT,
+  useNativeHostEvent,
+  useShellMenuCommands,
+} from "./nativeMenu";
 import {
   SHELL_SHORTCUTS,
   type ShellShortcutHandlers,
@@ -83,5 +87,39 @@ describe("useShellMenuCommands", () => {
 
     expect(handlers["open-settings"]).not.toHaveBeenCalled();
     expect(handlers["open-command-palette"]).toHaveBeenCalledWith(null);
+  });
+});
+
+describe("useNativeHostEvent", () => {
+  function Listener({
+    handler,
+    onListening,
+  }: {
+    handler: (payload: unknown) => void;
+    onListening: () => void;
+  }) {
+    useNativeHostEvent("desktop-test-event", handler, onListening);
+    return null;
+  }
+
+  it("reads lasting state only once the listener is in place", async () => {
+    // A caller catches up on anything raised before registration finished,
+    // so the callback must run after the listener exists, never before.
+    const order: string[] = [];
+    const handler = vi.fn();
+    render(
+      <Listener
+        handler={handler}
+        onListening={() =>
+          order.push(
+            hostListeners.has("desktop-test-event") ? "listening" : "early",
+          )
+        }
+      />,
+    );
+    await waitFor(() => expect(order).toEqual(["listening"]));
+    hostListeners.get("desktop-test-event")?.({ payload: 1 });
+    expect(handler).toHaveBeenCalledWith(1);
+    expect(order).toEqual(["listening"]);
   });
 });

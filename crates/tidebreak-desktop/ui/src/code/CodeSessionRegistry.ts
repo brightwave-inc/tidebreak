@@ -267,6 +267,15 @@ export function peekCodeSession(
   return entry ? { store: entry.store, refCount: entry.refCount } : undefined;
 }
 
+/**
+ * Reconnect an open session's socket now rather than on its backoff: the
+ * connection notice's Retry now. Resolves when the attempt settles, and at
+ * once for a session with no open socket.
+ */
+export function retryCodeSessionConnection(sessionId: string): Promise<void> {
+  return registry.get(sessionId)?.controller?.retryNow() ?? Promise.resolve();
+}
+
 /** Stamp a finished recap onto a retained or open session store. */
 export function applyLiveTurnRewrite(
   sessionId: string,

@@ -1,13 +1,21 @@
 import { useEffect, useState } from "react";
-import { Laptop, RotateCw } from "lucide-react";
+import { ExternalLink, Laptop, RotateCw } from "lucide-react";
 
 import type { Attachment } from "./api";
+import type { LocalBootFailure } from "./bootRecovery";
 import { copyPlainText } from "./ClipboardCopyButton";
 import { BootBrand } from "./Logomark";
+import { openInBrowser } from "./openInBrowser";
 import { WindowDragStrip } from "./WindowDragStrip";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { useRetry } from "@/components/ui/useRetry";
 import { scrubLogText } from "./rendererErrors";
 import { friendlyErrorMessage, sentenceStart } from "@/lib/utils";
+
+/** Where a person gets the newest Tidebreak when this one is too old. */
+export const LATEST_RELEASE_URL =
+  "https://github.com/brightwave-inc/tidebreak/releases/latest";
 
 /**
  * The screen a reader lands on when the shell cannot reach the API it is
@@ -25,6 +33,12 @@ import { friendlyErrorMessage, sentenceStart } from "@/lib/utils";
  * not coming back right now" — a way to return this window to the server inside
  * the app. The error is worded for the reader on the screen; the raw error
  * rides in the copied debug report, where a bug report needs it.
+ *
+ * The server inside the app fails for a handful of known reasons, and each
+ * gets its own sentence and the one action that helps: another process
+ * holding the data folder, data from a newer version, a full disk. Try again
+ * really runs the boot again, a server that stopped after it started offers
+ * a restart, and the screen says where the conversations still are.
  */
 
 /** Which step of boot failed. */
@@ -48,8 +62,19 @@ export type BootFailureProps = {
   error: unknown;
   attachment: BootAttachment | null;
   appVersion: string | null;
-  onRetry: () => void;
+  /**
+   * What the desktop knows about a local server that did not start: which
+   * known failure it was, whether it stopped after starting, and where the
+   * data folder is. `null` for a remote machine or outside the desktop.
+   */
+  local?: LocalBootFailure | null;
+  onRetry: () => void | Promise<void>;
   onWorkLocally: () => Promise<void>;
+  /** Quit and reopen Tidebreak, for a server that stopped after starting. */
+  onRestart?: () => void | Promise<void>;
+  /** Open the data folder in the file manager. */
+  onRevealDataDir?: () => void | Promise<void>;
+  onReportProblem?: () => void;
   /** Injectable for tests; defaults to the real clipboard. */
   writeClipboard?: (text: string) => Promise<void>;
 };
@@ -117,12 +142,160 @@ function attachedMachine(attachment: BootAttachment | null): string | null {
   return attachment.baseUrl;
 }
 
-function headline(attachment: BootAttachment | null, stage: BootStage): string {
+/** What the boot screen says, and the one action it leads with. */
+export type BootFailureCopy = {
+  headline: string;
+  /** What happened and what to do, as one or two sentences. */
+  body: string;
+  /** The host's own words, for a failure the sentence cannot carry. */
+  detail: string | null;
+  /** Run boot again, restart the app, or get a newer version. */
+  primary: "retry" | "restart" | "latest";
+};
+
+const LATEST_VERSION_STEP =
+  "Install the latest version, then open Tidebreak again.";
+
+/** The kind the host's error type puts before its message. */
+const HOST_ERROR_KIND = /^(?:configuration|store|secret|server) error:\s*/i;
+
+/**
+ * The words for a failed boot. A remote machine and the catalog step keep
+ * their headlines and the worded error; a local server that did not start
+ * speaks for the known failure it hit.
+ */
+export function bootFailureCopy({
+  stage,
+  error,
+  attachment,
+  local = null,
+}: {
+  stage: BootStage;
+  error: unknown;
+  attachment: BootAttachment | null;
+  local?: LocalBootFailure | null;
+}): BootFailureCopy {
+  // Worded for the reader, and set as a sentence: the host writes its
+  // errors as log fragments ("another instance already owns this data
+  // directory"). The raw error, in the machine's voice, goes in the copied
+  // report.
+  const worded = sentenceStart(
+    friendlyErrorMessage(error, "No error message was recorded."),
+  );
   const machine = attachedMachine(attachment);
-  if (machine) return `Could not reach ${machine}.`;
-  return stage === "connect"
-    ? "Tidebreak could not connect to its server."
-    : "Tidebreak started, but could not load its models.";
+  if (machine) {
+    return {
+      headline: `Could not reach ${machine}.`,
+      body: worded,
+      detail: null,
+      primary: "retry",
+    };
+  }
+  if (stage === "catalog") {
+    return {
+      headline: "Tidebreak started, but could not load its models.",
+      body: worded,
+      detail: null,
+      primary: "retry",
+    };
+  }
+  if (!local) {
+    return {
+      headline: "Tidebreak could not connect to its server.",
+      body: worded,
+      detail: null,
+      primary: "retry",
+    };
+  }
+  // The host's own words, without the error kind it prefixes them with
+  // ("store error: …"), for the failures a sentence cannot carry.
+  const hostWords = sentenceStart(
+    friendlyErrorMessage(error, "No error message was recorded.").replace(
+      HOST_ERROR_KIND,
+      "",
+    ),
+  );
+  if (local.stopped) {
+    return {
+      headline: "Tidebreak's server stopped.",
+      body: "Restart Tidebreak to start it again.",
+      detail: null,
+      primary: "restart",
+    };
+  }
+  switch (local.kind) {
+    case "instance_lock":
+      return {
+        headline: "Another Tidebreak is using your data.",
+        body: "Another Tidebreak process has your data folder open, such as a tidebreak command running in Terminal. Quit it, then try again.",
+        detail: null,
+        primary: "retry",
+      };
+    case "newer_version":
+      return {
+        headline: "Your data is from a newer version of Tidebreak.",
+        body: `This version cannot open it. ${LATEST_VERSION_STEP}`,
+        detail: null,
+        primary: "latest",
+      };
+    case "unrecognized_data":
+      return {
+        headline: "Tidebreak does not recognize your data.",
+        body: "It may come from a newer version of Tidebreak, or part of it may be damaged. Tidebreak changed nothing. Install the latest version, and report a problem if that does not help.",
+        detail: null,
+        primary: "latest",
+      };
+    case "unsupported_version":
+      return {
+        headline: "This version of Tidebreak cannot open your data.",
+        body: `It was released before it could. ${LATEST_VERSION_STEP}`,
+        detail: null,
+        primary: "latest",
+      };
+    case "migration":
+      return {
+        headline: "Tidebreak could not update your data.",
+        body: "Nothing is lost: Tidebreak copies your data before it updates it. Try again, and report a problem if it keeps failing.",
+        detail: hostWords,
+        primary: "retry",
+      };
+    case "disk_full":
+      return {
+        headline: "Your disk is full.",
+        body: "Tidebreak needs free space to open your data. Free up space, then try again.",
+        detail: null,
+        primary: "retry",
+      };
+    case "keychain":
+      return {
+        headline: "Tidebreak could not read its saved credentials.",
+        body: "Check that your login keychain is unlocked, then try again.",
+        detail: null,
+        primary: "retry",
+      };
+    case "unknown":
+      return {
+        headline: "Tidebreak could not start.",
+        body: hostWords,
+        detail: null,
+        primary: "retry",
+      };
+  }
+}
+
+/**
+ * The data folder as a person reads it: the home folder as `~`. The full
+ * path stays in the tooltip.
+ */
+export function displayDataDir(path: string): string {
+  return path.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
+}
+
+/** The file manager's name on this platform. */
+function revealLabel(): string {
+  return globalThis.navigator?.userAgent.includes("Mac OS")
+    ? "Show in Finder"
+    : "Show folder";
 }
 
 export function BootFailure({
@@ -130,15 +303,24 @@ export function BootFailure({
   error,
   attachment,
   appVersion,
+  local = null,
   onRetry,
   onWorkLocally,
+  onRestart,
+  onRevealDataDir,
+  onReportProblem,
   writeClipboard = copyPlainText,
 }: BootFailureProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
     "idle",
   );
   const [detaching, setDetaching] = useState(false);
+  const retry = useRetry(onRetry);
+  const restart = useRetry(() => onRestart?.());
   const machine = attachedMachine(attachment);
+  const copy = bootFailureCopy({ stage, error, attachment, local });
+  // A remote machine's boot never reads this computer's data folder.
+  const dataDir = machine ? null : (local?.dataDir ?? null);
 
   useEffect(() => {
     if (copyState === "idle") return;
@@ -173,31 +355,76 @@ export function BootFailure({
     }
   }
 
+  const busy = detaching || retry.pending || restart.pending;
+  const primary =
+    copy.primary === "restart" && onRestart ? (
+      <Button size="sm" onClick={restart.retry} disabled={busy}>
+        {restart.pending ? (
+          <Spinner aria-hidden="true" className="text-current" />
+        ) : (
+          <RotateCw size={16} aria-hidden />
+        )}
+        Restart Tidebreak
+      </Button>
+    ) : copy.primary === "latest" ? (
+      <Button
+        size="sm"
+        onClick={() => void openInBrowser(LATEST_RELEASE_URL)}
+        disabled={busy}
+      >
+        Get the latest version
+        <ExternalLink size={16} aria-hidden />
+      </Button>
+    ) : (
+      <Button size="sm" onClick={retry.retry} disabled={busy}>
+        {retry.pending ? (
+          <Spinner aria-hidden="true" className="text-current" />
+        ) : (
+          <RotateCw size={16} aria-hidden />
+        )}
+        Try again
+      </Button>
+    );
+
   return (
     <div className="boot" role="alert">
       <WindowDragStrip />
       <BootBrand />
-      <h1>{headline(attachment, stage)}</h1>
-      {/* Worded for the reader, and set as the sentence under the headline:
-          the host writes its errors as log fragments ("another instance
-          already owns this data directory"). The raw error, in the
-          machine's voice, goes in the copied report. */}
-      <p>
-        {sentenceStart(
-          friendlyErrorMessage(error, "No error message was recorded."),
-        )}
-      </p>
+      <h1>{copy.headline}</h1>
+      <p className="boot-message">{copy.body}</p>
+      {copy.detail && <p className="boot-error-detail">{copy.detail}</p>}
       {machine && (
         <p className="boot-error-hint">
           Work on that machine keeps running. Returning to this computer changes
           nothing there.
         </p>
       )}
+      {dataDir && (
+        <p className="boot-error-hint">
+          Your conversations are still on disk at{" "}
+          {/* Whole, so the path never breaks at the space inside it. */}
+          <span className="font-mono whitespace-nowrap" title={dataDir}>
+            {displayDataDir(dataDir)}
+          </span>
+          .
+          {onRevealDataDir && (
+            <>
+              {" "}
+              <Button
+                type="button"
+                variant="link"
+                size="2xs"
+                className="inline h-auto border-0 p-0 align-baseline text-xs"
+                onClick={() => void onRevealDataDir()}
+              >
+                {revealLabel()}
+              </Button>
+            </>
+          )}
+        </p>
+      )}
       <div className="boot-actions">
-        <Button size="sm" onClick={onRetry} disabled={detaching}>
-          <RotateCw size={16} aria-hidden />
-          Try again
-        </Button>
+        {primary}
         {machine && (
           <Button
             size="sm"
@@ -207,6 +434,11 @@ export function BootFailure({
           >
             <Laptop size={16} aria-hidden />
             Work on this computer
+          </Button>
+        )}
+        {onReportProblem && (
+          <Button size="sm" variant="ghost" onClick={onReportProblem}>
+            Report a problem…
           </Button>
         )}
         <Button size="sm" variant="ghost" onClick={() => void onCopy()}>
