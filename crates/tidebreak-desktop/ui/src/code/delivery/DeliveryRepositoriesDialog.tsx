@@ -203,7 +203,7 @@ export function DeliveryRepositoriesDialog({
             <div className="mt-3 flex gap-2">
               <Input
                 value={input}
-                placeholder="brightwave-inc/tidebreak"
+                placeholder="naingthet/tidebreak"
                 onChange={(event) => setInput(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {

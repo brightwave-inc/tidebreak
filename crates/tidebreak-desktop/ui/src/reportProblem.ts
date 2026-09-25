@@ -4,7 +4,7 @@ import { create } from "zustand";
 
 /** Where a new Tidebreak issue starts. */
 export const NEW_ISSUE_URL =
-  "https://github.com/brightwave-inc/tidebreak/issues/new";
+  "https://github.com/naingthet/tidebreak/issues/new";
 
 /** The issue form a report fills in (`.github/ISSUE_TEMPLATE`). */
 export const BUG_REPORT_TEMPLATE = "bug-report.yml";

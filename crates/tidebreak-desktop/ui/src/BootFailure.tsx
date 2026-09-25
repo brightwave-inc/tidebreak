@@ -15,7 +15,7 @@ import { friendlyErrorMessage, sentenceStart } from "@/lib/utils";
 
 /** Where a person gets the newest Tidebreak when this one is too old. */
 export const LATEST_RELEASE_URL =
-  "https://github.com/brightwave-inc/tidebreak/releases/latest";
+  "https://github.com/naingthet/tidebreak/releases/latest";
 
 /**
  * The screen a reader lands on when the shell cannot reach the API it is
