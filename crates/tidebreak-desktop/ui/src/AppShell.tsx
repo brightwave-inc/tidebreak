@@ -385,9 +385,17 @@ export function AppShell() {
 
   // The local server's accept loop died after it started. Its sockets only
   // saw a drop, which reads like a slow server, so every connection notice
-  // now says it stopped and offers a restart.
-  useNativeHostEvent(SERVER_STOPPED_EVENT, () =>
-    useServerHealth.getState().markStopped(),
+  // now says it stopped and offers a restart. The shell also keeps that
+  // outcome, so a stop raised before this listener existed is read back once
+  // the listener is in place.
+  useNativeHostEvent(
+    SERVER_STOPPED_EVENT,
+    () => useServerHealth.getState().markStopped(),
+    () => {
+      void localBootFailure().then((failure) => {
+        if (failure?.stopped) useServerHealth.getState().markStopped();
+      });
+    },
   );
 
   // Help > Documentation. Listened for here rather than beside the shortcuts

@@ -65,6 +65,7 @@ const RENDERER_COMMANDS: [&str; 14] = [
 /// a failed boot this menu is still there when the window has nothing else.
 /// Every item is a renderer command: the renderer opens the pages, runs the
 /// Report a problem dialog, and says how a save went.
+#[cfg(any(target_os = "macos", test))]
 const HELP_MENU: [Option<(&str, &str, Option<&str>)>; 8] = [
     Some((MENU_DOCUMENTATION_ID, "Documentation", None)),
     Some((MENU_RELEASE_NOTES_ID, "Release Notes", None)),
