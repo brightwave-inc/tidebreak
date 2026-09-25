@@ -32,7 +32,7 @@ use crate::{
     HarnessEvent, HarnessEventSink, HarnessSession, ProcessTreeChild, ProjectConfig, SessionSpec,
     StreamBudget, StreamLine, StreamLineBuffer, TurnInput, TurnOutcome,
 };
-use tidebreak_core::{PermissionMode, ReasoningEffort, ToolOutcome};
+use tidebreak_core::{HarnessKind, PermissionMode, ReasoningEffort, ToolOutcome};
 
 #[cfg(not(test))]
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
@@ -637,7 +637,7 @@ impl ReaderShared {
                 .to_owned()
             });
             HarnessEvent::TurnFailed {
-                error: tidebreak_core::BoundedError { message },
+                error: tidebreak_core::BoundedError::new(message),
             }
         };
         self.sink.emit(end).await;
@@ -1771,7 +1771,12 @@ impl ClaudeSession {
             if !stderr.is_empty() {
                 warn!(bytes = stderr.len(), "engine stderr (capped)");
             }
-            return Ok(turn_outcome(None, end.saw_terminal, &stderr));
+            return Ok(turn_outcome(
+                HarnessKind::ClaudeCode,
+                None,
+                end.saw_terminal,
+                &stderr,
+            ));
         }
 
         let status = channel.exit_status().await;
@@ -1780,7 +1785,12 @@ impl ClaudeSession {
             warn!(bytes = stderr.len(), "engine stderr (capped)");
         }
         self.retire_channel().await;
-        Ok(turn_outcome(status, end.saw_terminal, &stderr))
+        Ok(turn_outcome(
+            HarnessKind::ClaudeCode,
+            status,
+            end.saw_terminal,
+            &stderr,
+        ))
     }
 }
 
@@ -3064,7 +3074,7 @@ done
             "the pid must be readable while the turn is in flight"
         );
         match outcome.expect("the adapter reports the exit rather than failing") {
-            TurnOutcome::Incomplete { detail } => {
+            TurnOutcome::Incomplete { detail, .. } => {
                 assert!(detail.contains("status 3"), "{detail}");
                 assert!(detail.contains("auth expired"), "{detail}");
             }

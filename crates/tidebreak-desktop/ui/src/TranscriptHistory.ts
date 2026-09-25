@@ -179,7 +179,7 @@ export function hydrateTranscriptHistory(
         status: turn.status,
         text: turn.partial_content,
         reasoning: turn.reasoning,
-        failureCategory: turn.failure_category,
+        failureCategory: turn.failure?.category ?? turn.failure_category,
         failureDetail: turn.failure_detail,
         failureModel: turn.failure_model,
         invokedSkills: turn.invoked_skills ?? [],

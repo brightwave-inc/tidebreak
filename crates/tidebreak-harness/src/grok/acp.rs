@@ -424,6 +424,7 @@ impl GrokSession {
             if state.stopped {
                 return Ok(TurnOutcome::Incomplete {
                     detail: "Grok ACP was stopped during startup".into(),
+                    failure: None,
                 });
             }
             state.session_id = Some(session_id.clone());
@@ -496,14 +497,21 @@ impl GrokSession {
                     && value.get("method").is_none()
                 {
                     if let Some(error) = value.get("error") {
+                        // An internal error's own message is only "Internal
+                        // error"; what went wrong is in its data.
                         let message = error
-                            .get("message")
+                            .pointer("/data/message")
+                            .or_else(|| error.get("message"))
                             .and_then(Value::as_str)
                             .unwrap_or("request failed");
-                        return Err(HarnessError::Other(format!(
+                        let message = format!(
                             "Grok ACP {method}: {}",
                             message.chars().take(MAX_NOTICE_CHARS).collect::<String>()
-                        )));
+                        );
+                        return Err(HarnessError::TurnFailed(
+                            tidebreak_core::BoundedError::new(message)
+                                .with_failure(crate::failure::grok_rpc_failure(error)),
+                        ));
                     }
                     return value.get("result").cloned().ok_or_else(|| {
                         HarnessError::Other("Grok ACP response has no result".into())

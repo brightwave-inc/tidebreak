@@ -542,9 +542,7 @@ pub async fn project_native_turn(
             ),
             _ => (
                 Event::TurnFailed {
-                    error: crate::BoundedError {
-                        message: "the engine turn failed".into(),
-                    },
+                    error: crate::BoundedError::new("the engine turn failed"),
                     detail: None,
                 },
                 Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle),

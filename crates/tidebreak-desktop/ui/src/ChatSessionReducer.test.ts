@@ -9,6 +9,7 @@ import {
   type ChatSessionState,
   type ChatSessionTransition,
 } from "./ChatSessionReducer";
+import type { HarnessKind, TurnFailureCategory } from "./generated/wire";
 import type { ChatMessage } from "./MessageList";
 import { TURN_CANCELLED_NOTICE } from "./MessageList";
 
@@ -781,6 +782,74 @@ describe("terminal events", () => {
       model: { id: "gemini-3.6-flash", provider: "gemini" },
     });
     expect(effects).toContainEqual({ type: "hydrate_terminal_transcript" });
+  });
+
+  /**
+   * `category` is the coarse value older clients read; the full diagnosis
+   * rides as `failure`, and the transcript shows that when the server sent
+   * it. A server that predates it sends only `category`.
+   */
+  it("turn_failed prefers the full diagnosis over the coarse category", () => {
+    const { state } = play([
+      TURN,
+      {
+        type: "turn_failed",
+        category: "unknown",
+        failure: { category: "model_unavailable" },
+        model: { id: "claude-3-opus-20240229", provider: "anthropic" },
+      },
+    ]);
+    expect(state.messages[state.messages.length - 1]).toMatchObject({
+      role: "turn_failure",
+      category: "model_unavailable",
+    });
+
+    // A category from a newer server rides through as data; the notice
+    // reads one it has no copy for as unknown.
+    const newer = play([
+      TURN,
+      {
+        type: "turn_failed",
+        category: "unknown",
+        failure: {
+          category: "quota_exceeded" as TurnFailureCategory,
+          engine: "an_engine_from_next_year" as HarnessKind,
+        },
+      },
+    ]);
+    expect(newer.state.messages[newer.state.messages.length - 1]).toMatchObject(
+      { role: "turn_failure", category: "quota_exceeded" },
+    );
+
+    const older = play([TURN, { type: "turn_failed", category: "transient" }]);
+    expect(older.state.messages[older.state.messages.length - 1]).toMatchObject(
+      { role: "turn_failure", category: "transient" },
+    );
+  });
+
+  /**
+   * The server's own retry keeps the turn live. The event changes nothing the
+   * transcript draws yet, and the outcome that follows ends the turn as
+   * usual, so a replay never ends on a retry the turn moved past.
+   */
+  it("turn_retrying keeps the turn working until its outcome arrives", () => {
+    const retrying = play([
+      TURN,
+      {
+        type: "turn_retrying",
+        category: "overloaded",
+        attempt: 2,
+        max_attempts: 5,
+        retry_at: "2026-08-20T15:05:54Z",
+      },
+    ]);
+    expect(retrying.state.busy).toBe(true);
+    const settled = play(
+      [{ type: "turn_completed", usage: NO_USAGE }],
+      retrying.state,
+    );
+    expect(settled.state.busy).toBe(false);
+    expect(settled.state.lastTurnEnding).toBe("finished");
   });
 
   it("terminal settling leaves already-finished tools untouched", () => {

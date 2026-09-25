@@ -506,9 +506,7 @@ async fn a_failing_engine_says_why_and_an_unreadable_answer_still_arrives() {
     let limited = ScriptedAdapter::new(vec![
         HarnessEvent::TurnStarted,
         HarnessEvent::TurnFailed {
-            error: tidebreak_core::BoundedError {
-                message: "stream error: 429 Too Many Requests".into(),
-            },
+            error: tidebreak_core::BoundedError::new("stream error: 429 Too Many Requests"),
         },
     ])
     .with_kind(HarnessKind::Codex);

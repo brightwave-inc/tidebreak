@@ -139,6 +139,24 @@ pub enum AgentEvent {
         /// The serializable error description.
         error: AgentErrorInfo,
     },
+    /// The attempt failed in a way a retry may clear, and the turn worker will
+    /// run the turn again at `retry_at`.
+    ///
+    /// Journaled in the same transaction that parks the turn for its retry,
+    /// so it is on the journal before the wait begins. It is not terminal: the
+    /// turn's next outcome closes it, whether another `TurnRetrying` or the
+    /// terminal event that ends the turn.
+    TurnRetrying {
+        /// Why the attempt failed.
+        category: crate::turn_failure::TurnFailureCategory,
+        /// The attempt the retry starts, counting the first try as 1.
+        attempt: u32,
+        /// The most attempts the turn may take. The worker can also stop
+        /// earlier, when the next wait would outlast its retry window.
+        max_attempts: u32,
+        /// When the next attempt may start.
+        retry_at: chrono::DateTime<chrono::Utc>,
+    },
     /// The turn was cancelled at the client's request and stopped early. A
     /// distinct terminal outcome from `TurnCompleted`/`TurnFailed` so the UI can
     /// show "stopped" rather than success or error.
@@ -303,6 +321,7 @@ mod tests {
             AgentEvent::CompactionFinished { .. } => 17,
             AgentEvent::PlanProposed { .. } => 18,
             AgentEvent::TaskPlanUpdated { .. } => 19,
+            AgentEvent::TurnRetrying { .. } => 20,
         }
     }
 
@@ -437,6 +456,13 @@ mod tests {
             AgentEvent::TaskPlanUpdated {
                 call_id: CallId(id(6)),
                 turn_id: TurnId(id(1)),
+            },
+            AgentEvent::TurnRetrying {
+                category: crate::turn_failure::TurnFailureCategory::RateLimited,
+                attempt: 2,
+                max_attempts: 5,
+                retry_at: chrono::DateTime::from_timestamp(1_787_238_354, 0)
+                    .expect("a valid timestamp"),
             },
         ]
     }

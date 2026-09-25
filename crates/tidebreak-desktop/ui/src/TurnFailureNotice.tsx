@@ -25,20 +25,41 @@ import {
 export function turnFailurePointsAtSettings(
   category: TurnFailureCategory,
 ): boolean {
-  return category === "auth" || category === "provider_access";
+  return (
+    category === "auth" ||
+    category === "provider_access" ||
+    category === "endpoint_not_found"
+  );
+}
+
+/**
+ * Whether a plain retry of the same turn can help.
+ *
+ * Derived from the category alone, like the settings link: running an
+ * unchanged request again gets the same answer when the conversation no
+ * longer fits the model or the provider refused the request itself, so those
+ * failures offer no Retry. Every other category keeps it, for after its fix.
+ */
+export function turnFailureOffersRetry(category: TurnFailureCategory): boolean {
+  return category !== "context_overflow" && category !== "request_rejected";
 }
 
 /**
  * Renderer-owned failure copy; the server's category stays data, not prose.
  *
  * The categories only ever describe a *terminal* failure. A turn still waiting
- * on the server's own retry emits nothing at all, so `rate_limited` here means
- * those retries were already spent — copy that asks the reader to be patient
- * would be describing something that has already finished happening.
+ * on the server's own retry journals `turn_retrying` instead, so `rate_limited`
+ * and `overloaded` here mean those retries were already spent — copy that asks
+ * the reader to be patient would be describing something that has already
+ * finished happening.
+ *
+ * A category this build does not know, from a newer server, reads as
+ * `unknown`.
  */
 export function turnFailureCopy(
   category: TurnFailureCategory,
   provider = "the model provider",
+  model?: string,
 ): { title: string; body: string } {
   const titled =
     provider === "the model provider" ? "The model provider" : provider;
@@ -46,7 +67,12 @@ export function turnFailureCopy(
     case "rate_limited":
       return {
         title: `${titled} is rate-limiting requests`,
-        body: "Automatic retries are already spent. Try again after demand or your provider quota resets.",
+        body: "Automatic retries are already spent. Try again once your provider quota resets.",
+      };
+    case "overloaded":
+      return {
+        title: `${titled} is overloaded`,
+        body: "Automatic retries are already spent. This is the provider's capacity, not your account; try again in a few minutes.",
       };
     case "auth":
       // Decision 20 files a key the provider rejected and a key that was
@@ -62,12 +88,51 @@ export function turnFailureCopy(
         title: `${titled} denied access to this request`,
         body: `This came from ${provider}, not Tidebreak. Common causes include exhausted credits or quota, billing or organization restrictions, missing model access, and key permissions.`,
       };
+    case "model_unavailable":
+      return {
+        title: `${model ?? "This model"} is not available from ${provider}`,
+        body: "It may be retired or not enabled for your account. Choose another model, then send again.",
+      };
+    case "endpoint_not_found":
+      return {
+        title: `Nothing answered at ${provider}'s configured address`,
+        body: "The provider or a proxy in front of it answered 404. Check the provider's base URL in provider settings; if it is right, the model may no longer be offered there.",
+      };
+    case "context_overflow":
+      // No retry is offered here, so the copy names only what the reader
+      // can do from the composer.
+      return {
+        title: `This conversation no longer fits ${model ?? "the model"}`,
+        body: "Tidebreak already shortened what it could. Remove attachments or start a new conversation, then send again.",
+      };
+    case "request_rejected":
+      return {
+        title: `${titled} rejected this request`,
+        body: "Sending it unchanged gets the same answer. Change the request or the model, then send again.",
+      };
+    case "local":
+      // The server may run on this computer or on a hosted machine, so the
+      // copy names neither.
+      return {
+        title: "Tidebreak could not use its own storage",
+        body: "This came from Tidebreak's database or saved credentials, not from the provider. Try again; if it repeats, the disk or credential store where Tidebreak runs needs attention.",
+      };
     case "transient":
       return {
         title: `The connection to ${provider} failed`,
         body: "The turn ended before the provider finished responding. Try again; it may succeed.",
       };
-    case "unknown":
+    case "engine_auth":
+      return {
+        title: "The coding engine is not signed in",
+        body: "Sign in to it from Settings > Coding engines, then try again.",
+      };
+    case "usage_limit":
+      return {
+        title: "The coding engine reached its usage limit",
+        body: "The limit lifts when the plan resets. Wait for it, or choose another engine or model.",
+      };
+    default:
       return {
         title: "This turn could not be completed",
         body: "Tidebreak does not have a specific recovery for this failure. Try again once; if it repeats, use the detail below when troubleshooting.",
@@ -99,7 +164,8 @@ export function TurnFailureNotice({
   // generated route union contains `/settings` but not each literal child.
   const providerSettingsPath: string = "/settings/providers";
   const provider = model ? providerLabel(model.provider) : "the model provider";
-  const copy = turnFailureCopy(category, provider);
+  const copy = turnFailureCopy(category, provider, model?.id);
+  const retry = turnFailureOffersRetry(category) ? onRetry : undefined;
 
   const pointsAtSettings = turnFailurePointsAtSettings(category);
   return (
@@ -108,7 +174,7 @@ export function TurnFailureNotice({
       className="self-stretch"
       title={copy.title}
       action={
-        (onRetry || pointsAtSettings) && (
+        (retry || pointsAtSettings) && (
           <>
             {pointsAtSettings && (
               <Button
@@ -121,7 +187,7 @@ export function TurnFailureNotice({
                 Open provider settings
               </Button>
             )}
-            {onRetry && <NoticeRetryButton onClick={onRetry} />}
+            {retry && <NoticeRetryButton onClick={retry} />}
           </>
         )
       }

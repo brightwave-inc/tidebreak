@@ -1842,9 +1842,7 @@ mod tests {
                 turn_started(),
                 answer("Incomplete result"),
                 tidebreak_core::Event::TurnFailed {
-                    error: tidebreak_core::BoundedError {
-                        message: "Credential expired".into(),
-                    },
+                    error: tidebreak_core::BoundedError::new("Credential expired"),
                     detail: None,
                 },
             ],

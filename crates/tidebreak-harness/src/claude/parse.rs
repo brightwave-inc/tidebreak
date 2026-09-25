@@ -54,6 +54,11 @@ pub struct ClaudeStreamParser {
     reported_model: Option<String>,
     /// What the last line said about the turn it belongs to.
     mark: TurnMark,
+    /// The error type on the turn's API-error assistant line, which the
+    /// failing `result` does not repeat.
+    api_error: Option<String>,
+    /// What the last `rate_limit_event` said about the account's plan limit.
+    rate_limit: crate::failure::ClaudeRateLimit,
 }
 
 /// What one stream line says about the turn it belongs to.
@@ -327,6 +332,15 @@ impl ClaudeStreamParser {
             // 2.1.259). The call's card already shows it running and times
             // it, and the heartbeat's own `tool_use_id` names no call.
             "tool_progress" => Vec::new(),
+            // The account's plan-limit state, restated when it changes. It
+            // shows nothing on its own; a turn that then fails on a limit
+            // reads it for whether the plan is spent and when it resets.
+            "rate_limit_event" => {
+                if let Some(limit) = crate::failure::ClaudeRateLimit::from_event(value) {
+                    self.rate_limit = limit;
+                }
+                Vec::new()
+            }
             // What happened to a user line the session sent with a `uuid`
             // (captured on 2.1.259). It carries nothing for the transcript;
             // the session reads it to tell its own turn from one the engine
@@ -622,6 +636,12 @@ impl ClaudeStreamParser {
         let parent = parent_call_id(value);
         if parent.is_none() {
             events.extend(self.report_model(value.pointer("/message/model")));
+            // An API error arrives as an assistant line whose text is the
+            // error, typed beside it; the `result` that fails the turn
+            // carries only the text and the status.
+            if let Some(error) = value.get("error").and_then(Value::as_str) {
+                self.api_error = Some(error.to_owned());
+            }
         }
         let content = value
             .pointer("/message/content")
@@ -748,6 +768,7 @@ impl ClaudeStreamParser {
             }
         }
         let is_error = value.get("is_error").and_then(Value::as_bool) == Some(true);
+        let api_error = self.api_error.take();
         // Only the captured interrupt fixture (`terminal_reason:
         // aborted_streaming`) is an interruption. Any other error —
         // including a missing terminal_reason — is a failure.
@@ -757,14 +778,22 @@ impl ClaudeStreamParser {
             return vec![HarnessEvent::TurnInterrupted];
         }
         if is_error {
+            // A `success` result carries the error text in `result`; an
+            // `error_during_execution` result lists it in `errors` instead.
             let message = value
                 .get("result")
                 .and_then(Value::as_str)
-                .unwrap_or("engine reported an error");
+                .filter(|text| !text.trim().is_empty())
+                .or_else(|| value.pointer("/errors/0").and_then(Value::as_str))
+                .unwrap_or("Claude Code reported an error without saying why");
+            let failure = crate::failure::claude_failure(
+                api_error.as_deref(),
+                value.get("api_error_status").and_then(Value::as_u64),
+                self.rate_limit,
+                message,
+            );
             return vec![HarnessEvent::TurnFailed {
-                error: BoundedError {
-                    message: bound(message, MAX_NOTICE_CHARS),
-                },
+                error: BoundedError::new(bound(message, MAX_NOTICE_CHARS)).with_failure(failure),
             }];
         }
         vec![HarnessEvent::TurnCompleted {

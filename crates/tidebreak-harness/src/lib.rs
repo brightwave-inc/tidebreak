@@ -26,6 +26,7 @@ pub mod budget;
 pub mod child;
 pub mod claude;
 pub mod codex;
+mod failure;
 pub mod grok;
 pub mod launch;
 pub mod opencode;
@@ -467,9 +468,11 @@ pub enum TurnOutcome {
     /// The engine ended without a terminal turn event, exited non-zero, or
     /// was signaled.
     Incomplete {
-        /// Bounded description — exit code or signal, plus captured stderr.
-        /// Safe to journal.
+        /// Bounded description — which engine, its exit code or signal, and
+        /// captured stderr. Safe to journal.
         detail: String,
+        /// Why, in the shared vocabulary, when the adapter could tell.
+        failure: Option<tidebreak_core::TurnFailure>,
     },
     /// The engine durably checkpointed the turn and released it; the turn
     /// resumes through [`HarnessSession::resume_turn`] once the awaited
@@ -1418,6 +1421,10 @@ pub enum HarnessError {
     /// I/O or spawn failure.
     #[error("engine io: {0}")]
     Io(#[from] std::io::Error),
+    /// The engine refused the turn and said why in a way the adapter could
+    /// classify. The error carries the bounded message and its category.
+    #[error("{}", .0.message)]
+    TurnFailed(BoundedError),
     /// Anything else, already bounded.
     #[error("{0}")]
     Other(String),

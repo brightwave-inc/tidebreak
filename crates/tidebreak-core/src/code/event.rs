@@ -248,10 +248,47 @@ pub struct CheckpointHint {
 }
 
 /// Bounded error carried on [`Event::TurnFailed`].
+//
+// Read tolerantly, like every event: a key a newer server adds must not break
+// a client a release behind. The classification rides inside `error` rather
+// than beside it for exactly that reason: renderers built before it check
+// only `error.message`, while they refuse a key they do not know on the event
+// itself. A plain comment, so the generated `wire.ts` does not carry it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct BoundedError {
     /// Short message, already truncated by the adapter.
     pub message: String,
+    /// Why the turn failed, when the adapter could tell: the shared
+    /// category, with the engine, model, and reset time its copy needs.
+    /// Absent on rows written before engines were classified, and on a
+    /// failure no adapter recognized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure: Option<crate::turn_failure::TurnFailure>,
+}
+
+impl BoundedError {
+    /// An unclassified failure.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            failure: None,
+        }
+    }
+
+    /// Classify this failure.
+    #[must_use]
+    pub fn with_failure(mut self, failure: crate::turn_failure::TurnFailure) -> Self {
+        self.failure = Some(failure);
+        self
+    }
+
+    /// The failure's category, when it has one.
+    #[must_use]
+    pub fn category(&self) -> Option<crate::turn_failure::TurnFailureCategory> {
+        self.failure.as_ref().map(|failure| failure.category)
+    }
 }
 
 /// Severity of a visible-degradation notice.
@@ -858,6 +895,24 @@ pub enum Event {
         #[ts(optional)]
         detail: Option<AgentErrorInfo>,
     },
+    /// The turn failed in a way a retry may clear, and the server will try
+    /// it again at `retry_at`. Internal engine.
+    ///
+    /// Journaled before every wait. The turn's next journaled outcome closes
+    /// it: another `turn_retrying` replaces it, and a terminal event ends it.
+    /// A reader that replays the journal therefore never shows a retry the
+    /// turn has already moved past.
+    TurnRetrying {
+        /// Why the attempt failed.
+        category: crate::turn_failure::TurnFailureCategory,
+        /// The attempt the retry starts, counting the first try as 1.
+        attempt: u32,
+        /// The most attempts the turn may take. The server can also stop
+        /// earlier, when the next wait would outlast its retry window.
+        max_attempts: u32,
+        /// When the next attempt may start.
+        retry_at: chrono::DateTime<chrono::Utc>,
+    },
     /// The turn was interrupted (user or recovery).
     TurnInterrupted {
         /// Token accounting up to the interruption, when the engine reports
@@ -1253,6 +1308,7 @@ mod tests {
             Event::BackgroundActivity { .. } => 27,
             Event::CheckpointRestored { .. } => 28,
             Event::ReviewFinished { .. } => 29,
+            Event::TurnRetrying { .. } => 30,
         }
     }
 
@@ -1345,9 +1401,17 @@ mod tests {
                 stop_reason: None,
             },
             Event::TurnFailed {
-                error: BoundedError {
-                    message: "engine exited 1".into(),
-                },
+                error: BoundedError::new("engine exited 1").with_failure(
+                    crate::turn_failure::TurnFailure::new(
+                        crate::turn_failure::TurnFailureCategory::UsageLimit,
+                    )
+                    .with_engine(HarnessKind::Codex)
+                    .with_model("gpt-5.5")
+                    .with_resets_at(Some(
+                        chrono::DateTime::from_timestamp(1_787_238_354, 0)
+                            .expect("a valid timestamp"),
+                    )),
+                ),
                 detail: None,
             },
             Event::TurnInterrupted { usage: None },
@@ -1433,6 +1497,13 @@ mod tests {
                 turn_id: Some(TurnId(id(1))),
                 outcome: ReviewOutcome::Completed,
                 findings: 3,
+            },
+            Event::TurnRetrying {
+                category: crate::turn_failure::TurnFailureCategory::Overloaded,
+                attempt: 2,
+                max_attempts: 5,
+                retry_at: chrono::DateTime::from_timestamp(1_787_238_354, 0)
+                    .expect("a valid timestamp"),
             },
         ]
     }

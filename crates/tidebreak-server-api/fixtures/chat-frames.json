@@ -235,6 +235,9 @@
       "event": {
         "category": "rate_limited",
         "detail": "rate limited; retry after 30s",
+        "failure": {
+          "category": "overloaded"
+        },
         "model": {
           "id": "claude-opus-4-8",
           "provider": "anthropic"
@@ -323,11 +326,24 @@
   {
     "frame": {
       "event": {
+        "attempt": 2,
+        "category": "overloaded",
+        "max_attempts": 5,
+        "retry_at": "2026-08-20T15:05:54Z",
+        "type": "turn_retrying"
+      },
+      "seq": 25
+    },
+    "name": "turn_retrying"
+  },
+  {
+    "frame": {
+      "event": {
         "text": "from catch-up",
         "type": "text_delta"
       },
       "replayed": true,
-      "seq": 25
+      "seq": 26
     },
     "name": "replayed_event"
   },

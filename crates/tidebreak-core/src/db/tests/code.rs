@@ -1904,9 +1904,7 @@ async fn a_code_notification_says_how_the_turn_ended() {
         stop_reason: None,
     };
     let failed = Event::TurnFailed {
-        error: crate::code::BoundedError {
-            message: "claude exited with status 1\nat stderr line 2".into(),
-        },
+        error: crate::code::BoundedError::new("claude exited with status 1\nat stderr line 2"),
         detail: None,
     };
     for event in [completed, failed] {
@@ -1966,9 +1964,7 @@ async fn a_workspace_less_terminal_event_uses_the_chat_notification_and_dedupe_k
         ),
         (
             Event::TurnFailed {
-                error: crate::code::BoundedError {
-                    message: "provider failed".into(),
-                },
+                error: crate::code::BoundedError::new("provider failed"),
                 detail: None,
             },
             crate::NotificationKind::AgentFailed,

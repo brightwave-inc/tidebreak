@@ -209,8 +209,26 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
     let RecordTurnFailureOutcome::Recorded(receipt) = journaled.outcome else {
         panic!("first exact failure must commit")
     };
+    // The wait is on the journal before it begins: one non-terminal row
+    // saying why the attempt failed, which attempt runs next, and when.
     assert_eq!(journaled.terminal_event, None);
-    assert!(store.list_events(chat.id, 0).await.unwrap().is_empty());
+    let retrying = journaled
+        .retrying_event
+        .clone()
+        .expect("a journaled retry-waiting failure commits its retry row");
+    assert_eq!(
+        retrying.event,
+        AgentEvent::TurnRetrying {
+            category: crate::TurnFailureCategory::Unknown,
+            attempt: 2,
+            max_attempts: 2,
+            retry_at: canonical_retry_at,
+        }
+    );
+    assert_eq!(
+        store.list_events(chat.id, 0).await.unwrap(),
+        vec![retrying.clone()]
+    );
     assert_eq!(receipt.lease_token, token);
     assert_eq!(receipt.turn_id, turn_id);
     assert_eq!(receipt.attempt_count, 1);
@@ -249,6 +267,28 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
             .unwrap(),
         Some(RecordTurnFailureOutcome::Existing(receipt.clone()))
     );
+    // Retrying the exact journaled request returns the row it already wrote
+    // rather than writing a second one.
+    let repeated = store
+        .record_turn_failure_and_append_event(
+            turn_id,
+            token,
+            resolved_at,
+            TurnFailureRetry::RetryAt(retry_at),
+            progress_steps,
+            progress_usage,
+            "provider_unavailable",
+            Some("temporary outage"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        repeated.outcome,
+        RecordTurnFailureOutcome::Existing(receipt.clone())
+    );
+    assert_eq!(repeated.retrying_event, Some(retrying.clone()));
+    assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
     assert!(store
         .record_turn_failure_and_append_event(
             turn_id,

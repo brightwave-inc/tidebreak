@@ -1419,6 +1419,10 @@ pub struct JournaledTurnOutcome<T> {
     pub outcome: T,
     /// The exact terminal journal row when this operation publishes one.
     pub terminal_event: Option<SequencedAgentEvent>,
+    /// The exact `TurnRetrying` row a failure committed when it parked the
+    /// turn to run again. Only a journaled failure that waits to retry
+    /// carries one; it is never terminal.
+    pub retrying_event: Option<SequencedAgentEvent>,
 }
 
 /// A terminal event committed while a claim scan cleans expired work.

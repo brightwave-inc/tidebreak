@@ -751,6 +751,7 @@ struct PauseTerminalStore {
     pause_accept: std::sync::atomic::AtomicBool,
     fail_document_delete: std::sync::atomic::AtomicBool,
     delete_project_after_get: std::sync::atomic::AtomicBool,
+    retry_wait_read_faults: AtomicUsize,
 }
 
 impl PauseTerminalStore {
@@ -779,6 +780,7 @@ impl PauseTerminalStore {
             pause_accept: std::sync::atomic::AtomicBool::new(false),
             fail_document_delete: std::sync::atomic::AtomicBool::new(false),
             delete_project_after_get: std::sync::atomic::AtomicBool::new(false),
+            retry_wait_read_faults: AtomicUsize::new(0),
         }
     }
 
@@ -855,6 +857,16 @@ impl PauseTerminalStore {
 
     fn fail_next_document_delete(&self) {
         self.fail_document_delete.store(true, Ordering::SeqCst);
+    }
+
+    /// Fail the next `count` reads that find a turn waiting to retry, as a
+    /// busy database would.
+    fn fail_next_retry_wait_reads(&self, count: usize) {
+        self.retry_wait_read_faults.store(count, Ordering::SeqCst);
+    }
+
+    fn retry_wait_read_faults_left(&self) -> usize {
+        self.retry_wait_read_faults.load(Ordering::SeqCst)
     }
 
     fn delete_project_after_next_get(&self) {
@@ -1081,8 +1093,26 @@ impl Store for PauseTerminalStore {
             .set_chat_memory_incognito(id, memory_incognito)
             .await
     }
+    // An internal-engine code session needs its foreground run; the
+    // trait's default refuses it.
+    async fn ensure_foreground_agent_run(&self, chat_id: SessionId) -> Result<()> {
+        self.inner.ensure_foreground_agent_run(chat_id).await
+    }
     async fn get_turn(&self, id: TurnId) -> Result<Option<tidebreak_core::TurnRun>> {
-        self.inner.get_turn(id).await
+        let turn = self.inner.get_turn(id).await?;
+        if turn
+            .as_ref()
+            .is_some_and(|turn| turn.status == TurnRunStatus::RetryWait)
+            && self
+                .retry_wait_read_faults
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+        {
+            return Err(AgentError::Store("database is locked".into()));
+        }
+        Ok(turn)
     }
     async fn list_turns(&self, chat_id: SessionId) -> Result<Vec<tidebreak_core::TurnRun>> {
         self.inner.list_turns(chat_id).await

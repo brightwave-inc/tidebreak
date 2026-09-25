@@ -1466,6 +1466,32 @@ async fn worker_retries_a_transient_provider_failure_without_a_terminal_event() 
         events.last().map(|event| &event.event),
         Some(AgentEvent::TurnCompleted { .. })
     ));
+    // The wait was journaled before it began, between the failed attempt
+    // and the one that recovered, and the completion closes it.
+    let retrying = events
+        .iter()
+        .position(|event| matches!(event.event, AgentEvent::TurnRetrying { .. }))
+        .expect("the retry wait is journaled");
+    assert!(matches!(
+        &events[retrying].event,
+        AgentEvent::TurnRetrying {
+            category: tidebreak_core::TurnFailureCategory::Transient,
+            attempt: 2,
+            max_attempts: 5,
+            ..
+        }
+    ));
+    let started =
+        |event: &SequencedAgentEvent| matches!(event.event, AgentEvent::TurnStarted { .. });
+    assert!(events[..retrying].iter().any(started));
+    assert!(events[retrying..].iter().any(started));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, AgentEvent::TurnRetrying { .. }))
+            .count(),
+        1
+    );
     let turn = store.list_turns(chat.id).await.unwrap().pop().unwrap();
     assert_eq!(turn.attempt_count, 2);
     assert_eq!(turn.status, TurnRunStatus::Completed);

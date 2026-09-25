@@ -2,7 +2,11 @@
   {
     "type": "turn_failed",
     "error": {
-      "message": "Couldn't set model 'definitely-not-a-real-model-xyz': Invalid params: \"unknown model id\". Run 'grok models' to see available models."
+      "message": "Couldn't set model 'definitely-not-a-real-model-xyz': Invalid params: \"unknown model id\". Run 'grok models' to see available models.",
+      "failure": {
+        "category": "model_unavailable",
+        "engine": "grok"
+      }
     }
   }
 ]

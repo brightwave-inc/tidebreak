@@ -19,7 +19,11 @@ export {
   parseCodeDeliveryRunDetail,
   parseCodeDeliveryActionResult,
 } from "./delivery";
-export { parseSequencedCodeEvent, parseCodeEvent } from "./events";
+export {
+  parseSequencedCodeEvent,
+  parseCodeEvent,
+  parseTurnFailure,
+} from "./events";
 export {
   parseCodeWorkspaceTree,
   parseCodeWorkspaceSearch,

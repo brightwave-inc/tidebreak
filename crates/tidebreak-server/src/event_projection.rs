@@ -282,10 +282,17 @@ pub enum RendererAgentEvent {
         usage: RendererTurnUsage,
     },
     TurnFailed {
-        /// Why the turn failed, at the only resolution a client can act on.
-        /// The internal `kind` stays behind the server; allowlisted provider
-        /// diagnostics may cross separately as `detail`.
+        /// The category a client built before the full vocabulary reads:
+        /// only `rate_limited`, `auth`, `provider_access`, `transient`, or
+        /// `unknown`. A client that reads `failure` uses that instead.
         category: TurnFailureCategory,
+        /// Why the turn failed, in the full vocabulary chat and code turns
+        /// share. The internal `kind` stays behind the server; allowlisted
+        /// provider diagnostics may cross separately as `detail`. Absent only
+        /// from servers that predate it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        failure: Option<TurnFailure>,
         /// Bounded provider diagnostic, when the failure originated upstream.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -293,6 +300,21 @@ pub enum RendererAgentEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         model: Option<RendererModelIdentity>,
+    },
+    /// The attempt failed in a way a retry may clear, and the server runs
+    /// the turn again at `retry_at`. The turn is still live: its next event
+    /// is another attempt's, and its next outcome — another retry or the
+    /// terminal event — replaces this one.
+    TurnRetrying {
+        /// Why the attempt failed.
+        category: TurnFailureCategory,
+        /// The attempt the retry starts, counting the first try as 1.
+        attempt: u32,
+        /// The most attempts the turn may take. The server can stop sooner,
+        /// when the next wait would outlast its retry window.
+        max_attempts: u32,
+        /// When the next attempt may start.
+        retry_at: chrono::DateTime<chrono::Utc>,
     },
     TurnCancelled {
         usage: RendererTurnUsage,
@@ -322,74 +344,7 @@ pub enum RendererAgentEvent {
     EventOmitted,
 }
 
-/// Why a turn failed, closed and coarse enough to be stable.
-///
-/// A failure's `kind` is an internal diagnostic vocabulary: it grows with the
-/// server, and its `message` can carry provider diagnostics and host paths, so
-/// neither crosses to the renderer. What a client actually needs is narrower —
-/// what to tell the person, and whether running the same turn again could
-/// plausibly do anything different. This enum is exactly that, and nothing is
-/// worth a variant here unless a client would say or do something different
-/// for it.
-///
-/// It is also the worker's own retry taxonomy — the same classification decides
-/// whether a failed turn is rescheduled — so the category a client sees and the
-/// category the scheduler acted on cannot drift apart.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnFailureCategory {
-    /// The provider throttled or shed the request. Automatic retries were
-    /// already spent, but waiting and asking again is the actual remedy.
-    RateLimited,
-    /// The provider rejected our credentials. Retrying replays the same
-    /// rejection; only fixing the key changes the outcome.
-    Auth,
-    /// The provider account or organization denied access. This includes bare
-    /// 403 responses that may represent credits, billing, policy, entitlement,
-    /// or key-permission failures.
-    ProviderAccess,
-    /// A transient fault below the turn — an upstream error, a storage or
-    /// secret-store failure. Retrying is reasonable.
-    Transient,
-    /// Everything else: budgets the turn exceeded, malformed agent output,
-    /// internal invariants. Retrying is a guess, so a client should not promise
-    /// that it helps.
-    Unknown,
-}
-
-impl TurnFailureCategory {
-    /// Classify a failure `kind` from the internal vocabulary.
-    ///
-    /// Unrecognized kinds fall to [`Self::Unknown`], so a new internal failure
-    /// code is coarse rather than wrong.
-    pub fn from_kind(kind: &str) -> Self {
-        match kind {
-            "rate_limited" | "overloaded" => Self::RateLimited,
-            "authentication" | "missing_credential" => Self::Auth,
-            "access_denied" => Self::ProviderAccess,
-            "provider" | "store" | "secret" | "empty_model_response" => Self::Transient,
-            _ => Self::Unknown,
-        }
-    }
-
-    /// Whether running the same turn again could plausibly succeed.
-    pub const fn retries_may_succeed(self) -> bool {
-        matches!(self, Self::RateLimited | Self::Transient)
-    }
-
-    /// The wire spelling, for a client that prints the category as text.
-    /// Pinned to the serde rendering by `turn_failure_category_names_match_the_wire`.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::RateLimited => "rate_limited",
-            Self::Auth => "auth",
-            Self::ProviderAccess => "provider_access",
-            Self::Transient => "transient",
-            Self::Unknown => "unknown",
-        }
-    }
-}
+pub use tidebreak_core::{TurnFailure, TurnFailureCategory};
 
 /// Only provider-originated diagnostics cross to the renderer. These strings
 /// have already passed the router's bounded message extraction and credential
@@ -509,13 +464,25 @@ impl From<&SequencedAgentEvent> for RendererSequencedEvent {
                 usage: (*usage).into(),
             },
             AgentEvent::TurnFailed { error } => {
-                let category = TurnFailureCategory::from_kind(&error.kind);
+                let failure = TurnFailure::from_failure(&error.kind, &error.message);
                 RendererAgentEvent::TurnFailed {
-                    category,
+                    category: failure.category.legacy(),
+                    failure: Some(failure),
                     detail: renderer_provider_failure_detail(&error.kind, &error.message),
                     model: None,
                 }
             }
+            AgentEvent::TurnRetrying {
+                category,
+                attempt,
+                max_attempts,
+                retry_at,
+            } => RendererAgentEvent::TurnRetrying {
+                category: *category,
+                attempt: *attempt,
+                max_attempts: *max_attempts,
+                retry_at: *retry_at,
+            },
             AgentEvent::TurnCancelled { usage } => RendererAgentEvent::TurnCancelled {
                 usage: (*usage).into(),
             },
@@ -825,42 +792,124 @@ mod tests {
 
     /// A failure carries its category and a bounded provider diagnostic. Host
     /// and internal failures still keep their detail behind the server.
+    ///
+    /// `category` is what a client built before the full vocabulary reads,
+    /// so it only ever holds one of the five values those clients render;
+    /// `failure` carries the full diagnosis.
     #[test]
     fn failure_projection_carries_category_and_provider_detail_only() {
+        use TurnFailureCategory as C;
         let cases = [
             (
                 AgentError::RateLimited("upstream said 429 for key sk-live".into()),
-                TurnFailureCategory::RateLimited,
+                C::RateLimited,
+                C::RateLimited,
+                true,
+            ),
+            (
+                AgentError::Overloaded("anthropic returned 529 (overloaded_error)".into()),
+                C::Overloaded,
+                C::RateLimited,
                 true,
             ),
             (
                 AgentError::Authentication("invalid x-api-key sk-live".into()),
-                TurnFailureCategory::Auth,
+                C::Auth,
+                C::Auth,
                 true,
             ),
             (
                 AgentError::AccessDenied("xai returned 403".into()),
-                TurnFailureCategory::ProviderAccess,
+                C::ProviderAccess,
+                C::ProviderAccess,
                 true,
             ),
             (
                 AgentError::MissingCredential("no model provider is configured".into()),
-                TurnFailureCategory::Auth,
+                C::Auth,
+                C::Auth,
                 false,
             ),
             (
                 AgentError::Provider("upstream 503 from api.example".into()),
-                TurnFailureCategory::Transient,
+                C::Transient,
+                C::Transient,
+                true,
+            ),
+            // A retired model is not a connection failure, and its
+            // provider's own words cross.
+            (
+                AgentError::ModelUnavailable(
+                    "anthropic returned 404 (not_found_error): model: claude-3-opus-20240229"
+                        .into(),
+                ),
+                C::ModelUnavailable,
+                C::Unknown,
                 true,
             ),
             (
+                AgentError::PromptTooLong("anthropic returned 400: prompt is too long".into()),
+                C::ContextOverflow,
+                C::Unknown,
+                true,
+            ),
+            (
+                AgentError::InvalidRequest("openai returned 400: unsupported parameter".into()),
+                C::RequestRejected,
+                C::Unknown,
+                true,
+            ),
+            // A 404 that does not name the model points at the address.
+            (
+                AgentError::EndpointNotFound("openai-compat returned 404".into()),
+                C::EndpointNotFound,
+                C::Unknown,
+                true,
+            ),
+            // Tidebreak's own faults: never the provider's, and their
+            // messages carry host detail that stays behind the server. A
+            // definite fault is `local`; one that may clear is retried as
+            // `transient`.
+            (
+                AgentError::Store(
+                    "Execution Error: (code: 13) database or disk is full: /Users/me/tidebreak.db"
+                        .into(),
+                ),
+                C::Local,
+                C::Unknown,
+                false,
+            ),
+            (
+                AgentError::Secret(
+                    "Platform secure storage failure: User canceled the operation.".into(),
+                ),
+                C::Local,
+                C::Unknown,
+                false,
+            ),
+            (
+                AgentError::Store(
+                    "Failed to acquire connection from pool: Connection pool timed out".into(),
+                ),
+                C::Transient,
+                C::Transient,
+                false,
+            ),
+            (
+                AgentError::Secret("the Vault request timed out".into()),
+                C::Transient,
+                C::Transient,
+                false,
+            ),
+            (
                 AgentError::msg("max steps per turn were consumed"),
-                TurnFailureCategory::Unknown,
+                C::Unknown,
+                C::Unknown,
                 false,
             ),
         ];
 
-        for (error, expected, exposes_detail) in cases {
+        for (error, expected, legacy, exposes_detail) in cases {
             let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
                 seq: 1,
                 event: AgentEvent::TurnFailed {
@@ -870,7 +919,8 @@ mod tests {
             assert_eq!(
                 projected.event,
                 RendererAgentEvent::TurnFailed {
-                    category: expected,
+                    category: legacy,
+                    failure: Some(TurnFailure::new(expected)),
                     detail: exposes_detail.then(|| error.to_string()),
                     model: None,
                 },
@@ -882,7 +932,43 @@ mod tests {
                 exposes_detail,
                 "{encoded}"
             );
+            assert_eq!(encoded["event"]["failure"]["category"], expected.as_str());
         }
+    }
+
+    /// A turn waiting on the server's own retry says so, with the attempt
+    /// it will start and when, instead of emitting nothing for minutes.
+    #[test]
+    fn a_retry_wait_projects_its_category_attempt_and_time() {
+        let retry_at = chrono::DateTime::from_timestamp(1_787_238_354, 0).unwrap();
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
+            seq: 9,
+            event: AgentEvent::TurnRetrying {
+                category: TurnFailureCategory::Overloaded,
+                attempt: 2,
+                max_attempts: 5,
+                retry_at,
+            },
+        });
+        assert_eq!(
+            projected.event,
+            RendererAgentEvent::TurnRetrying {
+                category: TurnFailureCategory::Overloaded,
+                attempt: 2,
+                max_attempts: 5,
+                retry_at,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&projected.event).unwrap(),
+            serde_json::json!({
+                "type": "turn_retrying",
+                "category": "overloaded",
+                "attempt": 2,
+                "max_attempts": 5,
+                "retry_at": "2026-08-20T15:05:54Z",
+            })
+        );
     }
 
     #[test]

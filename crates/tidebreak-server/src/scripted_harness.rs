@@ -793,6 +793,7 @@ impl ScriptedSession {
         if self.silent_interrupt {
             return TurnOutcome::Incomplete {
                 detail: "the engine was terminated by signal 9".into(),
+                failure: None,
             };
         }
         self.sink.emit(HarnessEvent::TurnInterrupted).await;

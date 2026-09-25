@@ -185,11 +185,16 @@ impl OpencodeStreamParser {
                 .pointer("/data/message")
                 .or_else(|| body.get("message"))
                 .and_then(Value::as_str)
-                .unwrap_or("engine reported an error");
+                .unwrap_or("opencode reported an error without saying why");
+            // The status is opencode's own server answering Tidebreak, not the
+            // model API's; the named error in the body is what classifies.
+            let failure = crate::failure::opencode_failure(
+                body.get("name").and_then(Value::as_str).unwrap_or_default(),
+                body.get("data").unwrap_or(&Value::Null),
+                message,
+            );
             return vec![HarnessEvent::TurnFailed {
-                error: BoundedError {
-                    message: bound(message, MAX_NOTICE_CHARS),
-                },
+                error: BoundedError::new(bound(message, MAX_NOTICE_CHARS)).with_failure(failure),
             }];
         }
         self.count_unrecognized(&format!("in/http/{status}{path}"), value);
@@ -271,7 +276,7 @@ impl OpencodeStreamParser {
         let message = error
             .pointer("/data/message")
             .and_then(Value::as_str)
-            .unwrap_or("engine reported an error");
+            .unwrap_or("opencode reported an error without saying why");
         if self.turn_terminal {
             return Vec::new();
         }
@@ -280,10 +285,13 @@ impl OpencodeStreamParser {
         if name == "MessageAbortedError" {
             return vec![HarnessEvent::TurnInterrupted];
         }
+        let failure = crate::failure::opencode_failure(
+            name,
+            error.get("data").unwrap_or(&Value::Null),
+            message,
+        );
         vec![HarnessEvent::TurnFailed {
-            error: BoundedError {
-                message: bound(message, MAX_NOTICE_CHARS),
-            },
+            error: BoundedError::new(bound(message, MAX_NOTICE_CHARS)).with_failure(failure),
         }]
     }
 

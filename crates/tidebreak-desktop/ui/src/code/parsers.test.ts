@@ -52,6 +52,7 @@ import {
   parseHarnessDoctorReport,
   parseQueuedCodeTurn,
   parseSequencedCodeEvent,
+  parseTurnFailure,
 } from "./parsers";
 
 const DELIVERY_CAPABILITY = {
@@ -1268,6 +1269,71 @@ describe("parseCodeAction", () => {
 });
 
 describe("parseCodeEvent", () => {
+  it("keeps a failed turn's classification beside its message", () => {
+    expect(
+      parseCodeEvent({
+        type: "turn_failed",
+        error: {
+          message: "You've hit your usage limit.",
+          failure: {
+            category: "usage_limit",
+            engine: "codex",
+            resets_at: "2026-08-20T15:05:54Z",
+          },
+        },
+      }),
+    ).toEqual({
+      type: "turn_failed",
+      error: {
+        message: "You've hit your usage limit.",
+        failure: {
+          category: "usage_limit",
+          engine: "codex",
+          resets_at: "2026-08-20T15:05:54Z",
+        },
+      },
+    });
+  });
+
+  /**
+   * A failure must never go missing. A newer server's category reads as
+   * unknown, and what this build cannot read of the classification is left
+   * out, but the failure and its message still arrive.
+   */
+  it("degrades a classification it cannot fully read instead of dropping the failure", () => {
+    expect(
+      parseTurnFailure({
+        category: "a_category_from_next_year",
+        engine: "an_engine_from_next_year",
+        added_later: true,
+      }),
+    ).toEqual({ category: "unknown" });
+    expect(parseTurnFailure({ engine: "codex" })).toBeUndefined();
+    expect(parseTurnFailure("usage_limit")).toBeUndefined();
+    expect(
+      parseCodeEvent({
+        type: "turn_failed",
+        error: { message: "boom", failure: { category: 7 } },
+      }),
+    ).toEqual({ type: "turn_failed", error: { message: "boom" } });
+  });
+
+  it("reads the server's retry of a failed attempt", () => {
+    const retrying = {
+      type: "turn_retrying",
+      category: "overloaded",
+      attempt: 2,
+      max_attempts: 5,
+      retry_at: "2026-08-20T15:05:54Z",
+    };
+    expect(parseCodeEvent(retrying)).toEqual(retrying);
+    expect(
+      parseCodeEvent({ ...retrying, category: "a_category_from_next_year" }),
+    ).toEqual({ ...retrying, category: "unknown" });
+    expect(parseCodeEvent({ ...retrying, attempt: -1 })).toBeNull();
+    expect(parseCodeEvent({ ...retrying, retry_at: "" })).toBeNull();
+  });
+
   it("keeps the internal engine's rows on the code wire", () => {
     // A chat is a session on the one journal, so its rows carry fields an
     // external engine never writes. Dropping them would leave every tool

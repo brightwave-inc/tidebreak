@@ -6,8 +6,9 @@
 //! way it is a type error in the desktop renderer's generated `wire.ts`. The
 //! contract those types carry is documented on that module: unknown keys are
 //! ignored, so this CLI keeps working against a server a release ahead;
-//! vocabularies stay closed; and an event type this build does not know fails
-//! its frame, which the event stream counts and reports.
+//! vocabularies stay closed, except that a turn failure category this build
+//! does not know reads as `unknown`; and an event type this build does not
+//! know fails its frame, which the event stream counts and reports.
 //!
 //! The chat event socket's frames and the REST records (the model catalog,
 //! providers, MCP servers, agent runs, and conversation outputs) both come

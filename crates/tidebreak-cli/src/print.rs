@@ -366,13 +366,32 @@ async fn one_turn(
                     Err(halt) => break halted(client, chat, turn_id, &halt, &mut printer).await,
                 }
             }
+            // The server is waiting out a failure a retry may clear. Say so,
+            // or a long wait reads as a hang.
+            RendererAgentEvent::TurnRetrying {
+                category,
+                attempt,
+                max_attempts,
+                retry_at,
+            } => printer.notice(&turn_retrying_notice(
+                category.as_str(),
+                attempt,
+                max_attempts,
+                retry_at,
+            )),
             RendererAgentEvent::TurnCompleted { .. } => break 0,
             RendererAgentEvent::TurnFailed {
                 category,
+                failure,
                 detail,
                 model,
             } => {
                 printer.finish();
+                // `category` is the coarse value older clients read; a server
+                // that sends the full diagnosis sends it as `failure`.
+                let category = failure
+                    .as_ref()
+                    .map_or(category, |failure| failure.category);
                 let model_line = model
                     .as_ref()
                     .map(|identity| format!("{}/{}", identity.provider.as_str(), identity.id));
@@ -1041,6 +1060,20 @@ fn tool_failure_notice(reason: crate::api::wire::RendererToolFailureReason) -> &
     }
 }
 
+/// Human notice for a turn the server will run again: why the attempt
+/// failed, which attempt comes next, and when.
+fn turn_retrying_notice(
+    category: &str,
+    attempt: u32,
+    max_attempts: u32,
+    retry_at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    format!(
+        "attempt failed ({category}); retrying at {} (attempt {attempt} of at most {max_attempts})",
+        retry_at.format("%H:%M:%S UTC")
+    )
+}
+
 /// Human notice for a failed `-p` turn: category, optional detail, optional
 /// model identity, and a one-line next step.
 fn turn_failed_notice(category: &str, detail: Option<&str>, model: Option<&str>) -> String {
@@ -1064,8 +1097,17 @@ fn turn_failed_notice(category: &str, detail: Option<&str>, model: Option<&str>)
 fn turn_failure_hint(category: &str) -> &'static str {
     match category {
         "auth" => "run `tidebreak provider set-key <kind>`",
-        "rate_limited" => "wait, then run the turn again",
+        "rate_limited" | "overloaded" => "wait, then run the turn again",
         "provider_access" => "check the provider account, then try a different model or key",
+        "model_unavailable" => "pick another model with --model, then run the turn again",
+        "endpoint_not_found" => {
+            "check the provider's base URL, or the proxy in front of it, then run the turn again"
+        }
+        "context_overflow" => "start a new conversation, or send less, then run the turn again",
+        "request_rejected" => "change the request; sending it unchanged gets the same answer",
+        "local" => {
+            "check the disk space and credential store where the server runs, then run the turn again"
+        }
         "transient" => "run the turn again",
         _ => "check the server logs, then try again",
     }
@@ -1113,5 +1155,28 @@ mod tests {
         assert!(notice.contains("turn failed (auth): invalid api key"));
         assert!(notice.contains("model: anthropic/claude-sonnet"));
         assert!(notice.contains("run `tidebreak provider set-key <kind>`"));
+    }
+
+    #[test]
+    fn a_retry_wait_says_why_and_when() {
+        let at = chrono::DateTime::from_timestamp(1_787_238_354, 0).unwrap();
+        assert_eq!(
+            turn_retrying_notice("overloaded", 2, 5, at),
+            "attempt failed (overloaded); retrying at 15:05:54 UTC (attempt 2 of at most 5)"
+        );
+    }
+
+    /// A retired model and an oversized conversation are not worth a plain
+    /// rerun, so their hints say what to change instead.
+    #[test]
+    fn a_failure_that_a_rerun_cannot_fix_says_what_to_change() {
+        let retired = turn_failed_notice("model_unavailable", None, None);
+        assert!(retired.contains("pick another model with --model"));
+        let overflow = turn_failed_notice("context_overflow", None, None);
+        assert!(overflow.contains("start a new conversation"));
+        let local = turn_failed_notice("local", None, None);
+        assert!(local.contains("where the server runs"));
+        let address = turn_failed_notice("endpoint_not_found", None, None);
+        assert!(address.contains("base URL"));
     }
 }

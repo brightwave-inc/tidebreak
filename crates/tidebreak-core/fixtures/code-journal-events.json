@@ -94,7 +94,13 @@
   {
     "type": "turn_failed",
     "error": {
-      "message": "engine exited 1"
+      "message": "engine exited 1",
+      "failure": {
+        "category": "usage_limit",
+        "engine": "codex",
+        "model": "gpt-5.5",
+        "resets_at": "2026-08-20T15:05:54Z"
+      }
     }
   },
   {
@@ -203,5 +209,12 @@
     "turn_id": "00000000-0000-0000-0000-000000000001",
     "outcome": "completed",
     "findings": 3
+  },
+  {
+    "type": "turn_retrying",
+    "category": "overloaded",
+    "attempt": 2,
+    "max_attempts": 5,
+    "retry_at": "2026-08-20T15:05:54Z"
   }
 ]

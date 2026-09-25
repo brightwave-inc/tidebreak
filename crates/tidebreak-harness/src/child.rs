@@ -1235,36 +1235,61 @@ const MAX_DETAIL_STDERR_BYTES: usize = 2 * 1_024;
 
 /// Classify how the child that ran one turn ended.
 ///
-/// `saw_terminal` is whether the stream reported a terminal turn event.
-/// `status` is `None` when the exit could not be observed — a child another
-/// task already reaped, for instance.
+/// `engine` names the engine in the detail, so a reader learns which one
+/// stopped. `saw_terminal` is whether the stream reported a terminal turn
+/// event. `status` is `None` when the exit could not be observed — a child
+/// another task already reaped, for instance.
 #[must_use]
-pub fn turn_outcome(status: Option<ExitStatus>, saw_terminal: bool, stderr: &str) -> TurnOutcome {
-    let failure = status.filter(|status| !status.success()).map(describe_exit);
-    if failure.is_none() && saw_terminal {
+pub fn turn_outcome(
+    engine: tidebreak_core::HarnessKind,
+    status: Option<ExitStatus>,
+    saw_terminal: bool,
+    stderr: &str,
+) -> TurnOutcome {
+    let failed = status.filter(|status| !status.success());
+    if failed.is_none() && saw_terminal {
         return TurnOutcome::Clean;
     }
-    let mut detail =
-        failure.unwrap_or_else(|| "the engine exited without reporting a result".to_owned());
+    let label = engine.label();
+    let mut detail = failed.map_or_else(
+        || format!("{label} exited without reporting a result"),
+        |status| describe_exit(label, status),
+    );
     let tail = stderr_tail(stderr);
     if !tail.is_empty() {
         detail.push_str(": ");
         detail.push_str(tail);
     }
-    TurnOutcome::Incomplete { detail }
+    TurnOutcome::Incomplete {
+        detail,
+        failure: Some(crate::failure::exit_failure(
+            engine,
+            failed.and_then(exit_signal),
+        )),
+    }
 }
 
-fn describe_exit(status: ExitStatus) -> String {
+/// The Unix signal that ended the process, when one did.
+fn exit_signal(status: ExitStatus) -> Option<i32> {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        if let Some(signal) = status.signal() {
-            return format!("the engine was terminated by signal {signal}");
-        }
+        status.signal()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
+fn describe_exit(label: &str, status: ExitStatus) -> String {
+    if let Some(signal) = exit_signal(status) {
+        return format!("{label} was terminated by signal {signal}");
     }
     match status.code() {
-        Some(code) => format!("the engine exited with status {code}"),
-        None => "the engine exited abnormally".to_owned(),
+        Some(code) => format!("{label} exited with status {code}"),
+        None => format!("{label} exited abnormally"),
     }
 }
 
@@ -1290,23 +1315,65 @@ mod tests {
     fn a_stream_that_stopped_without_a_result_is_incomplete() {
         // The defect this guards: EOF on stdout was read as a completed turn,
         // so a killed or crashed child journaled as success.
-        let outcome = turn_outcome(None, false, "");
+        let outcome = turn_outcome(tidebreak_core::HarnessKind::Grok, None, false, "");
         assert!(matches!(outcome, TurnOutcome::Incomplete { .. }));
-        assert_eq!(turn_outcome(None, true, ""), TurnOutcome::Clean);
+        assert_eq!(
+            turn_outcome(tidebreak_core::HarnessKind::Grok, None, true, ""),
+            TurnOutcome::Clean
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn a_failed_exit_is_incomplete_even_after_a_terminal_event_and_carries_stderr() {
         use std::os::unix::process::ExitStatusExt;
-        let outcome = turn_outcome(Some(ExitStatus::from_raw(3 << 8)), true, "  boom  ");
+        let outcome = turn_outcome(
+            tidebreak_core::HarnessKind::ClaudeCode,
+            Some(ExitStatus::from_raw(3 << 8)),
+            true,
+            "  boom  ",
+        );
         match outcome {
-            TurnOutcome::Incomplete { detail } => {
-                assert!(detail.contains("status 3"), "{detail}");
+            TurnOutcome::Incomplete { detail, failure } => {
+                assert!(
+                    detail.starts_with("Claude Code exited with status 3"),
+                    "{detail}"
+                );
                 assert!(detail.ends_with("boom"), "{detail}");
+                let failure = failure.expect("an exit is classified");
+                assert_eq!(
+                    failure.category,
+                    tidebreak_core::TurnFailureCategory::Unknown
+                );
+                assert_eq!(
+                    failure.engine,
+                    Some(tidebreak_core::HarnessKind::ClaudeCode)
+                );
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A kill from outside the engine — most often the system reclaiming
+    /// memory — names the engine and is worth a retry.
+    #[cfg(unix)]
+    #[test]
+    fn a_killed_engine_is_named_and_transient() {
+        use std::os::unix::process::ExitStatusExt;
+        let outcome = turn_outcome(
+            tidebreak_core::HarnessKind::Codex,
+            Some(ExitStatus::from_raw(9)),
+            false,
+            "",
+        );
+        let TurnOutcome::Incomplete { detail, failure } = outcome else {
+            panic!("a killed engine did not finish its turn");
+        };
+        assert_eq!(detail, "Codex CLI was terminated by signal 9");
+        assert_eq!(
+            failure.map(|failure| failure.category),
+            Some(tidebreak_core::TurnFailureCategory::Transient)
+        );
     }
 
     #[test]

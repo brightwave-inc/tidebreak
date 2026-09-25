@@ -25,6 +25,7 @@ use crate::id::{CallId, MessageId, TurnId};
 use crate::preview::ToolActionPreview;
 use crate::provider::Usage;
 use crate::tool::{ToolErrorCategory, ToolOutput};
+use crate::turn_failure::TurnFailure;
 
 /// The code journal row for one chat event.
 ///
@@ -113,14 +114,27 @@ pub fn journal_row(event: &AgentEvent) -> Event {
             usage: code_usage(*usage),
             refusal: refusal.clone(),
         },
+        // The category rides beside the message, so a code reader of the
+        // internal engine's failure gets the same diagnosis the chat
+        // projection derives from `detail`.
         AgentEvent::TurnFailed { error } => Event::TurnFailed {
-            error: BoundedError {
-                message: bounded(
-                    &format!("{}: {}", error.kind, error.message),
-                    MAX_NOTICE_CHARS,
-                ),
-            },
+            error: BoundedError::new(bounded(
+                &format!("{}: {}", error.kind, error.message),
+                MAX_NOTICE_CHARS,
+            ))
+            .with_failure(TurnFailure::from_failure(&error.kind, &error.message)),
             detail: Some(error.clone()),
+        },
+        AgentEvent::TurnRetrying {
+            category,
+            attempt,
+            max_attempts,
+            retry_at,
+        } => Event::TurnRetrying {
+            category: *category,
+            attempt: *attempt,
+            max_attempts: *max_attempts,
+            retry_at: *retry_at,
         },
         AgentEvent::TurnCancelled { usage } => Event::TurnInterrupted {
             usage: Some(code_usage(*usage)),
@@ -253,6 +267,17 @@ pub fn chat_event(event: Event) -> Result<Option<AgentEvent>> {
             detail: Some(error),
             ..
         } => AgentEvent::TurnFailed { error },
+        Event::TurnRetrying {
+            category,
+            attempt,
+            max_attempts,
+            retry_at,
+        } => AgentEvent::TurnRetrying {
+            category,
+            attempt,
+            max_attempts,
+            retry_at,
+        },
         Event::TurnInterrupted { usage: Some(usage) } => AgentEvent::TurnCancelled {
             usage: chat_usage(&usage),
         },

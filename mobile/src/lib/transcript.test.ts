@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Event as CodeEvent } from "../generated/wire";
 import {
   hydrateTurnHistory,
   initialTranscript,
@@ -6,6 +7,48 @@ import {
 } from "./transcript";
 
 describe("reduceTranscript", () => {
+  /**
+   * A failure from a newer server carries a category and an engine this
+   * build does not know, and a retry this build does not draw. The failure
+   * still ends the turn with its message, and the retry changes nothing.
+   */
+  it("reads a failure from a newer server without breaking", () => {
+    let state = reduceTranscript(initialTranscript(), {
+      seq: 1,
+      event: { type: "turn_started", turn_id: "t1" },
+    });
+    state = reduceTranscript(state, {
+      seq: 2,
+      event: {
+        type: "turn_retrying",
+        category: "quota_exceeded",
+        attempt: 2,
+        max_attempts: 5,
+        retry_at: "2026-08-20T15:05:54Z",
+      } as unknown as CodeEvent,
+    });
+    expect(state.activeTurnId).toBe("t1");
+    state = reduceTranscript(state, {
+      seq: 3,
+      event: {
+        type: "turn_failed",
+        error: {
+          message: "You've hit your usage limit.",
+          failure: {
+            category: "quota_exceeded",
+            engine: "an_engine_from_next_year",
+          },
+        },
+      } as unknown as CodeEvent,
+    });
+    expect(state.activeTurnId).toBeNull();
+    expect(state.lastSeq).toBe(3);
+    expect(state.items.at(-1)).toMatchObject({
+      kind: "status",
+      text: "Turn failed: You've hit your usage limit.",
+    });
+  });
+
   it("ignores duplicate durable seq", () => {
     let state = initialTranscript();
     state = reduceTranscript(state, {

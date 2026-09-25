@@ -706,6 +706,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
         Some(crate::JournaledTurnOutcome {
             outcome: crate::RequestTurnCancellationOutcome::Requested(_),
             terminal_event: None,
+            retrying_event: None,
         })
     ));
 

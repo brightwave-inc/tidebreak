@@ -89,6 +89,7 @@ async fn request_turn_cancellation_inner(
             return Ok(Some(JournaledTurnOutcome {
                 outcome: RequestTurnCancellationOutcome::Existing(turn),
                 terminal_event: sequenced_event,
+                retrying_event: None,
             }));
         }
         TurnRunStatus::Completed | TurnRunStatus::Failed => {
@@ -97,6 +98,7 @@ async fn request_turn_cancellation_inner(
             return Ok(Some(JournaledTurnOutcome {
                 outcome: RequestTurnCancellationOutcome::AlreadyTerminal(turn),
                 terminal_event: None,
+                retrying_event: None,
             }));
         }
         TurnRunStatus::Queued
@@ -369,6 +371,7 @@ async fn request_turn_cancellation_inner(
     Ok(Some(JournaledTurnOutcome {
         outcome,
         terminal_event: sequenced_event,
+        retrying_event: None,
     }))
 }
 
@@ -497,6 +500,7 @@ async fn finish_turn_cancellation_inner(
         return Ok(Some(JournaledTurnOutcome {
             outcome: FinishTurnCancellationOutcome::Existing(turn),
             terminal_event: sequenced_event,
+            retrying_event: None,
         }));
     }
     if turn.status != TurnRunStatus::Cancelling.as_str()
@@ -657,6 +661,7 @@ async fn finish_turn_cancellation_inner(
     Ok(Some(JournaledTurnOutcome {
         outcome: FinishTurnCancellationOutcome::Cancelled(cancelled),
         terminal_event: sequenced_event,
+        retrying_event: None,
     }))
 }
 
