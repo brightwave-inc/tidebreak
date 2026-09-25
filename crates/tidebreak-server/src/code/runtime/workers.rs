@@ -529,6 +529,18 @@ impl CodeRuntime {
     }
 
     /// Whether a worker is attached to the session right now.
+    /// Stop a session's worker the way a crash would: no interrupt and no
+    /// close, the turn left exactly as the database holds it. For tests
+    /// that restart a worker mid-turn. `false` when no worker was attached.
+    #[doc(hidden)]
+    pub fn crash_worker(&self, id: SessionId) -> bool {
+        let handle = self.workers.lock().expect("code workers").remove(&id);
+        handle.is_some_and(|handle| {
+            handle.abort.abort();
+            true
+        })
+    }
+
     pub fn has_worker(&self, id: SessionId) -> bool {
         self.workers.lock().expect("code workers").contains_key(&id)
     }

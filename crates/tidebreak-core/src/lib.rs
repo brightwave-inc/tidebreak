@@ -447,7 +447,7 @@ pub use tool::{
 };
 #[cfg(feature = "tools")]
 pub use tools::{create_app_tool_spec, CreateAppTool, ListDir, ReadFile, WriteFile};
-pub use turn_failure::{TurnFailure, TurnFailureCategory};
+pub use turn_failure::{names_missing_model, TurnFailure, TurnFailureCategory};
 pub use user_questions::{
     ask_user_questions_tool_spec, validate_ask_user_questions_arguments, AnswerUserQuestions,
     AnswerUserQuestionsRequest, AskUserQuestionsArgs, PendingUserQuestions, UserQuestion,

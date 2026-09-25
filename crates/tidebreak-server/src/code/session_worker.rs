@@ -397,10 +397,14 @@ impl LiveSink {
     /// authentication failure (issue 2653). Those become `engine_auth`, and
     /// because the vendor's raw 401 body cannot tell the reader "sign this
     /// harness in" from "the provider is down", the sentence the create-time
-    /// refusal uses leads and the engine's own words follow. A turn riding
-    /// the relay keeps its message untouched — the relay's refusals already
-    /// name the gateway, and a hosted machine has no sign-in to send anyone
-    /// to.
+    /// refusal uses leads and the engine's own words follow.
+    ///
+    /// A turn riding the relay is different: the engine authenticates with
+    /// the relay's credential, which Tidebreak holds, not with a sign-in of
+    /// its own. A refusal there is Tidebreak's credential, so it reads as
+    /// `auth`, never `engine_auth`, and its message stays untouched — the
+    /// relay's refusals already name the gateway, and a hosted machine has
+    /// no engine sign-in to send anyone to.
     fn legible_turn_error(&self, error: BoundedError) -> BoundedError {
         let reads_as_signed_out = provider_auth_failure(&error.message);
         let mut failure = error
@@ -411,6 +415,9 @@ impl LiveSink {
         }
         if failure.category == TurnFailureCategory::Unknown && reads_as_signed_out {
             failure.category = TurnFailureCategory::EngineAuth;
+        }
+        if self.relay_wired && failure.category == TurnFailureCategory::EngineAuth {
+            failure.category = TurnFailureCategory::Auth;
         }
         // A failure about the model names the one the turn asked for, when
         // the engine did not name one itself.
@@ -1063,7 +1070,14 @@ async fn run_worker(
                         fast_mode: session.fast_mode,
                         images: Vec::new(),
                     };
-                    if let Err(error) = engine.run_turn(input).await {
+                    if let Err(error) = drive_recovered_internal_turn(
+                        engine.as_ref(),
+                        &mut commands,
+                        open.id,
+                        input,
+                    )
+                    .await
+                    {
                         warn!(
                             session = %session.id,
                             error = %error,
@@ -1091,7 +1105,8 @@ async fn run_worker(
         {
             // The turn was waiting on the server's own retry when the worker
             // stopped. The engine waits out what is left of it and takes the
-            // next attempt, so the journaled `turn_retrying` gets its outcome.
+            // next attempt, so the journaled `turn_retrying` gets its outcome;
+            // a stop during the wait ends it.
             let input = TurnInput {
                 turn_id: Some(open.id),
                 text: open.user_input.clone(),
@@ -1100,7 +1115,9 @@ async fn run_worker(
                 fast_mode: session.fast_mode,
                 images: Vec::new(),
             };
-            if let Err(error) = engine.run_turn(input).await {
+            if let Err(error) =
+                drive_recovered_internal_turn(engine.as_ref(), &mut commands, open.id, input).await
+            {
                 warn!(
                     session = %session.id,
                     error = %error,
@@ -1370,6 +1387,54 @@ async fn park_idle_engine(session: &mut Session, engine: &dyn HarnessSession, si
 
 /// Stop the engine's current turn, discarding the adapter's error: the turn
 /// is ending either way, and the outcome is what the worker journals.
+/// Run an internal-engine turn a restarted worker picked back up, answering
+/// commands while it runs.
+///
+/// The worker's command loop has not started yet, and the interrupt route
+/// waits on the worker's answer. Awaiting the engine bare would hold a stop
+/// until the turn ended on its own — through a whole retry wait and the
+/// attempt after it. Here a stop reaches the engine at once: during a retry
+/// wait it cancels the turn, and the wait ends on its next check.
+async fn drive_recovered_internal_turn(
+    engine: &dyn HarnessSession,
+    commands: &mut mpsc::Receiver<WorkerCommand>,
+    turn_id: TurnId,
+    input: TurnInput,
+) -> Result<TurnOutcome, HarnessError> {
+    let delivered: DeliveredDecisions =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut controls: FuturesUnordered<BoxFuture<'_, ControlFlow>> = FuturesUnordered::new();
+    let mut commands_closed = false;
+    let leg: BoxFuture<'_, Result<TurnOutcome, HarnessError>> = Box::pin(engine.run_turn(input));
+    tokio::pin!(leg);
+    let result = loop {
+        tokio::select! {
+            biased;
+            Some(flow) = controls.next(), if !controls.is_empty() => {
+                if flow == ControlFlow::Shutdown {
+                    controls.push(Box::pin(interrupt_engine(engine)));
+                }
+            }
+            result = &mut leg => break result,
+            command = commands.recv(), if !commands_closed => match command {
+                Some(command) => controls.push(Box::pin(apply_control(
+                    engine,
+                    command,
+                    Some(turn_id),
+                    Some(delivered.clone()),
+                ))),
+                None => {
+                    commands_closed = true;
+                    controls.push(Box::pin(interrupt_engine(engine)));
+                }
+            },
+        }
+    };
+    // A control still in flight has a caller waiting on its reply.
+    while controls.next().await.is_some() {}
+    result
+}
+
 async fn interrupt_engine(engine: &dyn HarnessSession) -> ControlFlow {
     let _ = engine.interrupt().await;
     ControlFlow::Continue

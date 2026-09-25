@@ -2352,6 +2352,23 @@ async fn a_relay_wired_session_keeps_the_relays_own_refusal() {
     // has no sign-in to send anyone to.
     let kept = sink.legible_turn_error(BoundedError::new("authentication_error: sign in required"));
     assert_eq!(kept.message, "authentication_error: sign in required");
+    // The relay's credential is Tidebreak's: its refusal reads as `auth`,
+    // never as an engine that needs signing in.
+    assert_eq!(
+        kept.failure,
+        Some(TurnFailure::new(TurnFailureCategory::Auth).with_engine(HarnessKind::Codex))
+    );
+    // The same holds when the adapter classified the 401 itself. The message
+    // is one Codex printed for a gateway refusal (see the harness tests).
+    let refusal = "unexpected status 401 Unauthorized: A live Model Gateway credential is required., url: https://gateway.example.com/compat/openai/v1/responses";
+    let classified = sink.legible_turn_error(BoundedError::new(refusal).with_failure(
+        TurnFailure::new(TurnFailureCategory::EngineAuth).with_engine(HarnessKind::Codex),
+    ));
+    assert_eq!(classified.message, refusal);
+    assert_eq!(
+        classified.failure,
+        Some(TurnFailure::new(TurnFailureCategory::Auth).with_engine(HarnessKind::Codex))
+    );
 }
 
 #[tokio::test]

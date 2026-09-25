@@ -122,7 +122,7 @@ pub fn journal_row(event: &AgentEvent) -> Event {
                 &format!("{}: {}", error.kind, error.message),
                 MAX_NOTICE_CHARS,
             ))
-            .with_failure(TurnFailure::from_kind(&error.kind)),
+            .with_failure(TurnFailure::from_failure(&error.kind, &error.message)),
             detail: Some(error.clone()),
         },
         AgentEvent::TurnRetrying {

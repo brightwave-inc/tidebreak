@@ -629,14 +629,27 @@ pub fn classify_provider_error(
     if status == 401 || matches!(code, "authentication_error" | "invalid_api_key") {
         return AgentError::Authentication(safe());
     }
-    if status == 403 {
+    // 402 is the account's credits or billing (OpenRouter: "insufficient
+    // credits"), which waiting does not refill. OpenRouter documents one
+    // exception: a 402 that carries `Retry-After` is its in-flight budget,
+    // a wait like any throttle.
+    if status == 402 && retry_after.is_some() {
+        return AgentError::RateLimited(ProviderFailure::new(safe(), retry_after));
+    }
+    if matches!(status, 402 | 403) {
         return AgentError::AccessDenied(safe());
     }
-    // A retired or unknown model. Anthropic answers 404 `not_found_error`,
-    // OpenAI 404 `model_not_found`, and some OpenAI-compatible routers send
-    // the same code on a 400.
-    if status == 404 || code == "model_not_found" {
+    // A retired or unknown model, when the provider says the model is what
+    // is missing: OpenAI's (and Google's) `model_not_found` code, sent on a
+    // 400 by some OpenAI-compatible routers, or words that name the model.
+    if code == "model_not_found" || (status == 404 && tidebreak_core::names_missing_model(message))
+    {
         return AgentError::ModelUnavailable(safe());
+    }
+    // Any other 404 is the address itself: a wrong base URL, or a proxy
+    // that answers for nothing there. Choosing another model would not help.
+    if status == 404 {
+        return AgentError::EndpointNotFound(safe());
     }
     if status == 429 || code == "rate_limit_error" {
         return AgentError::RateLimited(ProviderFailure::new(safe(), retry_after));
@@ -861,7 +874,12 @@ mod tests {
         use tidebreak_core::error::AgentError;
         let anthropic = r#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-3-opus-20240229"}}"#;
         let gateway = r#"{"error":{"code":"invalid_request_error","message":"The requested model does not exist or is not granted to you on this gateway.","type":"invalid_request_error"}}"#;
-        for (provider, body) in [("anthropic", anthropic), ("model_gateway", gateway)] {
+        let google = r#"{"error":{"code":"model_not_found","message":"The specified model was not found."}}"#;
+        for (provider, body) in [
+            ("anthropic", anthropic),
+            ("model_gateway", gateway),
+            ("gemini", google),
+        ] {
             let err = classify_provider_error(provider, 404, body, None);
             assert!(
                 matches!(err, AgentError::ModelUnavailable(_)),
@@ -879,6 +897,55 @@ mod tests {
             ),
             AgentError::ModelUnavailable(_)
         ));
+    }
+
+    /// A 404 that does not name the model is the address, not the model: a
+    /// wrong base URL, or a proxy with nothing behind it. It is not retried,
+    /// and it does not tell the reader to switch models.
+    #[test]
+    fn classify_reads_a_404_without_a_model_as_the_address() {
+        use tidebreak_core::error::AgentError;
+        let nginx = "<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>";
+        let google =
+            r#"{"error":{"code":"not_found","message":"The requested resource was not found."}}"#;
+        for (provider, body) in [
+            ("openai-compat", nginx),
+            ("openai-compat", "404 page not found"),
+            ("gemini", google),
+        ] {
+            let err = classify_provider_error(provider, 404, body, None);
+            assert!(
+                matches!(err, AgentError::EndpointNotFound(_)),
+                "{body}: expected EndpointNotFound, got {err:?}"
+            );
+            assert_eq!(err.kind(), "endpoint_not_found");
+        }
+    }
+
+    /// OpenRouter's 402 (its documented message) is the account's credits:
+    /// it is a provider-access refusal, not a connection to retry. Its one
+    /// documented exception, a 402 with `Retry-After`, waits like a throttle.
+    #[test]
+    fn classify_reads_payment_required_as_account_access() {
+        use tidebreak_core::error::AgentError;
+        let body = r#"{"error":{"code":402,"message":"Your account or API key has insufficient credits. Add more credits and retry the request."}}"#;
+        let err = classify_provider_error("openrouter", 402, body, None);
+        assert!(
+            matches!(err, AgentError::AccessDenied(_)),
+            "expected AccessDenied, got {err:?}"
+        );
+        assert_eq!(err.kind(), "access_denied");
+        let budget = classify_provider_error(
+            "openrouter",
+            402,
+            body,
+            Some(std::time::Duration::from_secs(2)),
+        );
+        assert!(matches!(budget, AgentError::RateLimited(_)), "{budget:?}");
+        assert_eq!(
+            budget.retry_after(),
+            Some(std::time::Duration::from_secs(2))
+        );
     }
 
     #[test]

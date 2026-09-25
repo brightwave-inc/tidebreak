@@ -67,6 +67,7 @@ const TURN_FAILURE_CATEGORIES = new Set<TurnFailureCategory>([
   "auth",
   "provider_access",
   "model_unavailable",
+  "endpoint_not_found",
   "context_overflow",
   "request_rejected",
   "local",

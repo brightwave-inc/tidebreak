@@ -675,8 +675,9 @@ impl From<tidebreak_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot
             tidebreak_core::ChatTerminalTurnStatus::Cancelled => ChatTerminalTurnStatus::Cancelled,
         };
         let failure = matches!(status, ChatTerminalTurnStatus::Failed).then(|| {
-            crate::event_projection::TurnFailure::from_kind(
+            crate::event_projection::TurnFailure::from_failure(
                 snapshot.failure_kind.as_deref().unwrap_or_default(),
+                snapshot.failure_detail.as_deref().unwrap_or_default(),
             )
         });
         let failure_category = failure.as_ref().map(|failure| failure.category.legacy());

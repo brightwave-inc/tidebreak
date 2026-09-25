@@ -40,6 +40,10 @@ enum Step {
     Text(&'static str),
     /// The provider sheds the call, as a 529 does.
     Overloaded,
+    /// The provider sheds the call and asks for this many seconds of wait.
+    OverloadedFor(u64),
+    /// The provider refuses the request as invalid, which no retry fixes.
+    Rejected,
 }
 
 /// A provider that replays one scripted completion per model call.
@@ -74,6 +78,19 @@ impl ModelProvider for ScriptedProvider {
             Some(Step::Overloaded) => {
                 return Err(tidebreak_core::AgentError::Overloaded(
                     "scripted provider is overloaded".into(),
+                ));
+            }
+            Some(Step::Rejected) => {
+                return Err(tidebreak_core::AgentError::InvalidRequest(
+                    "scripted provider returned 400: unsupported parameter".into(),
+                ));
+            }
+            Some(Step::OverloadedFor(seconds)) => {
+                return Err(tidebreak_core::AgentError::Overloaded(
+                    tidebreak_core::ProviderFailure::new(
+                        "scripted provider is overloaded",
+                        Some(Duration::from_secs(seconds)),
+                    ),
                 ));
             }
             Some(Step::Tool { name, input }) => vec![
@@ -1860,6 +1877,127 @@ async fn an_internal_code_turn_journals_its_retry_and_then_recovers() {
     assert_eq!(turn.attempt_count, 2);
     assert!(turn.started_at.is_some_and(|started| started < *retry_at));
     assert_eq!(streamed_text(&events), "recovered");
+}
+
+/// A failure no retry fixes ends an internal code turn once: the classified
+/// `turn_failed` the leg journals is the last word, with no notice after it
+/// saying the turn "did not complete".
+#[tokio::test]
+async fn an_internal_code_turn_failure_is_journaled_once() {
+    let (addr, token, runtime, _ran, _dir) = internal_engine_app(vec![Step::Rejected]).await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{addr}/sessions"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "ask" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    let hosted: SessionId = session["id"].as_str().unwrap().parse().unwrap();
+    super::code::run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        &hosted.to_string(),
+        serde_json::json!({ "message": "send something odd" }),
+    )
+    .await;
+    assert_eq!(
+        turn_statuses(&client, addr, &token, hosted).await,
+        vec!["failed"]
+    );
+    let events = super::code::journaled_events(&runtime.db, hosted).await;
+    let types = event_types(&events);
+    let failed = position(&types, "turn_failed", 0);
+    assert_eq!(failed + 1, types.len(), "{types:?}");
+    assert!(
+        !types.iter().any(|kind| kind == "harness_notice"),
+        "{types:?}"
+    );
+    let tidebreak_core::Event::TurnFailed { error, .. } = &events[failed].event else {
+        panic!("expected the failure at {failed}");
+    };
+    assert_eq!(
+        error.category(),
+        Some(tidebreak_core::TurnFailureCategory::RequestRejected)
+    );
+}
+
+/// A worker that restarts while its turn waits on the server's retry picks
+/// the wait back up, and a stop still ends it at once. Before the restarted
+/// worker answered commands during that wait, the stop waited out the retry
+/// and the whole next attempt.
+#[tokio::test]
+async fn a_stop_ends_a_retry_wait_that_a_restarted_worker_picked_up() {
+    let (router, token, runtime, _ran, _dir, provider, _state) =
+        internal_engine_app_capturing(vec![Step::OverloadedFor(120), Step::Text("too late")]).await;
+    let addr = super::code::serve(router).await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{addr}/sessions"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "ask" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    let hosted: SessionId = session["id"].as_str().unwrap().parse().unwrap();
+    let accepted: serde_json::Value = client
+        .post(format!("http://{addr}/sessions/{hosted}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "wait for it" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let turn_id: TurnId = accepted["id"].as_str().unwrap().parse().unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let turn = runtime.db.get_turn(turn_id).await.unwrap();
+            if turn.is_some_and(|turn| turn.status == TurnRunStatus::RetryWait) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the overloaded attempt parks the turn to retry");
+
+    // The process dies mid-wait and the worker comes back.
+    assert!(runtime.crash_worker(hosted));
+    runtime.recover().await.unwrap();
+    assert!(runtime.has_worker(hosted));
+
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(10),
+        client
+            .post(format!("http://{addr}/sessions/{hosted}/interrupt"))
+            .bearer_auth(&token)
+            .send(),
+    )
+    .await
+    .expect("the stop answers during the retry wait")
+    .unwrap();
+    assert_eq!(stopped.status(), reqwest::StatusCode::ACCEPTED);
+    let ended =
+        super::code::wait_for_turn_end_in(&runtime, &OwnerId::local(), hosted, turn_id).await;
+    assert_eq!(ended.status, TurnStatus::Interrupted);
+
+    let events = super::code::journaled_events(&runtime.db, hosted).await;
+    let types = event_types(&events);
+    let retrying = position(&types, "turn_retrying", 0);
+    position(&types, "turn_interrupted", retrying);
+    assert_eq!(
+        types.iter().filter(|kind| *kind == "turn_started").count(),
+        1,
+        "the retry never ran: {types:?}"
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
 
 /// The workspace-bound create path never selects the in-process engine,

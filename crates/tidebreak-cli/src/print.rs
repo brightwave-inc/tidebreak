@@ -1100,9 +1100,14 @@ fn turn_failure_hint(category: &str) -> &'static str {
         "rate_limited" | "overloaded" => "wait, then run the turn again",
         "provider_access" => "check the provider account, then try a different model or key",
         "model_unavailable" => "pick another model with --model, then run the turn again",
+        "endpoint_not_found" => {
+            "check the provider's base URL, or the proxy in front of it, then run the turn again"
+        }
         "context_overflow" => "start a new conversation, or send less, then run the turn again",
         "request_rejected" => "change the request; sending it unchanged gets the same answer",
-        "local" => "check free disk space and keychain access, then run the turn again",
+        "local" => {
+            "check the disk space and credential store where the server runs, then run the turn again"
+        }
         "transient" => "run the turn again",
         _ => "check the server logs, then try again",
     }
@@ -1170,6 +1175,8 @@ mod tests {
         let overflow = turn_failed_notice("context_overflow", None, None);
         assert!(overflow.contains("start a new conversation"));
         let local = turn_failed_notice("local", None, None);
-        assert!(local.contains("free disk space"));
+        assert!(local.contains("where the server runs"));
+        let address = turn_failed_notice("endpoint_not_found", None, None);
+        assert!(address.contains("base URL"));
     }
 }

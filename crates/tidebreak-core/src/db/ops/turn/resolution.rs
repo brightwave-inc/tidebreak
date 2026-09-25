@@ -871,7 +871,10 @@ async fn record_turn_failure_inner(
     let retrying_event = match (result_status, requested_retry_at, terminal_event) {
         (TurnRunStatus::RetryWait, Some(retry_at), Some(_)) => {
             let event = AgentEvent::TurnRetrying {
-                category: crate::turn_failure::TurnFailureCategory::from_kind(error_code),
+                category: crate::turn_failure::TurnFailureCategory::from_failure(
+                    error_code,
+                    error_detail.unwrap_or_default(),
+                ),
                 attempt: retrying_attempt(claim.attempt_count)?,
                 max_attempts: u32::try_from(turn.max_attempts).map_err(|_| {
                     AgentError::Store(format!("turn {id} has a negative attempt budget"))

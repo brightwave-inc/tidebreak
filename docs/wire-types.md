@@ -190,18 +190,19 @@ answer when it decides whether to reschedule a failed attempt.
 
 | Category | When | Retry helps | Fields |
 |---|---|---|---|
-| `rate_limited` | The provider or engine throttled this account (429). | Yes | `resets_at` when known |
+| `rate_limited` | The provider or engine throttled this account (429, or a 402 with `Retry-After`). | Yes | `resets_at` when known |
 | `overloaded` | The provider is overloaded or briefly down (502, 503, 504, 529). | Yes | |
-| `transient` | A dropped connection or an upstream fault that may clear. | Yes | |
-| `auth` | The provider rejected Tidebreak's credential, or none is configured. | No | |
-| `provider_access` | The provider account refused the request: credits, billing, policy, or model access. | No | |
-| `model_unavailable` | The model is retired, unknown, or not granted to this account (404). | No | `model` on a code turn |
+| `transient` | A dropped connection, an upstream fault, or a timeout or busy database or secret store: anything that may clear. | Yes | |
+| `auth` | The provider rejected Tidebreak's credential, or none is configured. A relay-wired code session's refusal lands here too, since the relay credential is Tidebreak's. | No | |
+| `provider_access` | The provider account refused the request: credits (402), billing, policy, or model access (403). | No | |
+| `model_unavailable` | The provider said the model is retired, unknown, or not granted: a `model_not_found` code, or its words naming the model. | No | `model` on a code turn |
+| `endpoint_not_found` | A 404 that does not name the model: a wrong base URL, or a proxy with nothing behind it. | No | |
 | `context_overflow` | The conversation no longer fits the model, after Tidebreak's own reductions. | No | `model` on a code turn |
 | `request_rejected` | The provider or engine refused the request as invalid or against policy. | No | |
-| `local` | Tidebreak could not read its own database, saved credentials, or disk. | No | |
+| `local` | A definite fault where Tidebreak runs: a full disk, a damaged or unopenable database, or a refused credential store. | No | |
 | `engine_auth` | A coding engine is not signed in, or its sign-in stopped working. | No | `engine` |
 | `usage_limit` | A coding engine's plan or credit limit is spent. | No | `engine`, `resets_at` when the engine said |
-| `unknown` | Anything else. | No | `engine` on a code turn |
+| `unknown` | Anything else, including a category the reader does not know. | No | `engine` on a code turn |
 
 `TurnFailure` carries the category and those fields. A chat turn names its
 model beside the failure, as `model` on `turn_failed` and `failure_model` on the
@@ -220,6 +221,20 @@ Where it rides:
 - **Code.** `turn_failed` carries it inside `error`, as `error.failure`.
   Renderers built before it check only `error.message` and refuse an unknown
   key on the event itself, so the classification rides where they do not look.
+
+The vocabulary in `failure` and on `turn_retrying` may grow without an
+`api_level` bump, because every reader from this release on degrades instead
+of failing:
+
+- A category the reader does not know reads as `unknown`: `#[serde(other)]` in
+  Rust, a fallback in the desktop's copy map and code parser.
+- An engine, model, or reset time it cannot read on a failure reads as absent.
+- A `turn_failed` the CLI cannot decode at all still ends the turn, as a
+  failure of unknown cause, rather than being skipped: a follower that skipped
+  it would wait on the open socket forever.
+
+A new category still needs a `legacy` mapping for the older fields and copy in
+each client before it is useful, but it never breaks one.
 
 A chat or internal-engine turn that fails in a way a retry may clear journals
 `turn_retrying` before the wait: the category, the attempt the retry starts

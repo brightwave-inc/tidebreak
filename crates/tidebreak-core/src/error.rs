@@ -160,6 +160,11 @@ pub enum AgentError {
     #[error("model unavailable: {0}")]
     ModelUnavailable(String),
 
+    /// The provider's address answered 404 without naming the model: the
+    /// configured base URL, or a proxy in front of it, is wrong.
+    #[error("provider endpoint not found: {0}")]
+    EndpointNotFound(String),
+
     /// A catch-all for contexts that do not yet warrant their own variant.
     #[error("{0}")]
     Message(String),
@@ -205,6 +210,7 @@ impl AgentError {
             Self::Refusal(_) => "refusal",
             Self::PromptTooLong(_) => "prompt_too_long",
             Self::ModelUnavailable(_) => "model_unavailable",
+            Self::EndpointNotFound(_) => "endpoint_not_found",
             Self::Message(_) => "message",
             Self::Serde(_) => "serde",
         }
@@ -259,7 +265,8 @@ impl ProviderErrorInfo {
             | AgentError::InvalidRequest(message)
             | AgentError::Refusal(message)
             | AgentError::PromptTooLong(message)
-            | AgentError::ModelUnavailable(message) => message.clone(),
+            | AgentError::ModelUnavailable(message)
+            | AgentError::EndpointNotFound(message) => message.clone(),
             AgentError::RateLimited(failure) | AgentError::Overloaded(failure) => {
                 failure.to_string()
             }
@@ -294,6 +301,7 @@ impl ProviderErrorInfo {
             "refusal" => AgentError::Refusal(self.message),
             "prompt_too_long" => AgentError::PromptTooLong(self.message),
             "model_unavailable" => AgentError::ModelUnavailable(self.message),
+            "endpoint_not_found" => AgentError::EndpointNotFound(self.message),
             _ => AgentError::Provider(self.message),
         }
     }
@@ -338,6 +346,7 @@ pub fn provider_failure_detail(kind: &str, message: &str) -> Option<String> {
             | "refusal"
             | "prompt_too_long"
             | "model_unavailable"
+            | "endpoint_not_found"
             | "provider"
     )
     .then(|| message.trim().to_owned())
@@ -390,6 +399,10 @@ mod tests {
             (
                 AgentError::ModelUnavailable("gone".into()),
                 "model_unavailable",
+            ),
+            (
+                AgentError::EndpointNotFound("nothing there".into()),
+                "endpoint_not_found",
             ),
         ] {
             let info = ProviderErrorInfo::from_error(&error);

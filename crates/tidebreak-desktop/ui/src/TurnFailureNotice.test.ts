@@ -12,6 +12,7 @@ const EVERY_CATEGORY: TurnFailureCategory[] = [
   "auth",
   "provider_access",
   "model_unavailable",
+  "endpoint_not_found",
   "context_overflow",
   "request_rejected",
   "local",
@@ -97,10 +98,32 @@ describe("TurnFailureNotice copy", () => {
     );
   });
 
-  it("does not blame the provider for a local fault", () => {
+  /**
+   * The server may run on a hosted machine, so the copy blames neither the
+   * provider nor "this computer" and its keychain.
+   */
+  it("does not blame the provider or this computer for a local fault", () => {
     const copy = turnFailureCopy("local", "Anthropic");
     expect(copy.title).not.toContain("Anthropic");
-    expect(copy.body).toContain("this computer");
+    expect(copy.body).toContain("not from the provider");
+    expect(copy.body).not.toContain("this computer");
+    expect(copy.body).not.toContain("keychain");
+  });
+
+  it("points a 404 without a model at the provider's address", () => {
+    const copy = turnFailureCopy("endpoint_not_found", "OpenRouter");
+    expect(copy.title).toContain("OpenRouter");
+    expect(copy.body).toContain("base URL");
+    expect(turnFailurePointsAtSettings("endpoint_not_found")).toBe(true);
+  });
+
+  /**
+   * Retry is off for an oversized conversation until a model switch can
+   * rerun the turn in place, so its copy suggests nothing that needs one.
+   */
+  it("does not suggest a bigger model while no retry is offered", () => {
+    expect(turnFailureOffersRetry("context_overflow")).toBe(false);
+    expect(turnFailureCopy("context_overflow").body).not.toContain("model");
   });
 
   /**

@@ -18,16 +18,22 @@
 //! the captured messages.
 
 use serde_json::Value;
-use tidebreak_core::{HarnessKind, TurnFailure, TurnFailureCategory};
+use tidebreak_core::{names_missing_model, HarnessKind, TurnFailure, TurnFailureCategory};
 
 use TurnFailureCategory as C;
 
 /// What an HTTP status from a model API means for an engine's turn.
-pub(crate) fn category_for_status(status: u64) -> Option<TurnFailureCategory> {
+///
+/// `message` is what came back with the status. It matters only for a 404:
+/// the model is what is missing only when the words say so, and otherwise
+/// the address the engine called is wrong.
+pub(crate) fn category_for_status(status: u64, message: &str) -> Option<TurnFailureCategory> {
     Some(match status {
         401 => C::EngineAuth,
-        403 => C::ProviderAccess,
-        404 => C::ModelUnavailable,
+        // Credits or billing (402), or the account's access (403).
+        402 | 403 => C::ProviderAccess,
+        404 if names_missing_model(message) => C::ModelUnavailable,
+        404 => C::EndpointNotFound,
         408 => C::Transient,
         413 => C::ContextOverflow,
         400 | 422 => C::RequestRejected,
@@ -99,7 +105,7 @@ pub(crate) fn claude_failure(
             .with_engine(engine)
             .with_reset_timestamp(rate_limit.resets_at)
     };
-    let by_status = status.and_then(category_for_status);
+    let by_status = status.and_then(|status| category_for_status(status, message));
     let category = match api_error {
         Some("authentication_failed" | "oauth_org_not_allowed") => C::EngineAuth,
         Some("account_on_hold") => C::ProviderAccess,
@@ -216,7 +222,7 @@ pub(crate) fn codex_failure(
     let engine = HarnessKind::Codex;
     let with_category = |category| TurnFailure::new(category).with_engine(engine);
     if let Some((name, status)) = info.and_then(codex_error_info) {
-        let by_status = status.and_then(category_for_status);
+        let by_status = status.and_then(|status| category_for_status(status, message));
         let category = match name.as_str() {
             "contextwindowexceeded" => Some(C::ContextOverflow),
             "usagelimitexceeded" | "sessionbudgetexceeded" => {
@@ -245,7 +251,9 @@ pub(crate) fn codex_failure(
 
 /// What Codex's message says when its error info says nothing.
 fn codex_text_category(message: &str) -> TurnFailureCategory {
-    if let Some(category) = codex_unexpected_status(message).and_then(category_for_status) {
+    if let Some(category) =
+        codex_unexpected_status(message).and_then(|status| category_for_status(status, message))
+    {
         // A 413 or a 400 that names the context window is an overflow.
         return match category {
             C::RequestRejected if context_overflow_text(message) => C::ContextOverflow,
@@ -295,7 +303,7 @@ pub(crate) fn opencode_failure(name: &str, data: &Value, message: &str) -> TurnF
         "APIError" => data
             .get("statusCode")
             .and_then(Value::as_u64)
-            .and_then(category_for_status)
+            .and_then(|status| category_for_status(status, message))
             .unwrap_or_else(|| {
                 if data.get("isRetryable").and_then(Value::as_bool) == Some(true) {
                     C::Transient
@@ -304,8 +312,8 @@ pub(crate) fn opencode_failure(name: &str, data: &Value, message: &str) -> TurnF
                 }
             }),
         // opencode files a model it cannot resolve as an unknown error whose
-        // message names it.
-        "UnknownError" if message.starts_with("Model not found: ") => C::ModelUnavailable,
+        // message names it ("Model not found: ...").
+        "UnknownError" if names_missing_model(message) => C::ModelUnavailable,
         _ => C::Unknown,
     };
     TurnFailure::new(category).with_engine(HarnessKind::Opencode)
@@ -317,23 +325,22 @@ pub(crate) fn opencode_failure(name: &str, data: &Value, message: &str) -> TurnF
 /// the `http_status` its internal errors carry in `data`.
 pub(crate) fn grok_rpc_failure(error: &Value) -> TurnFailure {
     let engine = HarnessKind::Grok;
+    let message = error
+        .pointer("/data/message")
+        .or_else(|| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let status = error
         .pointer("/data/http_status")
         .and_then(Value::as_u64)
-        .and_then(category_for_status);
+        .and_then(|status| category_for_status(status, message));
     let category = match (error.get("code").and_then(Value::as_i64), status) {
         (_, Some(category)) => category,
         // ACP's "authentication required".
         (Some(-32000), None) => C::EngineAuth,
         // JSON-RPC invalid params: the request itself.
         (Some(-32602), None) => C::RequestRejected,
-        _ => grok_text_category(
-            error
-                .pointer("/data/message")
-                .or_else(|| error.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        ),
+        _ => grok_text_category(message),
     };
     TurnFailure::new(category).with_engine(engine)
 }
@@ -350,16 +357,23 @@ pub(crate) fn grok_error_failure(message: &str) -> TurnFailure {
 /// field. The phrases below it are the ones Grok prints for a model it does
 /// not serve and an effort level it does not take.
 fn grok_text_category(message: &str) -> TurnFailureCategory {
-    if let Some(data) = message.strip_prefix("Internal error: ") {
-        if let Some(category) = serde_json::from_str::<Value>(data)
-            .ok()
-            .and_then(|data| data.get("http_status").and_then(Value::as_u64))
-            .and_then(category_for_status)
+    if let Some(data) = message
+        .strip_prefix("Internal error: ")
+        .and_then(|data| serde_json::from_str::<Value>(data).ok())
+    {
+        let said = data
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if let Some(category) = data
+            .get("http_status")
+            .and_then(Value::as_u64)
+            .and_then(|status| category_for_status(status, said))
         {
             return category;
         }
     }
-    if message.contains("\"unknown model id\"") {
+    if names_missing_model(message) {
         return C::ModelUnavailable;
     }
     if message.contains("unknown effort level") {
@@ -761,8 +775,9 @@ mod tests {
     fn statuses_map_like_the_chat_router() {
         for (status, expected) in [
             (401, Some(C::EngineAuth)),
+            (402, Some(C::ProviderAccess)),
             (403, Some(C::ProviderAccess)),
-            (404, Some(C::ModelUnavailable)),
+            (404, Some(C::EndpointNotFound)),
             (413, Some(C::ContextOverflow)),
             (400, Some(C::RequestRejected)),
             (429, Some(C::RateLimited)),
@@ -770,7 +785,19 @@ mod tests {
             (500, Some(C::Transient)),
             (302, None),
         ] {
-            assert_eq!(category_for_status(status), expected, "{status}");
+            assert_eq!(
+                category_for_status(status, "Not Found"),
+                expected,
+                "{status}"
+            );
         }
+        // A 404 is the model only when the words name the model.
+        assert_eq!(
+            category_for_status(
+                404,
+                "The requested model does not exist or is not granted to you on this gateway."
+            ),
+            Some(C::ModelUnavailable)
+        );
     }
 }

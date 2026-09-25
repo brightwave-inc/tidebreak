@@ -3414,7 +3414,7 @@ impl LegDriver {
         retry_after: Option<Duration>,
     ) -> futures::future::BoxFuture<'fut, Result<LegDriverOutcome>> {
         Box::pin(async move {
-            let retry = tidebreak_core::TurnFailureCategory::from_kind(code)
+            let retry = tidebreak_core::TurnFailureCategory::from_failure(code, detail)
                 .retries_may_succeed()
                 .then(|| {
                     self.config

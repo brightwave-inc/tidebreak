@@ -9,6 +9,7 @@ import {
   type ChatSessionState,
   type ChatSessionTransition,
 } from "./ChatSessionReducer";
+import type { HarnessKind, TurnFailureCategory } from "./generated/wire";
 import type { ChatMessage } from "./MessageList";
 import { TURN_CANCELLED_NOTICE } from "./MessageList";
 
@@ -802,6 +803,23 @@ describe("terminal events", () => {
       role: "turn_failure",
       category: "model_unavailable",
     });
+
+    // A category from a newer server rides through as data; the notice
+    // reads one it has no copy for as unknown.
+    const newer = play([
+      TURN,
+      {
+        type: "turn_failed",
+        category: "unknown",
+        failure: {
+          category: "quota_exceeded" as TurnFailureCategory,
+          engine: "an_engine_from_next_year" as HarnessKind,
+        },
+      },
+    ]);
+    expect(newer.state.messages[newer.state.messages.length - 1]).toMatchObject(
+      { role: "turn_failure", category: "quota_exceeded" },
+    );
 
     const older = play([TURN, { type: "turn_failed", category: "transient" }]);
     expect(older.state.messages[older.state.messages.length - 1]).toMatchObject(

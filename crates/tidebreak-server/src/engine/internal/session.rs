@@ -31,6 +31,19 @@ use crate::state::AppState;
 /// How often a turn waiting to retry checks whether it was cancelled.
 const RETRY_WAIT_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Consecutive store errors a retry wait sits out, one poll apart, before
+/// it gives up on the turn.
+const RETRY_WAIT_STORE_ERRORS: u32 = 30;
+
+/// A store failure that ended a retry wait, classified the way the turn
+/// worker classifies any store failure: a timeout or busy store may clear,
+/// a full disk or damaged database will not.
+fn classified_store_failure(error: &tidebreak_core::AgentError) -> HarnessError {
+    let message = format!("Tidebreak could not read the turn while it waited to retry: {error}");
+    let failure = tidebreak_core::TurnFailure::from_failure(error.kind(), &message);
+    HarnessError::TurnFailed(tidebreak_core::BoundedError::new(message).with_failure(failure))
+}
+
 pub(super) struct InternalSession {
     state: AppState,
     db: Arc<DbStore>,
@@ -259,12 +272,13 @@ impl InternalSession {
                 },
             },
             LegDriverOutcome::Resuming(_) => TurnOutcome::Clean,
-            LegDriverOutcome::Failed(_) | LegDriverOutcome::LeaseLost(_) => {
-                TurnOutcome::Incomplete {
-                    detail: format!("turn {turn_id} did not complete"),
-                    failure: None,
-                }
-            }
+            // The leg journaled the classified failure itself, as the turn's
+            // terminal event; nothing is left for the worker to report.
+            LegDriverOutcome::Failed(_) => TurnOutcome::Clean,
+            LegDriverOutcome::LeaseLost(_) => TurnOutcome::Incomplete {
+                detail: format!("turn {turn_id} did not complete"),
+                failure: None,
+            },
         }
     }
 
@@ -598,14 +612,26 @@ impl InternalSession {
         &self,
         turn_id: TurnId,
     ) -> Result<Option<(tidebreak_core::TurnRun, uuid::Uuid)>, HarnessError> {
+        let mut store_errors = 0_u32;
         loop {
-            let Some(waiting) = self
-                .state
-                .store
-                .get_turn(turn_id)
-                .await
-                .map_err(store_error)?
-            else {
+            // The wait reads the turn every second. A store that stumbles
+            // for a moment is waited out; one that keeps failing ends the
+            // turn with a classified failure rather than a bare message.
+            let waiting = match self.state.store.get_turn(turn_id).await {
+                Ok(waiting) => {
+                    store_errors = 0;
+                    waiting
+                }
+                Err(error) => {
+                    store_errors += 1;
+                    if store_errors >= RETRY_WAIT_STORE_ERRORS {
+                        return Err(classified_store_failure(&error));
+                    }
+                    tokio::time::sleep(RETRY_WAIT_POLL).await;
+                    continue;
+                }
+            };
+            let Some(waiting) = waiting else {
                 return Ok(None);
             };
             if waiting.status != TurnRunStatus::RetryWait {
@@ -638,18 +664,21 @@ impl InternalSession {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     continue;
                 }
-                Err(error) if error.to_string().contains("database is locked") => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Err(error) => {
+                    store_errors += 1;
+                    if store_errors >= RETRY_WAIT_STORE_ERRORS {
+                        return Err(classified_store_failure(&error));
+                    }
+                    tokio::time::sleep(RETRY_WAIT_POLL).await;
                     continue;
                 }
-                Err(error) => return Err(store_error(error)),
             }
             let turn = self
                 .state
                 .store
                 .get_turn(turn_id)
                 .await
-                .map_err(store_error)?
+                .map_err(|error| classified_store_failure(&error))?
                 .filter(|turn| turn.lease_token == Some(lease_token))
                 .ok_or_else(|| {
                     HarnessError::Other(format!(
@@ -667,17 +696,18 @@ impl InternalSession {
             .store
             .get_turn(turn_id)
             .await
-            .map_err(store_error)?
+            .map_err(|error| classified_store_failure(&error))?
             .map(|turn| turn.status);
         Ok(match status {
             Some(TurnRunStatus::Completed) => LegDriverOutcome::Completed(turn_id),
             Some(TurnRunStatus::Cancelled | TurnRunStatus::Cancelling) => {
                 LegDriverOutcome::Cancelled(turn_id)
             }
-            // Live under a claim that is not this session's: not ours to
-            // close.
-            Some(status) if status.is_live() => LegDriverOutcome::LeaseLost(turn_id),
-            _ => LegDriverOutcome::Failed(turn_id),
+            // Its terminal failure is journaled already.
+            Some(TurnRunStatus::Failed) => LegDriverOutcome::Failed(turn_id),
+            // Live under a claim that is not this session's, or gone: not
+            // ours to close.
+            _ => LegDriverOutcome::LeaseLost(turn_id),
         })
     }
 
@@ -827,8 +857,21 @@ impl HarnessSession for InternalSession {
     }
 
     async fn interrupt(&self) -> Result<(), HarnessError> {
-        let Some(turn_id) = self.active_turn() else {
-            return Ok(());
+        let turn_id = match self.active_turn() {
+            Some(turn_id) => turn_id,
+            // A stop can land before the engine has marked the turn it is
+            // picking up as active: a restarted worker hands it a turn that
+            // was waiting to retry, and the stop arrives first. The session's
+            // open turn is the one it is about to run, so the stop ends that.
+            None => {
+                match tidebreak_core::db::code::get_open_turn(&self.db, &self.owner, self.chat_id)
+                    .await
+                    .map_err(store_error)?
+                {
+                    Some(open) => TurnId(open.id.0),
+                    None => return Ok(()),
+                }
+            }
         };
         loop {
             match self

@@ -25,7 +25,11 @@ import {
 export function turnFailurePointsAtSettings(
   category: TurnFailureCategory,
 ): boolean {
-  return category === "auth" || category === "provider_access";
+  return (
+    category === "auth" ||
+    category === "provider_access" ||
+    category === "endpoint_not_found"
+  );
 }
 
 /**
@@ -89,10 +93,17 @@ export function turnFailureCopy(
         title: `${model ?? "This model"} is not available from ${provider}`,
         body: "It may be retired or not enabled for your account. Choose another model, then send again.",
       };
+    case "endpoint_not_found":
+      return {
+        title: `Nothing answered at ${provider}'s configured address`,
+        body: "The provider or a proxy in front of it answered 404. Check the provider's base URL in provider settings; if it is right, the model may no longer be offered there.",
+      };
     case "context_overflow":
+      // No retry is offered here, so the copy names only what the reader
+      // can do from the composer.
       return {
         title: `This conversation no longer fits ${model ?? "the model"}`,
-        body: "Tidebreak already shortened what it could. Remove attachments, start a new conversation, or choose a model with a larger context window.",
+        body: "Tidebreak already shortened what it could. Remove attachments or start a new conversation, then send again.",
       };
     case "request_rejected":
       return {
@@ -100,9 +111,11 @@ export function turnFailureCopy(
         body: "Sending it unchanged gets the same answer. Change the request or the model, then send again.",
       };
     case "local":
+      // The server may run on this computer or on a hosted machine, so the
+      // copy names neither.
       return {
-        title: "Tidebreak could not read its own data",
-        body: "This happened on this computer, not at the provider. Check that the disk has free space and that Tidebreak can use the keychain, then try again.",
+        title: "Tidebreak could not use its own storage",
+        body: "This came from Tidebreak's database or saved credentials, not from the provider. Try again; if it repeats, the disk or credential store where Tidebreak runs needs attention.",
       };
     case "transient":
       return {

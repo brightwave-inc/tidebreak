@@ -17,8 +17,13 @@
 //!   without breaking an older client. None of the types a client reads here
 //!   declares `deny_unknown_fields`; request bodies the server reads still do.
 //! - Every vocabulary is closed. Tool names, approval kinds, tool statuses,
-//!   failure categories, and grant rungs are the server's own enums, so a
-//!   value outside them fails to decode rather than folding to a string.
+//!   and grant rungs are the server's own enums, so a value outside them
+//!   fails to decode rather than folding to a string. Turn failure
+//!   categories are the one open vocabulary: a category this build does not
+//!   know reads as `unknown`, an engine it does not know on a failure reads
+//!   as absent, and the CLI reads a `turn_failed` it cannot decode at all as
+//!   a failure of unknown cause, because a follower that skipped it would
+//!   wait on the turn forever.
 //! - An event type the client does not know fails its frame. The CLI skips
 //!   that frame, counts it, and says so on stderr, and it moves its cursor
 //!   past the frame so a reconnect does not replay it.

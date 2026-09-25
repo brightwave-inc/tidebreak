@@ -7287,8 +7287,12 @@ resets_at?: string, };
  * Clients built before the full vocabulary read only `rate_limited`, `auth`,
  * `provider_access`, `transient`, and `unknown`, and nothing else is ever
  * sent to them; [`Self::legacy`] maps every category onto that set.
+ *
+ * The vocabulary may grow. A reader built from this definition reads a
+ * category it does not know as [`Self::Unknown`] instead of failing, so a
+ * failure from a newer server still arrives as a failure.
  */
-export type TurnFailureCategory = "rate_limited" | "overloaded" | "auth" | "provider_access" | "model_unavailable" | "context_overflow" | "request_rejected" | "local" | "transient" | "engine_auth" | "usage_limit" | "unknown";
+export type TurnFailureCategory = "rate_limited" | "overloaded" | "auth" | "provider_access" | "model_unavailable" | "endpoint_not_found" | "context_overflow" | "request_rejected" | "local" | "transient" | "engine_auth" | "usage_limit" | "unknown";
 
 /**
  * Identifies one turn: a single user input through to the final answer.

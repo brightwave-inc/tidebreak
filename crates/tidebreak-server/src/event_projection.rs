@@ -464,7 +464,7 @@ impl From<&SequencedAgentEvent> for RendererSequencedEvent {
                 usage: (*usage).into(),
             },
             AgentEvent::TurnFailed { error } => {
-                let failure = TurnFailure::from_kind(&error.kind);
+                let failure = TurnFailure::from_failure(&error.kind, &error.message);
                 RendererAgentEvent::TurnFailed {
                     category: failure.category.legacy(),
                     failure: Some(failure),
@@ -859,18 +859,46 @@ mod tests {
                 C::Unknown,
                 true,
             ),
-            // Tidebreak's own faults: never the provider's, and their
-            // messages carry host detail that stays behind the server.
+            // A 404 that does not name the model points at the address.
             (
-                AgentError::Store("database or disk is full: /Users/me/tidebreak.db".into()),
+                AgentError::EndpointNotFound("openai-compat returned 404".into()),
+                C::EndpointNotFound,
+                C::Unknown,
+                true,
+            ),
+            // Tidebreak's own faults: never the provider's, and their
+            // messages carry host detail that stays behind the server. A
+            // definite fault is `local`; one that may clear is retried as
+            // `transient`.
+            (
+                AgentError::Store(
+                    "Execution Error: (code: 13) database or disk is full: /Users/me/tidebreak.db"
+                        .into(),
+                ),
                 C::Local,
                 C::Unknown,
                 false,
             ),
             (
-                AgentError::Secret("the keychain denied access".into()),
+                AgentError::Secret(
+                    "Platform secure storage failure: User canceled the operation.".into(),
+                ),
                 C::Local,
                 C::Unknown,
+                false,
+            ),
+            (
+                AgentError::Store(
+                    "Failed to acquire connection from pool: Connection pool timed out".into(),
+                ),
+                C::Transient,
+                C::Transient,
+                false,
+            ),
+            (
+                AgentError::Secret("the Vault request timed out".into()),
+                C::Transient,
+                C::Transient,
                 false,
             ),
             (

@@ -109,6 +109,19 @@ fn raw_seq(raw: &str) -> Option<i64> {
         .as_i64()
 }
 
+/// The sequence and parsed body of a frame that states it is a
+/// `turn_failed`, when this build could not read the rest of it.
+///
+/// A failure is the frame a follower cannot do without: skipping it leaves
+/// the turn open on an open socket, and print mode waits for it forever. So
+/// a failure this build cannot read in full still ends the turn, as a
+/// failure of unknown cause.
+fn unreadable_turn_failure(raw: &str) -> Option<(i64, serde_json::Value)> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let seq = value.get("seq")?.as_i64()?;
+    (value.pointer("/event/type")?.as_str()? == "turn_failed").then_some((seq, value))
+}
+
 /// What one text frame on a chat socket turned out to be.
 pub(crate) enum ChatRead {
     /// A journaled turn event.
@@ -141,6 +154,19 @@ impl ChatFrames {
                 ChatRead::Event(Box::new(frame.event))
             }
             Ok(RendererChatFrame::Metadata(_)) => ChatRead::Other,
+            Err(_) if unreadable_turn_failure(text).is_some() => {
+                let (seq, value) = unreadable_turn_failure(text).expect("checked above");
+                self.last_seq = self.last_seq.max(seq);
+                ChatRead::Event(Box::new(RendererAgentEvent::TurnFailed {
+                    category: tidebreak_core::TurnFailureCategory::Unknown,
+                    failure: None,
+                    detail: value
+                        .pointer("/event/detail")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    model: None,
+                }))
+            }
             Err(_) => {
                 self.skipped.report(text);
                 if let Some(seq) = raw_seq(text) {
@@ -199,6 +225,25 @@ impl CodeFrames {
             Ok(frame) => {
                 self.last_seq = frame.seq;
                 Some(frame)
+            }
+            Err(_) if unreadable_turn_failure(text).is_some() => {
+                let (seq, value) = unreadable_turn_failure(text).expect("checked above");
+                self.last_seq = self.last_seq.max(seq);
+                let message = value
+                    .pointer("/event/error/message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("the turn failed; this version of Tidebreak cannot read why");
+                Some(SequencedEventFrame {
+                    seq,
+                    event: tidebreak_core::Event::TurnFailed {
+                        error: tidebreak_core::BoundedError::new(message),
+                        detail: None,
+                    },
+                    replayed: None,
+                    transient: None,
+                    replacement: None,
+                    truncated: None,
+                })
             }
             Err(_) => {
                 self.skipped.report(text);
@@ -484,6 +529,61 @@ mod tests {
         frames.observe(KNOWN);
         assert_eq!(frames.last_seq(), 6);
         assert_eq!(frames.skipped(), 0);
+    }
+
+    /// A failure from a newer server reads: a category or engine this build
+    /// does not know degrades inside the frame, and a failure it cannot read
+    /// at all still ends the turn instead of leaving print mode waiting.
+    #[test]
+    fn a_failure_this_build_cannot_fully_read_still_ends_the_turn() {
+        let mut frames = ChatFrames::after(0);
+        let newer = r#"{"seq":7,"event":{"type":"turn_failed","category":"unknown","failure":{"category":"quota_exceeded","engine":"an_engine_from_next_year"}}}"#;
+        match frames.read(newer) {
+            ChatRead::Event(event) => match *event {
+                RendererAgentEvent::TurnFailed { failure, .. } => assert_eq!(
+                    failure,
+                    Some(tidebreak_core::TurnFailure::new(
+                        tidebreak_core::TurnFailureCategory::Unknown
+                    ))
+                ),
+                other => panic!("{other:?}"),
+            },
+            _ => panic!("a newer failure must read"),
+        }
+        let unreadable = r#"{"seq":8,"event":{"type":"turn_failed","category":7,"detail":"anthropic returned 529"}}"#;
+        match frames.read(unreadable) {
+            ChatRead::Event(event) => match *event {
+                RendererAgentEvent::TurnFailed {
+                    category, detail, ..
+                } => {
+                    assert_eq!(category, tidebreak_core::TurnFailureCategory::Unknown);
+                    assert_eq!(detail.as_deref(), Some("anthropic returned 529"));
+                }
+                other => panic!("{other:?}"),
+            },
+            _ => panic!("an unreadable failure must still end the turn"),
+        }
+        assert_eq!((frames.skipped(), frames.last_seq()), (0, 8));
+
+        let mut code = CodeFrames::after(0);
+        let newer = r#"{"seq":3,"event":{"type":"turn_failed","error":{"message":"limit","failure":{"category":"quota_exceeded","engine":"an_engine_from_next_year"}}}}"#;
+        assert!(matches!(
+            code.read(newer).map(|frame| frame.event),
+            Some(tidebreak_core::Event::TurnFailed { error, .. })
+                if error.category() == Some(tidebreak_core::TurnFailureCategory::Unknown)
+        ));
+        let unreadable = r#"{"seq":4,"event":{"type":"turn_failed","error":{"message":"boom","failure":{"category":7}}}}"#;
+        assert!(matches!(
+            code.read(unreadable).map(|frame| frame.event),
+            Some(tidebreak_core::Event::TurnFailed { error, .. }) if error.message == "boom"
+        ));
+        let retrying = r#"{"seq":5,"event":{"type":"turn_retrying","category":"quota_exceeded","attempt":2,"max_attempts":5,"retry_at":"2026-08-20T15:05:54Z"}}"#;
+        assert!(matches!(
+            code.read(retrying).map(|frame| frame.event),
+            Some(tidebreak_core::Event::TurnRetrying { category, .. })
+                if category == tidebreak_core::TurnFailureCategory::Unknown
+        ));
+        assert_eq!((code.skipped(), code.last_seq()), (0, 5));
     }
 
     #[test]
