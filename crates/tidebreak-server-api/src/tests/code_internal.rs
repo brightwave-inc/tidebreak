@@ -232,9 +232,27 @@ async fn internal_engine_app_with_location(
     Arc<ScriptedProvider>,
     AppState,
 ) {
+    internal_engine_app_wrapping(steps, execution_location, |store| store).await
+}
+
+/// The same fixture, with the app's store passed through `wrap` first, so a
+/// test can inject faults into the reads the engine makes through it.
+async fn internal_engine_app_wrapping(
+    steps: Vec<Step>,
+    execution_location: tidebreak_core::AgentRunExecutionLocation,
+    wrap: impl FnOnce(Arc<dyn Store>) -> Arc<dyn Store>,
+) -> (
+    axum::Router,
+    Arc<str>,
+    Arc<CodeRuntime>,
+    Arc<AtomicUsize>,
+    tempfile::TempDir,
+    Arc<ScriptedProvider>,
+    AppState,
+) {
     let (dir, store) = temp_db_store("internal.db").await;
     let db = Arc::new(store);
-    let store_trait: Arc<dyn Store> = db.clone();
+    let store_trait: Arc<dyn Store> = wrap(db.clone());
     let ran = Arc::new(AtomicUsize::new(0));
     let mut tools = ToolRegistry::new();
     tools.register(Box::new(FakeExec { ran: ran.clone() }));
@@ -1876,6 +1894,77 @@ async fn an_internal_code_turn_journals_its_retry_and_then_recovers() {
         .expect("the turn row");
     assert_eq!(turn.attempt_count, 2);
     assert!(turn.started_at.is_some_and(|started| started < *retry_at));
+    assert_eq!(streamed_text(&events), "recovered");
+}
+
+/// A store that stumbles while a code turn waits on its retry is waited out.
+/// The wait's reads meet a busy database a few times in a row, and the turn
+/// still takes its next attempt and completes instead of ending on the
+/// first error.
+#[tokio::test]
+async fn a_retry_wait_sits_out_brief_store_errors() {
+    let wrapped: Arc<Mutex<Option<Arc<PauseTerminalStore>>>> = Arc::default();
+    let slot = wrapped.clone();
+    let (router, token, runtime, _ran, _dir, provider, _state) = internal_engine_app_wrapping(
+        vec![Step::Overloaded, Step::Text("recovered")],
+        tidebreak_core::AgentRunExecutionLocation::InProcess,
+        move |inner| {
+            let store = Arc::new(PauseTerminalStore::new(
+                inner,
+                Arc::new(tokio::sync::Notify::new()),
+                Arc::new(tokio::sync::Notify::new()),
+            ));
+            store.do_not_pause_terminal();
+            store.fail_next_retry_wait_reads(4);
+            *slot.lock().unwrap() = Some(store.clone());
+            store
+        },
+    )
+    .await;
+    let addr = super::code::serve(router).await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{addr}/sessions"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "ask" }))
+        .send()
+        .await
+        .unwrap();
+    let status = created.status();
+    let session: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{session}");
+    let hosted: SessionId = session["id"].as_str().unwrap().parse().unwrap();
+
+    super::code::run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        &hosted.to_string(),
+        serde_json::json!({ "message": "wait through a busy store" }),
+    )
+    .await;
+    assert_eq!(
+        turn_statuses(&client, addr, &token, hosted).await,
+        vec!["completed"]
+    );
+    let store = wrapped
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the store is wrapped");
+    assert_eq!(
+        store.retry_wait_read_faults_left(),
+        0,
+        "the retry wait met every injected store error"
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+    let events = super::code::journaled_events(&runtime.db, hosted).await;
+    let types = event_types(&events);
+    let retrying = position(&types, "turn_retrying", 0);
+    let completed = position(&types, "turn_completed", retrying);
+    assert_eq!(completed + 1, types.len(), "{types:?}");
+    assert!(!types.iter().any(|kind| kind == "turn_failed"), "{types:?}");
     assert_eq!(streamed_text(&events), "recovered");
 }
 
