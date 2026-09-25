@@ -72,7 +72,8 @@ pub use crate::approvals::ApprovalGrantRung;
 pub use crate::event_projection::{
     RendererAgentEvent, RendererChatFrame, RendererChatMetadata, RendererModelIdentity,
     RendererRefusal, RendererSequencedEvent, RendererToolFailure, RendererToolFailureCode,
-    RendererToolFailureReason, RendererToolStatus, RendererTurnUsage, TurnFailureCategory,
+    RendererToolFailureReason, RendererToolStatus, RendererTurnUsage, TurnFailure,
+    TurnFailureCategory,
 };
 pub use crate::providers::ProviderKind;
 pub use crate::routes::{AgentActivityHistoryItem, AgentActivityKind, AgentActivityOutcome};
@@ -146,13 +147,7 @@ mod tests {
     /// trip; this is what keeps it from drifting from the wire spelling.
     #[test]
     fn turn_failure_category_names_match_the_wire() {
-        for category in [
-            TurnFailureCategory::RateLimited,
-            TurnFailureCategory::Auth,
-            TurnFailureCategory::ProviderAccess,
-            TurnFailureCategory::Transient,
-            TurnFailureCategory::Unknown,
-        ] {
+        for category in TurnFailureCategory::ALL {
             assert_eq!(category.as_str(), wire_name(&category));
         }
     }

@@ -248,6 +248,7 @@ async fn complete_turn_inner(
         return Ok(Some(JournaledTurnOutcome {
             outcome: CompleteTurnRunOutcome::Existing(existing),
             terminal_event: sequenced_event,
+            retrying_event: None,
         }));
     }
     if existing.status != TurnRunStatus::Running.as_str()
@@ -290,6 +291,7 @@ async fn complete_turn_inner(
                 CompleteTurnRunOutcome::OutputSuperseded(existing)
             },
             terminal_event: None,
+            retrying_event: None,
         }));
     }
 
@@ -307,6 +309,7 @@ async fn complete_turn_inner(
                 child_run_ids: outstanding,
             },
             terminal_event: None,
+            retrying_event: None,
         }));
     }
 
@@ -329,6 +332,7 @@ async fn complete_turn_inner(
             return Ok(Some(JournaledTurnOutcome {
                 outcome: CompleteTurnRunOutcome::Existing(existing),
                 terminal_event: sequenced_event,
+                retrying_event: None,
             }));
         }
         return Err(AgentError::Store(format!(
@@ -359,6 +363,7 @@ async fn complete_turn_inner(
             return Ok(Some(JournaledTurnOutcome {
                 outcome: CompleteTurnRunOutcome::Existing(existing),
                 terminal_event: sequenced_event,
+                retrying_event: None,
             }));
         }
         return Err(store_err(error));
@@ -472,6 +477,7 @@ async fn complete_turn_inner(
     Ok(Some(JournaledTurnOutcome {
         outcome: CompleteTurnRunOutcome::Completed(completed),
         terminal_event: sequenced_event,
+        retrying_event: None,
     }))
 }
 
@@ -607,9 +613,12 @@ async fn record_turn_failure_inner(
             terminal_event,
         )
         .await?;
+        let retrying_event =
+            exact_retrying_event_on(&store.conn, lease_token, &existing, terminal_event).await?;
         return Ok(Some(JournaledTurnOutcome {
             outcome: RecordTurnFailureOutcome::Existing(existing),
             terminal_event: sequenced_event,
+            retrying_event,
         }));
     }
     let journal_chat_id = journal_chat_id(store, id, true).await?;
@@ -655,10 +664,13 @@ async fn record_turn_failure_inner(
             terminal_event,
         )
         .await?;
+        let retrying_event =
+            exact_retrying_event_on(&transaction, lease_token, &existing, terminal_event).await?;
         transaction.commit().await.map_err(store_err)?;
         return Ok(Some(JournaledTurnOutcome {
             outcome: RecordTurnFailureOutcome::Existing(existing),
             terminal_event: sequenced_event,
+            retrying_event,
         }));
     }
     let Some(claim) = entities::code_turn_claim::Entity::find_by_id(lease_token)
@@ -852,11 +864,40 @@ async fn record_turn_failure_inner(
     } else {
         None
     };
+    // A failure that parks the turn to run again says so before the wait
+    // begins, in the same commit, so no reader sees a turn that went quiet.
+    // The journaling path alone writes it: the bare state transition
+    // journals nothing, retry included.
+    let retrying_event = match (result_status, requested_retry_at, terminal_event) {
+        (TurnRunStatus::RetryWait, Some(retry_at), Some(_)) => {
+            let event = AgentEvent::TurnRetrying {
+                category: crate::turn_failure::TurnFailureCategory::from_kind(error_code),
+                attempt: retrying_attempt(claim.attempt_count)?,
+                max_attempts: u32::try_from(turn.max_attempts).map_err(|_| {
+                    AgentError::Store(format!("turn {id} has a negative attempt budget"))
+                })?,
+                retry_at,
+            };
+            let seq = append_event_on(
+                &transaction,
+                SessionId(turn.session_id),
+                Some(id),
+                Some(lease_token),
+                Some(RETRYING_EVENT_ORDINAL),
+                None,
+                &event,
+            )
+            .await?;
+            Some(SequencedAgentEvent { seq, event })
+        }
+        _ => None,
+    };
     let receipt = turn_failure_from_model(receipt)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(JournaledTurnOutcome {
         outcome: RecordTurnFailureOutcome::Recorded(receipt),
         terminal_event: sequenced_event,
+        retrying_event,
     }))
 }
 
@@ -1159,6 +1200,57 @@ fn terminal_notification_kind(event: &AgentEvent) -> Option<crate::NotificationK
         AgentEvent::TurnFailed { .. } => Some(crate::NotificationKind::AgentFailed),
         _ => None,
     }
+}
+
+/// The attempt ordinal a failing claim's `TurnRetrying` row takes.
+///
+/// The claim's own events count up from 1, and its terminal row would take
+/// `i32::MAX`. A claim that parks to retry never writes a terminal row, so
+/// its one `TurnRetrying` takes that last slot, and the unique
+/// `(lease_token, attempt_event_ordinal)` index keeps it to one per claim.
+const RETRYING_EVENT_ORDINAL: i32 = i32::MAX;
+
+/// The attempt a retry starts: the one after the claim that failed.
+fn retrying_attempt(failed_attempt: i32) -> Result<u32> {
+    failed_attempt
+        .checked_add(1)
+        .and_then(|attempt| u32::try_from(attempt).ok())
+        .ok_or_else(|| AgentError::Store("turn attempt count is out of range".into()))
+}
+
+/// The `TurnRetrying` row an exact retry-waiting failure already committed.
+async fn exact_retrying_event_on<C>(
+    conn: &C,
+    lease_token: uuid::Uuid,
+    receipt: &TurnFailureReceipt,
+    terminal_event: Option<&AgentEvent>,
+) -> Result<Option<SequencedAgentEvent>>
+where
+    C: ConnectionTrait,
+{
+    if receipt.result_status != TurnRunStatus::RetryWait || terminal_event.is_none() {
+        return Ok(None);
+    }
+    let Some(stored) = entities::event::Entity::find()
+        .filter(entities::event::Column::LeaseToken.eq(lease_token))
+        .filter(entities::event::Column::AttemptEventOrdinal.eq(RETRYING_EVENT_ORDINAL))
+        .filter(entities::event::Column::Terminal.eq(false))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    let event = crate::chat_journal::decode_chat_event_required(stored.event)?;
+    if !matches!(event, AgentEvent::TurnRetrying { .. }) {
+        return Err(AgentError::Store(format!(
+            "turn failure token {lease_token} holds a different retry event"
+        )));
+    }
+    Ok(Some(SequencedAgentEvent {
+        seq: stored.seq,
+        event,
+    }))
 }
 
 async fn exact_failure_terminal_event_on<C>(

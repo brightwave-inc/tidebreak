@@ -66,6 +66,9 @@ pub struct CodexStreamParser {
     /// Counter-stripped text of the reconnect notice most recently emitted,
     /// while its retry storm is still the latest thing the engine said.
     open_reconnect: Option<String>,
+    /// When the account's used-up rate-limit windows reset, from the last
+    /// `account/rateLimits/updated`, for a turn that fails on its limit.
+    rate_limits: crate::failure::CodexRateLimits,
 }
 
 /// Result of parsing a whole fixture or a finished stream.
@@ -461,8 +464,15 @@ impl CodexStreamParser {
                 );
                 Vec::new()
             }
-            "account/rateLimits/updated"
-            | "hook/completed"
+            // The account's limits: shown nowhere, but a turn that then fails
+            // on its usage limit reads them for when the limit resets.
+            "account/rateLimits/updated" => {
+                if let Some(limits) = params.get("rateLimits") {
+                    self.rate_limits.observe(limits);
+                }
+                Vec::new()
+            }
+            "hook/completed"
             | "hook/started"
             | "item/commandExecution/outputDelta"
             | "item/commandExecution/terminalInteraction"
@@ -621,11 +631,15 @@ impl CodexStreamParser {
                 let message = params
                     .pointer("/turn/error/message")
                     .and_then(Value::as_str)
-                    .unwrap_or("engine reported an error");
+                    .unwrap_or("Codex reported an error without saying why");
+                let failure = crate::failure::codex_failure(
+                    params.pointer("/turn/error/codexErrorInfo"),
+                    message,
+                    self.rate_limits,
+                );
                 vec![HarnessEvent::TurnFailed {
-                    error: BoundedError {
-                        message: bound(message, MAX_NOTICE_CHARS),
-                    },
+                    error: BoundedError::new(bound(message, MAX_NOTICE_CHARS))
+                        .with_failure(failure),
                 }]
             }
             // The manifest records the observed set as
@@ -646,12 +660,10 @@ impl CodexStreamParser {
                         ),
                     },
                     HarnessEvent::TurnFailed {
-                        error: BoundedError {
-                            message: bound(
-                                &format!("Codex protocol drift: turn ended with status {label}"),
-                                MAX_NOTICE_CHARS,
-                            ),
-                        },
+                        error: BoundedError::new(bound(
+                            &format!("Codex protocol drift: turn ended with status {label}"),
+                            MAX_NOTICE_CHARS,
+                        )),
                     },
                 ]
             }
@@ -952,9 +964,7 @@ impl CodexStreamParser {
                 }
                 self.count_unrecognized("rpc-result/turn-start/missing-turn-id", value);
                 vec![HarnessEvent::TurnFailed {
-                    error: BoundedError {
-                        message: "Codex returned a malformed turn/start result".into(),
-                    },
+                    error: BoundedError::new("Codex returned a malformed turn/start result"),
                 }]
             }
             "initialize" | "turn/interrupt" | "turn/steer" | "" => Vec::new(),
@@ -994,9 +1004,7 @@ impl CodexStreamParser {
             return Vec::new();
         }
         vec![HarnessEvent::TurnFailed {
-            error: BoundedError {
-                message: bound(message, MAX_NOTICE_CHARS),
-            },
+            error: BoundedError::new(bound(message, MAX_NOTICE_CHARS)),
         }]
     }
 

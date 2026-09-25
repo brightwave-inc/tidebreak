@@ -18,7 +18,7 @@ use tidebreak_core::{
     chat_journal, AcceptTurnSteerOutcome, AnswerUserQuestions, AnswerUserQuestionsOutcome,
     AnswerUserQuestionsRequest, ApprovalKind, CallId, DecidePlanRequest, OwnerId, PermissionMode,
     PlanDecision, PlanDecisionChoice, SessionId, ToolApprovalStatus, TurnId, TurnParkWait,
-    TurnStatus, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
+    TurnRunStatus, TurnStatus, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 use tidebreak_harness::{
     ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError, HarnessSession,
@@ -27,6 +27,9 @@ use tidebreak_harness::{
 
 use crate::engine::internal::leg::{LegDriver, LegDriverOutcome};
 use crate::state::AppState;
+
+/// How often a turn waiting to retry checks whether it was cancelled.
+const RETRY_WAIT_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(super) struct InternalSession {
     state: AppState,
@@ -259,6 +262,7 @@ impl InternalSession {
             LegDriverOutcome::Failed(_) | LegDriverOutcome::LeaseLost(_) => {
                 TurnOutcome::Incomplete {
                     detail: format!("turn {turn_id} did not complete"),
+                    failure: None,
                 }
             }
         }
@@ -581,6 +585,102 @@ impl InternalSession {
         Ok((turn, lease_token))
     }
 
+    /// Wait out a retry the leg scheduled, then claim the turn for its next
+    /// attempt.
+    ///
+    /// The leg parks a failure a retry may clear as `retry_wait` and journals
+    /// why and when. The chat lane runs those retries for plain chats; a code
+    /// session's turn belongs to its session worker, so the retry runs here,
+    /// inside the engine turn the worker is still waiting on. `None` means the
+    /// turn is no longer waiting to retry: it was cancelled during the wait,
+    /// or the retry was settled some other way.
+    async fn claim_retrying_turn(
+        &self,
+        turn_id: TurnId,
+    ) -> Result<Option<(tidebreak_core::TurnRun, uuid::Uuid)>, HarnessError> {
+        loop {
+            let Some(waiting) = self
+                .state
+                .store
+                .get_turn(turn_id)
+                .await
+                .map_err(store_error)?
+            else {
+                return Ok(None);
+            };
+            if waiting.status != TurnRunStatus::RetryWait {
+                return Ok(None);
+            }
+            let now = Utc::now();
+            if waiting.available_at > now {
+                // Poll rather than sleep through the whole wait, so a
+                // cancellation during it ends the turn promptly.
+                let remaining = (waiting.available_at - now)
+                    .to_std()
+                    .unwrap_or(RETRY_WAIT_POLL);
+                tokio::time::sleep(remaining.min(RETRY_WAIT_POLL)).await;
+                continue;
+            }
+            let lease_token = uuid::Uuid::new_v4();
+            match self
+                .db
+                .take_lease_on_retrying_turn(
+                    turn_id,
+                    lease_token,
+                    now,
+                    now + chrono::Duration::seconds(60),
+                )
+                .await
+            {
+                Ok(Some(())) => {}
+                // The row moved between the read and the claim; read again.
+                Ok(None) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+                Err(error) if error.to_string().contains("database is locked") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+                Err(error) => return Err(store_error(error)),
+            }
+            let turn = self
+                .state
+                .store
+                .get_turn(turn_id)
+                .await
+                .map_err(store_error)?
+                .filter(|turn| turn.lease_token == Some(lease_token))
+                .ok_or_else(|| {
+                    HarnessError::Other(format!(
+                        "turn {turn_id} was not readable after its retry claim"
+                    ))
+                })?;
+            return Ok(Some((turn, lease_token)));
+        }
+    }
+
+    /// How a turn that is no longer waiting to retry ended.
+    async fn settled_retry(&self, turn_id: TurnId) -> Result<LegDriverOutcome, HarnessError> {
+        let status = self
+            .state
+            .store
+            .get_turn(turn_id)
+            .await
+            .map_err(store_error)?
+            .map(|turn| turn.status);
+        Ok(match status {
+            Some(TurnRunStatus::Completed) => LegDriverOutcome::Completed(turn_id),
+            Some(TurnRunStatus::Cancelled | TurnRunStatus::Cancelling) => {
+                LegDriverOutcome::Cancelled(turn_id)
+            }
+            // Live under a claim that is not this session's: not ours to
+            // close.
+            Some(status) if status.is_live() => LegDriverOutcome::LeaseLost(turn_id),
+            _ => LegDriverOutcome::Failed(turn_id),
+        })
+    }
+
     async fn drive_claimed_turn(
         &self,
         turn_id: TurnId,
@@ -601,6 +701,15 @@ impl InternalSession {
                     return Err(HarnessError::Other(format!(
                         "turn {turn_id} returned a resume for {resuming_id}"
                     )));
+                }
+                // A failed attempt may have parked the turn to run again. The
+                // worker's turn stays open through the wait, and the next
+                // attempt runs under a fresh claim.
+                LegDriverOutcome::Failed(failed_id) if failed_id == turn_id => {
+                    match self.claim_retrying_turn(turn_id).await? {
+                        Some(claimed) => (turn, lease_token) = claimed,
+                        None => return self.settled_retry(turn_id).await,
+                    }
                 }
                 outcome => return Ok(outcome),
             }
@@ -647,14 +756,26 @@ impl HarnessSession for InternalSession {
                 "turn {turn_id} was not claimed before the leg"
             )));
         };
-        let Some(lease_token) = turn.lease_token else {
+        let retrying = turn.lease_token.is_none() && turn.status == TurnRunStatus::RetryWait;
+        if turn.lease_token.is_none() && !retrying {
             return Err(HarnessError::Other(format!("turn {turn_id} has no lease")));
-        };
+        }
         *self.active.lock().expect("active turn") = Some(ActiveTurn {
             turn_id,
             park: None,
         });
-        let outcome = self.drive_claimed_turn(turn_id, turn, lease_token).await?;
+        // A turn a restarted worker found waiting to retry takes its next
+        // attempt once the retry is due.
+        let claimed = match turn.lease_token {
+            Some(lease_token) => Some((turn, lease_token)),
+            None => self.claim_retrying_turn(turn_id).await?,
+        };
+        let outcome = match claimed {
+            Some((turn, lease_token)) => {
+                self.drive_claimed_turn(turn_id, turn, lease_token).await?
+            }
+            None => self.settled_retry(turn_id).await?,
+        };
         Ok(self.map_and_release(turn_id, outcome))
     }
 

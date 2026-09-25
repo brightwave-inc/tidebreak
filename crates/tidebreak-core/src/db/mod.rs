@@ -554,6 +554,21 @@ impl DbStore {
         ops::turn::take_lease_on_resuming_turn(self, id, lease_token, now, lease_expires_at).await
     }
 
+    /// Claim one exact turn that is waiting to retry, for its next attempt.
+    ///
+    /// Only a turn still in `retry_wait` whose retry time has come is taken;
+    /// anything else — a turn cancelled during the wait, one another worker
+    /// claimed, or one not due yet — answers `None`.
+    pub async fn take_lease_on_retrying_turn(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<Option<()>> {
+        ops::turn::take_lease_on_retrying_turn(self, id, lease_token, now, lease_expires_at).await
+    }
+
     /// Claim an inserted turn and add its user transcript row in one write.
     pub async fn take_lease_on_turn_with_input_message(
         &self,

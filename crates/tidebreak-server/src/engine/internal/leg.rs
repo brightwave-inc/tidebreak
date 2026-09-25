@@ -3414,7 +3414,7 @@ impl LegDriver {
         retry_after: Option<Duration>,
     ) -> futures::future::BoxFuture<'fut, Result<LegDriverOutcome>> {
         Box::pin(async move {
-            let retry = crate::event_projection::TurnFailureCategory::from_kind(code)
+            let retry = tidebreak_core::TurnFailureCategory::from_kind(code)
                 .retries_may_succeed()
                 .then(|| {
                     self.config
@@ -3485,6 +3485,11 @@ impl LegDriver {
                 {
                     Ok(Some(resolution)) => {
                         if let Some(event) = resolution.terminal_event {
+                            self.publish(turn.chat_id, event);
+                        }
+                        // A failure that parked the turn to run again
+                        // journaled why and when; live readers hear it now.
+                        if let Some(event) = resolution.retrying_event {
                             self.publish(turn.chat_id, event);
                         }
                         return Ok(match resolution.outcome {

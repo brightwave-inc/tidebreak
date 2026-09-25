@@ -1152,10 +1152,39 @@ fn event_frames() -> Vec<Fixture> {
             frame(
                 51,
                 Event::TurnFailed {
-                    error: BoundedError {
-                        message: "the engine exited with status 1".to_owned(),
-                    },
+                    error: BoundedError::new("the engine exited with status 1".to_owned()),
                     detail: None,
+                },
+            ),
+        ),
+        (
+            "event: turn_failed classified",
+            frame(
+                70,
+                Event::TurnFailed {
+                    error: BoundedError::new(
+                        "You've hit your usage limit. Upgrade to Pro or try again later.",
+                    )
+                    .with_failure(
+                        tidebreak_core::TurnFailure::new(
+                            tidebreak_core::TurnFailureCategory::UsageLimit,
+                        )
+                        .with_engine(HarnessKind::Codex)
+                        .with_resets_at(Some(at(1_787_238_354))),
+                    ),
+                    detail: None,
+                },
+            ),
+        ),
+        (
+            "event: turn_retrying",
+            frame(
+                71,
+                Event::TurnRetrying {
+                    category: tidebreak_core::TurnFailureCategory::Overloaded,
+                    attempt: 2,
+                    max_attempts: 5,
+                    retry_at: at(1_787_238_354),
                 },
             ),
         ),

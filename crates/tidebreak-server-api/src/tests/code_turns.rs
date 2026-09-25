@@ -563,11 +563,10 @@ fn always_failing_script() -> Vec<HarnessEvent> {
         },
         HarnessEvent::TurnStarted,
         HarnessEvent::TurnFailed {
-            error: tidebreak_core::BoundedError {
-                message: "Auth recovery succeeded but 4 authenticated inference requests \
-                          were still rejected (401); giving up after 3 retries."
-                    .into(),
-            },
+            error: tidebreak_core::BoundedError::new(
+                "Auth recovery succeeded but 4 authenticated inference requests \
+                          were still rejected (401); giving up after 3 retries.",
+            ),
         },
     ]
 }

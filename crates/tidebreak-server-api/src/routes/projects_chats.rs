@@ -617,9 +617,17 @@ pub struct ChatTerminalTurnSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub refusal: Option<crate::event_projection::RendererRefusal>,
+    /// The category a client built before the full vocabulary reads: only
+    /// `rate_limited`, `auth`, `provider_access`, `transient`, or `unknown`.
+    /// A client that reads `failure` uses that instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub failure_category: Option<crate::event_projection::TurnFailureCategory>,
+    /// Why a failed turn failed, in the full vocabulary chat and code turns
+    /// share. Absent unless the turn failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure: Option<crate::event_projection::TurnFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub failure_detail: Option<String>,
@@ -666,11 +674,12 @@ impl From<tidebreak_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot
             tidebreak_core::ChatTerminalTurnStatus::Failed => ChatTerminalTurnStatus::Failed,
             tidebreak_core::ChatTerminalTurnStatus::Cancelled => ChatTerminalTurnStatus::Cancelled,
         };
-        let failure_category = matches!(status, ChatTerminalTurnStatus::Failed).then(|| {
-            crate::event_projection::TurnFailureCategory::from_kind(
+        let failure = matches!(status, ChatTerminalTurnStatus::Failed).then(|| {
+            crate::event_projection::TurnFailure::from_kind(
                 snapshot.failure_kind.as_deref().unwrap_or_default(),
             )
         });
+        let failure_category = failure.as_ref().map(|failure| failure.category.legacy());
         let failure_model =
             failure_category.and_then(|_| crate::event_projection::model_identity(&snapshot.model));
         let failure_detail = snapshot.failure_kind.as_deref().and_then(|kind| {
@@ -687,6 +696,7 @@ impl From<tidebreak_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot
             reasoning: (!snapshot.reasoning.trim().is_empty()).then_some(snapshot.reasoning),
             refusal: snapshot.refusal.as_ref().map(Into::into),
             failure_category,
+            failure,
             failure_detail,
             failure_model,
             file_changes: Vec::new(),

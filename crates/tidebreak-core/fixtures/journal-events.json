@@ -156,5 +156,12 @@
     "type": "task_plan_updated",
     "call_id": "00000000-0000-0000-0000-000000000006",
     "turn_id": "00000000-0000-0000-0000-000000000001"
+  },
+  {
+    "type": "turn_retrying",
+    "category": "rate_limited",
+    "attempt": 2,
+    "max_attempts": 5,
+    "retry_at": "2026-08-20T15:05:54Z"
   }
 ]

@@ -472,6 +472,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         Some(JournaledTurnOutcome {
             outcome: CompleteTurnRunOutcome::Completed(_),
             terminal_event: Some(_),
+            retrying_event: None,
         })
     ));
     assert!(matches!(
@@ -492,6 +493,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         Some(JournaledTurnOutcome {
             outcome: CompleteTurnRunOutcome::Existing(_),
             terminal_event: Some(_),
+            retrying_event: None,
         })
     ));
     assert!(store

@@ -94,13 +94,7 @@ pub async fn session_workspace(
 
 /// The display name the product uses for an engine, wherever copy names one.
 pub fn harness_label(kind: tidebreak_core::HarnessKind) -> &'static str {
-    match kind {
-        tidebreak_core::HarnessKind::ClaudeCode => "Claude Code",
-        tidebreak_core::HarnessKind::Codex => "Codex CLI",
-        tidebreak_core::HarnessKind::Opencode => "opencode",
-        tidebreak_core::HarnessKind::Grok => "Grok CLI",
-        tidebreak_core::HarnessKind::Internal => "Tidebreak",
-    }
+    kind.label()
 }
 
 #[cfg(test)]

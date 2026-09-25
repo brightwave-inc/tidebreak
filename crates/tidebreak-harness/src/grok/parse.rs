@@ -539,12 +539,10 @@ impl GrokStreamParser {
                     ),
                 });
                 events.push(HarnessEvent::TurnFailed {
-                    error: BoundedError {
-                        message: bound(
-                            &format!("Grok protocol drift: turn ended with stop reason {label}"),
-                            MAX_NOTICE_CHARS,
-                        ),
-                    },
+                    error: BoundedError::new(bound(
+                        &format!("Grok protocol drift: turn ended with stop reason {label}"),
+                        MAX_NOTICE_CHARS,
+                    )),
                 });
             }
         }
@@ -557,12 +555,11 @@ impl GrokStreamParser {
         let message = value
             .get("message")
             .and_then(Value::as_str)
-            .unwrap_or("engine reported an error");
+            .unwrap_or("Grok CLI reported an error without saying why");
         let mut events = self.flush_assistant();
         events.push(HarnessEvent::TurnFailed {
-            error: BoundedError {
-                message: bound(message, MAX_NOTICE_CHARS),
-            },
+            error: BoundedError::new(bound(message, MAX_NOTICE_CHARS))
+                .with_failure(crate::failure::grok_error_failure(message)),
         });
         events
     }

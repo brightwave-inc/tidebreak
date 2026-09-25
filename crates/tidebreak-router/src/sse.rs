@@ -545,13 +545,15 @@ pub fn classify_gateway_denial(
         });
 
     match code {
-        "model_not_granted" => Some(AgentError::Message(match resource {
+        // Both codes mean the same remedy — pick another model — so both
+        // classify as an unavailable model rather than a bare message.
+        "model_not_granted" => Some(AgentError::ModelUnavailable(match resource {
             Some(model) => format!(
                 "You no longer have access to {model} on your gateway — an administrator may have revoked it. Pick another model."
             ),
             None => "You no longer have access to this model on your gateway — an administrator may have revoked it. Pick another model.".to_owned(),
         })),
-        "model_not_found" => Some(AgentError::Message(
+        "model_not_found" => Some(AgentError::ModelUnavailable(
             message.map_or_else(
                 || "Your gateway does not serve this model. Refresh the model list and pick another.".to_owned(),
                 str::to_owned,
@@ -565,6 +567,28 @@ pub fn classify_gateway_denial(
         }
         _ => None,
     }
+}
+
+/// Whether a provider's own words say the request outgrew the model's context
+/// window.
+///
+/// Each phrase is one a provider actually sends, matched only on a request
+/// the provider already rejected as invalid:
+///
+/// - "prompt is too long": Anthropic.
+/// - "maximum context length": OpenAI and OpenAI-compatible routers, such as
+///   OpenRouter's "This endpoint's maximum context length is 262144 tokens".
+/// - "maximum prompt length": xAI's "This model's maximum prompt length is
+///   500000 but the request contains 545763 tokens."
+fn context_overflow_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "prompt is too long",
+        "maximum context length",
+        "maximum prompt length",
+    ]
+    .iter()
+    .any(|phrase| message.contains(phrase))
 }
 
 /// Classify a provider HTTP error, detecting prompt-too-long patterns that the
@@ -592,8 +616,13 @@ pub fn classify_provider_error(
         .unwrap_or("");
     let safe = || safe_http_error(provider, status, body);
 
-    if status == 400
-        && (code == "context_length_exceeded" || message.contains("prompt is too long"))
+    // A request too large to send at all (413, Anthropic's
+    // `request_too_large`) gets the same treatment as a prompt too long for
+    // the window: the agent loop sheds context and asks again.
+    if status == 413
+        || (matches!(status, 400 | 422)
+            && (matches!(code, "context_length_exceeded" | "request_too_large")
+                || context_overflow_message(message)))
     {
         return AgentError::PromptTooLong(safe());
     }
@@ -602,6 +631,12 @@ pub fn classify_provider_error(
     }
     if status == 403 {
         return AgentError::AccessDenied(safe());
+    }
+    // A retired or unknown model. Anthropic answers 404 `not_found_error`,
+    // OpenAI 404 `model_not_found`, and some OpenAI-compatible routers send
+    // the same code on a 400.
+    if status == 404 || code == "model_not_found" {
+        return AgentError::ModelUnavailable(safe());
     }
     if status == 429 || code == "rate_limit_error" {
         return AgentError::RateLimited(ProviderFailure::new(safe(), retry_after));
@@ -787,6 +822,63 @@ mod tests {
             matches!(err, AgentError::PromptTooLong(_)),
             "expected PromptTooLong, got {err:?}"
         );
+    }
+
+    /// Providers word a context overflow their own way. Each body here is one
+    /// a provider actually returned through a gateway, so the phrase the
+    /// classifier matches is the provider's, not a guess.
+    #[test]
+    fn classify_detects_context_limits_in_the_providers_own_words() {
+        use tidebreak_core::error::AgentError;
+        let openrouter = r#"{"error":{"message":"This endpoint's maximum context length is 262144 tokens. However, you requested about 343684 tokens (294916 of text input, 1445 of image input, 47323 of tool input). Please reduce the length of either one, or use the context-compression plugin to compress your prompt automatically.","code":400,"metadata":{"provider_name":null}}}"#;
+        let xai = r#"{"code":"invalid-argument","error":"This model's maximum prompt length is 500000 but the request contains 545763 tokens."}"#;
+        for (provider, body) in [("openrouter", openrouter), ("xai", xai)] {
+            let err = classify_provider_error(provider, 400, body, None);
+            assert!(
+                matches!(err, AgentError::PromptTooLong(_)),
+                "{provider}: expected PromptTooLong, got {err:?}"
+            );
+        }
+        // A request too large to send at all sheds context the same way.
+        let too_large = r#"{"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}"#;
+        assert!(matches!(
+            classify_provider_error("anthropic", 413, too_large, None),
+            AgentError::PromptTooLong(_)
+        ));
+        // The phrase counts only on a request the provider already refused:
+        // a 500 that happens to quote it stays a provider fault.
+        assert!(matches!(
+            classify_provider_error("xai", 500, xai, None),
+            AgentError::Provider(_)
+        ));
+    }
+
+    /// A retired or unknown model is not a connection failure. Before this
+    /// the 404 fell through to a plain provider error, which the turn worker
+    /// retried for ten minutes and the reader was told to retry again.
+    #[test]
+    fn classify_reads_a_missing_model_as_unavailable() {
+        use tidebreak_core::error::AgentError;
+        let anthropic = r#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-3-opus-20240229"}}"#;
+        let gateway = r#"{"error":{"code":"invalid_request_error","message":"The requested model does not exist or is not granted to you on this gateway.","type":"invalid_request_error"}}"#;
+        for (provider, body) in [("anthropic", anthropic), ("model_gateway", gateway)] {
+            let err = classify_provider_error(provider, 404, body, None);
+            assert!(
+                matches!(err, AgentError::ModelUnavailable(_)),
+                "{provider}: expected ModelUnavailable, got {err:?}"
+            );
+            assert_eq!(err.kind(), "model_unavailable");
+        }
+        // OpenAI-compatible routers can send the model code on a 400.
+        assert!(matches!(
+            classify_provider_error(
+                "openrouter",
+                400,
+                r#"{"error":{"code":"model_not_found","message":"No such model"}}"#,
+                None
+            ),
+            AgentError::ModelUnavailable(_)
+        ));
     }
 
     #[test]
@@ -1043,8 +1135,9 @@ mod tests {
             .expect("a known denial classifies");
         assert!(matches!(
             error,
-            tidebreak_core::error::AgentError::Message(_)
+            tidebreak_core::error::AgentError::ModelUnavailable(_)
         ));
+        assert_eq!(error.kind(), "model_unavailable");
         assert!(error.to_string().contains("claude-opus-5"));
         assert!(error.to_string().contains("no longer have access"));
 

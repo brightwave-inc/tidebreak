@@ -38,6 +38,8 @@ enum Step {
     },
     WaitForSpawnedAgent,
     Text(&'static str),
+    /// The provider sheds the call, as a 529 does.
+    Overloaded,
 }
 
 /// A provider that replays one scripted completion per model call.
@@ -69,6 +71,11 @@ impl ModelProvider for ScriptedProvider {
             }
         };
         let events = match step {
+            Some(Step::Overloaded) => {
+                return Err(tidebreak_core::AgentError::Overloaded(
+                    "scripted provider is overloaded".into(),
+                ));
+            }
             Some(Step::Tool { name, input }) => vec![
                 ProviderEvent::ToolCallStarted {
                     index: 0,
@@ -1781,6 +1788,78 @@ async fn a_plain_internal_turn_is_journaled_once() {
     let completed = position(&types, "turn_completed", started);
     assert_eq!(completed + 1, types.len(), "{types:?}");
     assert_chat_replay_is_the_journal(&runtime.db, hosted, &events).await;
+}
+
+/// A code turn on the internal engine that hits a failure a retry may clear
+/// waits on the server's own retry instead of failing, and the wait is on
+/// the journal before it begins: `turn_retrying` names why, which attempt
+/// comes next, and when. The next attempt's outcome closes it, so a replay
+/// never ends on a retry the turn already moved past.
+#[tokio::test]
+async fn an_internal_code_turn_journals_its_retry_and_then_recovers() {
+    let (addr, token, runtime, _ran, _dir) =
+        internal_engine_app(vec![Step::Overloaded, Step::Text("recovered")]).await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{addr}/sessions"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "ask" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    let hosted: SessionId = session["id"].as_str().unwrap().parse().unwrap();
+
+    super::code::run_turn_to_end(
+        &client,
+        addr,
+        &token,
+        &hosted.to_string(),
+        serde_json::json!({ "message": "try twice" }),
+    )
+    .await;
+    assert_eq!(
+        turn_statuses(&client, addr, &token, hosted).await,
+        vec!["completed"]
+    );
+
+    let events = super::code::journaled_events(&runtime.db, hosted).await;
+    let types = event_types(&events);
+    let first = position(&types, "turn_started", 0);
+    let retrying = position(&types, "turn_retrying", first);
+    let second = position(&types, "turn_started", retrying);
+    let completed = position(&types, "turn_completed", second);
+    assert_eq!(completed + 1, types.len(), "{types:?}");
+    assert!(!types.iter().any(|kind| kind == "turn_failed"), "{types:?}");
+    let tidebreak_core::Event::TurnRetrying {
+        category,
+        attempt,
+        max_attempts,
+        retry_at,
+    } = &events[retrying].event
+    else {
+        panic!("expected the retry row at {retrying}: {types:?}");
+    };
+    assert_eq!(*category, tidebreak_core::TurnFailureCategory::Overloaded);
+    assert_eq!((*attempt, *max_attempts), (2, 5));
+    let turn = runtime
+        .db
+        .get_turn(TurnId(
+            events
+                .iter()
+                .find_map(|event| match &event.event {
+                    tidebreak_core::Event::TurnStarted { turn_id } => Some(turn_id.0),
+                    _ => None,
+                })
+                .expect("the turn started"),
+        ))
+        .await
+        .unwrap()
+        .expect("the turn row");
+    assert_eq!(turn.attempt_count, 2);
+    assert!(turn.started_at.is_some_and(|started| started < *retry_at));
+    assert_eq!(streamed_text(&events), "recovered");
 }
 
 /// The workspace-bound create path never selects the in-process engine,

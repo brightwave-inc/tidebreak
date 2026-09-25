@@ -172,9 +172,7 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
                 ));
             } else {
                 out.journal.push(Event::TurnFailed {
-                    error: BoundedError {
-                        message: "the engine turn failed".to_owned(),
-                    },
+                    error: BoundedError::new("the engine turn failed".to_owned()),
                     detail: None,
                 });
                 out.attention = Some(Attention::needs_you(

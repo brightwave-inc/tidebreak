@@ -109,6 +109,7 @@ pub mod text;
 pub mod tool;
 #[cfg(feature = "tools")]
 pub mod tools;
+pub mod turn_failure;
 pub mod user_questions;
 
 pub use agent::{
@@ -446,6 +447,7 @@ pub use tool::{
 };
 #[cfg(feature = "tools")]
 pub use tools::{create_app_tool_spec, CreateAppTool, ListDir, ReadFile, WriteFile};
+pub use turn_failure::{TurnFailure, TurnFailureCategory};
 pub use user_questions::{
     ask_user_questions_tool_spec, validate_ask_user_questions_arguments, AnswerUserQuestions,
     AnswerUserQuestionsRequest, AskUserQuestionsArgs, PendingUserQuestions, UserQuestion,

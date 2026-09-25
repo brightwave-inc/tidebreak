@@ -11,7 +11,11 @@
   {
     "type": "turn_failed",
     "error": {
-      "message": "Model not found: opencode/this-model-does-not-exist."
+      "message": "Model not found: opencode/this-model-does-not-exist.",
+      "failure": {
+        "category": "model_unavailable",
+        "engine": "opencode"
+      }
     }
   }
 ]

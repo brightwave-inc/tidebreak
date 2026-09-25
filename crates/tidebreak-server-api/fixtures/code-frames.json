@@ -1368,6 +1368,38 @@
   },
   {
     "kind": "event_frame",
+    "name": "event: turn_failed classified",
+    "value": {
+      "event": {
+        "error": {
+          "failure": {
+            "category": "usage_limit",
+            "engine": "codex",
+            "resets_at": "2026-08-20T15:05:54Z"
+          },
+          "message": "You've hit your usage limit. Upgrade to Pro or try again later."
+        },
+        "type": "turn_failed"
+      },
+      "seq": 70
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: turn_retrying",
+    "value": {
+      "event": {
+        "attempt": 2,
+        "category": "overloaded",
+        "max_attempts": 5,
+        "retry_at": "2026-08-20T15:05:54Z",
+        "type": "turn_retrying"
+      },
+      "seq": 71
+    }
+  },
+  {
+    "kind": "event_frame",
     "name": "event: turn_interrupted",
     "value": {
       "event": {

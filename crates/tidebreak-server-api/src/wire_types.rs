@@ -1102,7 +1102,8 @@ mod tests {
         use crate::event_projection::{
             RendererAgentEvent, RendererChatFrame, RendererChatMetadata, RendererModelIdentity,
             RendererRefusal, RendererSequencedEvent, RendererToolFailure, RendererToolFailureCode,
-            RendererToolFailureReason, RendererToolStatus, RendererTurnUsage, TurnFailureCategory,
+            RendererToolFailureReason, RendererToolStatus, RendererTurnUsage, TurnFailure,
+            TurnFailureCategory,
         };
         use tidebreak_core::{
             ApprovalClass, CallId, MessageId, RendererToolName, ToolActionPreview,
@@ -1309,6 +1310,7 @@ mod tests {
                     17,
                     RendererAgentEvent::TurnFailed {
                         category: TurnFailureCategory::RateLimited,
+                        failure: Some(TurnFailure::new(TurnFailureCategory::Overloaded)),
                         detail: Some("rate limited; retry after 30s".into()),
                         model: Some(RendererModelIdentity {
                             id: "claude-opus-4-8".into(),
@@ -1323,6 +1325,7 @@ mod tests {
                     18,
                     RendererAgentEvent::TurnFailed {
                         category: TurnFailureCategory::Unknown,
+                        failure: None,
                         detail: None,
                         model: None,
                     },
@@ -1365,9 +1368,22 @@ mod tests {
             ),
             ("event_omitted", event(24, RendererAgentEvent::EventOmitted)),
             (
+                "turn_retrying",
+                event(
+                    25,
+                    RendererAgentEvent::TurnRetrying {
+                        category: TurnFailureCategory::Overloaded,
+                        attempt: 2,
+                        max_attempts: 5,
+                        retry_at: chrono::DateTime::from_timestamp(1_787_238_354, 0)
+                            .expect("a valid timestamp"),
+                    },
+                ),
+            ),
+            (
                 "replayed_event",
                 RendererChatFrame::Event(Box::new(RendererSequencedEvent {
-                    seq: 25,
+                    seq: 26,
                     event: RendererAgentEvent::TextDelta {
                         text: "from catch-up".into(),
                     },

@@ -179,6 +179,55 @@ Four more things are shared through it:
   parser. The event union inside a frame is `tidebreak_core::CodeEvent`, which
   the server also reads back from its journal.
 
+## Turn failures and retries
+
+A failed turn says why in one vocabulary, `TurnFailureCategory`
+(`crates/tidebreak-core/src/turn_failure.rs`), whether it was a chat turn or a
+code turn and whichever engine ran it. Each category also settles whether
+running the same turn again could help. The wire carries no separate retry
+flag, so nothing can contradict the category; the turn worker reads the same
+answer when it decides whether to reschedule a failed attempt.
+
+| Category | When | Retry helps | Fields |
+|---|---|---|---|
+| `rate_limited` | The provider or engine throttled this account (429). | Yes | `resets_at` when known |
+| `overloaded` | The provider is overloaded or briefly down (502, 503, 504, 529). | Yes | |
+| `transient` | A dropped connection or an upstream fault that may clear. | Yes | |
+| `auth` | The provider rejected Tidebreak's credential, or none is configured. | No | |
+| `provider_access` | The provider account refused the request: credits, billing, policy, or model access. | No | |
+| `model_unavailable` | The model is retired, unknown, or not granted to this account (404). | No | `model` on a code turn |
+| `context_overflow` | The conversation no longer fits the model, after Tidebreak's own reductions. | No | `model` on a code turn |
+| `request_rejected` | The provider or engine refused the request as invalid or against policy. | No | |
+| `local` | Tidebreak could not read its own database, saved credentials, or disk. | No | |
+| `engine_auth` | A coding engine is not signed in, or its sign-in stopped working. | No | `engine` |
+| `usage_limit` | A coding engine's plan or credit limit is spent. | No | `engine`, `resets_at` when the engine said |
+| `unknown` | Anything else. | No | `engine` on a code turn |
+
+`TurnFailure` carries the category and those fields. A chat turn names its
+model beside the failure, as `model` on `turn_failed` and `failure_model` on the
+transcript. A code turn on an external engine names the engine. The renderer
+writes every sentence from these fields; no prose crosses for it to repeat.
+
+Where it rides:
+
+- **Chat.** `turn_failed` and the transcript's terminal turn carry `failure`.
+  Their older `category` and `failure_category` fields stay, and only ever hold
+  a value clients built before this vocabulary can render: `rate_limited`,
+  `auth`, `provider_access`, `transient`, or `unknown`
+  (`TurnFailureCategory::legacy`). An older desktop cannot draw any other
+  value and an older CLI cannot decode one, so never put a new value in either
+  field. Drop them only with an `api_level` bump.
+- **Code.** `turn_failed` carries it inside `error`, as `error.failure`.
+  Renderers built before it check only `error.message` and refuse an unknown
+  key on the event itself, so the classification rides where they do not look.
+
+A chat or internal-engine turn that fails in a way a retry may clear journals
+`turn_retrying` before the wait: the category, the attempt the retry starts
+(the first try is 1), the most attempts the turn may take, and `retry_at`. It
+is not terminal. The turn's next outcome closes it: another `turn_retrying`, or
+the terminal event that ends the turn, cancellation included. A reader that
+replays the journal therefore never ends on a retry the turn has moved past.
+
 ## Scope today
 
 **Generated: the whole renderer surface.** The WebSocket frame and event union, the

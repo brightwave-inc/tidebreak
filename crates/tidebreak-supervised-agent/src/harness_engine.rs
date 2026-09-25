@@ -582,7 +582,7 @@ impl HarnessTurn {
                 // would need resume wiring this runner does not have.
                 message: "the engine parked the turn, which this runner does not support".into(),
             },
-            TurnOutcome::Incomplete { detail } => {
+            TurnOutcome::Incomplete { detail, .. } => {
                 if self.interrupted || self.sink.read() == Some(Terminal::Interrupted) {
                     TurnEnd::Interrupted
                 } else {
@@ -1122,9 +1122,7 @@ mod tests {
     async fn a_failed_turn_completes_unsuccessfully() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
             events: vec![HarnessEvent::TurnFailed {
-                error: tidebreak_core::BoundedError {
-                    message: "model refused".to_owned(),
-                },
+                error: tidebreak_core::BoundedError::new("model refused".to_owned()),
             }],
             outcome: Ok(TurnOutcome::Clean),
             waits_for_interrupt: false,
@@ -1141,6 +1139,7 @@ mod tests {
             events: vec![],
             outcome: Ok(TurnOutcome::Incomplete {
                 detail: "exited with signal 9".to_owned(),
+                failure: None,
             }),
             waits_for_interrupt: false,
         }]));
@@ -1160,6 +1159,7 @@ mod tests {
             events: vec![],
             outcome: Ok(TurnOutcome::Incomplete {
                 detail: "exited with signal 2".to_owned(),
+                failure: None,
             }),
             waits_for_interrupt: true,
         }]));
@@ -1177,9 +1177,7 @@ mod tests {
         ] {
             let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
                 events: vec![HarnessEvent::TurnFailed {
-                    error: tidebreak_core::BoundedError {
-                        message: "human request cancelled".into(),
-                    },
+                    error: tidebreak_core::BoundedError::new("human request cancelled"),
                 }],
                 outcome,
                 waits_for_interrupt: true,
@@ -1196,9 +1194,7 @@ mod tests {
     async fn stop_after_a_native_failure_preserves_the_failure() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
             events: vec![HarnessEvent::TurnFailed {
-                error: tidebreak_core::BoundedError {
-                    message: "model refused".into(),
-                },
+                error: tidebreak_core::BoundedError::new("model refused"),
             }],
             outcome: Ok(TurnOutcome::Clean),
             waits_for_interrupt: false,
@@ -1244,9 +1240,7 @@ mod tests {
         let adapter = Arc::new(FakeAdapter::scripted(vec![
             ScriptedTurn {
                 events: vec![HarnessEvent::TurnFailed {
-                    error: tidebreak_core::BoundedError {
-                        message: "first turn failed".to_owned(),
-                    },
+                    error: tidebreak_core::BoundedError::new("first turn failed".to_owned()),
                 }],
                 outcome: Ok(TurnOutcome::Clean),
                 waits_for_interrupt: false,

@@ -783,6 +783,57 @@ describe("terminal events", () => {
     expect(effects).toContainEqual({ type: "hydrate_terminal_transcript" });
   });
 
+  /**
+   * `category` is the coarse value older clients read; the full diagnosis
+   * rides as `failure`, and the transcript shows that when the server sent
+   * it. A server that predates it sends only `category`.
+   */
+  it("turn_failed prefers the full diagnosis over the coarse category", () => {
+    const { state } = play([
+      TURN,
+      {
+        type: "turn_failed",
+        category: "unknown",
+        failure: { category: "model_unavailable" },
+        model: { id: "claude-3-opus-20240229", provider: "anthropic" },
+      },
+    ]);
+    expect(state.messages[state.messages.length - 1]).toMatchObject({
+      role: "turn_failure",
+      category: "model_unavailable",
+    });
+
+    const older = play([TURN, { type: "turn_failed", category: "transient" }]);
+    expect(older.state.messages[older.state.messages.length - 1]).toMatchObject(
+      { role: "turn_failure", category: "transient" },
+    );
+  });
+
+  /**
+   * The server's own retry keeps the turn live. The event changes nothing the
+   * transcript draws yet, and the outcome that follows ends the turn as
+   * usual, so a replay never ends on a retry the turn moved past.
+   */
+  it("turn_retrying keeps the turn working until its outcome arrives", () => {
+    const retrying = play([
+      TURN,
+      {
+        type: "turn_retrying",
+        category: "overloaded",
+        attempt: 2,
+        max_attempts: 5,
+        retry_at: "2026-08-20T15:05:54Z",
+      },
+    ]);
+    expect(retrying.state.busy).toBe(true);
+    const settled = play(
+      [{ type: "turn_completed", usage: NO_USAGE }],
+      retrying.state,
+    );
+    expect(settled.state.busy).toBe(false);
+    expect(settled.state.lastTurnEnding).toBe("finished");
+  });
+
   it("terminal settling leaves already-finished tools untouched", () => {
     const { state } = play([
       TURN,

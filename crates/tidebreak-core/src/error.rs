@@ -154,6 +154,12 @@ pub enum AgentError {
     #[error("prompt too long: {0}")]
     PromptTooLong(String),
 
+    /// The provider does not serve the requested model: it is retired,
+    /// unknown to the provider, or not granted to this account. Retrying the
+    /// same model gets the same answer; choosing another model is the fix.
+    #[error("model unavailable: {0}")]
+    ModelUnavailable(String),
+
     /// A catch-all for contexts that do not yet warrant their own variant.
     #[error("{0}")]
     Message(String),
@@ -198,6 +204,7 @@ impl AgentError {
             Self::InvalidRequest(_) => "invalid_request",
             Self::Refusal(_) => "refusal",
             Self::PromptTooLong(_) => "prompt_too_long",
+            Self::ModelUnavailable(_) => "model_unavailable",
             Self::Message(_) => "message",
             Self::Serde(_) => "serde",
         }
@@ -251,7 +258,8 @@ impl ProviderErrorInfo {
             | AgentError::AccessDenied(message)
             | AgentError::InvalidRequest(message)
             | AgentError::Refusal(message)
-            | AgentError::PromptTooLong(message) => message.clone(),
+            | AgentError::PromptTooLong(message)
+            | AgentError::ModelUnavailable(message) => message.clone(),
             AgentError::RateLimited(failure) | AgentError::Overloaded(failure) => {
                 failure.to_string()
             }
@@ -285,6 +293,7 @@ impl ProviderErrorInfo {
             "invalid_request" => AgentError::InvalidRequest(self.message),
             "refusal" => AgentError::Refusal(self.message),
             "prompt_too_long" => AgentError::PromptTooLong(self.message),
+            "model_unavailable" => AgentError::ModelUnavailable(self.message),
             _ => AgentError::Provider(self.message),
         }
     }
@@ -328,6 +337,7 @@ pub fn provider_failure_detail(kind: &str, message: &str) -> Option<String> {
             | "invalid_request"
             | "refusal"
             | "prompt_too_long"
+            | "model_unavailable"
             | "provider"
     )
     .then(|| message.trim().to_owned())
@@ -377,6 +387,10 @@ mod tests {
             (AgentError::InvalidRequest("i".into()), "invalid_request"),
             (AgentError::Refusal("no".into()), "refusal"),
             (AgentError::PromptTooLong("long".into()), "prompt_too_long"),
+            (
+                AgentError::ModelUnavailable("gone".into()),
+                "model_unavailable",
+            ),
         ] {
             let info = ProviderErrorInfo::from_error(&error);
             assert_eq!(info.kind, kind);

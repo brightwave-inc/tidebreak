@@ -94,6 +94,26 @@ pub(in crate::db) async fn take_lease_on_resuming_turn(
     .await
 }
 
+/// Take a fresh lease on one exact turn once its retry is due.
+pub(in crate::db) async fn take_lease_on_retrying_turn(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    lease_expires_at: chrono::DateTime<Utc>,
+) -> Result<Option<()>> {
+    take_lease_on_turn_inner(
+        store,
+        id,
+        lease_token,
+        now,
+        lease_expires_at,
+        None,
+        Some(TurnRunStatus::RetryWait),
+    )
+    .await
+}
+
 /// Claim one inserted turn and add its missing user transcript row atomically.
 pub(in crate::db) async fn take_lease_on_turn_with_input_message(
     store: &DbStore,
@@ -161,6 +181,18 @@ async fn take_lease_on_turn_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
+    let retrying = existing.status == TurnRunStatus::RetryWait.as_str();
+    // A retry is due only at the time its failure asked for, and only while
+    // the attempt budget lasts; the chat lane's claim holds the same line.
+    if retrying
+        && (existing
+            .available_at
+            .is_some_and(|available_at| available_at > now)
+            || existing.attempt_count >= existing.max_attempts)
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
     if existing.lease_token.is_some()
         && existing.status == TurnRunStatus::Running.as_str()
         && existing
@@ -224,9 +256,11 @@ async fn take_lease_on_turn_inner(
             entities::turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
+        // A retry is the same turn: its first start stays, because the retry
+        // window is measured from it.
         .col_expr(
             entities::turn::Column::StartedAt,
-            sea_orm::sea_query::Expr::value(now),
+            sea_orm::sea_query::Expr::value(if retrying { existing.started_at } else { now }),
         )
         .col_expr(
             entities::turn::Column::EndedAt,

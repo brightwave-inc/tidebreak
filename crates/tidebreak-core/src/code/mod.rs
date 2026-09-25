@@ -227,6 +227,18 @@ impl HarnessKind {
             .find(|kind| kind.as_str() == value)
     }
 
+    /// The engine's name as a sentence shows it, such as `Claude Code`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex CLI",
+            Self::Opencode => "opencode",
+            Self::Grok => "Grok CLI",
+            Self::Internal => "Tidebreak",
+        }
+    }
+
     /// Adapter maturity tier for this engine.
     #[must_use]
     pub const fn tier(self) -> HarnessTier {

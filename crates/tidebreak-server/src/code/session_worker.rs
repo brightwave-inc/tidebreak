@@ -37,8 +37,8 @@ use tidebreak_core::{
     bound_subagents, Approval, ApprovalId, ApprovalKind, ApprovalState, Attention, AttentionSource,
     BlobStore, BoundedError, CodeSubagentStatus, CodeSubagentSummary, CodeWorkspaceStatus, DbStore,
     Event, FenceReason, HarnessKind, HarnessNoticeLevel, OwnerId, PermissionMode, Session,
-    SessionId, SessionLifecycle, SettleChildSessionWaitOutcome, Store, ToolOutcome, Turn, TurnId,
-    TurnStatus,
+    SessionId, SessionLifecycle, SettleChildSessionWaitOutcome, Store, ToolOutcome, Turn,
+    TurnFailure, TurnFailureCategory, TurnId, TurnStatus,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -317,6 +317,9 @@ pub(crate) struct LiveSink {
     /// gateway, so [`LiveSink::legible_turn_error`] leaves them untouched.
     relay_wired: bool,
     turn_id: std::sync::Mutex<Option<TurnId>>,
+    /// The model the current turn asked for, so a failure about the model
+    /// can name it.
+    turn_model: std::sync::Mutex<Option<String>>,
     /// Resume ref reported during engine startup but not yet proven durable.
     ///
     /// Codex creates a thread before it writes that thread to disk. The first
@@ -365,6 +368,11 @@ impl LiveSink {
         *self.turn_id.lock().expect("code sink turn") = Some(turn_id);
     }
 
+    /// Remember the model the current turn asked for.
+    pub(crate) fn set_turn_model(&self, model: Option<String>) {
+        *self.turn_model.lock().expect("code sink turn model") = model;
+    }
+
     /// Whether the engine did anything on its own within the last `window`.
     fn active_on_its_own_within(&self, window: Duration) -> bool {
         self.last_background_activity
@@ -381,24 +389,53 @@ impl LiveSink {
         total.saturating_sub(flushed)
     }
 
-    /// The engine's report of a failed turn, made legible when it is a
-    /// provider authentication failure (issue 2653): the vendor's raw 401
-    /// body cannot tell the reader "sign this harness in" from "the
-    /// provider is down", so the sentence the create-time refusal uses
-    /// leads and the engine's own words follow. A turn riding the relay
-    /// keeps its message untouched — the relay's refusals already name the
-    /// gateway, and a hosted machine has no sign-in to send anyone to.
-    fn legible_turn_error(&self, message: String) -> BoundedError {
-        if self.relay_wired || !provider_auth_failure(&message) {
-            return BoundedError { message };
+    /// The engine's report of a failed turn, made legible and classified.
+    ///
+    /// Every external engine's failure names that engine, so a reader never
+    /// sees "the engine". The adapter's own classification stands; one it
+    /// could not make reads as `unknown`, unless the words are a provider
+    /// authentication failure (issue 2653). Those become `engine_auth`, and
+    /// because the vendor's raw 401 body cannot tell the reader "sign this
+    /// harness in" from "the provider is down", the sentence the create-time
+    /// refusal uses leads and the engine's own words follow. A turn riding
+    /// the relay keeps its message untouched — the relay's refusals already
+    /// name the gateway, and a hosted machine has no sign-in to send anyone
+    /// to.
+    fn legible_turn_error(&self, error: BoundedError) -> BoundedError {
+        let reads_as_signed_out = provider_auth_failure(&error.message);
+        let mut failure = error
+            .failure
+            .unwrap_or_else(|| TurnFailure::new(TurnFailureCategory::Unknown));
+        if self.harness != HarnessKind::Internal && failure.engine.is_none() {
+            failure.engine = Some(self.harness);
         }
-        let label = crate::code::harness_label(self.harness);
-        BoundedError {
-            message: format!(
+        if failure.category == TurnFailureCategory::Unknown && reads_as_signed_out {
+            failure.category = TurnFailureCategory::EngineAuth;
+        }
+        // A failure about the model names the one the turn asked for, when
+        // the engine did not name one itself.
+        if matches!(
+            failure.category,
+            TurnFailureCategory::ModelUnavailable | TurnFailureCategory::ContextOverflow
+        ) && failure.model.is_none()
+        {
+            failure.model = self
+                .turn_model
+                .lock()
+                .expect("code sink turn model")
+                .clone();
+        }
+        let message = if self.relay_wired || !reads_as_signed_out {
+            error.message
+        } else {
+            let label = crate::code::harness_label(self.harness);
+            format!(
                 "{label} is not signed in on this machine. Sign in to {label} from \
-                 Settings > Coding engines, then try again. The engine reported: {message}"
-            ),
-        }
+                 Settings > Coding engines, then try again. The engine reported: {}",
+                error.message
+            )
+        };
+        BoundedError::new(message).with_failure(failure)
     }
 
     /// Persist a reported resume ref after the engine proves a turn started.
@@ -804,7 +841,7 @@ impl HarnessEventSink for LiveSink {
         // journal keeps it.
         let session_event = match session_event {
             Event::TurnFailed { error, .. } => Event::TurnFailed {
-                error: self.legible_turn_error(error.message),
+                error: self.legible_turn_error(error),
                 detail: None,
             },
             other => other,
@@ -1048,6 +1085,27 @@ async fn run_worker(
                         "could not reclaim the running internal turn after a worker restart"
                     );
                 }
+            }
+        } else if session.harness_kind == HarnessKind::Internal
+            && open.status == TurnStatus::RetryWait
+        {
+            // The turn was waiting on the server's own retry when the worker
+            // stopped. The engine waits out what is left of it and takes the
+            // next attempt, so the journaled `turn_retrying` gets its outcome.
+            let input = TurnInput {
+                turn_id: Some(open.id),
+                text: open.user_input.clone(),
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                images: Vec::new(),
+            };
+            if let Err(error) = engine.run_turn(input).await {
+                warn!(
+                    session = %session.id,
+                    error = %error,
+                    "could not retry the waiting internal turn after a worker restart"
+                );
             }
         }
     }
@@ -2438,6 +2496,7 @@ async fn continue_parked_turn(
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
     sink.set_turn(turn.id);
+    sink.set_turn_model(turn.model.clone().or_else(|| session.model.clone()));
     let _ = rebind_pending_approvals_to_worker(
         db,
         &session.owner,
@@ -2671,12 +2730,13 @@ fn close_open_turn<'fut>(
 
         match run {
             Ok(outcome) => {
-                let detail = match outcome {
-                    TurnOutcome::Clean => None,
-                    TurnOutcome::Incomplete { detail } => Some(detail),
-                    TurnOutcome::Parked { .. } => {
-                        Some("the engine parked a turn the worker was no longer waiting on".into())
-                    }
+                let (detail, failure) = match outcome {
+                    TurnOutcome::Clean => (None, None),
+                    TurnOutcome::Incomplete { detail, failure } => (Some(detail), failure),
+                    TurnOutcome::Parked { .. } => (
+                        Some("the engine parked a turn the worker was no longer waiting on".into()),
+                        None,
+                    ),
                 };
                 if let (Some(detail), false) = (detail.as_ref(), interrupted) {
                     let _ = persist_and_publish(
@@ -2700,10 +2760,12 @@ fn close_open_turn<'fut>(
                             Event::TurnInterrupted { usage: None },
                         )
                     } else if let Some(detail) = detail {
+                        let mut error = BoundedError::new(detail);
+                        error.failure = failure;
                         (
                             TurnStatus::Failed,
                             Event::TurnFailed {
-                                error: sink.legible_turn_error(detail),
+                                error: sink.legible_turn_error(error),
                                 detail: None,
                             },
                         )
@@ -2753,8 +2815,14 @@ fn close_open_turn<'fut>(
                     turn.status = TurnStatus::Failed;
                     turn.ended_at = Some(Utc::now());
                     let _ = save_turn(db, &session.owner, &turn).await;
+                    // An adapter that classified the refusal hands back the
+                    // error itself; anything else is only its words.
+                    let error = match &err {
+                        HarnessError::TurnFailed(error) => error.clone(),
+                        other => BoundedError::new(other.to_string()),
+                    };
                     let event = Event::TurnFailed {
-                        error: sink.legible_turn_error(err.to_string()),
+                        error: sink.legible_turn_error(error),
                         detail: None,
                     };
                     sink.note_subagent_boundary(&event).await;
@@ -3196,6 +3264,7 @@ fn start_turn<'b, 'w: 'b>(
                 .map_err(|err| WorkerError::Failed(err.to_string()))?;
         }
         sink.set_turn(turn.id);
+        sink.set_turn_model(turn.model.clone().or_else(|| session.model.clone()));
 
         let lease_token = if session.harness_kind == HarnessKind::Internal {
             let lease_token = uuid::Uuid::new_v4();
@@ -3580,15 +3649,16 @@ fn finish_turn<'a>(
 
         match run {
             Ok(outcome) => {
-                let detail = match outcome {
-                    TurnOutcome::Clean => None,
-                    TurnOutcome::Incomplete { detail } => Some(detail),
+                let (detail, failure) = match outcome {
+                    TurnOutcome::Clean => (None, None),
+                    TurnOutcome::Incomplete { detail, failure } => (Some(detail), failure),
                     // Parks are intercepted by the leg loop above; one arriving
                     // here means the engine parked after the worker stopped
                     // waiting, and failing loudly beats stranding the turn open.
-                    TurnOutcome::Parked { .. } => {
-                        Some("the engine parked a turn the worker was no longer waiting on".into())
-                    }
+                    TurnOutcome::Parked { .. } => (
+                        Some("the engine parked a turn the worker was no longer waiting on".into()),
+                        None,
+                    ),
                 };
                 // An engine that died on us says why on stderr. That belongs in
                 // the journal, not only in a log line nobody reading the session
@@ -3619,10 +3689,12 @@ fn finish_turn<'a>(
                             Event::TurnInterrupted { usage: None },
                         )
                     } else if let Some(detail) = detail {
+                        let mut error = BoundedError::new(detail);
+                        error.failure = failure;
                         (
                             TurnStatus::Failed,
                             Event::TurnFailed {
-                                error: sink.legible_turn_error(detail),
+                                error: sink.legible_turn_error(error),
                                 detail: None,
                             },
                         )
@@ -3672,8 +3744,14 @@ fn finish_turn<'a>(
                     turn.status = TurnStatus::Failed;
                     turn.ended_at = Some(Utc::now());
                     let _ = save_turn(db, &session.owner, &turn).await;
+                    // An adapter that classified the refusal hands back the
+                    // error itself; anything else is only its words.
+                    let error = match &err {
+                        HarnessError::TurnFailed(error) => error.clone(),
+                        other => BoundedError::new(other.to_string()),
+                    };
                     let event = Event::TurnFailed {
-                        error: sink.legible_turn_error(err.to_string()),
+                        error: sink.legible_turn_error(error),
                         detail: None,
                     };
                     sink.note_subagent_boundary(&event).await;
@@ -4180,6 +4258,7 @@ pub(crate) fn sink_for(
         harness,
         relay_wired,
         turn_id: std::sync::Mutex::new(turn_id),
+        turn_model: std::sync::Mutex::new(None),
         pending_resume_ref: std::sync::Mutex::new(None),
         gh_search_path,
         flushed_unrecognized: AtomicU64::new(0),

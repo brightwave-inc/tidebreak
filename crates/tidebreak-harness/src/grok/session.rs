@@ -820,7 +820,12 @@ impl GrokSession {
                 return Err(HarnessError::ResumeLost(detail));
             }
         }
-        Ok(turn_outcome(status, saw_terminal, &stderr))
+        Ok(turn_outcome(
+            HarnessKind::Grok,
+            status,
+            saw_terminal,
+            &stderr,
+        ))
     }
 }
 
@@ -1747,7 +1752,7 @@ exit 0
             let session = session_with(binary, dir.path(), sink, Some("broken"));
             assert!(matches!(
                 session.run_turn(turn("one")).await.unwrap(),
-                TurnOutcome::Incomplete { detail } if detail.contains("boom")
+                TurnOutcome::Incomplete { detail, .. } if detail.contains("boom")
             ));
         }
     }

@@ -1844,9 +1844,7 @@ async fn sink_settles_unclosed_tasks_at_each_terminal_parent_boundary() {
         (
             "failed",
             HarnessEvent::TurnFailed {
-                error: BoundedError {
-                    message: "engine failed".into(),
-                },
+                error: BoundedError::new("engine failed"),
             },
             CodeSubagentStatus::Failed,
         ),
@@ -2267,7 +2265,9 @@ fn provider_auth_failures_are_recognized_and_other_failures_are_not() {
 #[tokio::test]
 async fn a_raw_401_turn_failure_reads_as_a_sign_in_problem() {
     let (_directory, _store, sink, _session_id) = seeded_sink().await;
-    let mapped = sink.legible_turn_error("Missing bearer or basic authentication in header".into());
+    let mapped = sink.legible_turn_error(BoundedError::new(
+        "Missing bearer or basic authentication in header",
+    ));
     assert!(
         mapped
             .message
@@ -2279,8 +2279,53 @@ async fn a_raw_401_turn_failure_reads_as_a_sign_in_problem() {
     assert!(mapped
         .message
         .contains("Missing bearer or basic authentication in header"));
-    let untouched = sink.legible_turn_error("engine exited with status 1".into());
+    // The words no adapter classified still classify, and name the engine.
+    assert_eq!(
+        mapped.failure,
+        Some(
+            TurnFailure::new(TurnFailureCategory::EngineAuth).with_engine(HarnessKind::ClaudeCode)
+        )
+    );
+    let untouched = sink.legible_turn_error(BoundedError::new("engine exited with status 1"));
     assert_eq!(untouched.message, "engine exited with status 1");
+    assert_eq!(
+        untouched.failure,
+        Some(TurnFailure::new(TurnFailureCategory::Unknown).with_engine(HarnessKind::ClaudeCode))
+    );
+}
+
+/// An adapter's classification stands, and a failure about the model names
+/// the model the turn asked for.
+#[tokio::test]
+async fn a_classified_turn_failure_keeps_its_category_and_names_the_model() {
+    let (_directory, _store, sink, _session_id) = seeded_sink().await;
+    sink.set_turn_model(Some("claude-opus-5".into()));
+    let classified = sink.legible_turn_error(
+        BoundedError::new("There's an issue with the selected model (claude-opus-5).")
+            .with_failure(
+                TurnFailure::new(TurnFailureCategory::ModelUnavailable)
+                    .with_engine(HarnessKind::ClaudeCode),
+            ),
+    );
+    assert_eq!(
+        classified.failure,
+        Some(
+            TurnFailure::new(TurnFailureCategory::ModelUnavailable)
+                .with_engine(HarnessKind::ClaudeCode)
+                .with_model("claude-opus-5")
+        )
+    );
+    // A throttle is about the account, not the model.
+    let throttled = sink.legible_turn_error(
+        BoundedError::new("rate limited")
+            .with_failure(TurnFailure::new(TurnFailureCategory::RateLimited)),
+    );
+    assert_eq!(
+        throttled.failure,
+        Some(
+            TurnFailure::new(TurnFailureCategory::RateLimited).with_engine(HarnessKind::ClaudeCode)
+        )
+    );
 }
 
 #[tokio::test]
@@ -2305,7 +2350,7 @@ async fn a_relay_wired_session_keeps_the_relays_own_refusal() {
     );
     // The relay's refusals already name the gateway, and a hosted machine
     // has no sign-in to send anyone to.
-    let kept = sink.legible_turn_error("authentication_error: sign in required".into());
+    let kept = sink.legible_turn_error(BoundedError::new("authentication_error: sign in required"));
     assert_eq!(kept.message, "authentication_error: sign in required");
 }
 
@@ -3199,9 +3244,7 @@ async fn terminal_events_close_the_open_turn() {
         ),
         (
             Event::TurnFailed {
-                error: BoundedError {
-                    message: "the model stopped".into(),
-                },
+                error: BoundedError::new("the model stopped"),
                 detail: None,
             },
             TurnStatus::Failed,

@@ -713,7 +713,14 @@ export type BoundedError = {
 /**
  * Short message, already truncated by the adapter.
  */
-message: string, };
+message: string,
+/**
+ * Why the turn failed, when the adapter could tell: the shared
+ * category, with the engine, model, and reset time its copy needs.
+ * Absent on rows written before engines were classified, and on a
+ * failure no adapter recognized.
+ */
+failure?: TurnFailure, };
 
 export type BranchPrefixMode = "account" | "custom" | "none";
 
@@ -975,7 +982,18 @@ origin: RootAttachmentOrigin, };
  * message-less failed and cancelled turns remain first-class transcript entries
  * carrying the partial prose and reasoning the reader already saw live.
  */
-export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, failure_detail?: string, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>,
+export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal,
+/**
+ * The category a client built before the full vocabulary reads: only
+ * `rate_limited`, `auth`, `provider_access`, `transient`, or `unknown`.
+ * A client that reads `failure` uses that instead.
+ */
+failure_category?: TurnFailureCategory,
+/**
+ * Why a failed turn failed, in the full vocabulary chat and code turns
+ * share. Absent unless the turn failed.
+ */
+failure?: TurnFailure, failure_detail?: string, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>,
 /**
  * Model-authored memory records this turn produced, whatever their
  * review state now, so the transcript can show the proposal chip and
@@ -2993,7 +3011,24 @@ error: BoundedError,
  * The failure's machine-readable kind beside its message, so the
  * renderer can categorize it. Internal engine.
  */
-detail?: AgentErrorInfo, } | { "type": "turn_interrupted",
+detail?: AgentErrorInfo, } | { "type": "turn_retrying",
+/**
+ * Why the attempt failed.
+ */
+category: TurnFailureCategory,
+/**
+ * The attempt the retry starts, counting the first try as 1.
+ */
+attempt: number,
+/**
+ * The most attempts the turn may take. The server can also stop
+ * earlier, when the next wait would outlast its retry window.
+ */
+max_attempts: number,
+/**
+ * When the next attempt may start.
+ */
+retry_at: string, } | { "type": "turn_interrupted",
 /**
  * Token accounting up to the interruption, when the engine reports
  * it. Internal engine.
@@ -5857,15 +5892,39 @@ action?: ToolActionPreview,
  */
 result?: ToolResultPreview, } | { "type": "turn_completed", usage: RendererTurnUsage, } | { "type": "turn_refused", refusal: RendererRefusal, usage: RendererTurnUsage, } | { "type": "turn_failed",
 /**
- * Why the turn failed, at the only resolution a client can act on.
- * The internal `kind` stays behind the server; allowlisted provider
- * diagnostics may cross separately as `detail`.
+ * The category a client built before the full vocabulary reads:
+ * only `rate_limited`, `auth`, `provider_access`, `transient`, or
+ * `unknown`. A client that reads `failure` uses that instead.
  */
 category: TurnFailureCategory,
 /**
+ * Why the turn failed, in the full vocabulary chat and code turns
+ * share. The internal `kind` stays behind the server; allowlisted
+ * provider diagnostics may cross separately as `detail`. Absent only
+ * from servers that predate it.
+ */
+failure?: TurnFailure,
+/**
  * Bounded provider diagnostic, when the failure originated upstream.
  */
-detail?: string, model?: RendererModelIdentity, } | { "type": "turn_cancelled", usage: RendererTurnUsage, } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated",
+detail?: string, model?: RendererModelIdentity, } | { "type": "turn_retrying",
+/**
+ * Why the attempt failed.
+ */
+category: TurnFailureCategory,
+/**
+ * The attempt the retry starts, counting the first try as 1.
+ */
+attempt: number,
+/**
+ * The most attempts the turn may take. The server can stop sooner,
+ * when the next wait would outlast its retry window.
+ */
+max_attempts: number,
+/**
+ * When the next attempt may start.
+ */
+retry_at: string, } | { "type": "turn_cancelled", usage: RendererTurnUsage, } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated",
 /**
  * Estimated transcript tokens before the reduction.
  */
@@ -7195,21 +7254,41 @@ external_identity: string | null,
 trigger?: TriggerTurnContext, };
 
 /**
+ * A turn failure's category with the facts its copy needs.
+ *
+ * Every field but the category is optional: a source that cannot state a
+ * fact leaves it out, and the renderer words around its absence.
+ */
+export type TurnFailure = {
+/**
+ * Why the turn failed.
+ */
+category: TurnFailureCategory,
+/**
+ * The coding engine that failed the turn. Absent on a chat turn and on
+ * a code turn that ran on Tidebreak's own engine, where the failure is
+ * the model provider's.
+ */
+engine?: HarnessKind,
+/**
+ * The model the failure is about. A code turn's failure about its
+ * model names the model the turn asked for; a chat turn's model rides
+ * beside the failure instead.
+ */
+model?: string,
+/**
+ * When a usage or rate limit lifts, when the engine or provider said.
+ */
+resets_at?: string, };
+
+/**
  * Why a turn failed, closed and coarse enough to be stable.
  *
- * A failure's `kind` is an internal diagnostic vocabulary: it grows with the
- * server, and its `message` can carry provider diagnostics and host paths, so
- * neither crosses to the renderer. What a client actually needs is narrower —
- * what to tell the person, and whether running the same turn again could
- * plausibly do anything different. This enum is exactly that, and nothing is
- * worth a variant here unless a client would say or do something different
- * for it.
- *
- * It is also the worker's own retry taxonomy — the same classification decides
- * whether a failed turn is rescheduled — so the category a client sees and the
- * category the scheduler acted on cannot drift apart.
+ * Clients built before the full vocabulary read only `rate_limited`, `auth`,
+ * `provider_access`, `transient`, and `unknown`, and nothing else is ever
+ * sent to them; [`Self::legacy`] maps every category onto that set.
  */
-export type TurnFailureCategory = "rate_limited" | "auth" | "provider_access" | "transient" | "unknown";
+export type TurnFailureCategory = "rate_limited" | "overloaded" | "auth" | "provider_access" | "model_unavailable" | "context_overflow" | "request_rejected" | "local" | "transient" | "engine_auth" | "usage_limit" | "unknown";
 
 /**
  * Identifies one turn: a single user input through to the final answer.

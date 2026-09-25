@@ -1358,9 +1358,7 @@ mod tests {
         let events = seq(vec![
             Event::TurnStarted { turn_id: only.id },
             Event::TurnFailed {
-                error: BoundedError {
-                    message: "the engine exited".to_owned(),
-                },
+                error: BoundedError::new("the engine exited".to_owned()),
                 detail: None,
             },
         ]);

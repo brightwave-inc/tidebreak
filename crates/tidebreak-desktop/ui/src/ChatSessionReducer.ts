@@ -599,12 +599,14 @@ export function reduceChatSessionEvent(
           messages: [
             ...settleActiveToolCalls(state.messages, "failed"),
             // The category rides into the transcript as data; the renderer
-            // owns both the copy and which recovery it offers.
+            // owns both the copy and which recovery it offers. `failure` is
+            // the full diagnosis; a server that predates it sends only the
+            // coarse `category`.
             {
               id: deps.nextId(),
               role: "turn_failure",
               turnId: state.activeTurnId ?? undefined,
-              category: event.category,
+              category: event.failure?.category ?? event.category,
               detail: event.detail,
               model: event.model,
             },

@@ -20,6 +20,8 @@ import type {
   ReviewOutcome,
   SequencedEventFrame as WireSequencedCodeEventFrame,
   ToolDetail as WireToolDetail,
+  TurnFailure,
+  TurnFailureCategory,
 } from "../../generated/wire";
 import {
   lineText,
@@ -29,6 +31,7 @@ import {
   rawText,
   wireId,
   optionalWireId,
+  timestamp,
   HARNESS_KINDS,
   FILE_CHANGE_KINDS,
 } from "./shared";
@@ -57,6 +60,58 @@ const CREDENTIAL_REFUSAL_REASONS = new Set<CredentialRefusalReason>([
 ]);
 
 const TOOL_OUTCOMES = new Set<ToolOutcome>(["succeeded", "failed", "denied"]);
+
+const TURN_FAILURE_CATEGORIES = new Set<TurnFailureCategory>([
+  "rate_limited",
+  "overloaded",
+  "auth",
+  "provider_access",
+  "model_unavailable",
+  "context_overflow",
+  "request_rejected",
+  "local",
+  "transient",
+  "engine_auth",
+  "usage_limit",
+  "unknown",
+]);
+
+/**
+ * A category this build knows, or `unknown` for one a newer server added.
+ *
+ * A failure is the one event that must never go missing, so an unfamiliar
+ * category degrades to the generic reading instead of rejecting the frame,
+ * the way the renderer reads any failure it has no specific copy for.
+ */
+function turnFailureCategory(value: unknown): TurnFailureCategory | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return isMember(value, TURN_FAILURE_CATEGORIES) ? value : "unknown";
+}
+
+/**
+ * The classification a failed turn carries beside its message, or
+ * `undefined` when it carries none or one this build cannot read.
+ *
+ * Keys a newer server adds are ignored, an engine this build does not know is
+ * left out, and a classification with no readable category is dropped: the
+ * failure still shows its message either way.
+ */
+export function parseTurnFailure(value: unknown): TurnFailure | undefined {
+  if (!isRecord(value)) return undefined;
+  const category = turnFailureCategory(value.category);
+  if (!category) return undefined;
+  const engine = isMember(value.engine, HARNESS_KINDS)
+    ? value.engine
+    : undefined;
+  const model = nonEmptyLine(value.model) ? value.model : undefined;
+  const resetsAt = timestamp(value.resets_at) ? value.resets_at : undefined;
+  return {
+    category,
+    ...(engine ? { engine } : {}),
+    ...(model ? { model } : {}),
+    ...(resetsAt ? { resets_at: resetsAt } : {}),
+  };
+}
 
 const APPROVAL_CLASSES = new Set(["read_only", "workspace", "sensitive"]);
 const TOOL_APPROVAL_KINDS = new Set([
@@ -404,9 +459,10 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           : {}),
       };
     }
-    case "turn_failed":
+    case "turn_failed": {
       // `detail` is the internal engine's machine-readable kind beside the
-      // message; the code view shows the message.
+      // message; the code view shows the message, and reads the failure's
+      // classification from `error.failure`.
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "turn_failed" }>>(value, [
           "type",
@@ -418,7 +474,42 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       ) {
         return null;
       }
-      return { type: "turn_failed", error: { message: value.error.message } };
+      const failure = parseTurnFailure(value.error.failure);
+      return {
+        type: "turn_failed",
+        error: {
+          message: value.error.message,
+          ...(failure ? { failure } : {}),
+        },
+      };
+    }
+    case "turn_retrying": {
+      // The server's own retry of a failed attempt: why, which attempt comes
+      // next, and when. The turn's next outcome replaces it.
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "turn_retrying" }>>(value, [
+          "type",
+          "category",
+          "attempt",
+          "max_attempts",
+          "retry_at",
+        ]) ||
+        !isNonNegativeInteger(value.attempt) ||
+        !isNonNegativeInteger(value.max_attempts) ||
+        !timestamp(value.retry_at)
+      ) {
+        return null;
+      }
+      const category = turnFailureCategory(value.category);
+      if (!category) return null;
+      return {
+        type: "turn_retrying",
+        category,
+        attempt: value.attempt,
+        max_attempts: value.max_attempts,
+        retry_at: value.retry_at,
+      };
+    }
     case "turn_refused": {
       // The internal engine's terminal for a model refusal: the turn is
       // over, the way a completion ends it.

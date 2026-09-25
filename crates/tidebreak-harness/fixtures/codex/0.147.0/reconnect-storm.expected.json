@@ -10,7 +10,11 @@
   {
     "type": "turn_failed",
     "error": {
-      "message": "Missing bearer or basic authentication in header"
+      "message": "Missing bearer or basic authentication in header",
+      "failure": {
+        "category": "unknown",
+        "engine": "codex"
+      }
     }
   }
 ]

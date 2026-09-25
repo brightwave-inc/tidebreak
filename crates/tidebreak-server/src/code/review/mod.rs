@@ -727,10 +727,9 @@ impl CodeRuntime {
         match outcome {
             None => ReviewEnd::TimedOut,
             Some(Err(error)) => ReviewEnd::Failed(classify_harness_error(job.harness, &error)),
-            Some(Ok(TurnOutcome::Incomplete { detail })) => ReviewEnd::Failed(classify_failure(
-                job.harness,
-                trace.failure.as_deref().unwrap_or(&detail),
-            )),
+            Some(Ok(TurnOutcome::Incomplete { detail, .. })) => ReviewEnd::Failed(
+                classify_failure(job.harness, trace.failure.as_deref().unwrap_or(&detail)),
+            ),
             Some(Ok(TurnOutcome::Parked { .. })) => ReviewEnd::Failed(failure(
                 CodeReviewFailureKind::Failed,
                 format!("{label} paused the review to wait for something a review cannot give it"),
