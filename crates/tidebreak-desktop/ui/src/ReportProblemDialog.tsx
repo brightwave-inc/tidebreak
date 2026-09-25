@@ -39,7 +39,7 @@ export type ReportProblemDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /**
-   * Hand the report to an agent in this workspace instead (decision 81).
+   * Hand the session's debug report to an agent instead (decision 81).
    * Offered only where a session's debug details exist.
    */
   onAskAgent?: () => void;
@@ -179,8 +179,10 @@ export function ReportProblemDialog({
                 Ask an agent instead
               </p>
               <p className="text-sm text-muted-foreground">
-                An agent in this workspace reads this session's diagnostic
-                details, asks what went wrong, and files the issue with you.
+                An agent reads this session's full debug report, including its
+                prompts, replies, and tool output, asks what went wrong, and
+                files the issue with you. The engine you choose receives that
+                report.
               </p>
             </div>
             <Button
