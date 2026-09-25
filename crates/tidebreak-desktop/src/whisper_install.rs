@@ -43,11 +43,11 @@ use sha2::{Digest, Sha256};
 /// the **Publish whisper helper** workflow before shipping the app change.
 pub(crate) const HELPER_VERSION: &str = "0.1.0";
 
-/// The Tauri updater public key, byte-identical to
-/// `plugins.updater.pubkey` in `tauri.conf.json` (a test enforces this).
-/// The helper is signed with the matching private key by the publish
-/// workflow, exactly like updater artifacts.
-const UPDATER_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUyRjM1NjZGOTQxRUFBNwpSV1NuNmtINVpqVXZEaXY4cVFWZ0RrbThUbHlEZFB1RnVtT01MSGcwRElhcjdtUUpJckJzM2ZjTAo=";
+/// The public key the published helper is signed with. Helper 0.1.0 on
+/// downloads.brightwave.io was signed with the key app updates used through
+/// v0.x. App updates moved to the new home's key in `tauri.conf.json`, so the
+/// helper keeps its own pin until a helper signed with that key is published.
+const HELPER_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUyRjM1NjZGOTQxRUFBNwpSV1NuNmtINVpqVXZEaXY4cVFWZ0RrbThUbHlEZFB1RnVtT01MSGcwRElhcjdtUUpJckJzM2ZjTAo=";
 
 /// The helper is a single static binary in the low tens of megabytes. The
 /// signature gate decides authenticity; this only stops an oversized response
@@ -277,7 +277,7 @@ fn verify_signature(bytes: &[u8], signature_base64: &str) -> Result<(), String> 
     }
     let engine = base64::engine::general_purpose::STANDARD;
     let pubkey =
-        String::from_utf8(engine.decode(UPDATER_PUBKEY).map_err(invalid)?).map_err(invalid)?;
+        String::from_utf8(engine.decode(HELPER_PUBKEY).map_err(invalid)?).map_err(invalid)?;
     let pubkey = minisign_verify::PublicKey::decode(&pubkey).map_err(invalid)?;
     let signature =
         String::from_utf8(engine.decode(signature_base64).map_err(invalid)?).map_err(invalid)?;
@@ -315,20 +315,23 @@ fn sha256_hex_of_file(path: &Path) -> std::io::Result<String> {
 mod tests {
     use super::*;
 
-    /// The helper trusts the same publisher as app updates: this constant and
-    /// the updater pubkey in `tauri.conf.json` must never drift apart.
+    /// The helper trusts the key that signed the published helper, which is
+    /// not the app's update key any more: pin its key id so a change to either
+    /// key is deliberate.
     #[test]
-    fn pinned_pubkey_matches_the_updater_configuration() {
-        let mut config = String::new();
-        std::fs::File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json"))
-            .expect("tauri.conf.json")
-            .read_to_string(&mut config)
-            .expect("read tauri.conf.json");
-        let config: serde_json::Value = serde_json::from_str(&config).expect("parse");
-        assert_eq!(
-            config["plugins"]["updater"]["pubkey"].as_str(),
-            Some(UPDATER_PUBKEY)
+    fn pinned_pubkey_is_the_key_that_signed_the_published_helper() {
+        use base64::Engine as _;
+        let text = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(HELPER_PUBKEY)
+                .expect("base64"),
+        )
+        .expect("utf8");
+        assert!(
+            text.contains("minisign public key: E2F3566F941EAA7"),
+            "{text}"
         );
+        minisign_verify::PublicKey::decode(&text).expect("a minisign public key");
     }
 
     /// The signature gate: garbage, truncated, and wrong-key signatures are
