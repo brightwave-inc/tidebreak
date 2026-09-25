@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { ExternalLink, Globe2, RefreshCw, TriangleAlert } from "lucide-react";
+import { ExternalLink, Globe2, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -63,6 +63,8 @@ import {
   setBrowserTitle,
   type BrowserSession,
 } from "./browserSession";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
+import { useRetry } from "@/components/ui/useRetry";
 
 const SLOW_LOAD_MS = 15_000;
 const NATIVE_REVEAL_FALLBACK_MS = 100;
@@ -1140,6 +1142,9 @@ function CodeBrowserTabSession({
     await runHostCommand("reload");
   }
 
+  // The failure stays until the browser opens, so its Retry waits for that.
+  const nativeRetry = useRetry(retryNativeCreate);
+
   async function retryNativeCreate() {
     const url = sessionRef.current.url;
     if (!url || !host.available()) return;
@@ -1355,7 +1360,8 @@ function CodeBrowserTabSession({
             <BrowserFallback
               error={session.error}
               hasUrl={Boolean(session.url)}
-              onRetry={session.url ? () => void retryNativeCreate() : undefined}
+              onRetry={session.url ? nativeRetry.retry : undefined}
+              retrying={nativeRetry.pending}
               onOpenExternal={
                 session.url ? () => void openExternal() : undefined
               }
@@ -1371,30 +1377,60 @@ export function BrowserFallback({
   error,
   hasUrl,
   onRetry,
+  retrying = false,
   onOpenExternal,
 }: {
   error: string | null;
   hasUrl: boolean;
   onRetry?: () => void;
+  retrying?: boolean;
   onOpenExternal?: () => void;
 }) {
+  if (error) {
+    return (
+      <div className="flex h-full min-h-72 items-center justify-center bg-page-background/35 p-6">
+        <Notice
+          tone="critical"
+          title="This page did not open"
+          className="max-w-lg"
+          action={
+            hasUrl &&
+            (onRetry || onOpenExternal) && (
+              <>
+                {onRetry && (
+                  <NoticeRetryButton pending={retrying} onClick={onRetry} />
+                )}
+                {onOpenExternal && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={onOpenExternal}
+                  >
+                    <ExternalLink />
+                    Open externally
+                  </Button>
+                )}
+              </>
+            )
+          }
+        >
+          {error}
+        </Notice>
+      </div>
+    );
+  }
   return (
     <Empty className="h-full min-h-72 rounded-none bg-page-background/35">
       <EmptyHeader>
-        <EmptyMedia
-          variant="icon"
-          className={error ? "text-critical" : undefined}
-        >
-          {error ? <TriangleAlert /> : <Globe2 />}
+        <EmptyMedia variant="icon">
+          <Globe2 />
         </EmptyMedia>
-        <EmptyTitle>
-          {error
-            ? "This page did not open"
-            : "Bring the live work into the workspace"}
-        </EmptyTitle>
+        <EmptyTitle>Bring the live work into the workspace</EmptyTitle>
         <EmptyDescription>
-          {error ||
-            "Open a local preview, documentation, or a pull request here. The browser stays attached to this workspace so you and its agents can work from the same page."}
+          Open a local preview, documentation, or a pull request here. The
+          browser stays attached to this workspace so you and its agents can
+          work from the same page.
         </EmptyDescription>
       </EmptyHeader>
       {hasUrl && (onRetry || onOpenExternal) && (

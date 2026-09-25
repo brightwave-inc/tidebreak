@@ -24,6 +24,7 @@ import {
   SettingsSection,
   SettingsStatus,
 } from "./primitives";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 const MIN_CODE_EXECUTION_TIMEOUT_SECONDS = 1;
 const MAX_CODE_EXECUTION_TIMEOUT_SECONDS = 120;
@@ -45,13 +46,20 @@ export function ExecPanel({ client }: { client: ApiClient }) {
   const [saving, setSaving] = useState(false);
   const [savingKey, setSavingKey] = useState<ExecProviderKind | null>(null);
   const [removing, setRemoving] = useState<ExecProviderKind | null>(null);
+  /** Why the settings did not load; Try again reads them once more. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  /** Why a save did not go through. */
   const [error, setError] = useState<string | null>(null);
+  /** Why the chosen provider or the typed timeout cannot be saved. */
+  const [providerError, setProviderError] = useState<string | null>(null);
+  const [timeoutError, setTimeoutError] = useState<string | null>(null);
   const writeSeq = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setError(null);
+    setLoadError(null);
     void (async () => {
       try {
         const [nextConfig, nextCredentials] = await Promise.all([
@@ -64,7 +72,9 @@ export function ExecPanel({ client }: { client: ApiClient }) {
         setProvider(nextConfig.provider ?? "");
         setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
       } catch (err) {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          setLoadError(friendlyErrorMessage(err, "Try again in a moment."));
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -72,7 +82,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, loadAttempt]);
 
   const working = saving || savingKey !== null || removing !== null;
   const state = codeExecutionState(config);
@@ -89,7 +99,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
       setCredentials(nextCredentials.credentials);
       toast.success(`Saved the ${codeExecutionProviderLabel(target)} API key`);
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setSavingKey(null);
     }
@@ -115,7 +125,9 @@ export function ExecPanel({ client }: { client: ApiClient }) {
       toast.success("Saved code-execution settings");
       return true;
     } catch (err) {
-      if (seq === writeSeq.current) setError(String(err));
+      if (seq === writeSeq.current) {
+        setError(friendlyErrorMessage(err, "Could not save that change."));
+      }
       return false;
     } finally {
       if (seq === writeSeq.current) setSaving(false);
@@ -126,12 +138,13 @@ export function ExecPanel({ client }: { client: ApiClient }) {
     if (nextProvider) {
       const slot = credentials.find((row) => row.provider === nextProvider);
       if (slot && !slot.has_credential) {
-        setError(
+        setProviderError(
           `${codeExecutionProviderLabel(nextProvider)} needs an API key before you can make it active.`,
         );
         return;
       }
     }
+    setProviderError(null);
     setProvider(nextProvider);
     await persistConfig({ provider: nextProvider || null });
   }
@@ -143,9 +156,10 @@ export function ExecPanel({ client }: { client: ApiClient }) {
       MAX_CODE_EXECUTION_TIMEOUT_SECONDS,
     );
     if ("error" in timeout) {
-      setError(timeout.error);
+      setTimeoutError(timeout.error);
       return;
     }
+    setTimeoutError(null);
     await persistConfig({ timeout_ms: timeout.timeoutMs });
   }
 
@@ -164,7 +178,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
         `Removed the saved ${codeExecutionProviderLabel(target)} API key`,
       );
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setRemoving(null);
     }
@@ -180,6 +194,13 @@ export function ExecPanel({ client }: { client: ApiClient }) {
         <p className="text-sm text-muted-foreground">
           Loading code-execution settings…
         </p>
+      ) : loadError ? (
+        <SettingsError
+          title="Could not load code-execution settings"
+          onRetry={() => setLoadAttempt((count) => count + 1)}
+        >
+          {loadError}
+        </SettingsError>
       ) : !config ? (
         <p className="text-sm text-muted-foreground">
           Code-execution settings are unavailable.
@@ -234,6 +255,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
             <ActiveProviderField
               value={provider}
               disabled={working}
+              error={providerError}
               onChange={(next) => void saveProvider(next)}
               options={config.providers.map((row) => ({
                 kind: row.provider,
@@ -249,6 +271,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
               maxSeconds={MAX_CODE_EXECUTION_TIMEOUT_SECONDS}
               value={timeoutSeconds}
               disabled={working}
+              error={timeoutError}
               onChange={setTimeoutSeconds}
               onBlur={() => void saveTimeout()}
             />

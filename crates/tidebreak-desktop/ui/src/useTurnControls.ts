@@ -10,6 +10,7 @@ import { useChatListStore } from "./ChatListStore";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { useOpenConversation } from "./OpenConversation";
 import { useTurnLifecycle } from "./TurnLifecycleSignals";
+import { friendlyErrorMessage } from "./lib/utils";
 
 export type TurnControls = {
   cancelPendingTurnId: string | null;
@@ -165,7 +166,7 @@ export function useTurnControls(
       if (stillOpen(startedChatId) && cancelRequestTurnRef.current === turnId) {
         cancelRequestTurnRef.current = null;
         setCancelPendingTurnId(null);
-        setCancelError(String(err));
+        setCancelError(friendlyErrorMessage(err, "Try again."));
       }
     }
   }
@@ -223,7 +224,7 @@ export function useTurnControls(
       steerFenceRef.current.fail(request);
       setSteerPendingTurnId(null);
       setSteerStatus(null);
-      setSteerError(String(err));
+      setSteerError(friendlyErrorMessage(err, "Try again."));
     }
   }
 

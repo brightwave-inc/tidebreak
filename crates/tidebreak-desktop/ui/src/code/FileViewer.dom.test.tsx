@@ -119,6 +119,51 @@ afterEach(() => {
 });
 
 describe("FileViewer", () => {
+  it("says an archived workspace is archived, with no retry that cannot help", async () => {
+    const client = textClient();
+    const message =
+      "This workspace is archived. Its files come back when you restore it.";
+    client.getCodeWorkspaceBlob.mockRejectedValue(
+      new HttpError(409, `409: ${message}`, "workspace_archived", {
+        kind: "workspace_archived",
+        message,
+      }),
+    );
+    render(
+      <FileViewer
+        client={client}
+        workspaceId="workspace-1"
+        path="src/main.rs"
+      />,
+    );
+
+    const notice = (await screen.findByText(message)).closest<HTMLElement>(
+      '[data-slot="notice"]',
+    );
+    expect(notice).toHaveAttribute("data-tone", "neutral");
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("offers Try again for a read that failed, and reads again", async () => {
+    const client = textClient();
+    client.getCodeWorkspaceBlob
+      .mockRejectedValueOnce(new TypeError("Load failed"))
+      .mockResolvedValue(textBlob("fn main() {}\n"));
+    render(
+      <FileViewer
+        client={client}
+        workspaceId="workspace-1"
+        path="src/main.rs"
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(
+      await screen.findByRole("button", { name: "Edit" }),
+    ).toBeInTheDocument();
+    expect(client.getCodeWorkspaceBlob).toHaveBeenCalledTimes(2);
+  });
+
   it("opens a workspace image from its original bytes", async () => {
     const client = {
       getCodeWorkspaceBlob: vi.fn().mockResolvedValue({

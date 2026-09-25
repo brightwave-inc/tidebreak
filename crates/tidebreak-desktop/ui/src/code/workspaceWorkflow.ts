@@ -19,6 +19,7 @@ import {
   type CheckCounts,
 } from "./prState";
 import { renderWorkflowPrompt } from "./workflowPrompts";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 export type WorkspaceWorkflowAction =
   | PrWorkflowAction
@@ -196,7 +197,7 @@ export function workspaceMergeConflictMessage(error: unknown): string | null {
   ) {
     return null;
   }
-  const message = error.message.replace(/^\d{3}:\s*/, "");
+  const message = friendlyErrorMessage(error, "The merge changed underneath.");
   return `${message} Refresh workspace status, then review the merge again.`;
 }
 

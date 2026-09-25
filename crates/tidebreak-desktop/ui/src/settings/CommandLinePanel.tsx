@@ -22,6 +22,7 @@ import {
   SettingsStatus,
   type SettingsStatusTone,
 } from "./primitives";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 /** The line a shell profile needs when `~/.local/bin` is not on the PATH. */
 export const LOCAL_BIN_PATH_LINE = 'export PATH="$HOME/.local/bin:$PATH"';
@@ -310,7 +311,11 @@ export function CommandLinePanel({
       if (current(ticket)) setStatus(next);
     } catch (err) {
       if (current(ticket)) {
-        setOutcome({ location: null, text: String(err), failed: true });
+        setOutcome({
+          location: null,
+          text: friendlyErrorMessage(err, "Could not check the command."),
+          failed: true,
+        });
       }
     } finally {
       if (current(ticket)) setWork(null);
@@ -330,7 +335,11 @@ export function CommandLinePanel({
         setOutcome(text ? { location, text, failed: false } : null);
       } catch (err) {
         if (!current(ticket)) return;
-        setOutcome({ location, text: String(err), failed: true });
+        setOutcome({
+          location,
+          text: friendlyErrorMessage(err, `Could not ${action} the command.`),
+          failed: true,
+        });
         // A refusal says why; the state behind it is worth reading afresh.
         void host
           .status()

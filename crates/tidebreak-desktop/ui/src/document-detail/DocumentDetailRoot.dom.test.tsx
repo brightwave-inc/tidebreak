@@ -26,6 +26,10 @@ import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
 import { clearFileDownloadCache } from "@/document/useFileDownload";
 import { renderWithRouter } from "../test/router";
 import { DocumentDetailRoot } from "./DocumentDetailRoot";
+import {
+  SERVER_UNAVAILABLE_MESSAGE,
+  UNREACHABLE_SERVER_MESSAGE,
+} from "@/lib/utils";
 
 // pdf.js draws to a canvas and runs a worker, neither of which jsdom has, so
 // page targeting is observed through a stand-in that keeps the real page state
@@ -643,9 +647,11 @@ describe("DocumentDetailRoot load failures", () => {
       new HttpError(500, "500: internal error"),
     );
 
-    expect(
-      await screen.findByText("The document could not be loaded (500)."),
-    ).toBeVisible();
+    // The failure names what failed and what to do, never a status code.
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveTextContent("Could not load this source");
+    expect(failure).toHaveTextContent(SERVER_UNAVAILABLE_MESSAGE);
+    expect(failure).not.toHaveTextContent("500");
     expect(
       screen.queryByText("The document is no longer available."),
     ).toBeNull();
@@ -667,9 +673,7 @@ describe("DocumentDetailRoot load failures", () => {
   it("reports a dropped connection as a failure rather than a deletion", async () => {
     await openFailingPanel(new TypeError("Load failed"));
 
-    expect(
-      await screen.findByText("The document could not be loaded."),
-    ).toBeVisible();
+    expect(await screen.findByText(UNREACHABLE_SERVER_MESSAGE)).toBeVisible();
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
   });
 });

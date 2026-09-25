@@ -438,7 +438,7 @@ export function QueueTray({
                 type="button"
                 variant="ghost"
                 size="icon-xs"
-                className="size-6 text-muted-foreground hover:text-destructive"
+                className="size-6 text-muted-foreground hover:text-critical"
                 aria-label="Delete queued message"
                 title={
                   row.reviewComments

@@ -5,6 +5,7 @@ import { AppDetailView } from "@/apps/AppDetailView";
 import { AppsView } from "@/apps/AppsView";
 import type { AppsApis } from "@/apps/appsApis";
 import { ManagedPolicyContext } from "@/managedPolicy";
+import { failureFixtures } from "./fixtures";
 
 const appRows: AppSummary[] = [
   {
@@ -208,7 +209,7 @@ export const LoadFailure: Story = {
   args: {
     apis: appApis({
       apps: [],
-      listError: new Error("The app library did not answer."),
+      listError: failureFixtures.unreachable,
     }),
   },
 };
@@ -263,7 +264,7 @@ export const DetailFailure: Story = {
   render: () => (
     <AppDetailView
       appId={detail.id}
-      apis={appApis({ detailError: new Error("404: app not found") })}
+      apis={appApis({ detailError: failureFixtures.notFound })}
       onBack={fn()}
     />
   ),

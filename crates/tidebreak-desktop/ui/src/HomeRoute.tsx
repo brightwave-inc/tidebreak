@@ -54,6 +54,8 @@ import {
   shouldOfferFirstTaskWalkthrough,
 } from "./FirstTaskWalkthrough";
 import { Button } from "@/components/ui/button";
+import { Notice } from "@/components/ui/notice";
+import { friendlyErrorMessage } from "./lib/utils";
 
 const chatListActions = useChatListStore.getState();
 const composerDraftActions = useComposerDrafts.getState();
@@ -304,11 +306,7 @@ export function HomeRoute({
       if (!attached) return;
       adoptAttached(attached);
     } catch (err) {
-      setAttachError(
-        String(err)
-          .replace(/^Error:\s*/, "")
-          .trim() || "Could not attach that file.",
-      );
+      setAttachError(friendlyErrorMessage(err, "Could not attach that file."));
     } finally {
       setAttaching(false);
     }
@@ -352,11 +350,7 @@ export function HomeRoute({
         );
       }
     } catch (err) {
-      setAttachError(
-        String(err)
-          .replace(/^Error:\s*/, "")
-          .trim() || "Could not attach that file.",
-      );
+      setAttachError(friendlyErrorMessage(err, "Could not attach that file."));
     } finally {
       setAttaching(false);
     }
@@ -463,7 +457,9 @@ export function HomeRoute({
       }
       composerDraftActions.clearDraft(draftKey);
     } catch (err) {
-      setError(`Could not start work: ${String(err)}`);
+      setError(
+        `Could not start work: ${friendlyErrorMessage(err, "Try again.")}`,
+      );
     } finally {
       chatListActions.setCreatingChat(false);
     }
@@ -592,7 +588,11 @@ export function HomeRoute({
                 </Button>
               </div>
             )}
-            {error && <p className="pb-2 text-sm text-critical">{error}</p>}
+            {error && (
+              <Notice tone="critical" className="mb-2">
+                {error}
+              </Notice>
+            )}
             <Composer
               activeTurnId={null}
               busy={false}
@@ -663,9 +663,10 @@ export function HomeRoute({
                   onAttached={adoptAttached}
                   onError={(caught) =>
                     setAttachError(
-                      String(caught)
-                        .replace(/^Error:\s*/, "")
-                        .trim() || "Could not attach that file.",
+                      friendlyErrorMessage(
+                        caught,
+                        "Could not attach that file.",
+                      ),
                     )
                   }
                 />

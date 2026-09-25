@@ -59,7 +59,7 @@ function PdfViewerSource({
   if (file.error) {
     return (
       <DocumentViewerShell className={className} {...restProps}>
-        <DocumentViewerState variant="error">
+        <DocumentViewerState variant="error" onRetry={file.retry}>
           This document could not be loaded.
         </DocumentViewerState>
       </DocumentViewerShell>

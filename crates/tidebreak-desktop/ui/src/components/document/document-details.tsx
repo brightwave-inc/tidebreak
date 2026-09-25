@@ -22,7 +22,6 @@ import {
   CITATION_MARK_LABEL,
   CITATION_MARK_STYLE,
 } from "./citationMark";
-import { DocumentError } from "./error";
 import { ImageViewer } from "./image-viewer";
 import { MarkdownViewer } from "./markdown-viewer";
 
@@ -195,7 +194,10 @@ function ExtractedText({
 
   if (info.content.length === 0) {
     return (
-      <DocumentError>No text could be read out of this document</DocumentError>
+      // An empty result, not a failure: it reads as a plain message.
+      <DocumentViewerState>
+        No text could be read out of this document.
+      </DocumentViewerState>
     );
   }
 

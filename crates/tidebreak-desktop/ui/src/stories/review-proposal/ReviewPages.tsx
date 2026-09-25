@@ -40,6 +40,7 @@ import {
   reviewPr,
 } from "./fixtures";
 import "./review-proposal.css";
+import { Notice } from "@/components/ui/notice";
 
 export type ReviewScenario =
   | "inbox"
@@ -506,29 +507,28 @@ export function ReviewPrototype({
               </div>
             </header>
             {conflict && (
-              <div
-                role="alert"
-                className="notice-surface notice-critical mx-5 mt-4 p-3"
+              <Notice
+                tone="critical"
+                title="Resolve one conflict before committing"
+                className="mx-5 mt-4 w-auto"
+                action={
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      startAgent(
+                        `Resolve the conflict in ${reviewFiles[0]!.path}. Keep unrelated changes.`,
+                      )
+                    }
+                  >
+                    Ask agent to resolve
+                  </Button>
+                }
               >
-                <p className="text-sm font-medium">
-                  Resolve one conflict before committing
-                </p>
-                <p className="mt-1 font-mono text-xs wrap-anywhere">
+                <span className="font-mono text-xs wrap-anywhere">
                   {reviewFiles[0]!.path}
-                </p>
-                <Button
-                  className="mt-2"
-                  size="sm"
-                  variant="outline"
-                  onClick={() =>
-                    startAgent(
-                      `Resolve the conflict in ${reviewFiles[0]!.path}. Keep unrelated changes.`,
-                    )
-                  }
-                >
-                  Ask agent to resolve
-                </Button>
-              </div>
+                </span>
+              </Notice>
             )}
             <Tabs
               value={scope}

@@ -97,6 +97,41 @@ function offenders(
   return hits;
 }
 
+/**
+ * The notice shapes `Notice` (components/ui/notice.tsx) replaced: the
+ * `notice-surface` classes some panels boxed and others did not, the
+ * transcript's bracketed `.message-notice`, the turn failure's own layout,
+ * and the settings verdict's. A panel that draws its own notice is a second
+ * answer to a question the component settles.
+ */
+export const RETIRED_NOTICE_CLASS =
+  /(?<![\w-])(?:notice-surface|message-notice|message-turn-failure|settings-status)(?!\w)/;
+
+/**
+ * Their rules in styles.css, tones included, so the classes cannot come back
+ * as selectors either.
+ */
+const RETIRED_NOTICE_SELECTOR =
+  /\.(?:notice-surface|notice-(?:critical|warning|info|success)|message-notice|message-turn-failure|settings-status)(?!\w)/;
+
+/**
+ * `text-destructive` paints the same red as `text-critical` under a second
+ * name, and the two drifted into two reds. Text uses `text-critical`; a fill
+ * or a border may still say `destructive`, and `text-destructive-foreground`
+ * is the ink on that fill.
+ */
+export const DESTRUCTIVE_TEXT = /\btext-destructive(?![-\w])/;
+
+function cssOffenders(pattern: RegExp): string[] {
+  const hits: string[] = [];
+  const lines = readFileSync(join(SRC, "styles.css"), "utf8").split("\n");
+  lines.forEach((line, index) => {
+    const match = line.match(pattern);
+    if (match) hits.push(`styles.css:${index + 1}  ${match[0]}`);
+  });
+  return hits;
+}
+
 /** RefreshCw / RotateCw / Loader2 / LoaderCircle JSX that also carries animate-spin. */
 const SPINNING_LUCIDE_REFRESH =
   /<(RefreshCw|RotateCw|Loader2|LoaderCircle)\b[^>]*animate-spin/;
@@ -153,6 +188,43 @@ describe("styles contract (see DESIGN.md)", () => {
       "Text that states something takes a text token at full strength: " +
         "text-muted-foreground, or a status -foreground rung. See DESIGN.md.",
     ).toEqual([]);
+  });
+
+  it("draws every notice and failure through Notice", () => {
+    const guidance =
+      "Render a notice or a failure with <Notice> from " +
+      "components/ui/notice.tsx; it owns the radius, border, padding, icon, " +
+      "and action slot. See DESIGN.md, Notices and errors.";
+    expect(offenders(RETIRED_NOTICE_CLASS), guidance).toEqual([]);
+    expect(cssOffenders(RETIRED_NOTICE_SELECTOR), guidance).toEqual([]);
+  });
+
+  it("recognizes every retired notice shape", () => {
+    for (const retired of [
+      'className="notice-surface notice-critical rounded-lg border"',
+      "cn(`message-notice is-${role}`)",
+      '<aside className="message-turn-failure">',
+      'className="settings-status notice-warning"',
+    ]) {
+      expect(RETIRED_NOTICE_CLASS.test(retired), retired).toBe(true);
+    }
+    expect(RETIRED_NOTICE_SELECTOR.test(".message-notice.is-error {")).toBe(
+      true,
+    );
+    // Neighbors that only share a word stay allowed.
+    expect(RETIRED_NOTICE_CLASS.test('className="message-branch-notice"')).toBe(
+      false,
+    );
+  });
+
+  it("colors error text with text-critical, not text-destructive", () => {
+    expect(
+      offenders(DESTRUCTIVE_TEXT),
+      "Use text-critical for red text; destructive is the same red under a " +
+        "second name. See DESIGN.md, Color.",
+    ).toEqual([]);
+    expect(DESTRUCTIVE_TEXT.test("hover:text-destructive")).toBe(true);
+    expect(DESTRUCTIVE_TEXT.test("text-destructive-foreground")).toBe(false);
   });
 
   it("does not spin Lucide refresh icons", () => {

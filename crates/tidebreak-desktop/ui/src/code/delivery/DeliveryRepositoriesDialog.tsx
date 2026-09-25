@@ -26,6 +26,7 @@ import { useApp } from "@/AppContext";
 import { useCodeCatalogStore } from "../CodeCatalogStore";
 import { useCodeUpdatesStore } from "../CodeUpdatesStore";
 import { useMemo, useState } from "react";
+import { Notice } from "@/components/ui/notice";
 
 export function DeliveryRepositoriesDialog({
   open,
@@ -220,7 +221,11 @@ export function DeliveryRepositoriesDialog({
                 Add
               </Button>
             </div>
-            {error && <p className="mt-2 text-xs text-critical">{error}</p>}
+            {error && (
+              <Notice tone="critical" density="compact" className="mt-2">
+                {error}
+              </Notice>
+            )}
             {manualRepositories.length > 0 && (
               <div className="mt-3 flex flex-col rounded-lg border border-border-subtle">
                 {manualRepositories.map((repository) => {

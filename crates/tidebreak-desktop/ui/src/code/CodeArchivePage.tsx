@@ -42,6 +42,8 @@ import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { listArchivedWorkspaces, isPutAway } from "./workspaceCards";
 import { workspaceCommandsForAccess } from "./workspaceAccess";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
+import { useRetry } from "@/components/ui/useRetry";
 
 type AgeFilter = "all" | "7d" | "30d" | "90d";
 
@@ -77,6 +79,7 @@ function CodeArchiveBody() {
   const loaded = useCodeCatalogStore((state) => state.loaded);
   const error = useCodeCatalogStore((state) => state.error);
   const refresh = useCodeCatalogStore((state) => state.refresh);
+  const catalogRetry = useRetry(() => refresh(client));
   const upsertWorkspace = useCodeCatalogStore((state) => state.upsertWorkspace);
   const [search, setSearch] = useState("");
   const [repoId, setRepoId] = useState("all");
@@ -369,9 +372,19 @@ function CodeArchiveBody() {
         {!loaded ? (
           <ArchiveSkeleton />
         ) : error ? (
-          <div className="notice-surface notice-critical m-5 rounded-lg border px-3 py-2 text-sm">
+          <Notice
+            tone="critical"
+            title="Could not load archived workspaces"
+            className="m-5 w-auto"
+            action={
+              <NoticeRetryButton
+                pending={catalogRetry.pending}
+                onClick={catalogRetry.retry}
+              />
+            }
+          >
             {error}
-          </div>
+          </Notice>
         ) : totalArchived === 0 ? (
           <Empty className="min-h-80">
             <EmptyHeader>

@@ -1,7 +1,10 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 import { CodeTranscript } from "@/code/CodeTranscript";
-import type { CodeTranscriptItem } from "@/code/CodeSessionReducer";
+import {
+  credentialRefusalNotice,
+  type CodeTranscriptItem,
+} from "@/code/CodeSessionReducer";
 import { messageWithReviewComments } from "@/code/diff/reviewComments";
 
 const items: CodeTranscriptItem[] = [
@@ -565,15 +568,23 @@ export const Notices: Story = {
         kind: "notice",
         id: "notice-error",
         level: "error",
+        // A code transcript offers no retry for an engine error, so the
+        // notice promises none; File an issue is its way out.
         message:
-          "The connection closed before the response completed. Check the connection and try again.",
+          "The connection to the engine closed before the response completed.",
       },
       {
         kind: "notice",
         id: "notice-credential-refused",
         level: "warning",
-        message:
-          "Push refused: this external connection has no live gateway delegation; reconnect it from Slack. Reconnect this session from Slack; a newer connect or a revoke ended the one it used.",
+        // Worded the way the reducer words the event the server sends.
+        message: credentialRefusalNotice({
+          reason: "connection_ended",
+          message:
+            "this external connection has no live gateway delegation; reconnect it from Slack",
+          remediation:
+            "Reconnect this session from Slack; a newer connect or a revoke ended the one it used.",
+        }),
       },
       {
         kind: "notice",
@@ -587,14 +598,14 @@ export const Notices: Story = {
     ],
   },
   play: async ({ canvasElement }) => {
-    const notices = Array.from(
-      canvasElement.querySelectorAll<HTMLElement>(
-        ".message-notice, .message-turn-failure, .notice-surface",
-      ),
-    );
-    await expect(notices.length).toBeGreaterThan(2);
-    const first = notices[0].getBoundingClientRect();
-    for (const notice of notices) {
+    const notices = () =>
+      Array.from(
+        canvasElement.querySelectorAll<HTMLElement>('[data-slot="notice"]'),
+      );
+    // The transcript draws its rows after it measures the column.
+    await waitFor(() => expect(notices().length).toBeGreaterThan(2));
+    const first = notices()[0].getBoundingClientRect();
+    for (const notice of notices()) {
       const rect = notice.getBoundingClientRect();
       await expect(Math.abs(rect.width - first.width)).toBeLessThan(1);
       await expect(Math.abs(rect.left - first.left)).toBeLessThan(1);

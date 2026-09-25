@@ -1,9 +1,4 @@
-import {
-  CircleAlert,
-  LayoutGrid,
-  RotateCwIcon,
-  ShieldCheck,
-} from "lucide-react";
+import { LayoutGrid, RotateCwIcon, ShieldCheck } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { AppSummary } from "@/api";
@@ -13,7 +8,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
-  EmptyContent,
   EmptyDescription,
   EmptyHeader,
   EmptyMedia,
@@ -23,6 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { friendlyErrorMessage } from "@/lib/utils";
 import type { AppsApis } from "./appsApis";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 /**
  * The Apps library, as the panel addressed `apps`.
@@ -55,7 +50,7 @@ export function AppsView({
       setApps(library.apps);
     } catch (caught) {
       if (generation !== generationRef.current) return;
-      setError(friendlyAppsError(caught, "Could not load your apps."));
+      setError(friendlyErrorMessage(caught, "Try again in a moment."));
     } finally {
       if (generation === generationRef.current) setLoading(false);
     }
@@ -97,28 +92,20 @@ export function AppsView({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pt-4 pb-6">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-3">
-          {error && hasApps && (
-            <div
-              className="notice-surface notice-critical flex shrink-0 items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm"
-              role="alert"
+          {error && (
+            <Notice
+              tone="critical"
+              title="Could not load your apps"
+              className="shrink-0"
+              action={<NoticeRetryButton onClick={() => void refresh(true)} />}
             >
-              <span>{error}</span>
-              <Button
-                variant="outline"
-                size="xs"
-                className="shrink-0"
-                onClick={() => void refresh(true)}
-              >
-                Try again
-              </Button>
-            </div>
+              {error}
+            </Notice>
           )}
 
           {loading && !hasApps ? (
             <AppsLoading />
-          ) : error && !hasApps ? (
-            <AppsFailure error={error} onRetry={() => void refresh(true)} />
-          ) : !hasApps ? (
+          ) : error && !hasApps ? null : !hasApps ? (
             <Empty className="min-h-80 border">
               <EmptyHeader>
                 <EmptyMedia variant="icon" className="text-icon-blue">
@@ -192,31 +179,6 @@ export function AppsView({
   );
 }
 
-function AppsFailure({
-  error,
-  onRetry,
-}: {
-  error: string;
-  onRetry: () => void;
-}) {
-  return (
-    <Empty className="min-h-80 border" role="alert">
-      <EmptyHeader>
-        <EmptyMedia variant="icon" className="text-critical">
-          <CircleAlert />
-        </EmptyMedia>
-        <EmptyTitle>Apps could not load</EmptyTitle>
-        <EmptyDescription>{error}</EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent>
-        <Button variant="outline" size="sm" onClick={onRetry}>
-          Try again
-        </Button>
-      </EmptyContent>
-    </Empty>
-  );
-}
-
 function AppsLoading() {
   return (
     <div
@@ -252,8 +214,4 @@ export function updatedLabel(updatedAt: string): string {
   return Number.isNaN(date.getTime())
     ? ""
     : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-export function friendlyAppsError(error: unknown, fallback: string): string {
-  return friendlyErrorMessage(error, fallback);
 }

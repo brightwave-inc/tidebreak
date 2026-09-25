@@ -44,6 +44,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 export type LoadState = "ready" | "loading" | "refreshing" | "failed";
 export function RefreshNotice({
@@ -55,17 +56,16 @@ export function RefreshNotice({
 }) {
   if (state === "failed")
     return (
-      <div
+      <Notice
+        tone="warning"
         role="alert"
-        className="notice-surface notice-warning mx-5 my-3 flex flex-wrap items-center justify-between gap-2 p-3 text-sm"
+        className="mx-5 my-3 w-auto"
+        action={
+          <NoticeRetryButton onClick={onRetry}>Retry refresh</NoticeRetryButton>
+        }
       >
-        <span>
-          Could not refresh GitHub. Your last results are still available.
-        </span>
-        <Button size="sm" variant="outline" onClick={onRetry}>
-          Retry refresh
-        </Button>
-      </div>
+        Could not refresh GitHub. Your last results are still available.
+      </Notice>
     );
   return (
     <div

@@ -241,12 +241,9 @@ export function MemoryPanel({
           Loading memory…
         </p>
       ) : records == null || settings == null || digest == null ? (
-        <div className="flex flex-col items-start gap-3">
-          <SettingsError>{error}</SettingsError>
-          <Button type="button" variant="outline" size="sm" onClick={reload}>
-            Try again
-          </Button>
-        </div>
+        <SettingsError title="Could not load memory" onRetry={reload}>
+          {error}
+        </SettingsError>
       ) : (
         <>
           {!settings.enabled ? (

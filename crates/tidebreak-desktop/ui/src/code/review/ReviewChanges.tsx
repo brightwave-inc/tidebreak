@@ -41,7 +41,7 @@ import {
   type CodeModelOption,
 } from "../labels";
 import { formatElapsedDuration } from "../TurnReviewCard";
-import { STATUS_MARK, type StatusTone } from "../statusTone";
+import { type StatusTone } from "../statusTone";
 import { renderWorkflowPrompt } from "../workflowPrompts";
 import {
   defaultReviewEngine,
@@ -54,6 +54,7 @@ import {
   useWorkspaceReview,
   type ReviewClient,
 } from "./reviewStore";
+import { Notice, type NoticeTone } from "@/components/ui/notice";
 
 /**
  * Review changes, where a person looks at them: the diff's header opens a
@@ -259,9 +260,9 @@ export function ReviewChangesForm({
         </div>
       )}
       {error && (
-        <p role="alert" className="text-critical text-xs">
+        <Notice tone="critical" density="compact">
           {error}
-        </p>
+        </Notice>
       )}
       <div className="flex items-center justify-end gap-1.5">
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
@@ -577,10 +578,11 @@ export function reviewTone(review: CodeReviewSnapshot): StatusTone {
   }
 }
 
-const NOTICE_TONE: Partial<Record<StatusTone, string>> = {
-  ready: "notice-success",
-  warning: "notice-warning",
-  critical: "notice-critical",
+/** The review's tone as a notice tone; a running or idle review is neutral. */
+const NOTICE_TONE: Partial<Record<StatusTone, NoticeTone>> = {
+  ready: "success",
+  warning: "warning",
+  critical: "critical",
 };
 
 function useNow(active: boolean): number {
@@ -652,16 +654,15 @@ export function ReviewStatus({
         ? CircleAlert
         : ScanSearch;
   return (
-    <section
+    <Notice
+      tone={NOTICE_TONE[tone] ?? "neutral"}
+      docked="top"
+      role="region"
       aria-label="Review"
-      className={cn(
-        "notice-surface flex shrink-0 flex-col gap-1 border-b px-3 py-2",
-        NOTICE_TONE[tone],
-      )}
+      className="shrink-0"
       data-review-status={review.status}
-    >
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        {running ? (
+      icon={
+        running ? (
           <Loader
             variant="comet"
             size={14}
@@ -669,20 +670,23 @@ export function ReviewStatus({
             decorative
           />
         ) : (
-          <Mark
-            className={cn("size-3.5 shrink-0", STATUS_MARK[tone])}
-            aria-hidden
-          />
-        )}
-        <p className="min-w-0 text-sm font-medium" role="status">
-          {running ? <LiveLabel live>{headline}</LiveLabel> : headline}
-        </p>
-        <span className="text-muted-foreground min-w-0 truncate text-xs">
-          {[review.model ?? null, running ? elapsed : null]
-            .filter(Boolean)
-            .join(" · ")}
-        </span>
-        <span className="ml-auto flex shrink-0 items-center gap-1">
+          Mark
+        )
+      }
+      title={
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+          <p className="min-w-0" role="status">
+            {running ? <LiveLabel live>{headline}</LiveLabel> : headline}
+          </p>
+          <span className="text-muted-foreground min-w-0 truncate text-xs font-normal">
+            {[review.model ?? null, running ? elapsed : null]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+        </div>
+      }
+      action={
+        <>
           {running && onStop && (
             <Button
               type="button"
@@ -737,38 +741,41 @@ export function ReviewStatus({
               <X aria-hidden />
             </Button>
           )}
-        </span>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-1 text-xs">
+        {running && reviewProgressLine(review) && (
+          <p className="text-muted-foreground truncate text-xs">
+            {reviewProgressLine(review)}
+          </p>
+        )}
+        {detail && (
+          <p className="text-muted-foreground line-clamp-3 text-xs break-words">
+            {detail}
+          </p>
+        )}
+        {review.status === "completed" && proposed > 0 && (
+          <p className="text-muted-foreground text-xs">
+            {plural(proposed, "finding waits", "findings wait")} in the diff for
+            you to keep or dismiss. Kept ones go with your next message.
+          </p>
+        )}
+        {review.status === "completed" && rejected > 0 && (
+          <p className="text-muted-foreground text-xs">
+            {plural(rejected, "entry", "entries")} in the answer could not be
+            read and {rejected === 1 ? "was" : "were"} left out.
+          </p>
+        )}
+        {review.status === "completed" && omitted > 0 && (
+          <p className="text-muted-foreground text-xs">
+            The review found more than one message can carry, so the findings on{" "}
+            {plural(omitted, "file", "files")} are listed above the files
+            instead of on their lines.
+          </p>
+        )}
       </div>
-      {running && reviewProgressLine(review) && (
-        <p className="text-muted-foreground truncate pl-5.5 text-xs">
-          {reviewProgressLine(review)}
-        </p>
-      )}
-      {detail && (
-        <p className="text-muted-foreground line-clamp-3 pl-5.5 text-xs break-words">
-          {detail}
-        </p>
-      )}
-      {review.status === "completed" && proposed > 0 && (
-        <p className="text-muted-foreground pl-5.5 text-xs">
-          {plural(proposed, "finding waits", "findings wait")} in the diff for
-          you to keep or dismiss. Kept ones go with your next message.
-        </p>
-      )}
-      {review.status === "completed" && rejected > 0 && (
-        <p className="text-muted-foreground pl-5.5 text-xs">
-          {plural(rejected, "entry", "entries")} in the answer could not be read
-          and {rejected === 1 ? "was" : "were"} left out.
-        </p>
-      )}
-      {review.status === "completed" && omitted > 0 && (
-        <p className="text-muted-foreground pl-5.5 text-xs">
-          The review found more than one message can carry, so the findings on{" "}
-          {plural(omitted, "file", "files")} are listed above the files instead
-          of on their lines.
-        </p>
-      )}
-    </section>
+    </Notice>
   );
 }
 

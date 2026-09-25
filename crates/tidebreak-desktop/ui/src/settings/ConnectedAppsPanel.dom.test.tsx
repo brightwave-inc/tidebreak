@@ -226,7 +226,7 @@ describe("ConnectedAppsPanel", () => {
     render(<ConnectedAppsPanel client={client} managed={false} />);
 
     expect(
-      await screen.findByText("Connected apps could not load"),
+      await screen.findByText("Could not load connected apps"),
     ).toBeInTheDocument();
     expect(screen.queryByText(/No apps connected/)).not.toBeInTheDocument();
     expect(

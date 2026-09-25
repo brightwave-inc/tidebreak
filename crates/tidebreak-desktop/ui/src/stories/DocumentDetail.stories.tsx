@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, userEvent, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -26,6 +27,7 @@ import {
   type PanelSearch,
 } from "@/panel/panelUrl";
 import { useProjectListStore } from "@/ProjectListStore";
+import { failureFixtures } from "./fixtures";
 
 const CHAT_ID = "chat-storybook";
 const DOCUMENT_ID = "document-renewals";
@@ -114,7 +116,7 @@ function storyClient(scenario: Scenario): ApiClient {
       throw new HttpError(404, "404: document not found");
     }
     if (scenario === "retriable" && documentAttempts++ === 0) {
-      throw new HttpError(503, "503: service unavailable");
+      throw failureFixtures.unavailable;
     }
     return info;
   };
@@ -369,8 +371,20 @@ export const TerminalNotFound: Story = {
   args: { scenario: "not-found" },
 };
 
+/** The first save is refused; the notice under the source retries it. */
 export const DownloadFailureAndRetry: Story = {
   args: { scenario: "download-rejected" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Download" }),
+    );
+    const failure = await canvas.findByRole("alert");
+    await expect(failure).toHaveTextContent("Could not save that source.");
+    await expect(
+      within(failure).getByRole("button", { name: "Try again" }),
+    ).toBeVisible();
+  },
 };
 
 export const ProjectSharing: Story = {

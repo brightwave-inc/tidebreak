@@ -53,7 +53,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import type { ContextUsageReading } from "../ContextUsageIndicator";
 import type { CodeTurnSubmission } from "./parsers";
 import {
@@ -1102,7 +1102,7 @@ export function CodeComposer({
       settleReview(false);
       if (steerRequestRef.current !== request) return;
       setSteerStatus(null);
-      setSteerError(err instanceof Error ? err.message : "Could not steer");
+      setSteerError(friendlyErrorMessage(err, "Could not steer"));
     } finally {
       if (steerRequestRef.current === request) setSteerPending(false);
     }

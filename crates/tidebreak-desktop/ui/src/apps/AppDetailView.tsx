@@ -17,8 +17,11 @@ import { useManagedPolicy } from "@/managedPolicy";
 import { openInBrowser } from "@/openInBrowser";
 import { AppConsentSheet } from "./AppConsentSheet";
 import { AppFrame } from "./AppFrame";
-import { friendlyAppsError, updatedLabel } from "./AppsView";
+import { updatedLabel } from "./AppsView";
 import type { AppsApis } from "./appsApis";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
+import { friendlyErrorMessage } from "@/lib/utils";
+import { HttpError } from "@/api";
 
 /**
  * The footer's one-line revision readout: the current revision and its date,
@@ -64,7 +67,16 @@ export function AppDetailView({
 }) {
   const [detail, setDetail] = useState<AppDetail | null>(null);
   const [grant, setGrant] = useState<AppGrantState | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  /**
+   * Why the app did not load, and whether asking again could help: an app
+   * that is gone offers the way back instead of a retry.
+   */
+  const [loadError, setLoadError] = useState<{
+    message: string;
+    retriable: boolean;
+  } | null>(null);
+  /** Bumped by Try again, so the load below runs once more. */
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // The server's message from the last gateway_authorization_required
@@ -135,13 +147,19 @@ export function AppDetailView({
         setGrant(loadedGrant);
       } catch (caught) {
         if (generation !== generationRef.current) return;
-        setLoadError(friendlyAppsError(caught, "Could not load this app."));
+        setLoadError({
+          message: friendlyErrorMessage(caught, "Try again in a moment.", {
+            not_found:
+              "This app is no longer in your library. Go back to your apps to open another.",
+          }),
+          retriable: !(caught instanceof HttpError && caught.status === 404),
+        });
       }
     })();
     return () => {
       generationRef.current += 1;
     };
-  }, [apis, appId]);
+  }, [apis, appId, loadAttempt]);
 
   async function onConsent() {
     if (mutationInFlightRef.current) return;
@@ -159,7 +177,9 @@ export function AppDetailView({
       }
     } catch (caught) {
       if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
-        setActionError(friendlyAppsError(caught, "Could not record consent."));
+        setActionError(
+          friendlyErrorMessage(caught, "Could not record consent."),
+        );
       }
     } finally {
       if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
@@ -185,7 +205,7 @@ export function AppDetailView({
       }
     } catch (caught) {
       if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
-        toast.error(friendlyAppsError(caught, "Could not revoke access."));
+        toast.error(friendlyErrorMessage(caught, "Could not revoke access."));
       }
     } finally {
       if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
@@ -233,7 +253,7 @@ export function AppDetailView({
       await openInBrowser(baseUrl);
       setConnectPrompt(null);
     } catch (caught) {
-      toast.error(friendlyAppsError(caught, "Could not open your gateway."));
+      toast.error(friendlyErrorMessage(caught, "Could not open your gateway."));
     }
   }
 
@@ -259,7 +279,7 @@ export function AppDetailView({
             : "Your gateway does not hold shared apps, so this app has no page there."),
       );
     } catch (caught) {
-      toast.error(friendlyAppsError(caught, "Could not open your gateway."));
+      toast.error(friendlyErrorMessage(caught, "Could not open your gateway."));
     } finally {
       if (appIdRef.current === targetAppId) setBusy(false);
     }
@@ -294,7 +314,7 @@ export function AppDetailView({
       }
     } catch (caught) {
       if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
-        toast.error(friendlyAppsError(caught, "Could not delete this app."));
+        toast.error(friendlyErrorMessage(caught, "Could not delete this app."));
       }
     } finally {
       if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
@@ -322,9 +342,29 @@ export function AppDetailView({
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pt-4 pb-4">
         {loadError && (
-          <p className="text-critical mx-4 text-sm" role="alert">
-            {loadError}
-          </p>
+          <Notice
+            tone="critical"
+            title="Could not load this app"
+            className="mx-4 w-auto"
+            action={
+              loadError.retriable ? (
+                <NoticeRetryButton
+                  onClick={() => setLoadAttempt((count) => count + 1)}
+                />
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={onBack}
+                >
+                  Back to apps
+                </Button>
+              )
+            }
+          >
+            {loadError.message}
+          </Notice>
         )}
         {!loadError && (!detail || !grant) && (
           <p className="text-muted-foreground mx-4 text-sm" role="status">
@@ -337,28 +377,33 @@ export function AppDetailView({
             {grant.granted ? (
               <>
                 {connectPrompt && (
-                  <div
-                    className="border-warning/40 bg-warning/10 mx-4 flex items-start gap-3 rounded-lg border p-3"
+                  <Notice
+                    tone="warning"
                     role="alert"
+                    className="mx-4 w-auto"
+                    action={
+                      <>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void onConnectAtGateway()}
+                        >
+                          <ExternalLink aria-hidden="true" />
+                          Connect at gateway
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => setConnectPrompt(null)}
+                        >
+                          <X aria-hidden="true" />
+                          <span className="sr-only">Dismiss</span>
+                        </Button>
+                      </>
+                    }
                   >
-                    <p className="min-w-0 flex-1 text-sm">{connectPrompt}</p>
-                    <Button
-                      variant="outline"
-                      size="xs"
-                      onClick={() => void onConnectAtGateway()}
-                    >
-                      <ExternalLink className="size-3.5" aria-hidden="true" />
-                      Connect at gateway
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      onClick={() => setConnectPrompt(null)}
-                    >
-                      <X className="size-4" />
-                      <span className="sr-only">Dismiss</span>
-                    </Button>
-                  </div>
+                    {connectPrompt}
+                  </Notice>
                 )}
                 <AppFrame
                   appId={appId}

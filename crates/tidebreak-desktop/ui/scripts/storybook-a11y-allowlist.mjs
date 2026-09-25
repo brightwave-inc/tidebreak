@@ -98,11 +98,6 @@ export const allowlist = [
     rule: "story-error",
     reason: "The play function expects an element to be visible, and it is not.",
   },
-  {
-    story: "conversation-transcript--notices",
-    rule: "story-error",
-    reason: "The play function expects more than two notices and finds none.",
-  },
 
   // A play function that fails only some of the time, so this entry also
   // shows up as unmatched in runs where the story passes.

@@ -3,6 +3,7 @@ import { fn, userEvent, within } from "storybook/test";
 
 import type { PersonalInstructions } from "@/api/types";
 import { InstructionsPanel } from "@/settings/InstructionsPanel";
+import { failureFixtures } from "./fixtures";
 
 /** Instructions as someone would write them: a few plain preferences. */
 const written = [
@@ -37,7 +38,9 @@ function client(
       ? () => new Promise<PersonalInstructions>(() => undefined)
       : options.loadFailure
         ? async () => {
-            throw new Error("Your instructions could not be loaded.");
+            // A read that never reached the server; the notice's title
+            // names what failed.
+            throw failureFixtures.unreachable;
           }
         : async () => ({ instructions: current }),
     putPersonalInstructions: fn(async (instructions: string) => {

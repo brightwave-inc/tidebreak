@@ -44,6 +44,7 @@ import { HEADER_CAPTION, WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
 import type { DiffFileGroup, DiffHunk, DiffLine } from "./unifiedDiff";
 import { diffHunks, fileChangeOf, groupUnifiedDiff } from "./unifiedDiff";
 import type { RevertRequest } from "./worktreeUndo";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 /** Files longer than this start collapsed behind "Show diff". */
 export const DIFF_COLLAPSE_LINE_THRESHOLD = 400;
@@ -129,7 +130,9 @@ export function DiffPanel({
   const {
     data: payload,
     error,
+    archived,
     refreshing,
+    refresh,
   } = useLiveResource({
     key: `${workspaceId}${turnId ?? ""}${file ?? ""}`,
     revision: contentRevision,
@@ -364,7 +367,26 @@ export function DiffPanel({
           turnLabel={turnLabel}
         />
       )}
-      {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
+      {error &&
+        (archived ? (
+          <Notice tone="neutral" docked="top" className="shrink-0">
+            {error}
+          </Notice>
+        ) : (
+          <Notice
+            tone="critical"
+            docked="top"
+            className="shrink-0"
+            action={
+              <NoticeRetryButton
+                pending={refreshing}
+                onClick={() => void refresh()}
+              />
+            }
+          >
+            {error}
+          </Notice>
+        ))}
       {payload?.truncated && (
         <p className="text-muted-foreground border-b px-3 py-2 text-xs">
           This diff was truncated. Open a single file for the rest.

@@ -87,6 +87,9 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
   }, [client]);
 
   const ready = voiceSelectionReady(info);
+  // Until the settings load, the panel cannot say whether voice input is
+  // ready, so a failed read takes the status's place, with its retry.
+  const loadFailed = info === null && error !== null;
   const selectedLocal = selectedLocalVoiceModel(info);
   const downloading = info?.local_models.find(
     (model) => model.state === "downloading" || model.id === installing,
@@ -127,15 +130,26 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
       description={`Choose how microphone recordings become editable message drafts. Recordings are transcribed on ${hostMachineLabel()}, and the audio stays there unless you pick a cloud model.`}
       busy={loading}
     >
-      <SettingsStatus
-        tone={ready ? "ready" : "neutral"}
-        label={ready ? "Ready" : "Setup required"}
-        description={
-          ready
-            ? "The selected voice input model is ready to transcribe recordings."
-            : `Download a model that runs on ${hostMachineLabel()}, or configure a supported cloud provider.`
-        }
-      />
+      {loadFailed ? (
+        <SettingsError
+          title="Could not load voice input settings"
+          // The read clears this failure as it starts, so the retry needs
+          // no pending state of its own.
+          onRetry={() => void useVoiceInputStore.getState().load(client)}
+        >
+          {error}
+        </SettingsError>
+      ) : (
+        <SettingsStatus
+          tone={ready ? "ready" : "neutral"}
+          label={ready ? "Ready" : "Setup required"}
+          description={
+            ready
+              ? "The selected voice input model is ready to transcribe recordings."
+              : `Download a model that runs on ${hostMachineLabel()}, or configure a supported cloud provider.`
+          }
+        />
+      )}
 
       <SettingsSection
         title="Transcription model"
@@ -151,7 +165,7 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
             onValueChange={(value) => void choose(value)}
           >
             <SelectTrigger aria-label="Voice input model">
-              <SelectValue placeholder="Loading…">
+              <SelectValue placeholder={loadFailed ? "" : "Loading…"}>
                 {voiceSelectionLabel(info)}
               </SelectValue>
             </SelectTrigger>
@@ -254,7 +268,7 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
           </Button>
         </SettingsSection>
       )}
-      {error && <SettingsError>{error}</SettingsError>}
+      {error && !loadFailed && <SettingsError>{error}</SettingsError>}
       {confirmDialog}
     </SettingsPanel>
   );

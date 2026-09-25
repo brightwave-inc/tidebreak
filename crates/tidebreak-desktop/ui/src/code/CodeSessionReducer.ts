@@ -1251,7 +1251,7 @@ export function reduceCodeSessionEvent(
             kind: "notice",
             id: deps.nextId(),
             level: "warning",
-            message: `Push refused: ${event.message} ${event.remediation}`,
+            message: credentialRefusalNotice(event),
           }),
         },
         effects,
@@ -2231,4 +2231,34 @@ export function applyStoredRewrites(state: CodeSessionState): CodeSessionState {
     }
   }
   return changed ? { ...state, items } : state;
+}
+
+/**
+ * What a refused push says, once and in plain words.
+ *
+ * The event's message is what the machine told the git helper, and its
+ * remediation is a sentence written for every surface. Joined, they said the
+ * same instruction twice, and the connection case in the gateway's own terms,
+ * so the reason picks the words here, as the event intends.
+ */
+export function credentialRefusalNotice(event: {
+  reason: "connection_ended" | "not_connected" | "forge_refused";
+  message: string;
+  remediation: string;
+}): string {
+  switch (event.reason) {
+    case "connection_ended":
+      return "Push refused: this session's Slack connection ended when it was revoked or replaced by a newer one. Reconnect the session from Slack, then push again.";
+    case "not_connected":
+      // The message names where to connect, with the link when there is one.
+      return `Push refused. ${asSentence(event.message)} Then push again.`;
+    case "forge_refused":
+      return `Push refused: ${asSentence(event.message)} If this names the deployment, ask an administrator.`;
+  }
+}
+
+/** A message ends in a full stop before the next sentence starts. */
+function asSentence(message: string): string {
+  const trimmed = message.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }

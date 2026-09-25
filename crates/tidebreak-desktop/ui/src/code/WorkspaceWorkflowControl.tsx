@@ -350,9 +350,7 @@ export function WorkspaceWorkflowControl({
       if (refreshable) setDetailsOpen(true);
       const message = refreshable
         ? refreshable
-        : err instanceof HttpError && err.kind === "pr_not_mergeable"
-          ? err.message
-          : friendlyErrorMessage(err, "Could not merge");
+        : friendlyErrorMessage(err, "Could not merge");
       resource.setMutationError(message);
       toast.error(message);
     }

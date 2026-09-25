@@ -92,6 +92,7 @@ import {
   workspaceHarnesses,
   type CodeModelOption,
 } from "./labels";
+import { Notice } from "@/components/ui/notice";
 
 const NO_ENGINE_EFFORTS: ReasoningEffort[] = [];
 
@@ -1077,9 +1078,9 @@ export function NewWorkspaceDialog({
                 onRemove={images.remove}
               />
               {images.error && (
-                <p className="text-critical text-xs" role="alert">
+                <Notice tone="critical" density="compact">
                   {images.error}
-                </p>
+                </Notice>
               )}
               {imageNeedsMessage && (
                 <p className="text-muted-foreground text-xs">

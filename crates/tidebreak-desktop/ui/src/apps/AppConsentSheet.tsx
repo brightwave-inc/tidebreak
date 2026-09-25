@@ -9,6 +9,7 @@ import {
 
 import type { AppGrantState } from "@/api";
 import { Button } from "@/components/ui/button";
+import { Notice } from "@/components/ui/notice";
 
 /**
  * The consent sheet: exactly what the server's grant projection says, and a
@@ -152,26 +153,15 @@ export function AppConsentSheet({
         </ul>
       )}
       {exfiltrationWarning && (
-        <p
-          className="border-warning/50 text-warning flex items-start gap-2 rounded-md border px-3 py-2 text-xs"
-          role="alert"
-        >
-          <TriangleAlert
-            className="mt-0.5 size-3.5 shrink-0"
-            aria-hidden="true"
-          />
-          <span>{exfiltrationWarning}</span>
-        </p>
+        <Notice tone="warning" density="compact" role="alert">
+          {exfiltrationWarning}
+        </Notice>
       )}
       <p className="text-muted-foreground text-xs">
         The app can use only this access, only while you have it open. You can
         revoke it at any time from the app&rsquo;s page.
       </p>
-      {error && (
-        <p className="text-critical text-sm" role="alert">
-          {error}
-        </p>
-      )}
+      {error && <Notice tone="critical">{error}</Notice>}
       <div>
         <Button size="sm" disabled={busy} onClick={onConsent}>
           Allow access

@@ -377,5 +377,6 @@ function rpcError(error: unknown): {
 } {
   return error instanceof AppInvokeRefusalError
     ? { code: -32000, message: error.message, data: { kind: error.kind } }
-    : { code: -32000, message: String(error) };
+    : // raw-error-ok: a JSON-RPC error for the MCP app, not text on screen.
+      { code: -32000, message: String(error) };
 }

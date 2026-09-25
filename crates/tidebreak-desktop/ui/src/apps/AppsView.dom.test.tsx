@@ -74,12 +74,32 @@ describe("AppsView", () => {
     render(<AppsView apis={apis} onOpen={() => {}} />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Apps could not load",
+      "Could not load your apps",
     );
     expect(screen.getByRole("alert")).toHaveTextContent(
       "The app library did not answer.",
     );
     expect(screen.queryByText("No apps yet")).not.toBeInTheDocument();
+  });
+
+  it("loads the library again when the reader tries again", async () => {
+    const apis = appsApis(apps);
+    vi.mocked(apis.list)
+      .mockRejectedValueOnce(new TypeError("Load failed"))
+      .mockResolvedValueOnce({ apps });
+
+    render(<AppsView apis={apis} onOpen={() => {}} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Tidebreak could not reach its server.",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(
+      await screen.findByRole("region", { name: "Saved apps" }),
+    ).toBeVisible();
+    expect(apis.list).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("keeps cached apps visible when a refresh fails", async () => {

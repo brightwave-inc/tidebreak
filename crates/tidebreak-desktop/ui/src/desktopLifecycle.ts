@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { friendlyErrorMessage } from "./lib/utils";
 
 /** The agents a quit prompt is about. */
 export type QuitAgentCount = {
@@ -155,9 +156,7 @@ export type UncleanExitController = {
 };
 
 function errorText(error: unknown): string {
-  if (typeof error === "string" && error) return error;
-  if (error instanceof Error && error.message) return error.message;
-  return "Could not save the diagnostics report";
+  return friendlyErrorMessage(error, "Could not save the diagnostics report.");
 }
 
 /**

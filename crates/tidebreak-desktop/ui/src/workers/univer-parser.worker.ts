@@ -126,7 +126,10 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       opId,
     } satisfies ResultMessage);
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage =
+      error instanceof Error
+        ? error.message
+        : "The workbook could not be read.";
     self.postMessage({
       type: "error",
       error: errorMessage,

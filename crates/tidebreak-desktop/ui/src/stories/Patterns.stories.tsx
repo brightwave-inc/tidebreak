@@ -33,6 +33,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { execPreview } from "./fixtures";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 function SettingsComposition() {
   const { confirm, dialog } = useConfirm();
@@ -82,7 +83,10 @@ function SettingsComposition() {
   );
 }
 
-/** One verdict in each tone, then an error as `String(err)` hands it over. */
+/**
+ * One verdict in each tone, then a failure as `friendlyErrorMessage` words
+ * it, with the Try again a panel's load failure offers.
+ */
 function SettingsVerdicts() {
   return (
     <>
@@ -106,8 +110,11 @@ function SettingsVerdicts() {
         label="Needs attention"
         description="The server exited before it answered: command not found."
       />
-      <SettingsError>
-        {String(new Error("The gateway refused the sign-in link."))}
+      <SettingsError
+        title="Could not read the gateway connection"
+        onRetry={() => undefined}
+      >
+        {friendlyErrorMessage(new TypeError("Load failed"), "Try again.")}
       </SettingsError>
     </>
   );
@@ -202,7 +209,7 @@ $ pnpm test -- TaskPlanCard.dom.test.tsx`}
               badge={
                 <>
                   <Badge variant="outline">Local</Badge>
-                  <Badge variant="outline" className="text-destructive">
+                  <Badge variant="outline" className="text-critical">
                     Exit 1
                   </Badge>
                 </>

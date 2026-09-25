@@ -19,6 +19,7 @@ import {
   type CodeModelOption,
 } from "./labels";
 import type { ParsedHarnessModelList } from "./parsers";
+import { friendlyErrorMessage } from "../lib/utils";
 
 const HARNESS_KINDS: HarnessKind[] = [
   "claude_code",
@@ -245,7 +246,7 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
         if (!requestIsCurrent(context)) return;
         set({
           loaded: true,
-          error: error instanceof Error ? error.message : String(error),
+          error: friendlyErrorMessage(error, "Try again in a moment."),
         });
         return;
       }
@@ -259,8 +260,10 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
           .catch((error) => {
             if (!requestIsCurrent(context)) return;
             set({
-              doctorError:
-                error instanceof Error ? error.message : String(error),
+              doctorError: friendlyErrorMessage(
+                error,
+                "The check did not answer in time.",
+              ),
             });
           }),
       ];

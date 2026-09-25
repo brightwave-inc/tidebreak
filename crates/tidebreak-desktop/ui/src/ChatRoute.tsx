@@ -899,7 +899,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         activeTurnId: null,
         messages: [
           ...session.messages.filter((message) => message.id !== optimisticId),
-          { id: nextId(), role: "error", text: String(err) },
+          {
+            id: nextId(),
+            role: "error",
+            text: friendlyErrorMessage(err, "That did not go through."),
+          },
         ],
       }));
       if (!draftRef.current) setComposerDraft(composerDraft ?? content);
@@ -1474,12 +1478,7 @@ export async function queueComposerMessage(
 }
 
 function friendlyAttachError(error: unknown): string {
-  const message = String(error)
-    .replace(/^Error:\s*/, "")
-    .trim();
-  return message && message.length <= 240
-    ? message
-    : "Could not attach that file.";
+  return friendlyErrorMessage(error, "Could not attach that file.");
 }
 
 function isImportedDocument(result: {

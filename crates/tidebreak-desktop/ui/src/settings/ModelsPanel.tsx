@@ -26,7 +26,9 @@ import {
   SettingsField,
   SettingsPanel,
   SettingsSection,
+  SettingsFieldError,
 } from "./primitives";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 // Radix Select reserves the empty string for its placeholder, so the
 // "automatic" choice needs a sentinel that no catalog key can collide with
@@ -104,14 +106,23 @@ export function ModelsPanel({
   const [saving, setSaving] = useState<ModelRole | null>(null);
   const [retention, setRetention] = useState<PromptCacheRetention | null>(null);
   const [savingRetention, setSavingRetention] = useState(false);
+  /** Why a save did not go through. */
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Why the roles or the cache setting did not load. Each read clears its own
+   * failure when it starts, and Try again runs both.
+   */
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [retentionError, setRetentionError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const loadError = catalogError ?? retentionError;
 
   // `managed` is a dependency on purpose: a policy flip mid-session re-reads
   // the catalog, so the page reshapes without a manual refresh.
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setError(null);
+    setCatalogError(null);
     void (async () => {
       try {
         const next = await client.listModels();
@@ -120,7 +131,9 @@ export function ModelsPanel({
           setCatalog(next.models);
         }
       } catch (err) {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          setCatalogError(friendlyErrorMessage(err, "Try again in a moment."));
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -128,7 +141,7 @@ export function ModelsPanel({
     return () => {
       cancelled = true;
     };
-  }, [client, managed]);
+  }, [client, managed, loadAttempt]);
 
   // The managed watch. A failed tick keeps the last answer — the next tick
   // retries — a tick that finds the previous read still in flight skips
@@ -159,18 +172,23 @@ export function ModelsPanel({
   // the model catalog, so it loads on its own read.
   useEffect(() => {
     let cancelled = false;
+    setRetentionError(null);
     void client
       .getSettings()
       .then((settings) => {
         if (!cancelled) setRetention(settings.prompt_cache_retention);
       })
       .catch((err) => {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          setRetentionError(
+            friendlyErrorMessage(err, "Try again in a moment."),
+          );
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, loadAttempt]);
 
   // Unmanaged renders from the shell's catalog exactly as it always has;
   // managed renders from the panel's own fetch, which the watch keeps current.
@@ -192,7 +210,7 @@ export function ModelsPanel({
       // now a step behind.
       onChanged?.();
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setSaving(null);
     }
@@ -210,7 +228,7 @@ export function ModelsPanel({
       setRetention(settings.prompt_cache_retention);
     } catch (err) {
       setRetention(previous);
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setSavingRetention(false);
     }
@@ -226,6 +244,14 @@ export function ModelsPanel({
       }
       busy={loading}
     >
+      {loadError && (
+        <SettingsError
+          title="Could not load model settings"
+          onRetry={() => setLoadAttempt((count) => count + 1)}
+        >
+          {loadError}
+        </SettingsError>
+      )}
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading model settings…</p>
       ) : (
@@ -422,11 +448,11 @@ function ManagedModelRoleRow({
         </Select>
       </SettingsField>
       {incompatiblePin && (
-        <SettingsError>
+        <SettingsFieldError>
           The saved model “{selected?.display_name ?? info.selection}” cannot
           enforce the strict structured responses this role requires. Pick a
           compatible model or return to automatic.
-        </SettingsError>
+        </SettingsFieldError>
       )}
     </SettingsSection>
   );
@@ -562,23 +588,23 @@ function ModelRoleRow({
         </Select>
       </SettingsField>
       {retiredGatewayPin ? (
-        <SettingsError>
+        <SettingsFieldError>
           The saved model “{info.selection}” came from a model gateway, and this
           profile is not connected to one. Pick a model here, or connect from
           your gateway&apos;s page.
-        </SettingsError>
+        </SettingsFieldError>
       ) : incompatiblePin ? (
-        <SettingsError>
+        <SettingsFieldError>
           The saved model “{selected?.display_name ?? info.selection}” cannot
           enforce the strict structured responses this role requires. Pick a
           compatible model or return to automatic.
-        </SettingsError>
+        </SettingsFieldError>
       ) : (
         unresolvedSelection && (
-          <SettingsError>
+          <SettingsFieldError>
             The saved model “{info.selection}” is not uniquely registered. Add
             it under the OpenAI-compatible provider, then choose it here.
-          </SettingsError>
+          </SettingsFieldError>
         )
       )}
     </SettingsSection>

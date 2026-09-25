@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 
 import { Textarea } from "@/components/ui/textarea";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
-import { SettingsError, SettingsField } from "./primitives";
+import { SettingsError, SettingsField, SettingsFieldError } from "./primitives";
 
 /**
  * Matches `MAX_INSTRUCTIONS_BYTES` on the server: the same bound a Slack
@@ -158,10 +158,10 @@ export function InstructionsField({
         />
       </SettingsField>
       {tooLong && (
-        <SettingsError>
+        <SettingsFieldError>
           Shorten the instructions to {number.format(MAX_INSTRUCTIONS_BYTES)}{" "}
           bytes to save them.
-        </SettingsError>
+        </SettingsFieldError>
       )}
       {error && <SettingsError>{error}</SettingsError>}
       {saving && (

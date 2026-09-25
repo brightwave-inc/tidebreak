@@ -28,7 +28,7 @@ import {
   DocumentViewerShell,
   DocumentViewerState,
 } from "@/document/ViewerPrimitives";
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 
 // The PDF engine is fetched on first use, same as the direct PDF branch.
 const PdfViewer = lazy(() =>
@@ -102,7 +102,7 @@ function DirectPresentationSurface({
   return (
     <DocumentViewerShell ref={containerRef} className={className}>
       {file.error ? (
-        <DocumentViewerState variant="error">
+        <DocumentViewerState variant="error" onRetry={file.retry}>
           This presentation could not be loaded.
         </DocumentViewerState>
       ) : !file.objectUrl ? (
@@ -191,8 +191,8 @@ export function ConvertedOfficeViewer({
         <span className="block">
           This {kind} could not be converted for preview.
         </span>
-        {error?.message ? (
-          <span className="mt-1 block">{error.message}</span>
+        {error && friendlyErrorMessage(error, "") ? (
+          <span className="mt-1 block">{friendlyErrorMessage(error, "")}</span>
         ) : null}
         {error instanceof OfficeConversionError ? (
           <details className="mt-3 w-full text-left">
@@ -251,7 +251,9 @@ function ConverterInstall({
       })
       .catch((error: unknown) => {
         if (disposed) return;
-        setFailure(error instanceof Error ? error.message : String(error));
+        setFailure(
+          friendlyErrorMessage(error, "The converter did not install."),
+        );
         setRunning(false);
         setProgress(null);
       });

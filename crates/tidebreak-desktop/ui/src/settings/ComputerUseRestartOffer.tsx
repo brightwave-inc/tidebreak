@@ -1,6 +1,7 @@
 import { RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Notice } from "@/components/ui/notice";
 
 /**
  * The offer to restart after Screen Recording was turned on.
@@ -20,24 +21,23 @@ export function ComputerUseRestartOffer({
   onRestart: () => void;
 }) {
   return (
-    <div
-      role="status"
-      className="notice-surface notice-info flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border px-3 py-2 text-sm"
+    <Notice
+      tone="info"
+      action={
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={restarting || disabled}
+          onClick={onRestart}
+        >
+          <RotateCcw aria-hidden="true" />
+          {restarting ? "Restarting…" : "Restart Tidebreak"}
+        </Button>
+      }
     >
-      <p className="min-w-0 flex-1 basis-56">
-        macOS applies Screen Recording after Tidebreak restarts. Once you turn
-        it on in System Settings, restart to finish.
-      </p>
-      <Button
-        type="button"
-        size="xs"
-        variant="outline"
-        disabled={restarting || disabled}
-        onClick={onRestart}
-      >
-        <RotateCcw aria-hidden="true" />
-        {restarting ? "Restarting…" : "Restart Tidebreak"}
-      </Button>
-    </div>
+      macOS applies Screen Recording after Tidebreak restarts. Once you turn it
+      on in System Settings, restart to finish.
+    </Notice>
   );
 }

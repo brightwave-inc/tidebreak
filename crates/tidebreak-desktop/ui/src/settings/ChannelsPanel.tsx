@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/empty";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 /**
  * The grants an external channel holds on this machine, grouped by the
@@ -60,7 +61,7 @@ export function ChannelsPanel({
       setGrants(await client.listCodeGrants());
       setRefreshFailed(false);
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Try again in a moment."));
       setRefreshFailed(true);
     } finally {
       setLoading(false);
@@ -86,7 +87,7 @@ export function ChannelsPanel({
       toast.success(`Revoked ${label}`);
       await reload();
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, `Could not revoke ${label}.`));
     } finally {
       setWorking(false);
     }
@@ -114,7 +115,12 @@ export function ChannelsPanel({
       );
       await reload();
     } catch (err) {
-      setError(String(err));
+      setError(
+        friendlyErrorMessage(
+          err,
+          `Could not revoke the grants from ${group.workspaceName}.`,
+        ),
+      );
     } finally {
       setWorking(false);
     }
@@ -134,17 +140,12 @@ export function ChannelsPanel({
           Loading grants…
         </p>
       ) : grants === null ? (
-        <div className="flex flex-col items-start gap-3">
-          <SettingsError>{error}</SettingsError>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => void reload()}
-          >
-            Try again
-          </Button>
-        </div>
+        <SettingsError
+          title="Could not load grants"
+          onRetry={() => void reload()}
+        >
+          {error}
+        </SettingsError>
       ) : groups.length === 0 ? (
         <Empty className="min-h-64">
           <EmptyHeader>
@@ -226,22 +227,13 @@ export function ChannelsPanel({
         ))
       )}
       {grants !== null && error && (
-        <div className="notice-surface notice-critical flex flex-col items-start gap-2 rounded-md border px-3 py-2">
-          <p className="text-sm break-words" role="alert">
-            {error}
-          </p>
-          {refreshFailed && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={loading || working}
-              onClick={() => void reload()}
-            >
-              Refresh grants
-            </Button>
-          )}
-        </div>
+        <SettingsError
+          title={refreshFailed ? "Could not refresh grants" : undefined}
+          onRetry={refreshFailed ? () => void reload() : undefined}
+          retrying={loading || working}
+        >
+          {error}
+        </SettingsError>
       )}
       {dialog}
     </SettingsPanel>

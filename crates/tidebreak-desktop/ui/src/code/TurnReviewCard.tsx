@@ -27,6 +27,7 @@ import { openEngineSignIn } from "./EngineSignIn";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { HARNESS_LABELS } from "./labels";
 import { STATUS_TEXT } from "./statusTone";
+import { Notice } from "@/components/ui/notice";
 
 /**
  * What a turn came to, at the seam where it ended.
@@ -126,33 +127,35 @@ export function TurnReviewCard({
     const codexNeedsLogin = isCodexRevokedRefreshTokenError(turn.error);
     const requiredVersion = harnessVersionRequirement(turn.error);
     return (
-      <div
-        role="alert"
-        className="notice-surface notice-critical flex flex-col gap-1.5 rounded-md border px-3 py-2 text-sm"
+      <Notice
+        tone="critical"
+        title={
+          <>
+            Turn failed
+            {duration && (
+              <span className="font-normal tabular-nums"> · {duration}</span>
+            )}
+          </>
+        }
       >
-        <p className="flex items-center gap-1.5 font-medium">
-          <TriangleAlert size={14} aria-hidden="true" />
-          Turn failed
-          {duration && (
-            <span className="font-normal tabular-nums">· {duration}</span>
+        <div className="flex flex-col gap-1.5">
+          {codexNeedsLogin ? (
+            <CodexLoginRecovery />
+          ) : requiredVersion ? (
+            <HarnessVersionRecovery required={requiredVersion} />
+          ) : (
+            <p>{turn.error ?? "The engine stopped without saying why."}</p>
           )}
-        </p>
-        {codexNeedsLogin ? (
-          <CodexLoginRecovery />
-        ) : requiredVersion ? (
-          <HarnessVersionRecovery required={requiredVersion} />
-        ) : (
-          <p>{turn.error ?? "The engine stopped without saying why."}</p>
-        )}
-        {recap && <TurnRecap text={recap} tone="critical" />}
-        {(diffstat || actions || onFileIssue) && (
-          <div className="flex items-center gap-2">
-            {diffstat}
-            {actions}
-            {onFileIssue && <FileIssueButton onClick={onFileIssue} />}
-          </div>
-        )}
-      </div>
+          {recap && <TurnRecap text={recap} tone="critical" />}
+          {(diffstat || actions || onFileIssue) && (
+            <div className="flex items-center gap-2">
+              {diffstat}
+              {actions}
+              {onFileIssue && <FileIssueButton onClick={onFileIssue} />}
+            </div>
+          )}
+        </div>
+      </Notice>
     );
   }
 

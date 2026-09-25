@@ -18,6 +18,7 @@ import {
   useNativePickerLatch,
 } from "./NativePickerLatch";
 import { useRefreshSignals } from "./RefreshSignals";
+import { friendlyErrorMessage } from "./lib/utils";
 
 /**
  * A connected folder joined with the consent statements that say what it
@@ -90,7 +91,11 @@ export function useChatFolderAttachments(
         );
       },
       (reason) => {
-        if (generation === refreshGeneration.current) setError(String(reason));
+        if (generation === refreshGeneration.current) {
+          setError(
+            friendlyErrorMessage(reason, "Could not load connected folders."),
+          );
+        }
       },
     );
     return () => {
@@ -113,7 +118,7 @@ export function useChatFolderAttachments(
       }
       return connected;
     } catch (reason) {
-      setError(String(reason));
+      setError(friendlyErrorMessage(reason, "Could not connect that folder."));
       return null;
     } finally {
       useNativePickerLatch.getState().release(PICKER_HOLDERS.connectFolder);
@@ -142,7 +147,7 @@ export function useChatFolderAttachments(
       }
       return connected;
     } catch (reason) {
-      setError(String(reason));
+      setError(friendlyErrorMessage(reason, "Could not connect that folder."));
       return null;
     } finally {
       setWorking(false);
@@ -157,7 +162,9 @@ export function useChatFolderAttachments(
       await disconnectFolder(chat, rootId);
       useRefreshSignals.getState().signal("folderAccess");
     } catch (reason) {
-      setError(String(reason));
+      setError(
+        friendlyErrorMessage(reason, "Could not disconnect that folder."),
+      );
     } finally {
       setWorking(false);
     }

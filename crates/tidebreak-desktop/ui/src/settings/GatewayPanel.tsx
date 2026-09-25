@@ -283,9 +283,17 @@ function ManagedGatewayPanel({
     return next;
   }, [client, onChanged]);
 
+  const load = useCallback(
+    () =>
+      reload().catch((err) =>
+        setError(friendlyErrorMessage(err, "Try again in a moment.")),
+      ),
+    [reload],
+  );
+
   useEffect(() => {
-    reload().catch((err) => setError(String(err)));
-  }, [reload]);
+    void load();
+  }, [load]);
 
   // Entitled apps are never cached server-side (a revoked grant disappears on
   // the next request), so fetch them fresh whenever the signed-in state turns
@@ -326,7 +334,7 @@ function ManagedGatewayPanel({
       await action();
       await reload();
     } catch (err) {
-      setError(String(err));
+      setError(friendlyErrorMessage(err, "Could not finish that. Try again."));
     } finally {
       setWorking(false);
     }
@@ -351,7 +359,9 @@ function ManagedGatewayPanel({
       onChanged();
       toast.success("Left the gateway");
     } catch (err) {
-      setLeaveError(String(err));
+      setLeaveError(
+        friendlyErrorMessage(err, "Could not leave the gateway. Try again."),
+      );
     } finally {
       setWorking(false);
     }
@@ -359,8 +369,22 @@ function ManagedGatewayPanel({
 
   if (!status) {
     return (
-      <SettingsPanel title="Model Gateway" description="Loading…" busy>
-        {error && <SettingsError>{error}</SettingsError>}
+      <SettingsPanel
+        title="Model Gateway"
+        description={error ? "The connection did not load." : "Loading…"}
+        busy={!error}
+      >
+        {error && (
+          <SettingsError
+            title="Could not read the gateway connection"
+            onRetry={() => {
+              setError(null);
+              void load();
+            }}
+          >
+            {error}
+          </SettingsError>
+        )}
       </SettingsPanel>
     );
   }

@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { AppWindow, CircleAlert } from "lucide-react";
+import { AppWindow } from "lucide-react";
 import { useApp } from "./AppContext";
-import { Button } from "./components/ui/button";
 import { createMcpAppBridge, type McpAppBridge } from "./McpAppBridge";
 import { useTheme } from "./theme";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 /**
  * The sandboxed surface for an MCP Apps view.
@@ -136,24 +136,20 @@ export function McpAppCard({
       </div>
       <div className="border-t">
         {payloadState === "failed" && (
-          <div
-            className="notice-surface notice-warning flex min-w-0 flex-wrap items-center justify-between gap-2 border-b px-2.5 py-2"
+          <Notice
+            tone="warning"
+            docked="top"
+            density="compact"
             role="alert"
+            action={
+              <NoticeRetryButton
+                size="xs"
+                onClick={() => setPayloadAttempt((attempt) => attempt + 1)}
+              />
+            }
           >
-            <div className="flex min-w-0 items-center gap-1.5 text-xs">
-              <CircleAlert className="size-3.5 shrink-0" aria-hidden="true" />
-              <span>Tool result did not load.</span>
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="xs"
-              className="border-warning-border bg-background text-warning-foreground hover:bg-warning-background hover:text-warning-foreground"
-              onClick={() => setPayloadAttempt((attempt) => attempt + 1)}
-            >
-              Try again
-            </Button>
-          </div>
+            Tool result did not load.
+          </Notice>
         )}
         {state.kind === "loading" && (
           <p className="text-muted-foreground p-3 text-xs">Loading view…</p>

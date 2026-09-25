@@ -461,6 +461,7 @@ function CodeDeliveryBody({
       {repositoryError && repositorySnapshot && (
         <RepositoryRefreshWarning
           message={repositoryError}
+          retrying={repositoryLoading}
           onRetry={() => void loadRepositories(true, true)}
         />
       )}

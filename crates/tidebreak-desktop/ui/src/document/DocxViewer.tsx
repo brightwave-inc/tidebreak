@@ -34,7 +34,7 @@ export default function DocxViewer({ source, className, ...restProps }: Props) {
       {...restProps}
     >
       {file.error ? (
-        <DocumentViewerState variant="error">
+        <DocumentViewerState variant="error" onRetry={file.retry}>
           This document could not be loaded.
         </DocumentViewerState>
       ) : !file.objectUrl ? (

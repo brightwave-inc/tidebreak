@@ -21,6 +21,8 @@ import {
   type DmSubscriptionPreference,
   type PersonalInferencePreferences,
 } from "./inferencePreferences";
+import { Notice } from "@/components/ui/notice";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 export function PersonalInferencePreferencesPanel({
   client,
@@ -50,7 +52,9 @@ export function PersonalInferencePreferencesPanel({
         if (generation.current === current) setPreferences(value);
       })
       .catch((error: unknown) => {
-        if (generation.current === current) setError(String(error));
+        if (generation.current === current) {
+          setError(friendlyErrorMessage(error, "Try again in a moment."));
+        }
       })
       .finally(() => {
         if (generation.current === current) setLoading(false);
@@ -81,7 +85,9 @@ export function PersonalInferencePreferencesPanel({
       });
       if (generation.current === current) setPreferences(saved);
     } catch (error) {
-      if (generation.current === current) setError(String(error));
+      if (generation.current === current) {
+        setError(friendlyErrorMessage(error, "Could not save that change."));
+      }
     } finally {
       if (generation.current === current) setSaving(false);
     }
@@ -102,25 +108,16 @@ export function PersonalInferencePreferencesPanel({
           Loading subscription settings…
         </p>
       ) : !preferences ? (
-        <>
-          <SettingsError>{error}</SettingsError>
-          <Button
-            variant="outline"
-            className="self-start"
-            onClick={() => setAttempt((value) => value + 1)}
-          >
-            Try again
-          </Button>
-        </>
+        <SettingsError
+          title="Could not load your subscription settings"
+          onRetry={() => setAttempt((value) => value + 1)}
+        >
+          {error}
+        </SettingsError>
       ) : (
         <>
           {!preferences.inference_sponsorship_supported && (
-            <p
-              className="notice-surface notice-info rounded-md border px-3 py-2 text-sm"
-              role="status"
-            >
-              {SUBSCRIPTION_PREFERENCES_UNAVAILABLE}
-            </p>
+            <Notice tone="info">{SUBSCRIPTION_PREFERENCES_UNAVAILABLE}</Notice>
           )}
           <SettingsSection title="Direct messages">
             <SettingsField

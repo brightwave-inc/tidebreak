@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ApiClient, PendingPlanApproval, PlanDecision } from "./api";
 import { useOpenConversation } from "./OpenConversation";
 import { usePendingPrompts } from "./PendingPrompts";
+import { friendlyErrorMessage } from "./lib/utils";
 
 export type PlanApprovals = {
   requests: PendingPlanApproval[];
@@ -90,7 +91,8 @@ export function usePlanApprovals(
       callId,
       startedChatId,
       () => client.decidePlan(startedChatId, callId, decision),
-      (err) => `Could not send your decision: ${String(err)}`,
+      (err) =>
+        `Could not send your decision: ${friendlyErrorMessage(err, "Try again.")}`,
     );
   }
 
@@ -103,7 +105,8 @@ export function usePlanApprovals(
       request.callId,
       startedChatId,
       () => client.cancel(startedChatId, turnId),
-      (err) => `Could not cancel the turn: ${String(err)}`,
+      (err) =>
+        `Could not cancel the turn: ${friendlyErrorMessage(err, "Try again.")}`,
     );
   }
 

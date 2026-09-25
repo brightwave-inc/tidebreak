@@ -1,10 +1,15 @@
-import { AlertCircle, RefreshCw, Settings } from "lucide-react";
+import { Settings } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { Button } from "@/components/ui/button";
 import type { TurnFailureCategory } from "./generated/wire";
 import type { ProviderKind } from "./api";
 import { providerLabel } from "./ModelSelection";
+import {
+  Notice,
+  NoticeDetail,
+  NoticeRetryButton,
+} from "@/components/ui/notice";
 
 /**
  * Whether a category's recovery starts in provider settings.
@@ -96,42 +101,38 @@ export function TurnFailureNotice({
   const provider = model ? providerLabel(model.provider) : "the model provider";
   const copy = turnFailureCopy(category, provider);
 
+  const pointsAtSettings = turnFailurePointsAtSettings(category);
   return (
-    <aside className="message-turn-failure" role="alert">
-      <AlertCircle className="message-turn-failure-icon" aria-hidden="true" />
-      <div className="message-turn-failure-text">
-        <p className="message-turn-failure-title">{copy.title}</p>
-        <p className="message-turn-failure-body">{copy.body}</p>
-        {detail && (
-          <code className="message-turn-failure-detail">{detail}</code>
-        )}
-        {model && (
-          <p className="message-turn-failure-model">
-            {model.id} · {provider}
-          </p>
-        )}
-      </div>
-      {(onRetry || turnFailurePointsAtSettings(category)) && (
-        <div className="message-turn-failure-action">
-          {turnFailurePointsAtSettings(category) && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void navigate({ to: providerSettingsPath })}
-            >
-              <Settings aria-hidden="true" />
-              Open provider settings
-            </Button>
-          )}
-          {onRetry && (
-            <Button type="button" variant="outline" size="sm" onClick={onRetry}>
-              <RefreshCw aria-hidden="true" />
-              Try again
-            </Button>
-          )}
-        </div>
+    <Notice
+      tone="critical"
+      className="self-stretch"
+      title={copy.title}
+      action={
+        (onRetry || pointsAtSettings) && (
+          <>
+            {pointsAtSettings && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void navigate({ to: providerSettingsPath })}
+              >
+                <Settings aria-hidden="true" />
+                Open provider settings
+              </Button>
+            )}
+            {onRetry && <NoticeRetryButton onClick={onRetry} />}
+          </>
+        )
+      }
+    >
+      <p className="text-pretty">{copy.body}</p>
+      {detail && <NoticeDetail>{detail}</NoticeDetail>}
+      {model && (
+        <p className="mt-1.5 text-xs">
+          {model.id} · {provider}
+        </p>
       )}
-    </aside>
+    </Notice>
   );
 }

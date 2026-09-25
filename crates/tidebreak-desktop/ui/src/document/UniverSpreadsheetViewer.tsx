@@ -381,7 +381,17 @@ export default function UniverSpreadsheetViewer({
   if (errorType) {
     return (
       <div className={cn("relative overflow-auto", className)} {...restProps}>
-        <DocumentViewerState variant="error">
+        <DocumentViewerState
+          variant="error"
+          onRetry={
+            errorType === "load"
+              ? () => {
+                  setErrorType(null);
+                  fileDownload.retry();
+                }
+              : undefined
+          }
+        >
           {errorType === "parse"
             ? "This spreadsheet could not be read."
             : "This spreadsheet could not be loaded."}

@@ -21,6 +21,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "./lib/utils";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 type ChangeClient = Pick<
   ApiClient,
@@ -128,7 +129,7 @@ export function ChangeSummaryCard({ client, chatId, turnId, files }: Props) {
             </span>
           </div>
           {rejected > 0 && (
-            <p className="mt-0.5 text-xs text-destructive">
+            <p className="mt-0.5 text-xs text-critical">
               {rejected} rejected and left unchanged
             </p>
           )}
@@ -184,7 +185,7 @@ function FileChangeRow({
       <div className="flex items-start gap-2">
         {rejected ? (
           <AlertTriangle
-            className="mt-0.5 shrink-0 text-destructive"
+            className="mt-0.5 shrink-0 text-critical"
             size={14}
             aria-hidden="true"
           />
@@ -380,10 +381,7 @@ function RevisionPreview({
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        const message =
-          error instanceof Error
-            ? error.message.replace(/^\d+:\s*/, "")
-            : "Preview unavailable.";
+        const message = friendlyErrorMessage(error, "Preview unavailable.");
         setLoaded({ status: "error", message });
       });
     return () => {

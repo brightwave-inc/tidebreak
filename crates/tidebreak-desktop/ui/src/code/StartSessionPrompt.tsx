@@ -12,7 +12,6 @@ import type {
 import type { ComposerWorkspaceFiles } from "@/Composer";
 import { LiveLabel } from "@/LiveLabel";
 import { Loader } from "@/components/motion/loader";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { clampPermissionMode } from "../PermissionModeMenu";
 import { useManagedPolicy } from "../managedPolicy";
@@ -39,6 +38,11 @@ import {
   workspaceHarnesses,
   type CodeModelOption,
 } from "./labels";
+import {
+  Notice,
+  NoticeDetail,
+  NoticeRetryButton,
+} from "@/components/ui/notice";
 
 const NO_ENGINE_EFFORTS: ReasoningEffort[] = [];
 
@@ -58,23 +62,23 @@ export function SetupFailedBanner({
   onRetry: () => void;
 }) {
   return (
-    <div className="notice-surface notice-critical mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
-      <p>The setup script failed. Fix the script, then retry.</p>
+    <Notice
+      tone="critical"
+      title="The setup script failed"
+      className="mx-4 mt-3 w-auto"
+      action={
+        <NoticeRetryButton pending={retrying} onClick={onRetry}>
+          Retry setup
+        </NoticeRetryButton>
+      }
+    >
+      <p>Fix the script, then retry.</p>
       {output ? (
-        <pre className="bg-muted max-h-48 overflow-auto rounded-md px-2 py-1.5 font-mono text-xs whitespace-pre-wrap">
+        <NoticeDetail className="max-h-48 w-full overflow-auto">
           {output}
-        </pre>
+        </NoticeDetail>
       ) : null}
-      <Button
-        type="button"
-        size="sm"
-        className="self-start"
-        disabled={retrying}
-        onClick={onRetry}
-      >
-        Retry setup
-      </Button>
-    </div>
+    </Notice>
   );
 }
 

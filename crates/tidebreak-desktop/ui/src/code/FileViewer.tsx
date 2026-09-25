@@ -11,7 +11,7 @@ import Editor, {
   type DiffOnMount,
   type OnMount,
 } from "@monaco-editor/react";
-import { Check, CircleAlert, Eye, Lock, Pencil } from "lucide-react";
+import { Check, Eye, Lock, Pencil } from "lucide-react";
 import { toast } from "sonner";
 
 import type { ApiClient } from "../api/client";
@@ -45,6 +45,7 @@ import { STATUS_MARK } from "./statusTone";
 import { HEADER_CAPTION, WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
 import { OpenInEditorButton } from "./OpenInEditorButton";
 import { useLiveResource } from "./useLiveContent";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 type FileViewerClient = Pick<
   ApiClient,
@@ -133,7 +134,7 @@ export function FileViewer({
     load,
     errorMessage: "Could not open that file",
   });
-  const { data, error, refreshing, adopt } = resource;
+  const { data, error, archived, refreshing, adopt } = resource;
   const draft = useCodeFileDraft(workspaceId, path);
   const editing = draft !== undefined;
   const dirty = draft !== undefined && isCodeFileDraftDirty(draft);
@@ -408,18 +409,32 @@ export function FileViewer({
         />
       )}
       {draft?.save.kind === "failed" && (
-        <div
-          role="alert"
-          className="notice-surface notice-critical flex shrink-0 items-start gap-1.5 border-b px-3 py-2 text-sm"
-        >
-          <CircleAlert
-            className={cn("mt-0.5 size-3.5 shrink-0", STATUS_MARK.critical)}
-            aria-hidden
-          />
-          <span>Your changes are not saved. {draft.save.message}</span>
-        </div>
+        <Notice tone="critical" docked="top" className="shrink-0">
+          Your changes are not saved. {draft.save.message}
+        </Notice>
       )}
-      {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
+      {error &&
+        (archived ? (
+          // Archived is a state the reader changes by restoring the
+          // workspace, not a failure a retry can clear.
+          <Notice tone="neutral" docked="top" className="shrink-0">
+            {error}
+          </Notice>
+        ) : (
+          <Notice
+            tone="critical"
+            docked="top"
+            className="shrink-0"
+            action={
+              <NoticeRetryButton
+                pending={refreshing}
+                onClick={() => void resource.refresh()}
+              />
+            }
+          >
+            {error}
+          </Notice>
+        ))}
       {!data && !error && !draft && (
         <div className="flex flex-col gap-2 px-3 py-3" aria-hidden="true">
           <Skeleton className="h-4 w-1/3" />
@@ -587,64 +602,60 @@ function ConflictNotice({
   onOverwrite: () => void;
 }) {
   return (
-    <div
+    <Notice
+      tone="warning"
+      docked="top"
       role="alert"
-      className="notice-surface notice-warning flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b px-3 py-2 text-sm"
+      className="shrink-0"
+      action={
+        <>
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            disabled={busy}
+            onClick={onReload}
+          >
+            Reload
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            disabled={busy}
+            onClick={onKeep}
+          >
+            Keep my changes
+          </Button>
+          {rejected && (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                aria-pressed={comparing}
+                disabled={busy && !comparing}
+                onClick={onCompare}
+              >
+                {comparing ? "Hide comparison" : "Compare"}
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                size="xs"
+                disabled={busy || !canOverwrite}
+                onClick={onOverwrite}
+              >
+                Overwrite
+              </Button>
+            </>
+          )}
+        </>
+      }
     >
-      <span className="flex min-w-0 items-start gap-1.5">
-        <CircleAlert
-          className={cn("mt-0.5 size-3.5 shrink-0", STATUS_MARK.warning)}
-          aria-hidden
-        />
-        <span>
-          This file changed on disk.
-          {rejected && " Your changes are not saved."}
-        </span>
-      </span>
-      <div className="flex flex-wrap items-center gap-1.5">
-        <Button
-          type="button"
-          variant="outline"
-          size="xs"
-          disabled={busy}
-          onClick={onReload}
-        >
-          Reload
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="xs"
-          disabled={busy}
-          onClick={onKeep}
-        >
-          Keep my changes
-        </Button>
-        {rejected && (
-          <>
-            <Button
-              type="button"
-              variant="outline"
-              size="xs"
-              aria-pressed={comparing}
-              disabled={busy && !comparing}
-              onClick={onCompare}
-            >
-              {comparing ? "Hide comparison" : "Compare"}
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              size="xs"
-              disabled={busy || !canOverwrite}
-              onClick={onOverwrite}
-            >
-              Overwrite
-            </Button>
-          </>
-        )}
-      </div>
-    </div>
+      This file changed on disk.
+      {rejected && " Your changes are not saved."}
+    </Notice>
   );
 }
 

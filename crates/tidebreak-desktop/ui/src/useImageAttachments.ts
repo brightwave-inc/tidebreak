@@ -21,6 +21,7 @@ import {
   type ImageAttachment,
   type PickedImage,
 } from "./ImageAttachments";
+import { friendlyErrorMessage } from "./lib/utils";
 
 export type ImageAttachmentControls = {
   attachments: ImageAttachment[];
@@ -505,10 +506,5 @@ export function useImageAttachments(
 }
 
 function failureText(error: unknown): string {
-  const message = String(error)
-    .replace(/^Error:\s*/, "")
-    .trim();
-  return message && message.length <= 240
-    ? message
-    : "Could not attach that image.";
+  return friendlyErrorMessage(error, "Could not attach that image.");
 }

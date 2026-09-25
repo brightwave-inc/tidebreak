@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ApiClient, FileDownloadProgress } from "@/api";
 import { readDeliverableFile } from "@/deliverables";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 /** How a viewer wants the bytes handed to it. */
 export type FileDownloadFormat = "arrayBuffer" | "text" | "blob";
@@ -145,6 +146,8 @@ export type FileDownload<F extends FileDownloadFormat> = {
    * one-shot IPC load with no streaming progress.
    */
   progress: FileDownloadProgress | null;
+  /** Download again after `error`: the viewer's Try again. */
+  retry: () => void;
 };
 
 /** Bytes of one imported source document, addressed by document id. */
@@ -204,6 +207,10 @@ export function useFileDownload<F extends FileDownloadFormat>(
   const [error, setError] = useState<Error | null>(null);
   const [isLoading, setIsLoading] = useState(file === null);
   const [progress, setProgress] = useState<FileDownloadProgress | null>(null);
+  // Bumped by `retry`. A failed download is never cached, so running the
+  // effect again goes back to the source.
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((count) => count + 1), []);
   const requestRef = useRef(0);
   // Keep the latest fetch without re-running the effect when the caller
   // rebuilds an otherwise-identical source object each render.
@@ -239,7 +246,11 @@ export function useFileDownload<F extends FileDownloadFormat>(
         setFile(downloaded);
       } catch (err) {
         if (controller.signal.aborted || request !== requestRef.current) return;
-        setError(err instanceof Error ? err : new Error(String(err)));
+        setError(
+          err instanceof Error
+            ? err
+            : new Error(friendlyErrorMessage(err, "The download failed.")),
+        );
       } finally {
         if (request === requestRef.current) {
           setIsLoading(false);
@@ -249,7 +260,7 @@ export function useFileDownload<F extends FileDownloadFormat>(
     })();
 
     return () => controller.abort();
-  }, [cacheKey]);
+  }, [cacheKey, attempt]);
 
   const data = useMemo(() => {
     if (!file) return null;
@@ -262,6 +273,7 @@ export function useFileDownload<F extends FileDownloadFormat>(
     error,
     contentType: file?.contentType ?? null,
     progress,
+    retry,
   };
 }
 

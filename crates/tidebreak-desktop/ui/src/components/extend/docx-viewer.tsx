@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -64,6 +64,7 @@ import {
   createDocxTrackedChangeCardRenderer,
 } from "@/components/extend/docx-annotation-card";
 import { FileThumbnail } from "@/components/extend/file-thumbnail";
+import { Notice } from "@/components/ui/notice";
 
 setWasmSource(docxWasmUrl);
 
@@ -1301,7 +1302,7 @@ function DocxViewerContent({
       } catch (error) {
         if (isCurrent) {
           setLoadError(
-            error instanceof Error ? error.message : "Unknown DOCX load error",
+            friendlyErrorMessage(error, "The document could not be read."),
           );
           setIsLoadingDocument(false);
         }
@@ -1527,11 +1528,14 @@ function DocxViewerContent({
               </div>
             </div>
           ) : loadError ? (
-            <div className="grid h-full min-h-96 place-items-center p-6 text-center">
-              <div className="max-w-md rounded-lg border bg-background p-4 text-sm text-destructive shadow-xs">
-                <div className="font-medium">Unable to display DOCX</div>
-                <div className="mt-1 text-muted-foreground">{loadError}</div>
-              </div>
+            <div className="grid h-full min-h-96 place-items-center p-6">
+              <Notice
+                tone="critical"
+                title="Could not display this document"
+                className="max-w-md"
+              >
+                {loadError}
+              </Notice>
             </div>
           ) : isLoadingDocument ? (
             loadingState

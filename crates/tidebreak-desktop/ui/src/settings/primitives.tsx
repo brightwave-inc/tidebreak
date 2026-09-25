@@ -1,8 +1,19 @@
 import { cloneElement, isValidElement, useId, type ReactNode } from "react";
-import { CircleAlert, CircleCheck, CircleMinus } from "lucide-react";
+import {
+  CircleAlert,
+  CircleCheck,
+  CircleMinus,
+  type LucideIcon,
+} from "lucide-react";
 
 import { Card } from "@/components/ui/card";
+import {
+  Notice,
+  NoticeRetryButton,
+  type NoticeTone,
+} from "@/components/ui/notice";
 import { PaneDragBand } from "@/WindowDragStrip";
+import { cn } from "@/lib/utils";
 
 /**
  * A whole settings surface: the page title, an optional description, and the
@@ -51,25 +62,52 @@ export function SettingsPanel({
  * `status` is a short reading about the value, such as how much of a size
  * limit it uses. It sits at the right end of the hint's row, under the
  * control's right edge.
+ *
+ * `error` says why the value cannot be saved. It sits directly under the
+ * control in critical ink and marks the control invalid; a failure to load or
+ * save the panel is a `SettingsError` instead.
  */
 export function SettingsField({
   label,
   hint,
   status,
+  error,
   children,
 }: {
   label: string;
   hint?: ReactNode;
   status?: ReactNode;
+  error?: ReactNode;
   children: ReactNode;
 }) {
   const hintId = useId();
+  const errorId = useId();
+  const describedBy = [hint ? hintId : null, error ? errorId : null].filter(
+    Boolean,
+  );
   const control =
-    hint && isValidElement<{ "aria-describedby"?: string }>(children)
+    describedBy.length > 0 &&
+    isValidElement<{
+      "aria-describedby"?: string;
+      "aria-invalid"?: boolean;
+      className?: string;
+    }>(children)
       ? cloneElement(children, {
-          "aria-describedby": [children.props["aria-describedby"], hintId]
+          "aria-describedby": [
+            children.props["aria-describedby"],
+            ...describedBy,
+          ]
             .filter(Boolean)
             .join(" "),
+          ...(error
+            ? {
+                "aria-invalid": true,
+                className: cn(
+                  children.props.className,
+                  "aria-invalid:border-critical-border",
+                ),
+              }
+            : {}),
         })
       : children;
   const hintElement = hint && (
@@ -83,6 +121,7 @@ export function SettingsField({
         <span className="settings-field-label">{label}</span>
         {control}
       </label>
+      {error && <SettingsFieldError id={errorId}>{error}</SettingsFieldError>}
       {status ? (
         <div className="flex items-start justify-between gap-4">
           {hintElement}
@@ -146,18 +185,20 @@ export function SettingsSection({
  */
 export type SettingsStatusTone = "ready" | "neutral" | "warning" | "critical";
 
-const STATUS_NOTICE: Record<SettingsStatusTone, string> = {
-  ready: "notice-success",
-  neutral: "",
-  warning: "notice-warning",
-  critical: "notice-critical",
+const STATUS_NOTICE: Record<
+  SettingsStatusTone,
+  { tone: NoticeTone; icon: LucideIcon }
+> = {
+  ready: { tone: "success", icon: CircleCheck },
+  neutral: { tone: "neutral", icon: CircleMinus },
+  warning: { tone: "warning", icon: CircleAlert },
+  critical: { tone: "critical", icon: CircleAlert },
 };
 
 /**
  * The readiness line a settings surface leads with: a short verdict and the one
- * sentence that says what to do about it. It reads as a notice: a neutral
- * surface with the tone on its leading edge and icon, so a panel never has to
- * reach for the class itself.
+ * sentence that says what to do about it. It is a `Notice`: a neutral surface
+ * with the tone on its leading edge and icon.
  */
 export function SettingsStatus({
   tone,
@@ -168,42 +209,66 @@ export function SettingsStatus({
   label: string;
   description: ReactNode;
 }) {
-  const Icon =
-    tone === "ready"
-      ? CircleCheck
-      : tone === "neutral"
-        ? CircleMinus
-        : CircleAlert;
+  const notice = STATUS_NOTICE[tone];
   return (
-    <div
-      className={`settings-status ${STATUS_NOTICE[tone]}`.trim()}
-      role="status"
-    >
-      <Icon className="settings-status-icon" aria-hidden="true" />
-      <span className="settings-status-copy">
-        <strong>{label}</strong>
-        <span className="break-words">{description}</span>
-      </span>
-    </div>
+    <Notice tone={notice.tone} icon={notice.icon} title={label} role="status">
+      {description}
+    </Notice>
   );
 }
 
 /**
- * An error line on a settings surface, in the critical ink that reads as text
- * on the page in both themes. `String(err)` puts the error's class name in
- * front of the message ("Error: …", "HttpError: …"); the reader needs only
- * the message.
+ * Why a value on a settings surface cannot be saved, in critical ink beside
+ * the field or form it belongs to. Validation is part of editing, not a
+ * failure, so it never takes the notice shape and never offers a retry.
  */
-export function SettingsError({ children }: { children: ReactNode }) {
+export function SettingsFieldError({
+  id,
+  children,
+}: {
+  id?: string;
+  children: ReactNode;
+}) {
   return (
-    <p className="text-sm text-critical break-words" role="alert">
-      {typeof children === "string" ? withoutErrorName(children) : children}
+    <p id={id} className="text-sm text-critical break-words" role="alert">
+      {children}
     </p>
   );
 }
 
-function withoutErrorName(message: string): string {
-  return message.replace(/^(?:[A-Z][A-Za-z]*)?Error:\s*/, "") || message;
+/**
+ * A failure on a settings surface: a load or a save that did not go through,
+ * as a critical `Notice`. When the failure is the panel's own load, pass
+ * `onRetry` so the reader can run it again. The message arrives worded by
+ * `friendlyErrorMessage`; this renders it as given. A value the reader can
+ * fix is a `SettingsFieldError`, not this.
+ */
+export function SettingsError({
+  children,
+  title,
+  onRetry,
+  retrying = false,
+  className,
+}: {
+  children: ReactNode;
+  title?: ReactNode;
+  onRetry?: () => void;
+  /** The retry is running: its button waits instead of sending another. */
+  retrying?: boolean;
+  className?: string;
+}) {
+  return (
+    <Notice
+      tone="critical"
+      title={title}
+      className={className}
+      action={
+        onRetry && <NoticeRetryButton pending={retrying} onClick={onRetry} />
+      }
+    >
+      {children}
+    </Notice>
+  );
 }
 
 /**

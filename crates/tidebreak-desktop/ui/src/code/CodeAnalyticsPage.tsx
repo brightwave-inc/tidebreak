@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ChartNoAxesCombined,
-  CircleAlert,
   CircleDollarSign,
   Cpu,
   Database,
@@ -41,6 +40,7 @@ import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { paneHeaderDragRegion } from "@/WindowDragStrip";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeSubscriptionUsage } from "./useCodeSubscriptionUsage";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 type TrendMetric = "tokens" | "turns" | "cost";
 
@@ -92,7 +92,7 @@ export function CodeAnalyticsBody() {
       setError(null);
     } catch (caught) {
       if (request !== requestSequence.current) return;
-      setError(friendlyErrorMessage(caught, "Could not load code analytics."));
+      setError(friendlyErrorMessage(caught, "Try again in a moment."));
     } finally {
       if (request === requestSequence.current) {
         setLoading(false);
@@ -167,7 +167,11 @@ export function CodeAnalyticsBody() {
         {loading && !report ? (
           <AnalyticsSkeleton />
         ) : error && !report ? (
-          <AnalyticsError message={error} onRetry={() => void refresh()} />
+          <AnalyticsError
+            message={error}
+            retrying={refreshing}
+            onRetry={() => void refresh()}
+          />
         ) : report && report.totals.turns === 0 ? (
           <AnalyticsEmpty quota={quota.report} />
         ) : report ? (
@@ -175,6 +179,7 @@ export function CodeAnalyticsBody() {
             {error && (
               <AnalyticsRefreshError
                 message={error}
+                retrying={refreshing}
                 onRetry={() => void refresh()}
               />
             )}
@@ -518,7 +523,19 @@ function QuotaCard({
               this card. Sessions, tokens, and estimates do not depend on it.
             </p>
             {quota.error && (
-              <p className="text-xs text-critical">{quota.error}</p>
+              <Notice
+                tone="critical"
+                density="compact"
+                action={
+                  <NoticeRetryButton
+                    size="xs"
+                    pending={quota.refreshing}
+                    onClick={() => void quota.refresh()}
+                  />
+                }
+              >
+                {quota.error}
+              </Notice>
             )}
           </div>
         )}
@@ -813,50 +830,45 @@ function AnalyticsSkeleton() {
 
 function AnalyticsError({
   message,
+  retrying,
   onRetry,
 }: {
   message: string;
+  retrying: boolean;
   onRetry: () => void;
 }) {
   return (
-    <Empty className="mx-auto h-full max-w-lg">
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <CircleAlert />
-        </EmptyMedia>
-        <EmptyTitle>Analytics could not load</EmptyTitle>
-        <EmptyDescription>{message}</EmptyDescription>
-      </EmptyHeader>
-      <Button type="button" variant="outline" onClick={onRetry}>
-        <RefreshCw />
-        Try again
-      </Button>
-    </Empty>
+    <Notice
+      tone="critical"
+      title="Could not load code analytics"
+      className="mx-auto max-w-2xl"
+      action={<NoticeRetryButton pending={retrying} onClick={onRetry} />}
+    >
+      {message}
+    </Notice>
   );
 }
 
 function AnalyticsRefreshError({
   message,
+  retrying,
   onRetry,
 }: {
   message: string;
+  retrying: boolean;
   onRetry: () => void;
 }) {
   return (
-    <div
-      className="notice-surface notice-critical mx-auto mb-4 flex w-full max-w-[1500px] items-center gap-2 rounded-lg border px-3 py-2 text-xs"
-      role="alert"
+    <Notice
+      tone="critical"
+      density="compact"
+      className="mx-auto mb-4 max-w-[1500px]"
+      action={
+        <NoticeRetryButton size="xs" pending={retrying} onClick={onRetry} />
+      }
     >
-      <CircleAlert className="size-3.5 shrink-0" />
-      <span className="min-w-0 flex-1">{message}</span>
-      <button
-        type="button"
-        className="shrink-0 rounded-md px-2 py-1 font-medium hover:bg-background/60"
-        onClick={onRetry}
-      >
-        Try again
-      </button>
-    </div>
+      {message}
+    </Notice>
   );
 }
 

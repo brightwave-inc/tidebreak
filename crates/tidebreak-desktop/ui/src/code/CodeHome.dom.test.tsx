@@ -324,10 +324,9 @@ describe("CodeHome", () => {
     );
 
     expect(
-      await screen.findByText(
-        "The coding engine check did not answer: doctor unavailable",
-      ),
+      await screen.findByText("The coding engine check did not answer"),
     ).toBeInTheDocument();
+    expect(screen.getByText("doctor unavailable")).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: "Start with a repository" }),
     ).toBeInTheDocument();

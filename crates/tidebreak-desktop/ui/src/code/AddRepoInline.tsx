@@ -3,6 +3,7 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { ParentDirField } from "./AddRepoPalette";
 import { displayClonePhase, type AddRepoInlineState } from "./useAddRepoInline";
+import { Notice } from "@/components/ui/notice";
 
 /**
  * What one submit is about to do with what has been typed.
@@ -128,12 +129,9 @@ export function AddRepoInline({
         </div>
       )}
       {state.error && (
-        <p
-          className="text-critical text-xs break-words"
-          data-testid="add-repo-error"
-        >
+        <Notice tone="critical" density="compact" data-testid="add-repo-error">
           {state.error}
-        </p>
+        </Notice>
       )}
       <Button type="submit" className="self-start" disabled={!state.canSubmit}>
         {state.busy ? (cloning ? "Cloning…" : "Adding…") : submitLabel}

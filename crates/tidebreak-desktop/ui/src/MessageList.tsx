@@ -8,7 +8,7 @@ import {
   useSyncExternalStore,
   type MutableRefObject,
 } from "react";
-import { RefreshCw, Wand2 } from "lucide-react";
+import { Wand2 } from "lucide-react";
 import type { ReactNode, Ref, RefCallback, UIEvent } from "react";
 import type {
   ApprovalGrantRung,
@@ -96,6 +96,7 @@ import { useStreamStalled } from "./useStreamStalled";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 export type ChatMessage =
   | {
@@ -2070,36 +2071,31 @@ function MessageBubbleImpl({
   }
 
   if (message.role === "system" || message.role === "error") {
+    const error = message.role === "error";
     return (
-      <div
-        className={cn(
-          `message-notice is-${message.role}`,
-          onRetry && "has-action",
-        )}
-        role={message.role === "error" ? "alert" : "status"}
+      <Notice
+        tone={error ? "critical" : "neutral"}
+        density={error ? "default" : "compact"}
+        className="self-stretch"
+        action={
+          onRetry && (
+            <NoticeRetryButton size={error ? "sm" : "xs"} onClick={onRetry} />
+          )
+        }
       >
-        <span>{message.text}</span>
-        {onRetry && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="message-notice-action"
-            onClick={onRetry}
-          >
-            <RefreshCw aria-hidden="true" />
-            Try again
-          </Button>
-        )}
-      </div>
+        {message.text}
+      </Notice>
     );
   }
 
   if (message.role === "compaction") {
     return (
-      <div className="message-notice is-compaction" role="status">
+      <p
+        className="self-stretch py-0.5 text-2xs tracking-wide text-muted-foreground"
+        role="status"
+      >
         Compacted conversation
-      </div>
+      </p>
     );
   }
 
@@ -2139,9 +2135,9 @@ function MessageBubbleImpl({
 
   if (message.role === "refusal") {
     return (
-      <div className="message-notice is-refusal" role="status">
+      <Notice tone="warning" density="compact" className="self-stretch">
         {refusalCopy(message.category, message.partialOutput, message.source)}
-      </div>
+      </Notice>
     );
   }
 

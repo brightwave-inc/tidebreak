@@ -9,6 +9,7 @@ import type {
 } from "./api";
 import { RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
 import type { ChatMessage } from "./MessageList";
+import { friendlyErrorMessage } from "./lib/utils";
 
 const LIVE_POLL_INTERVAL_MS = 5_000;
 
@@ -107,7 +108,11 @@ export function useAgentRuns(
         setRuns(listed);
         setError(null);
       } catch (cause) {
-        if (!cancelled && seq === requestSeq) setError(String(cause));
+        if (!cancelled && seq === requestSeq) {
+          setError(
+            friendlyErrorMessage(cause, "Could not load background agents."),
+          );
+        }
       } finally {
         if (!cancelled && seq === requestSeq) setLoading(false);
       }

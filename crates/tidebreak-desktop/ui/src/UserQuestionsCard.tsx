@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
+import { Notice } from "@/components/ui/notice";
 
 type DraftAnswer = {
   selectedOptionIds: string[];
@@ -173,9 +174,9 @@ export function UserQuestionsCard({
     });
 
   const errorNotice = error ? (
-    <p className="text-destructive text-xs break-words" role="alert">
+    <Notice tone="critical" density="compact">
       {error}
-    </p>
+    </Notice>
   ) : null;
 
   if (showContextForm) {

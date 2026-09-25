@@ -406,7 +406,10 @@ export async function archiveWorkspaceWithConfirm(options: {
       options.onOptimisticChange?.(false);
       throw error;
     }
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = friendlyErrorMessage(
+      error,
+      "This workspace still has work that is not saved anywhere else.",
+    );
     const forced = await options.confirm(
       kind === "archive_inspection_uncertain"
         ? {

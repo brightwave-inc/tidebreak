@@ -4,7 +4,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const reportRendererError = vi.hoisted(() => vi.fn());
-vi.mock("./rendererErrors", () => ({ reportRendererError }));
+vi.mock("./rendererErrors", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./rendererErrors")>()),
+  reportRendererError,
+}));
 
 import { ErrorBoundary } from "./ErrorBoundary";
 

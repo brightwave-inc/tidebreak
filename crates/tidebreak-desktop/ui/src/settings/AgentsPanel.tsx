@@ -13,6 +13,7 @@ import {
   SettingsPanel,
   SettingsSection,
 } from "./primitives";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 const MIN_ACTIVE_AGENTS = 1;
 const MAX_ACTIVE_AGENTS = 1024;
@@ -38,10 +39,25 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savingTurnRecaps, setSavingTurnRecaps] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  /** Why the settings did not load; Try again reads them once more. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  /** Why a save did not go through. */
+  const [saveError, setSaveError] = useState<string | null>(null);
+  /** Which number cannot be saved, and why, shown under that field. */
+  const [fieldError, setFieldError] = useState<{
+    field: "limit" | "checkinSteps" | "errorCheckin";
+    message: string;
+  } | null>(null);
+  // Nothing here can be edited until the settings load, so a value typed
+  // after a failed read is never saved over the real one or thrown away by
+  // the retry.
+  const unavailable = loading || loadError !== null;
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
     void client
       .getSettings()
       .then((settings) => {
@@ -52,7 +68,9 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
         setTurnRecapsEnabled(settings.code_turn_recaps_enabled);
       })
       .catch((err) => {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          setLoadError(friendlyErrorMessage(err, "Try again in a moment."));
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -60,7 +78,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, loadAttempt]);
 
   async function saveNumbers() {
     const parsedLimit = Number(limit);
@@ -69,9 +87,10 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
       parsedLimit < MIN_ACTIVE_AGENTS ||
       parsedLimit > MAX_ACTIVE_AGENTS
     ) {
-      setError(
-        `Active agents must be a whole number from ${MIN_ACTIVE_AGENTS} to ${MAX_ACTIVE_AGENTS}.`,
-      );
+      setFieldError({
+        field: "limit",
+        message: `Active agents must be a whole number from ${MIN_ACTIVE_AGENTS} to ${MAX_ACTIVE_AGENTS}.`,
+      });
       return;
     }
     const parsedSteps = Number(checkinSteps);
@@ -80,9 +99,10 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
       parsedSteps < MIN_CHECKIN_STEPS ||
       parsedSteps > MAX_CHECKIN_STEPS
     ) {
-      setError(
-        `Check-in steps must be a whole number from ${MIN_CHECKIN_STEPS} to ${MAX_CHECKIN_STEPS}.`,
-      );
+      setFieldError({
+        field: "checkinSteps",
+        message: `Check-in steps must be a whole number from ${MIN_CHECKIN_STEPS} to ${MAX_CHECKIN_STEPS}.`,
+      });
       return;
     }
     const parsedErrors = Number(errorCheckin);
@@ -91,13 +111,15 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
       parsedErrors < MIN_ERROR_CHECKIN ||
       parsedErrors > MAX_ERROR_CHECKIN
     ) {
-      setError(
-        `Error check-in must be a whole number from ${MIN_ERROR_CHECKIN} to ${MAX_ERROR_CHECKIN}.`,
-      );
+      setFieldError({
+        field: "errorCheckin",
+        message: `Error check-in must be a whole number from ${MIN_ERROR_CHECKIN} to ${MAX_ERROR_CHECKIN}.`,
+      });
       return;
     }
+    setFieldError(null);
     setSaving(true);
-    setError(null);
+    setSaveError(null);
     try {
       const settings = await client.putSettings({
         max_active_background_agents: parsedLimit,
@@ -109,7 +131,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
       setErrorCheckin(String(settings.sandbox_agent_error_checkin));
       toast.success("Saved agent settings");
     } catch (err) {
-      setError(String(err));
+      setSaveError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setSaving(false);
     }
@@ -119,7 +141,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
     const previous = turnRecapsEnabled;
     setTurnRecapsEnabled(enabled);
     setSavingTurnRecaps(true);
-    setError(null);
+    setSaveError(null);
     try {
       const settings = await client.putSettings({
         code_turn_recaps_enabled: enabled,
@@ -127,7 +149,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
       setTurnRecapsEnabled(settings.code_turn_recaps_enabled);
     } catch (err) {
       setTurnRecapsEnabled(previous);
-      setError(String(err));
+      setSaveError(friendlyErrorMessage(err, "Could not save that change."));
     } finally {
       setSavingTurnRecaps(false);
     }
@@ -139,6 +161,14 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
       description="Choose how messages behave around active work, whether coding turns write recaps, and how delegated agents report back."
       busy={loading}
     >
+      {loadError && (
+        <SettingsError
+          title="Could not load agent settings"
+          onRetry={() => setLoadAttempt((count) => count + 1)}
+        >
+          {loadError}
+        </SettingsError>
+      )}
       <SettingsSection
         title="While an agent is responding"
         description={`Choose what Enter and the composer action do during a running response. ${modEnter} always steers immediately.`}
@@ -189,7 +219,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
         >
           <Switch
             checked={turnRecapsEnabled}
-            disabled={loading || savingTurnRecaps}
+            disabled={unavailable || savingTurnRecaps}
             onCheckedChange={(enabled) => void saveTurnRecaps(enabled)}
             aria-label="Write fallback recaps"
           />
@@ -202,6 +232,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
         <SettingsField
           label="Active background agents per work"
           hint="A spawn beyond this limit fails immediately. Wait for a running agent to finish, then try again."
+          error={fieldError?.field === "limit" ? fieldError.message : undefined}
         >
           <Input
             type="number"
@@ -210,7 +241,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
             max={MAX_ACTIVE_AGENTS}
             step="1"
             value={limit}
-            disabled={loading || saving}
+            disabled={unavailable || saving}
             onChange={(event) => setLimit(event.target.value)}
             onBlur={() => void saveNumbers()}
           />
@@ -218,6 +249,11 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
         <SettingsField
           label="Check in every N steps"
           hint="A step is one model turn, usually one tool call. Reaching the cadence never fails the agent — it wraps up what it has and reports back. Raising this rescues a running agent at its next step."
+          error={
+            fieldError?.field === "checkinSteps"
+              ? fieldError.message
+              : undefined
+          }
         >
           <Input
             type="number"
@@ -226,7 +262,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
             max={MAX_CHECKIN_STEPS}
             step="1"
             value={checkinSteps}
-            disabled={loading || saving}
+            disabled={unavailable || saving}
             onChange={(event) => setCheckinSteps(event.target.value)}
             onBlur={() => void saveNumbers()}
           />
@@ -234,6 +270,11 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
         <SettingsField
           label="Check in after N consecutive tool errors"
           hint="An agent whose tool calls keep failing reports back for direction instead of continuing to thrash. Any success resets the count."
+          error={
+            fieldError?.field === "errorCheckin"
+              ? fieldError.message
+              : undefined
+          }
         >
           <Input
             type="number"
@@ -242,13 +283,13 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
             max={MAX_ERROR_CHECKIN}
             step="1"
             value={errorCheckin}
-            disabled={loading || saving}
+            disabled={unavailable || saving}
             onChange={(event) => setErrorCheckin(event.target.value)}
             onBlur={() => void saveNumbers()}
           />
         </SettingsField>
       </SettingsSection>
-      {error && <SettingsError>{error}</SettingsError>}
+      {saveError && <SettingsError>{saveError}</SettingsError>}
     </SettingsPanel>
   );
 }

@@ -12,6 +12,8 @@ import { ProjectsSection } from "./ProjectsSection";
 import { SidebarButton } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
 import { useActiveChatId } from "@/useActiveChatId";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
+import { useRetry } from "@/components/ui/useRetry";
 
 /**
  * The one navigation rail, used by every route that is not settings.
@@ -30,6 +32,9 @@ export function AppSidebar() {
   const activeChatId = useActiveChatId() ?? undefined;
   const navigate = useNavigate();
   const { refreshChats } = useApp();
+  // The failed load stays on screen until a read answers, so its Retry waits
+  // for that answer rather than sending another.
+  const chatsRetry = useRetry(refreshChats);
   const chatsError = useChatListStore((state) => state.chatsError);
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
@@ -71,15 +76,20 @@ export function AppSidebar() {
       <ProjectsSection activeChatId={activeChatId} />
       <ChatsSection activeChatId={activeChatId} />
       {chatsError && (
-        <div className="flex shrink-0 flex-col gap-1 px-2 py-1">
-          <p className="text-xs text-critical">{chatsError}</p>
-          <button
-            type="button"
-            className="self-start text-xs text-muted-foreground underline-offset-2 hover:underline"
-            onClick={() => void refreshChats()}
+        <div className="shrink-0 px-2 py-1">
+          <Notice
+            tone="critical"
+            density="compact"
+            action={
+              <NoticeRetryButton
+                size="xs"
+                pending={chatsRetry.pending}
+                onClick={chatsRetry.retry}
+              />
+            }
           >
-            Try again
-          </button>
+            {chatsError}
+          </Notice>
         </div>
       )}
     </SidebarFrame>

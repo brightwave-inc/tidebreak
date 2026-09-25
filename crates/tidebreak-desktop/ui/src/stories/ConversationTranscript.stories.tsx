@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -592,7 +592,7 @@ export const Notices: Story = {
       {
         id: "notice-error",
         role: "error",
-        text: "The connection closed before the response completed. Check the connection and try again.",
+        text: "The connection closed before the response completed. Send the message again to continue.",
       },
       blockedMessages[2],
       { id: "notice-compaction", role: "compaction" },
@@ -600,14 +600,14 @@ export const Notices: Story = {
     ],
   },
   play: async ({ canvasElement }) => {
-    const notices = Array.from(
-      canvasElement.querySelectorAll<HTMLElement>(
-        ".message-notice, .message-turn-failure, .notice-surface",
-      ),
-    );
-    await expect(notices.length).toBeGreaterThan(2);
-    const first = notices[0].getBoundingClientRect();
-    for (const notice of notices) {
+    const notices = () =>
+      Array.from(
+        canvasElement.querySelectorAll<HTMLElement>('[data-slot="notice"]'),
+      );
+    // The transcript draws its rows after it measures the column.
+    await waitFor(() => expect(notices().length).toBeGreaterThan(2));
+    const first = notices()[0].getBoundingClientRect();
+    for (const notice of notices()) {
       const rect = notice.getBoundingClientRect();
       await expect(Math.abs(rect.width - first.width)).toBeLessThan(1);
       await expect(Math.abs(rect.left - first.left)).toBeLessThan(1);

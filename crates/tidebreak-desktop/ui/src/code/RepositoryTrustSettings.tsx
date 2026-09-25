@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 
 import type { ApiClient } from "@/api/client";
 import type { CodeRepoTrustSnapshot } from "@/api/types";
-import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { friendlyErrorMessage } from "@/lib/utils";
@@ -113,20 +112,12 @@ export function RepositoryTrustSettings({
         </div>
       )}
       {error && (
-        <div className="flex flex-col items-start gap-2">
-          <SettingsError>{error}</SettingsError>
-          {!snapshot && (
-            <Button
-              type="button"
-              size="xs"
-              variant="outline"
-              disabled={loading}
-              onClick={() => void load()}
-            >
-              Try again
-            </Button>
-          )}
-        </div>
+        <SettingsError
+          onRetry={snapshot ? undefined : () => void load()}
+          retrying={loading}
+        >
+          {error}
+        </SettingsError>
       )}
       {snapshot && (
         <>

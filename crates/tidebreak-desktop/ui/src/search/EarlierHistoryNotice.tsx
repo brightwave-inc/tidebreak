@@ -1,6 +1,7 @@
 import { History } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Notice } from "@/components/ui/notice";
 
 /**
  * Closes a stretch of earlier history a search opened on its own.
@@ -18,18 +19,17 @@ export function EarlierHistoryNotice({
   label?: string;
 }) {
   return (
-    <div
-      role="status"
-      className="notice-surface notice-info mt-2 flex w-full flex-wrap items-center gap-3 rounded-lg border px-3 py-2 text-sm"
+    <Notice
+      tone="info"
+      icon={History}
+      className="mt-2"
+      action={
+        <Button type="button" size="sm" variant="outline" onClick={onLeave}>
+          Back to latest
+        </Button>
+      }
     >
-      <History
-        aria-hidden="true"
-        className="size-4 shrink-0 text-muted-foreground"
-      />
-      <p className="min-w-0 flex-1">{label}</p>
-      <Button type="button" size="xs" variant="outline" onClick={onLeave}>
-        Back to latest
-      </Button>
-    </div>
+      {label}
+    </Notice>
   );
 }

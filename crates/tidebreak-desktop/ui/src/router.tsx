@@ -23,6 +23,12 @@ import { ProjectFilesView } from "./ProjectFilesView";
 import { useProjectListStore } from "./ProjectListStore";
 import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
+import {
+  reportRouteError,
+  RouteCrashScreen,
+  RouteNotFound,
+  RoutePaneError,
+} from "./RouteFallbacks";
 import { PaneDragBand } from "./WindowDragStrip";
 import { WorkArchivePage } from "./WorkArchivePage";
 import { WorkLayout } from "./WorkLayout";
@@ -66,6 +72,12 @@ function CodeRouteSuspense({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * Every route below a layout renders inside that layout's frame, so its own
+ * crash is `RoutePaneError`: the pane says what happened and the rail beside
+ * it keeps working. A crash in the shell or a layout falls to the router's
+ * default, `RouteCrashScreen`, which takes the window.
+ */
 const rootRoute = createRootRoute({ component: AppShell });
 
 /**
@@ -94,6 +106,7 @@ type HomeSearch = PanelSearch & { project?: string };
 
 const homeRoute = createRoute({
   getParentRoute: () => workLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/",
   // Home hosts panels the way a conversation does — the Apps library opens
   // beside the composer — so it reads the same layout params. Which panel
@@ -121,12 +134,14 @@ function HomeRouteComponent() {
  */
 const appsRoute = createRoute({
   getParentRoute: () => workLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/apps",
   component: () => <AppsPage />,
 });
 
 const appDetailRoute = createRoute({
   getParentRoute: () => workLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/apps/$appId",
   component: AppDetailRouteComponent,
 });
@@ -138,12 +153,14 @@ function AppDetailRouteComponent() {
 
 const pluginsRoute = createRoute({
   getParentRoute: () => workLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/plugins",
   component: () => <PluginsPage />,
 });
 
 const pluginDetailRoute = createRoute({
   getParentRoute: () => workLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/plugins/$pluginId",
   component: PluginDetailRouteComponent,
 });
@@ -159,6 +176,7 @@ function PluginDetailRouteComponent() {
  */
 const inboxRoute = createRoute({
   getParentRoute: () => workLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/inbox",
   component: InboxRoute,
 });
@@ -177,12 +195,14 @@ function InboxRoute() {
  */
 const archiveRoute = createRoute({
   getParentRoute: () => workLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/archive",
   component: WorkArchivePage,
 });
 
 const chatRoute = createRoute({
   getParentRoute: () => workLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/c/$chatId",
   validateSearch: (search: Record<string, unknown>): ChatSearch => ({
     ...panelSearchFrom(search),
@@ -222,6 +242,7 @@ function ChatRouteComponent() {
  */
 const projectChatRoute = createRoute({
   getParentRoute: () => workLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/p/$projectId/c/$chatId",
   validateSearch: chatRoute.options.validateSearch,
   component: ProjectChatRouteComponent,
@@ -247,6 +268,7 @@ function ProjectChatRouteComponent() {
  */
 const projectRoute = createRoute({
   getParentRoute: () => workLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/p/$projectId",
   component: ProjectRouteComponent,
 });
@@ -281,6 +303,7 @@ const codeLayoutRoute = createRoute({
 
 const codeRoute = createRoute({
   getParentRoute: () => codeLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/code",
   component: () => (
     <CodeRouteSuspense>
@@ -291,6 +314,7 @@ const codeRoute = createRoute({
 
 const codeSessionRoute = createRoute({
   getParentRoute: () => codeLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/code/s/$sessionId",
   component: CodeSessionRouteComponent,
 });
@@ -306,6 +330,7 @@ function CodeSessionRouteComponent() {
 
 const codeWorkspaceRoute = createRoute({
   getParentRoute: () => codeLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/code/w/$workspaceId",
   validateSearch: (search: Record<string, unknown>): PanelSearch =>
     panelSearchFrom(search),
@@ -314,6 +339,7 @@ const codeWorkspaceRoute = createRoute({
 
 const codeAnalyticsRoute = createRoute({
   getParentRoute: () => codeLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/code/analytics",
   component: () => (
     <CodeRouteSuspense>
@@ -324,6 +350,7 @@ const codeAnalyticsRoute = createRoute({
 
 const codeDeliveryPullRequestsRoute = createRoute({
   getParentRoute: () => codeLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/code/delivery/pull-requests",
   validateSearch: codeDeliverySearchFrom,
   component: CodeDeliveryPullRequestsRoute,
@@ -331,6 +358,7 @@ const codeDeliveryPullRequestsRoute = createRoute({
 
 const codeDeliveryRunsRoute = createRoute({
   getParentRoute: () => codeLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/code/delivery/runs",
   validateSearch: codeDeliverySearchFrom,
   component: CodeDeliveryRunsRoute,
@@ -356,6 +384,7 @@ function CodeDeliveryRunsRoute() {
 
 const codeArchiveRoute = createRoute({
   getParentRoute: () => codeLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/code/archive",
   component: () => (
     <CodeRouteSuspense>
@@ -370,6 +399,7 @@ const codeArchiveRoute = createRoute({
  */
 const codeInboxRoute = createRoute({
   getParentRoute: () => codeLayoutRoute,
+  errorComponent: RoutePaneError,
   path: "/code/inbox",
   component: () => (
     <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
@@ -412,6 +442,7 @@ function SettingsIndexRedirect() {
 
 const settingsIndexRoute = createRoute({
   getParentRoute: () => settingsRoute,
+  errorComponent: RoutePaneError,
   path: "/",
   component: SettingsIndexRedirect,
 });
@@ -434,6 +465,7 @@ function McpSettingsRedirect() {
 
 const settingsMcpRedirectRoute = createRoute({
   getParentRoute: () => settingsRoute,
+  errorComponent: RoutePaneError,
   path: "mcp",
   component: McpSettingsRedirect,
 });
@@ -451,6 +483,7 @@ function ExperimentalSettingsRedirect() {
 
 const settingsExperimentalRedirectRoute = createRoute({
   getParentRoute: () => settingsRoute,
+  errorComponent: RoutePaneError,
   path: "experimental",
   component: ExperimentalSettingsRedirect,
 });
@@ -458,6 +491,7 @@ const settingsExperimentalRedirectRoute = createRoute({
 const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
   createRoute({
     getParentRoute: () => settingsRoute,
+    errorComponent: RoutePaneError,
     path: section.path,
     component: section.Component,
     // Only the sections that address with search params declare one; the rest
@@ -527,6 +561,9 @@ export function createAppRouter() {
     routeTree,
     history: createHashHistory(),
     defaultPreload: false,
+    defaultErrorComponent: RouteCrashScreen,
+    defaultNotFoundComponent: RouteNotFound,
+    defaultOnCatch: reportRouteError,
   });
 }
 

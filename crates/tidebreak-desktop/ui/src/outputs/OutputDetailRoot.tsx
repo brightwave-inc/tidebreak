@@ -48,6 +48,7 @@ import { OutputContent } from "./OutputContent";
 import { outputTypeLabel } from "./outputFormat";
 import { OutputRevisionSources } from "./OutputRevisionSources";
 import { exportFailureMessage, friendlyOutputError } from "./OutputsView";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 export type OutputDetailApis = {
   read: (chatId: string, outputId: string) => Promise<DeliverablePreview>;
@@ -121,6 +122,8 @@ export function OutputDetailRoot({
   const sourceNav = useSourceNav();
   const [preview, setPreview] = useState<DeliverablePreview | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** Bumped by Try again, so the load below runs once more. */
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -158,9 +161,7 @@ export function OutputDetailRoot({
       })
       .catch((caught) => {
         if (!cancelled) {
-          setLoadError(
-            friendlyOutputError(caught, "Could not preview that output."),
-          );
+          setLoadError(friendlyOutputError(caught, "Try again in a moment."));
         }
       });
     void apis
@@ -182,7 +183,7 @@ export function OutputDetailRoot({
     return () => {
       cancelled = true;
     };
-  }, [apis, chatId, outputId]);
+  }, [apis, chatId, outputId, loadAttempt]);
 
   async function refreshRevisions() {
     setRevisions(null);
@@ -513,61 +514,69 @@ export function OutputDetailRoot({
     >
       {confirmDialog}
       {previewRevision && (
-        <div
-          className="notice-surface notice-info mx-6 mt-3 flex shrink-0 flex-wrap items-center gap-2 rounded-md px-3 py-2 text-sm"
-          role="status"
+        <Notice
+          tone="info"
+          icon={HistoryIcon}
+          className="mx-6 mt-3 w-auto shrink-0"
+          action={
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={restoring}
+                onClick={() => void onRestore()}
+              >
+                <RotateCcwIcon aria-hidden="true" />
+                Restore this version
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setPreviewRevision(null);
+                  setRevisionPreview(null);
+                }}
+              >
+                <ArrowLeftIcon aria-hidden="true" />
+                Back to latest
+              </Button>
+            </>
+          }
         >
-          <HistoryIcon className="size-4 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">
-            Viewing v{previewRevision.ordinal} — {preview?.filename ?? "Output"}
-          </span>
-          <Button
-            variant="outline"
-            size="xs"
-            className="shrink-0"
-            disabled={restoring}
-            onClick={() => void onRestore()}
-          >
-            <RotateCcwIcon className="size-3.5" />
-            Restore this version
-          </Button>
-          <Button
-            variant="ghost"
-            size="xs"
-            className="shrink-0"
-            onClick={() => {
-              setPreviewRevision(null);
-              setRevisionPreview(null);
-            }}
-          >
-            <ArrowLeftIcon className="size-3.5" />
-            Back to latest
-          </Button>
-        </div>
+          Viewing v{previewRevision.ordinal} — {preview?.filename ?? "Output"}
+        </Notice>
       )}
       {editConflict && (
-        <div
-          className="notice-surface notice-critical mx-6 mt-3 flex shrink-0 flex-wrap items-center gap-2 rounded-md px-3 py-2 text-sm"
-          role="alert"
+        <Notice
+          tone="critical"
+          className="mx-6 mt-3 w-auto shrink-0"
+          action={
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void onReloadLatest()}
+            >
+              Reload latest version
+            </Button>
+          }
         >
-          <span className="min-w-0 flex-1">
-            A newer version of this output was published while you were editing,
-            so nothing was saved. Reload it to work from the latest text.
-          </span>
-          <Button
-            variant="outline"
-            size="xs"
-            className="shrink-0"
-            onClick={() => void onReloadLatest()}
-          >
-            Reload latest version
-          </Button>
-        </div>
+          A newer version of this output was published while you were editing,
+          so nothing was saved. Reload it to work from the latest text.
+        </Notice>
       )}
       {loadError ? (
-        <p className="p-6 text-sm text-critical" role="alert">
+        <Notice
+          tone="critical"
+          title="Could not preview this output"
+          className="m-6 w-auto"
+          action={
+            <NoticeRetryButton
+              onClick={() => setLoadAttempt((count) => count + 1)}
+            />
+          }
+        >
           {loadError}
-        </p>
+        </Notice>
       ) : editor ? (
         <div className="flex min-h-0 flex-1 flex-col gap-2 p-6">
           <Textarea

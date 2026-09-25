@@ -40,7 +40,7 @@ import {
   type FileBytesSource,
 } from "@/document/useFileDownload";
 import { DocumentViewerState } from "@/document/ViewerPrimitives";
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { useTheme } from "@/theme";
 
 // Make the parser asset an application resource. The viewer's default loader
@@ -99,7 +99,11 @@ export default function NativeSpreadsheetViewer({
         className={cn(WORKBOOK_SURFACE, "relative min-h-0", className)}
         {...restProps}
       >
-        <DocumentViewerState variant="error" className="h-full">
+        <DocumentViewerState
+          variant="error"
+          className="h-full"
+          onRetry={fileDownload.error ? fileDownload.retry : undefined}
+        >
           This workbook could not be loaded.
         </DocumentViewerState>
       </div>
@@ -253,7 +257,9 @@ function RenderedWorkbook({
         errorState={(error) => (
           <DocumentViewerState variant="error" className="h-full">
             <span className="block">This workbook could not be read.</span>
-            <span className="mt-1 block text-xs">{error.message}</span>
+            <span className="mt-1 block text-xs">
+              {friendlyErrorMessage(error, "Its contents are not readable.")}
+            </span>
           </DocumentViewerState>
         )}
         experimentalCanvas
@@ -487,7 +493,12 @@ function useReadOnlyProjection(data: ArrayBuffer): {
         if (!cancelled) {
           setState({
             value: null,
-            error: error instanceof Error ? error : new Error(String(error)),
+            error:
+              error instanceof Error
+                ? error
+                : new Error(
+                    friendlyErrorMessage(error, "The workbook did not open."),
+                  ),
           });
         }
       },

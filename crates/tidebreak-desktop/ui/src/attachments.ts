@@ -10,6 +10,7 @@ import {
   type PickedImage,
   type PublishedImage,
 } from "./ImageAttachments";
+import { friendlyErrorMessage } from "./lib/utils";
 
 /** One file the host could not attach as an image, named so it can be reported. */
 export type FailedImage = {
@@ -124,12 +125,7 @@ export async function attachHeldChatFiles(
 }
 
 function importFailureText(error: unknown): string {
-  const message = String(error)
-    .replace(/^Error:\s*/, "")
-    .trim();
-  return message && message.length <= 240
-    ? message
-    : "That file could not be attached.";
+  return friendlyErrorMessage(error, "That file could not be attached.");
 }
 
 /** Claim one just-dropped native path set and attach it to the composer. */

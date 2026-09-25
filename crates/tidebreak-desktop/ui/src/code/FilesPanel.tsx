@@ -34,6 +34,7 @@ import {
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { useLiveResource } from "./useLiveContent";
 import { WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 const TREE_PAGE = 5000;
 
@@ -85,7 +86,9 @@ export function FilesPanel({
   const {
     data: tree,
     error,
+    archived,
     refreshing,
+    refresh,
   } = useLiveResource({
     key: workspaceId,
     revision: contentRevision,
@@ -322,28 +325,38 @@ export function FilesPanel({
           />
         </div>
       )}
-      {!searchMode && error && (
-        <p
-          className={
-            error === WORKSPACE_ARCHIVED_MESSAGE
-              ? "text-muted-foreground px-3 py-2 text-sm"
-              : "text-critical px-3 py-2 text-sm"
-          }
-        >
-          {error}
-        </p>
-      )}
-      {searchMode && searchError && (
-        <p
-          className={
-            searchError === WORKSPACE_ARCHIVED_MESSAGE
-              ? "text-muted-foreground px-3 py-2 text-sm"
-              : "text-critical px-3 py-2 text-sm"
-          }
-        >
-          {searchError}
-        </p>
-      )}
+      {!searchMode &&
+        error &&
+        (archived ? (
+          <Notice tone="neutral" docked="top" className="shrink-0">
+            {error}
+          </Notice>
+        ) : (
+          <Notice
+            tone="critical"
+            docked="top"
+            className="shrink-0"
+            action={
+              <NoticeRetryButton
+                pending={refreshing}
+                onClick={() => void refresh()}
+              />
+            }
+          >
+            {error}
+          </Notice>
+        ))}
+      {searchMode &&
+        searchError &&
+        (searchError === WORKSPACE_ARCHIVED_MESSAGE ? (
+          <Notice tone="neutral" docked="top" className="shrink-0">
+            {searchError}
+          </Notice>
+        ) : (
+          <Notice tone="critical" docked="top" className="shrink-0">
+            {searchError}
+          </Notice>
+        ))}
       {truncated && (
         <p className="text-muted-foreground px-3 py-2 text-xs">
           {searchMode

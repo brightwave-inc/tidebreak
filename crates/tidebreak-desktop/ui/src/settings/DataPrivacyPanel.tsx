@@ -277,17 +277,12 @@ export function DataPrivacyPanel({
               Reading the data folder…
             </p>
           ) : overview === null ? (
-            <div className="flex flex-col items-start gap-3">
-              <SettingsError>{loadError}</SettingsError>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => void reload()}
-              >
-                Try again
-              </Button>
-            </div>
+            <SettingsError
+              title="Could not read the data folder"
+              onRetry={() => void reload()}
+            >
+              {loadError}
+            </SettingsError>
           ) : (
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
               <div className="flex min-w-0 flex-1 basis-64 flex-col gap-1">

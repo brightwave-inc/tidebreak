@@ -6,6 +6,8 @@ import { copyPlainText } from "./ClipboardCopyButton";
 import { BootBrand } from "./Logomark";
 import { WindowDragStrip } from "./WindowDragStrip";
 import { Button } from "@/components/ui/button";
+import { scrubLogText } from "./rendererErrors";
+import { friendlyErrorMessage, sentenceStart } from "@/lib/utils";
 
 /**
  * The screen a reader lands on when the shell cannot reach the API it is
@@ -21,7 +23,8 @@ import { Button } from "@/components/ui/button";
  * So the screen carries the three things the reader needs: which machine could
  * not be reached, a way to try again, and — when the answer is "that machine is
  * not coming back right now" — a way to return this window to the server inside
- * the app. The raw error stays, under the copy the reader can act on.
+ * the app. The error is worded for the reader on the screen; the raw error
+ * rides in the copied debug report, where a bug report needs it.
  */
 
 /** Which step of boot failed. */
@@ -76,10 +79,19 @@ export function bootDebugReport(input: {
   capturedAt: string;
   userAgent: string | null;
 }): string {
+  // The raw error is the evidence a bug report needs, so it stays here,
+  // scrubbed the way the renderer log scrubs it, and never on the screen.
   const error =
     input.error instanceof Error
-      ? { name: input.error.name, message: input.error.message }
-      : { name: null, message: String(input.error) };
+      ? {
+          name: input.error.name,
+          message: scrubLogText(input.error.message, REPORT_MESSAGE_CHARS),
+        }
+      : {
+          name: null,
+          // raw-error-ok: the copied report keeps the raw value as evidence.
+          message: scrubLogText(String(input.error), REPORT_MESSAGE_CHARS),
+        };
   return JSON.stringify(
     {
       capturedAt: input.capturedAt,
@@ -95,6 +107,9 @@ export function bootDebugReport(input: {
     2,
   );
 }
+
+/** The bound the renderer's own log puts on an error message. */
+const REPORT_MESSAGE_CHARS = 1_000;
 
 /** The remote machine's address, or `null` when this is a local boot. */
 function attachedMachine(attachment: BootAttachment | null): string | null {
@@ -163,7 +178,15 @@ export function BootFailure({
       <WindowDragStrip />
       <BootBrand />
       <h1>{headline(attachment, stage)}</h1>
-      <p className="boot-error-detail">{String(error)}</p>
+      {/* Worded for the reader, and set as the sentence under the headline:
+          the host writes its errors as log fragments ("another instance
+          already owns this data directory"). The raw error, in the
+          machine's voice, goes in the copied report. */}
+      <p>
+        {sentenceStart(
+          friendlyErrorMessage(error, "No error message was recorded."),
+        )}
+      </p>
       {machine && (
         <p className="boot-error-hint">
           Work on that machine keeps running. Returning to this computer changes

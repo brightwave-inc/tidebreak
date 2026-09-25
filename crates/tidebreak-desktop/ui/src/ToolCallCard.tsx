@@ -515,7 +515,7 @@ function ToolStatusBadge({
   // failed command, so it outranks the generic outcome word.
   if (typeof result?.exitCode === "number" && result.exitCode !== 0) {
     return (
-      <Badge variant="outline" className="text-destructive shrink-0 gap-1">
+      <Badge variant="outline" className="text-critical shrink-0 gap-1">
         <X className="size-3" aria-hidden="true" />
         Exit {result.exitCode}
       </Badge>
@@ -542,7 +542,7 @@ function ToolStatusBadge({
       variant="outline"
       className={cn(
         "text-muted-foreground shrink-0 gap-1",
-        presentation.tone === "failed" && "text-destructive",
+        presentation.tone === "failed" && "text-critical",
       )}
     >
       <X className="size-3" aria-hidden="true" />

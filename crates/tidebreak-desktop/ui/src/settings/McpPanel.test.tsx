@@ -348,8 +348,9 @@ describe("McpPanel", () => {
     await user.click(screen.getByRole("button", { name: "Add server" }));
     await user.click(screen.getByRole("button", { name: "Save and verify" }));
 
+    // The server's reason, started as a sentence.
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      'invalid external MCP server "docs": must configure exactly one of command, url, or gateway endpoint',
+      'Invalid external MCP server "docs": must configure exactly one of command, url, or gateway endpoint',
     );
   });
 
@@ -697,7 +698,7 @@ describe("McpPanel", () => {
     render(<McpPanel client={client} />);
 
     expect(
-      await screen.findByText("MCP servers could not load"),
+      await screen.findByText("Could not load MCP servers"),
     ).toBeInTheDocument();
     expect(
       screen.queryByText(/No MCP servers configured/),
@@ -732,10 +733,9 @@ describe("McpPanel", () => {
     // disabled toggle is explained rather than passing unknown off as
     // unmounted.
     expect(
-      await screen.findByText(
-        /Could not read the MCP server list: mcp backend unavailable/,
-      ),
+      await screen.findByText("Could not read the MCP server list"),
     ).toBeInTheDocument();
+    expect(screen.getByText("mcp backend unavailable")).toBeInTheDocument();
     expect(
       await screen.findByRole("switch", {
         name: "Connect example-security-tools",
@@ -785,10 +785,9 @@ describe("McpPanel", () => {
       await vi.advanceTimersByTimeAsync(15_100);
     });
     expect(
-      screen.getByText(
-        /Could not read the MCP server list: mcp backend unavailable/,
-      ),
+      screen.getByText("Could not read the MCP server list"),
     ).toBeInTheDocument();
+    expect(screen.getByText("mcp backend unavailable")).toBeInTheDocument();
     const row = mountRow("example-security-tools");
     expect(within(row).getByText(/3 tools available/)).toBeInTheDocument();
     const toggle = within(row).getByRole("switch");

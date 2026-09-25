@@ -27,6 +27,7 @@ import { type LiveResource, useLiveResource } from "./useLiveContent";
 import { WorkspaceRevisionChip } from "./WorkspaceRevisionChip";
 import { STATUS_TEXT } from "./statusTone";
 import { FILE_KIND, type RevertRequest } from "./worktreeUndo";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 /**
  * What a changed-file row offers besides opening its diff: revert the file,
@@ -133,7 +134,8 @@ export function DiffOverviewContent({
   resource: Pick<
     LiveResource<CodeWorkspaceFiles>,
     "data" | "error" | "refreshing"
-  >;
+  > &
+    Partial<Pick<LiveResource<CodeWorkspaceFiles>, "refresh" | "archived">>;
   turnId?: string;
   /** Ordinal label for the scoped turn. Never a raw id. */
   turnLabel?: string;
@@ -146,7 +148,7 @@ export function DiffOverviewContent({
    */
   commit?: (files: CodeWorkspaceFiles | null) => ReactNode;
 }) {
-  const { data: payload, error, refreshing } = resource;
+  const { data: payload, error, archived, refreshing, refresh } = resource;
 
   const scopeCaption = turnId
     ? (turnLabel ?? "This turn")
@@ -192,7 +194,24 @@ export function DiffOverviewContent({
           </span>
         </div>
       </header>
-      {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
+      {error && (
+        <Notice
+          tone={archived ? "neutral" : "critical"}
+          docked="top"
+          className="shrink-0"
+          action={
+            refresh &&
+            !archived && (
+              <NoticeRetryButton
+                pending={refreshing}
+                onClick={() => void refresh()}
+              />
+            )
+          }
+        >
+          {error}
+        </Notice>
+      )}
       {payload?.truncated && (
         <p className="text-muted-foreground border-y px-3 py-2 text-xs">
           The changed-file list was truncated.

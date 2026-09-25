@@ -113,6 +113,7 @@ import {
   STATUS_TEXT,
   type StatusTone,
 } from "./statusTone";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 type MergeMethod = "squash" | "merge" | "rebase";
 type DetailTab = "conversation" | "files" | "checks";
@@ -935,19 +936,20 @@ function DetailErrors({
 }) {
   if (errors.length === 0) return null;
   return (
-    <div
+    <Notice
+      tone="warning"
       role="alert"
-      className="m-5 mb-0 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2.5 text-xs"
+      title="Some details could not load"
+      className="m-5 mb-0 w-auto"
     >
-      <p className="font-medium text-warning">Some details could not load.</p>
-      <ul className="mt-1 list-disc space-y-1 pl-4 text-muted-foreground">
+      <ul className="mt-1 list-disc space-y-1 pl-4 text-xs">
         {errors.map((error, index) => (
           <li key={`${error.kind}:${error.message}:${index}`}>
             {error.message}
           </li>
         ))}
       </ul>
-    </div>
+    </Notice>
   );
 }
 
@@ -2260,12 +2262,13 @@ function InlineDetailError({
   onRetry: () => void;
 }) {
   return (
-    <div className="notice-surface notice-critical m-5 flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
-      <span>{message}</span>
-      <Button type="button" size="xs" variant="outline" onClick={onRetry}>
-        Try again
-      </Button>
-    </div>
+    <Notice
+      tone="critical"
+      className="m-5 w-auto"
+      action={<NoticeRetryButton onClick={onRetry} />}
+    >
+      {message}
+    </Notice>
   );
 }
 

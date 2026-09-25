@@ -5,6 +5,7 @@ import type {
   VoiceTranscriptionInfo,
   VoiceTranscriptionModel,
 } from "./api";
+import { friendlyErrorMessage } from "./lib/utils";
 
 type VoiceInputStore = {
   info: VoiceTranscriptionInfo | null;
@@ -33,7 +34,10 @@ export const useVoiceInputStore = create<VoiceInputStore>()((set, get) => ({
       set({ info, loading: false });
       return info;
     } catch (caught) {
-      set({ loading: false, error: String(caught) });
+      set({
+        loading: false,
+        error: friendlyErrorMessage(caught, "Try again in a moment."),
+      });
       return null;
     }
   },
@@ -45,7 +49,10 @@ export const useVoiceInputStore = create<VoiceInputStore>()((set, get) => ({
         loading: false,
       });
     } catch (caught) {
-      set({ loading: false, error: String(caught) });
+      set({
+        loading: false,
+        error: friendlyErrorMessage(caught, "Could not save that choice."),
+      });
     }
   },
   /**
@@ -74,7 +81,11 @@ export const useVoiceInputStore = create<VoiceInputStore>()((set, get) => ({
       set({ installing: null });
       await get().select(client, "local", model);
     } catch (caught) {
-      set({ loading: false, installing: null, error: String(caught) });
+      set({
+        loading: false,
+        installing: null,
+        error: friendlyErrorMessage(caught, "Could not download that model."),
+      });
       const info = await client.getVoiceTranscription().catch(() => null);
       if (info) set({ info });
     } finally {

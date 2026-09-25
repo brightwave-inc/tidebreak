@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 import type { RuntimeSettings } from "@/api/types";
 import { GitSourceControlPanel } from "@/settings/GitSourceControlPanel";
+import { failureFixtures } from "./fixtures";
 import { storySettings } from "./SettingsStoryHarness";
 
 function settings(
@@ -30,7 +31,9 @@ function client(
       ? () => new Promise<RuntimeSettings>(() => undefined)
       : options.loadFailure
         ? async () => {
-            throw new Error("Git settings could not be loaded.");
+            // A read that never reached the server; the panel's notice
+            // names what failed, and the formatter words why.
+            throw failureFixtures.unreachable;
           }
         : async () => stored,
     putSettings: fn(async (body) => {

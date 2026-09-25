@@ -726,7 +726,9 @@ export function AppShell() {
         if (!cancelled) chatListActions.setChats(existingChats);
       } catch (err) {
         if (!cancelled) {
-          chatListActions.failChatsLoad(`Could not load work: ${String(err)}`);
+          chatListActions.failChatsLoad(
+            `Could not load work: ${friendlyErrorMessage(err, "Try again.")}`,
+          );
         }
       }
     })();
@@ -742,7 +744,9 @@ export function AppShell() {
       chatListActions.setChats(await client.listChats());
       chatListActions.setChatsError(null);
     } catch (err) {
-      chatListActions.failChatsLoad(`Could not load work: ${String(err)}`);
+      chatListActions.failChatsLoad(
+        `Could not load work: ${friendlyErrorMessage(err, "Try again.")}`,
+      );
     }
   }
 
@@ -1071,7 +1075,7 @@ export function AppShell() {
         // Product delete already committed. Surface the host cleanup failure
         // without undoing the delete — startup reconcile is the backup path.
         chatListActions.setChatsError(
-          `Work deleted, but host permissions could not be cleared: ${String(err)}`,
+          `Work deleted, but host permissions could not be cleared: ${friendlyErrorMessage(err, "Restart the app to clear them.")}`,
         );
       }
       // Nothing left to send it to.
@@ -1171,7 +1175,9 @@ export function AppShell() {
       chatListActions.replaceChat(updated, true);
       chatListActions.endRename();
     } catch (err) {
-      chatListActions.setChatsError(`Could not rename work: ${String(err)}`);
+      chatListActions.setChatsError(
+        `Could not rename work: ${friendlyErrorMessage(err, "Try again.")}`,
+      );
     } finally {
       chatListActions.setSavingTitle(false);
     }

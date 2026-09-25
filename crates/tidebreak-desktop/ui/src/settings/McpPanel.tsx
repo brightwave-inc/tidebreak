@@ -1,15 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
+import { ExternalLink, Plus, RefreshCw, Trash2, Upload } from "lucide-react";
 import {
-  CircleAlert,
-  ExternalLink,
-  Plus,
-  RefreshCw,
-  Trash2,
-  Upload,
-} from "lucide-react";
-import {
-  HttpError,
   type ApiClient,
   type GatewayApps,
   type McpDirectoryEntry,
@@ -19,14 +11,6 @@ import {
   type McpServerInfo,
 } from "../api";
 import { Button } from "@/components/ui/button";
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -50,6 +34,8 @@ import {
   type McpImportSecret,
   type McpImportStored,
 } from "./mcpImport";
+import { Notice } from "@/components/ui/notice";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 3_600_000;
@@ -102,7 +88,7 @@ export function McpHealthChip({ health }: { health: McpHealth }) {
     health === "healthy"
       ? "text-success"
       : health === "degraded"
-        ? "text-destructive"
+        ? "text-critical"
         : "text-muted-foreground";
   return (
     <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
@@ -600,6 +586,9 @@ export function McpPanel({
   // toggle would be a write against unknown state, so the rows say so.
   const [serversKnown, setServersKnown] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  // A server-list read is in flight, so a Retry waits for it rather than
+  // sending another.
+  const [listReading, setListReading] = useState(false);
   // Bumped by the Retry affordance; re-runs the list effect immediately and
   // restarts its cadence.
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -765,6 +754,7 @@ export function McpPanel({
   useEffect(() => {
     const read = async () => {
       const request = ++requestRef.current;
+      setListReading(true);
       try {
         const result = await client.listMcpServers();
         if (request !== requestRef.current) return;
@@ -776,6 +766,8 @@ export function McpPanel({
         if (request !== requestRef.current) return;
         setListError(errorMessage(err));
         setLoading(false);
+      } finally {
+        if (request === requestRef.current) setListReading(false);
       }
     };
     void read();
@@ -1170,6 +1162,7 @@ export function McpPanel({
       entitledSlugs={apps?.supported === true ? entitledSlugs : null}
       appsFailed={appsFailed}
       listError={listError}
+      listReading={listReading}
       working={working}
       onRetry={() => {
         // One error surface: a retry that recovers the list must not leave a
@@ -1211,23 +1204,16 @@ export function McpPanel({
           </p>
         )}
         {listError !== null && endpointSlugs.length > 0 && (
-          <div className="flex items-center justify-between gap-4">
-            <SettingsError>
-              Could not read the MCP server list: {listError}
-            </SettingsError>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={working}
-              onClick={() => {
-                setError(null);
-                setRefreshNonce((nonce) => nonce + 1);
-              }}
-            >
-              <RefreshCw size={14} />
-              Try again
-            </Button>
-          </div>
+          <SettingsError
+            title="Could not read the MCP server list"
+            onRetry={() => {
+              setError(null);
+              setRefreshNonce((nonce) => nonce + 1);
+            }}
+            retrying={listReading || working}
+          >
+            {listError}
+          </SettingsError>
         )}
         {loading && !serversKnown ? (
           <p className="text-sm text-muted-foreground">Loading endpoints…</p>
@@ -1236,6 +1222,7 @@ export function McpPanel({
           endpointSlugs.length === 0 ? (
           <McpLoadFailure
             error={listError}
+            retrying={listReading}
             onRetry={() => {
               setError(null);
               setRefreshNonce((nonce) => nonce + 1);
@@ -1317,7 +1304,7 @@ export function McpPanel({
                     mounted.health !== "initializing" &&
                     mounted.health !== "reconnecting" &&
                     mounted.diagnostic !== null && (
-                      <span className="text-xs text-destructive break-words">
+                      <span className="text-xs text-critical break-words">
                         {mounted.diagnostic}
                       </span>
                     )}
@@ -1342,6 +1329,7 @@ export function McpPanel({
       ) : listError !== null && !serversKnown && !endpointsVisible ? (
         <McpLoadFailure
           error={listError}
+          retrying={listReading}
           onRetry={() => {
             setError(null);
             setRefreshNonce((nonce) => nonce + 1);
@@ -1899,26 +1887,21 @@ function storedByServer(stored: McpImportStored[]): Array<[string, string[]]> {
  */
 function McpLoadFailure({
   error,
+  retrying,
   onRetry,
 }: {
   error: string;
+  retrying: boolean;
   onRetry: () => void;
 }) {
   return (
-    <Empty className="min-h-80 border" role="alert">
-      <EmptyHeader>
-        <EmptyMedia variant="icon" className="text-critical">
-          <CircleAlert />
-        </EmptyMedia>
-        <EmptyTitle>MCP servers could not load</EmptyTitle>
-        <EmptyDescription>{error}</EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent>
-        <Button variant="outline" size="sm" onClick={onRetry}>
-          Try again
-        </Button>
-      </EmptyContent>
-    </Empty>
+    <SettingsError
+      title="Could not load MCP servers"
+      onRetry={onRetry}
+      retrying={retrying}
+    >
+      {error}
+    </SettingsError>
   );
 }
 
@@ -1985,14 +1968,11 @@ function mountStatus(mounted: McpServerInfo): string {
   }
 }
 
-/** A message that can sit mid-sentence: `String(err)` would keep the error
- * class prefix ("HttpError: ...") in front of it. HTTP status prefixes stay
- * off so a rejected save shows the server's field-level reason. */
+/** A failure in the app's one wording (`friendlyErrorMessage`): a rejected
+ * save shows the server's field-level reason, without a class name or an
+ * HTTP status in front of it. */
 function errorMessage(err: unknown): string {
-  if (err instanceof HttpError) {
-    return err.message.replace(/^\d+:\s*/, "");
-  }
-  return err instanceof Error ? err.message : String(err);
+  return friendlyErrorMessage(err, "Try again in a moment.");
 }
 
 /** A fresh gateway mount: everything comes from the session except the name,
@@ -2036,6 +2016,7 @@ function GatewayEndpoints({
   entitledSlugs,
   appsFailed,
   listError,
+  listReading,
   working,
   onRetry,
   onToggle,
@@ -2051,6 +2032,8 @@ function GatewayEndpoints({
   entitledSlugs: ReadonlySet<string> | null;
   appsFailed: boolean;
   listError: string | null;
+  /** A list read is in flight; the Retry waits for it. */
+  listReading: boolean;
   working: boolean;
   onRetry: () => void;
   onToggle: (slug: string, mounted: boolean) => void;
@@ -2082,20 +2065,13 @@ function GatewayEndpoints({
         </p>
       )}
       {listError !== null && (
-        <div className="flex items-center justify-between gap-4">
-          <SettingsError>
-            Could not read the MCP server list: {listError}
-          </SettingsError>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={working}
-            onClick={onRetry}
-          >
-            <RefreshCw size={14} />
-            Try again
-          </Button>
-        </div>
+        <SettingsError
+          title="Could not read the MCP server list"
+          onRetry={onRetry}
+          retrying={listReading || working}
+        >
+          {listError}
+        </SettingsError>
       )}
       {slugs.length > 0 && (
         <ul className="flex flex-col gap-2">
@@ -2545,15 +2521,13 @@ function UrlEditDropsStoredValues({
   const dropped = droppedByUrlEdit(server, saved);
   if (dropped === null) return null;
   return (
-    <div className="notice-surface notice-warning flex flex-col gap-1 rounded-xl border px-3 py-2">
-      <p className="text-sm font-medium">
-        Saving this URL drops the stored {dropped}
-      </p>
-      <p className="text-sm">
-        Tidebreak sends a stored value only to the URL it was entered for. Enter
-        the values again below, or change the URL back to keep them.
-      </p>
-    </div>
+    <Notice
+      tone="warning"
+      title={`Saving this URL drops the stored ${dropped}`}
+    >
+      Tidebreak sends a stored value only to the URL it was entered for. Enter
+      the values again below, or change the URL back to keep them.
+    </Notice>
   );
 }
 

@@ -19,6 +19,7 @@ import {
   type OutputDetailApis,
 } from "@/outputs/OutputDetailRoot";
 import { SourceNavProvider } from "@/panel/SourceNav";
+import { failureFixtures } from "./fixtures";
 
 const markdown = `# Q3 renewal plan
 
@@ -201,7 +202,7 @@ export const Failure: Story = {
   args: {
     apis: outputApis({
       read: async () => {
-        throw new Error("The output revision is unavailable.");
+        throw failureFixtures.unavailable;
       },
     }),
   },

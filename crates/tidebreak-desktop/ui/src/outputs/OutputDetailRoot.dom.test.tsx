@@ -175,6 +175,27 @@ describe("OutputDetailRoot", () => {
     );
   });
 
+  it("reads the output again when the reader tries again", async () => {
+    const user = userEvent.setup();
+    const read = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("Load failed"))
+      .mockResolvedValue(preview());
+    await openOutput(detailApis({ read }));
+
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveTextContent("Could not preview this output");
+    expect(failure).toHaveTextContent("Tidebreak could not reach its server.");
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Findings" }),
+    ).toBeVisible();
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   // CSV shares the spreadsheet viewer with xlsx — never markdown, which would
   // eat its structure into headings.
   it("renders a delimited output in the spreadsheet viewer", async () => {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CircleAlert, Plus, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 
 import type { ApiClient } from "@/api/client";
 import type { CodeRepoSnapshot, QuickAction } from "@/api/types";
@@ -11,6 +11,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { SettingsField, SettingsSection } from "@/settings/primitives";
 import { RepositoryTrustSettings } from "./RepositoryTrustSettings";
+import { Notice, NoticeRetryButton } from "@/components/ui/notice";
 
 type RepoSettingsClient = Pick<
   ApiClient,
@@ -226,22 +227,19 @@ export function RepositorySettings({
           {(loading || busy) && <Spinner className="size-3.5" />}
         </div>
         {error && (
-          <div className="notice-surface notice-critical flex flex-col items-stretch gap-2 rounded-md border px-3 py-2 text-xs min-[480px]:flex-row min-[480px]:items-center min-[480px]:justify-between">
-            <span className="flex min-w-0 items-start gap-2">
-              <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
-              <span className="min-w-0">{error}</span>
-            </span>
-            <Button
-              type="button"
-              size="xs"
-              variant="outline"
-              className="shrink-0 self-end min-[480px]:self-auto"
-              disabled={loading}
-              onClick={() => void load()}
-            >
-              Try again
-            </Button>
-          </div>
+          <Notice
+            tone="critical"
+            density="compact"
+            action={
+              <NoticeRetryButton
+                size="xs"
+                pending={loading}
+                onClick={() => void load()}
+              />
+            }
+          >
+            {error}
+          </Notice>
         )}
         {!loading && draft && (
           <>
