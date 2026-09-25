@@ -17,7 +17,7 @@ import {
 export const MENU_COMMAND_EVENT = "desktop-menu-command";
 
 /** Where Help > Documentation goes. */
-export const DOCUMENTATION_URL = "https://www.tidebreak.io/docs/";
+export const DOCUMENTATION_URL = "https://naingthet.github.io/tidebreak/docs/";
 
 /**
  * The shell shortcut behind each menu item that has one.

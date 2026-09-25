@@ -49,7 +49,7 @@ describe("UpdateReadyCard", () => {
     ).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Release notes" }));
     expect(openInBrowser).toHaveBeenCalledWith(
-      "https://github.com/brightwave-inc/tidebreak/releases/tag/v0.59.0",
+      "https://github.com/naingthet/tidebreak/releases/tag/v0.59.0",
     );
 
     await user.click(
@@ -65,7 +65,7 @@ describe("UpdateReadyCard", () => {
 
   it("links to the latest release when the version is unavailable", () => {
     expect(releaseNotesUrl(null)).toBe(
-      "https://github.com/brightwave-inc/tidebreak/releases/latest",
+      "https://github.com/naingthet/tidebreak/releases/latest",
     );
   });
 

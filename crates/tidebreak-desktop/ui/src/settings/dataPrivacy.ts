@@ -83,7 +83,7 @@ export const OUTBOUND_TRAFFIC: readonly OutboundTraffic[] = [
   {
     id: "updates",
     title: "Update checks",
-    what: "Tidebreak checks downloads.brightwave.io for a new version at launch and every hour, and downloads it unless you turn that off.",
+    what: "Tidebreak checks github.com/naingthet/tidebreak for a new version at launch and every hour, and downloads it unless you turn that off.",
     off: "Turn off Download updates automatically. The check itself always runs.",
     section: { path: "updates", label: "Updates" },
   },

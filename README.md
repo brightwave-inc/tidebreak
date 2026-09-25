@@ -5,6 +5,9 @@
 
 <h1 align="center">Tidebreak</h1>
 
+> [!NOTE]
+> Tidebreak's home is now **[github.com/naingthet/tidebreak](https://github.com/naingthet/tidebreak)**. This repository stays in place at v1.0.0. Development, releases, and updates continue there: v1.0.0 and later check that repository for updates.
+
 <p align="center">
   <strong>The open-source, local-first desktop for AI coding agents and finished work.</strong>
 </p>

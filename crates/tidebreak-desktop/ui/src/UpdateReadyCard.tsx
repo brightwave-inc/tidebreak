@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { openInBrowser } from "@/openInBrowser";
 
-const RELEASES_URL = "https://github.com/brightwave-inc/tidebreak/releases";
+const RELEASES_URL = "https://github.com/naingthet/tidebreak/releases";
 
 type UpdateReadyCardProps =
   | {
