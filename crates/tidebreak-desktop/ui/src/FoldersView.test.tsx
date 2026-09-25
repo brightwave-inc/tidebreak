@@ -361,7 +361,7 @@ describe("FoldersView", () => {
     expect(screen.getByText("Research")).toBeInTheDocument();
   });
 
-  it("changes whether a folder is available in future chats", async () => {
+  it("changes whether a folder is available in future conversations", async () => {
     vi.mocked(host.listConnectedFolders)
       .mockResolvedValueOnce([folder("drafts", "Drafts")])
       .mockResolvedValueOnce([folder("drafts", "Drafts", "connected", true)]);
@@ -369,7 +369,7 @@ describe("FoldersView", () => {
     render(<FoldersView chat={chat} />);
 
     const toggle = await screen.findByRole("switch", {
-      name: "Available in future chats for Drafts",
+      name: "Available in future conversations for Drafts",
     });
     expect(toggle).not.toBeChecked();
     await user.click(toggle);

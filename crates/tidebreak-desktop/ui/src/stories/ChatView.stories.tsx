@@ -1208,7 +1208,7 @@ export const LoadingTranscript: Story = {
     scenario: {
       id: "loading-transcript",
       messages: [],
-      draft: "Keep this draft while the work loads.",
+      draft: "Keep this draft while the conversation loads.",
       hydration: "loading",
     },
   },
@@ -1219,7 +1219,7 @@ export const HydrationFailure: Story = {
     scenario: {
       id: "hydration-failure",
       messages: [],
-      draft: "Keep this draft while the work loads.",
+      draft: "Keep this draft while the conversation loads.",
       hydration: "error",
     },
   },
@@ -1230,21 +1230,21 @@ export const HydrationRetry: Story = {
     scenario: {
       id: "hydration-retry",
       messages: [],
-      draft: "Keep this draft while the work loads.",
+      draft: "Keep this draft while the conversation loads.",
       hydration: "error",
     },
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(await canvas.findByRole("alert")).toHaveTextContent(
-      "Could not load this work",
+      "Could not load this conversation",
     );
     await expect(canvas.getByRole("textbox")).toBeDisabled();
     await userEvent.click(canvas.getByRole("button", { name: "Try again" }));
     await expect(canvas.queryByRole("alert")).not.toBeInTheDocument();
     await expect(canvas.getByRole("textbox")).toBeEnabled();
     await expect(canvas.getByRole("textbox")).toHaveValue(
-      "Keep this draft while the work loads.",
+      "Keep this draft while the conversation loads.",
     );
   },
 };

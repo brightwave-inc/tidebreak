@@ -18,7 +18,7 @@ export const INCOGNITO_FIND_NOTE =
 
 /** Why the find bar searches only what a session shared with you has loaded. */
 export const SHARED_FIND_NOTE =
-  "Search covers only your own sessions, so this finds only in what is loaded here.";
+  "Search covers only your own conversations, so this finds only in what is loaded here.";
 
 /**
  * Whether `text` holds every one of `terms`, each at the start of a word or

@@ -39,7 +39,7 @@ export function withCodeGrantsApi<TBase extends Constructor<HttpCore>>(
             { headers: this.headers() },
           ),
         ),
-        "channel harness catalog",
+        "channel engine catalog",
       );
     }
 

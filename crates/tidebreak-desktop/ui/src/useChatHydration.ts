@@ -52,7 +52,10 @@ export function useChatHydration(client: HydrationClient, chatId: string) {
           chatId,
           attempt,
           hydrated: false,
-          error: friendlyErrorMessage(error, "Could not load this work."),
+          error: friendlyErrorMessage(
+            error,
+            "Could not load this conversation.",
+          ),
         });
       },
     );

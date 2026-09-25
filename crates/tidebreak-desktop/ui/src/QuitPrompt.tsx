@@ -97,8 +97,8 @@ export function quitPromptCopy(
           ? `${verb} while an agent is working?`
           : `${verb} while ${prompt.agents} agents are working?`,
         description: one
-          ? "Stopping it ends its current turn. At a safe point, a code turn finishes first, and a chat continues the next time Tidebreak opens."
-          : "Stopping them ends their current turns. At a safe point, code turns finish first, and chats continue the next time Tidebreak opens.",
+          ? "Stopping it ends its current turn. At a safe point, a code turn finishes first, and a conversation continues the next time Tidebreak opens."
+          : "Stopping them ends their current turns. At a safe point, code turns finish first, and conversations continue the next time Tidebreak opens.",
         stopLabel,
         safePointLabel,
         waitingNote: waitingForYouNote(prompt),

@@ -376,7 +376,7 @@ export function DataPrivacyPanel({
           )}
           <ActionRow
             title="Export conversations"
-            description="Your chats as Markdown files or one JSON file, all of them or the ones you choose: the messages and the names of attached files. Coding sessions, tool activity, and attachment contents are not in it."
+            description="Your conversations as Markdown files or one JSON file, all of them or the ones you choose: the messages and the names of attached files. Code conversations, tool activity, and attachment contents are not in it."
           >
             <Button
               type="button"

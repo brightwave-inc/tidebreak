@@ -5,12 +5,12 @@ import { TriggerEventCard } from "@/code/TriggerEventCard";
 import type { TriggerTurnContext } from "@/generated/wire";
 
 /**
- * A pull-request event delivered to the agent in chat: a trigger fire or a
- * watch fix turn, drawn as the event it is rather than as a person's
- * message. The collapsed row leads with the condition and the pull request;
- * the expand holds the failing checks, the head, and the exact instruction
- * the agent received. The states that matter are the conditions with
- * different tones, the watch source, and a long title forcing truncation.
+ * A pull-request event delivered to the agent in a conversation: a trigger
+ * fire or a watch fix turn, drawn as the event it is rather than as a
+ * person's message. The collapsed row leads with the condition and the pull
+ * request; the expand holds the failing checks, the head, and the exact
+ * instruction the agent received. The states that matter are the conditions
+ * with different tones, the watch source, and a long title forcing truncation.
  */
 const meta = {
   title: "Code/Trigger event",

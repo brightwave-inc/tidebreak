@@ -60,7 +60,8 @@ export function useChatListWatcher(client: ApiClient | null): void {
       } catch (err) {
         // Keep the last list. A transient failure is no reason to blank the
         // rail, and the boot load already reports a list that never arrived.
-        if (!cancelled) console.error("failed to refresh the work list", err);
+        if (!cancelled)
+          console.error("failed to refresh the conversation list", err);
       } finally {
         inFlight = false;
         if (queued && !cancelled) {

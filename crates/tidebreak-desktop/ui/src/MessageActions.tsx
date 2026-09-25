@@ -209,7 +209,7 @@ export function RegenerateControl({
               <p className="message-rerun-note">{newChatNote}</p>
               <DropdownMenuItem onSelect={() => onRegenerate()}>
                 <RefreshCw aria-hidden="true" />
-                Regenerate in new chat
+                Regenerate in a new conversation
               </DropdownMenuItem>
             </>
           )}
@@ -233,7 +233,7 @@ export function RegenerateControl({
                   <span className="min-w-0 flex-1 truncate">{model.label}</span>
                   {model.key === currentModelKey && (
                     <Check
-                      aria-label="The chat's model"
+                      aria-label="The conversation's model"
                       className="text-muted-foreground"
                     />
                   )}
@@ -303,7 +303,7 @@ export function editStartsNewChatCopy(
   effects: readonly TurnSideEffect[],
 ): string | null {
   if (effects.length === 0) return null;
-  return `Your edit replaces an answer that ${sideEffectsPhrase(effects)}, so it starts a new chat. This chat stays as it is.`;
+  return `Your edit replaces an answer that ${sideEffectsPhrase(effects)}, so it starts a new conversation. This conversation stays as it is.`;
 }
 
 /**
@@ -314,7 +314,7 @@ export function regenerateStartsNewChatCopy(
   effects: readonly TurnSideEffect[],
 ): string | null {
   if (effects.length === 0) return null;
-  return `This answer ${sideEffectsPhrase(effects)}, so answering again starts a new chat. This chat stays as it is.`;
+  return `This answer ${sideEffectsPhrase(effects)}, so answering again starts a new conversation. This conversation stays as it is.`;
 }
 
 /**
@@ -393,7 +393,7 @@ export function UserMessageEditor({
           Cancel
         </Button>
         <Button type="submit" size="sm" disabled={!changed}>
-          {note ? "Send in new chat" : "Send"}
+          {note ? "Send in a new conversation" : "Send"}
         </Button>
       </div>
     </form>
@@ -424,11 +424,11 @@ export function BranchNotice({
             className="message-branch-notice-link"
             onClick={onOpen}
           >
-            {title ?? "the original chat"}
+            {title ?? "the original conversation"}
           </button>
         </span>
       ) : (
-        <span>Branched from a chat that no longer exists</span>
+        <span>Branched from a conversation that no longer exists</span>
       )}
     </div>
   );

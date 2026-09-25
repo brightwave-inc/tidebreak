@@ -30,8 +30,8 @@ export function ArchivedChatNotice({ chat }: { chat: Chat }) {
         </Button>
       }
     >
-      This work is archived. It stays out of your list until you unarchive it or
-      send a message.
+      This conversation is archived. It stays out of your list until you
+      unarchive it or send a message.
     </Notice>
   );
 }

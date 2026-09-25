@@ -727,7 +727,7 @@ export function AppShell() {
       } catch (err) {
         if (!cancelled) {
           chatListActions.failChatsLoad(
-            `Could not load work: ${friendlyErrorMessage(err, "Try again.")}`,
+            `Could not load conversations: ${friendlyErrorMessage(err, "Try again.")}`,
           );
         }
       }
@@ -745,7 +745,7 @@ export function AppShell() {
       chatListActions.setChatsError(null);
     } catch (err) {
       chatListActions.failChatsLoad(
-        `Could not load work: ${friendlyErrorMessage(err, "Try again.")}`,
+        `Could not load conversations: ${friendlyErrorMessage(err, "Try again.")}`,
       );
     }
   }
@@ -922,7 +922,9 @@ export function AppShell() {
           : navigate({ to: "/c/$chatId", params: { chatId: chat.id } }));
       }
     } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not move the work."));
+      toast.error(
+        friendlyErrorMessage(err, "Could not move the conversation."),
+      );
     } finally {
       projectMutationRef.current = false;
     }
@@ -958,7 +960,7 @@ export function AppShell() {
   async function onDeleteChat(target: Chat) {
     if (!client || deletionInFlightRef.current || creationInFlightRef.current)
       return;
-    const label = target.title?.trim() || "this work";
+    const label = target.title?.trim() || "this conversation";
     // The listed chat carries the folders it had at the last refresh, which
     // predates anything connected since. The server refuses the delete on its
     // own count, so ask it what is attached before promising to detach it.
@@ -1001,7 +1003,7 @@ export function AppShell() {
         stopping,
         offerArchive,
       }),
-      confirmLabel: stopping ? "Stop and delete" : "Delete work",
+      confirmLabel: stopping ? "Stop and delete" : "Delete conversation",
       destructive: true,
     };
     const decision = offerArchive
@@ -1075,7 +1077,7 @@ export function AppShell() {
         // Product delete already committed. Surface the host cleanup failure
         // without undoing the delete — startup reconcile is the backup path.
         chatListActions.setChatsError(
-          `Work deleted, but host permissions could not be cleared: ${friendlyErrorMessage(err, "Restart the app to clear them.")}`,
+          `Conversation deleted, but host permissions could not be cleared: ${friendlyErrorMessage(err, "Restart the app to clear them.")}`,
         );
       }
       // Nothing left to send it to.
@@ -1107,7 +1109,7 @@ export function AppShell() {
         await client.setChatPinned(target.id, !target.pinned_at),
       );
     } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not pin the work."));
+      toast.error(friendlyErrorMessage(err, "Could not pin the conversation."));
     }
   }
 
@@ -1119,7 +1121,7 @@ export function AppShell() {
    */
   async function onSetChatArchived(target: Chat, archived: boolean) {
     if (!client) return;
-    const label = target.title?.trim() || "Work";
+    const label = target.title?.trim() || "Conversation";
     try {
       chatListActions.replaceChat(
         await client.setChatArchived(target.id, archived),
@@ -1128,7 +1130,9 @@ export function AppShell() {
       toast.error(
         friendlyErrorMessage(
           err,
-          archived ? "Could not archive the work." : "Could not unarchive it.",
+          archived
+            ? "Could not archive the conversation."
+            : "Could not unarchive it.",
         ),
       );
       return;
@@ -1176,7 +1180,7 @@ export function AppShell() {
       chatListActions.endRename();
     } catch (err) {
       chatListActions.setChatsError(
-        `Could not rename work: ${friendlyErrorMessage(err, "Try again.")}`,
+        `Could not rename the conversation: ${friendlyErrorMessage(err, "Try again.")}`,
       );
     } finally {
       chatListActions.setSavingTitle(false);

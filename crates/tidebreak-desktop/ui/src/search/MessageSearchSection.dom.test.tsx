@@ -55,7 +55,7 @@ describe("the palette's Messages section", () => {
       .map((mark) => mark.textContent);
     expect(marks).toEqual(["harbour"]);
     expect(first).toHaveTextContent("Harbour pricing notes");
-    expect(first).toHaveTextContent("Chat");
+    expect(first).toHaveTextContent("Work");
 
     const code = options[2]!;
     expect(code).toHaveTextContent("fix-harbour-rounding");

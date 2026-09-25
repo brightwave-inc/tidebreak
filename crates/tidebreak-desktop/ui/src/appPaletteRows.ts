@@ -54,13 +54,13 @@ export function currentChatPaletteRows(input: {
   onExport: () => void;
   onFind: () => void;
 }): PaletteRow[] {
-  const title = input.chat.title?.trim() || "this work";
+  const title = input.chat.title?.trim() || "this conversation";
   const rows: PaletteRow[] = [
     findPaletteRow(input.onFind, "Find in this conversation"),
     {
       id: "chat:rename",
       section: "actions",
-      label: "Rename this work",
+      label: "Rename this conversation",
       hint: title,
       keywords: "title name chat conversation",
       icon: Pencil,
@@ -71,7 +71,7 @@ export function currentChatPaletteRows(input: {
     {
       id: "chat:export",
       section: "actions",
-      label: "Export this work",
+      label: "Export this conversation",
       hint: "Markdown",
       keywords: "download save conversation transcript markdown",
       icon: Download,
@@ -107,7 +107,7 @@ export function currentChatPaletteRows(input: {
   rows.push({
     id: "chat:delete",
     section: "actions",
-    label: "Delete this work",
+    label: "Delete this conversation",
     hint: title,
     keywords: "remove chat conversation trash",
     icon: Trash2,

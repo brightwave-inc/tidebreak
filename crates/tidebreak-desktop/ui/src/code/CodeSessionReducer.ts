@@ -1752,7 +1752,7 @@ function withTruncationNotice(
     kind: "notice",
     id: TRUNCATED_NOTICE_ID,
     level: "info",
-    message: "Earlier history in this session is not shown.",
+    message: "Earlier history in this conversation is not shown.",
   };
   return items.length === 0 ? [notice] : [...items, notice];
 }

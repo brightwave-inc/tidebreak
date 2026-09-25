@@ -230,7 +230,7 @@ export function WelcomeState({
   }
 
   return (
-    <section className="welcome" aria-label="Start work">
+    <section className="welcome" aria-label="Start a conversation">
       <div className="welcome-intro">
         <span className="welcome-mark" aria-hidden="true">
           <Logomark />

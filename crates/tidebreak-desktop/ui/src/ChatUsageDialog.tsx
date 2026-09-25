@@ -74,7 +74,10 @@ export function ChatUsageDialog({
       } catch (caught) {
         if (!current) return;
         toast.error(
-          friendlyErrorMessage(caught, "Could not read this work's usage."),
+          friendlyErrorMessage(
+            caught,
+            "Could not read this conversation's usage.",
+          ),
         );
       }
     })();
@@ -121,7 +124,7 @@ function ContextWindowPanel({
       <section className="rounded-lg border bg-muted/30 px-3.5 py-4">
         <SectionLabel>Last turn</SectionLabel>
         <p className="mt-2 text-sm text-muted-foreground">
-          No turn has finished in this work yet.
+          No turn has finished in this conversation yet.
         </p>
       </section>
     );
@@ -215,7 +218,7 @@ function ChatTotalsPanel({
   return (
     <section className="space-y-2.5">
       <div className="flex items-baseline justify-between gap-2">
-        <SectionLabel>This work</SectionLabel>
+        <SectionLabel>This conversation</SectionLabel>
         {turns !== null && totals.turns > 0 && (
           <span className="text-2xs text-muted-foreground tabular-nums">
             {totals.turns} {totals.turns === 1 ? "turn" : "turns"}

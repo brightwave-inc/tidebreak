@@ -25,21 +25,25 @@ export function CodeSessionTree({
   const waitLabel = sessionTreeWaitLabel(wait);
   return (
     <section
-      aria-label="Child sessions"
+      aria-label="Child conversations"
       className="border-border-subtle mx-auto mt-3 w-[calc(100%-2rem)] max-w-3xl rounded-lg border px-3 py-2"
       data-testid="session-tree"
     >
-      <div className="flex items-baseline justify-between gap-2">
+      {/* In a narrow pane the wait count drops below the heading whole,
+          rather than breaking "Waiting on 6 of 6" across two lines. */}
+      <div className="flex flex-wrap items-baseline justify-between gap-x-2">
         <h2 className="text-xs font-medium text-muted-foreground">
-          Child sessions
+          Child conversations
         </h2>
         {waitLabel && (
-          <p className={cn("text-xs", STATUS_TEXT.pending)}>{waitLabel}</p>
+          <p className={cn("text-xs whitespace-nowrap", STATUS_TEXT.pending)}>
+            {waitLabel}
+          </p>
         )}
       </div>
       {nodes.length === 0 ? (
         <p className="text-muted-foreground mt-1 text-sm">
-          No child sessions yet.
+          No child conversations yet.
         </p>
       ) : (
         <ul className="mt-1 flex flex-col gap-1">

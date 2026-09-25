@@ -174,6 +174,26 @@ on the critical tint. Every button, destructive included, focuses with the
 - Don't hand-pick status rungs in code mode; go through `statusTone.ts`.
 - Don't paint a feature nobody has set up as critical.
 
+## Words
+
+Each thing a person meets has one name, in visible text and in what a
+screen reader says.
+
+- A conversation is the record, in Work and in Code: "Delete conversation",
+  "Could not load this conversation", "Background agents per conversation".
+  An untitled one reads "New conversation" in Work.
+- Work is the mode and its navigation label: the mode switch, the rail
+  section, the Work group in keyboard shortcuts. It never names a single
+  conversation.
+- A session is an engine's lifecycle: starting, reconnecting, restoring, or
+  stopping. A session a person opens, searches, or deletes is a conversation.
+- An engine runs a coding agent: Claude Code, Codex, and the rest. "Harness"
+  stays in identifiers, types, file names, routes, and wire values.
+
+`src/vocabularyContract.test.ts` fails the build on "harness" in copy and on
+"work" as a count noun ("this work", "the work", "per work", "Delete work",
+"Rename work").
+
 ## Extending the system
 
 A new status tone is a five-member quad in both themes in `styles.css`, an

@@ -119,7 +119,7 @@ export function useChatPromptWatcher(
         for (const { entry, item } of parked) {
           const sessionId = entry.conversation.sessionId;
           void presentNeedsYou({
-            name: entry.title?.trim() || "New work",
+            name: entry.title?.trim() || "New conversation",
             href: `/c/${sessionId}`,
             viewing: chatIdRef.current === sessionId,
             question: () => workParkedQuestion(client, sessionId, item),

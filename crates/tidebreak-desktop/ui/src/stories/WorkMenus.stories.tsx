@@ -109,8 +109,8 @@ export const PermissionPosture: Story = {
 };
 
 /**
- * New work starts on the model picked last. When that is not the default
- * Settings names, the menu says so and marks the default.
+ * A new conversation starts on the model picked last. When that is not the
+ * default Settings names, the menu says so and marks the default.
  */
 export const LastUsedAndDefault: Story = {
   args: { menu: "model" },

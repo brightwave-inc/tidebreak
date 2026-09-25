@@ -7,9 +7,9 @@ import {
 import { QuickActionsPanel } from "@/settings/QuickActionsPanel";
 
 /**
- * The prompts workspace actions send into chat. Defaults are the shipped
- * wording; a customized Create PR is the state a reader who has edited one
- * field actually sees, including a live Reset.
+ * The prompts workspace actions send into the conversation. Defaults are the
+ * shipped wording; a customized Create PR is the state a reader who has edited
+ * one field actually sees, including a live Reset.
  */
 const meta = {
   title: "Settings/Quick actions",

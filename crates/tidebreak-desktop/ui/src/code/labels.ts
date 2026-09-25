@@ -105,7 +105,7 @@ export const PERMISSION_MODE_POLICY_BLOCKED =
  * live engine that fixes its posture when the session starts (opencode).
  */
 export const SESSION_PERMISSION_MODE_LOCKED =
-  "Set when the session started — start a new session to change it";
+  "Set when the session started — start a new conversation to change it";
 
 /** Create-time hint when the selected engine cannot change mode after start. */
 export const CREATE_PERMISSION_MODE_FIXED =
@@ -113,7 +113,7 @@ export const CREATE_PERMISSION_MODE_FIXED =
 
 /** What each posture does, in one line, for the surfaces that state it. */
 export const PERMISSION_MODE_POSTURES: Record<PermissionMode, string> = {
-  plan: "Plans the work and writes nothing",
+  plan: "Plans the task and writes nothing",
   ask: "Asks before every tool that changes something",
   auto: "Decides for itself as it works",
   allow: "Runs every tool without asking",

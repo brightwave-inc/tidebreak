@@ -270,7 +270,7 @@ export function withCodeReposApi<TBase extends Constructor<HttpCore>>(
         parseHarnessDoctorReport(
           await this.json("/code/harnesses", { headers: this.headers() }),
         ),
-        "harness doctor",
+        "coding engines",
       );
     }
 
@@ -311,7 +311,7 @@ export function withCodeReposApi<TBase extends Constructor<HttpCore>>(
             },
           ),
         ),
-        "harness models",
+        "engine models",
       );
     }
 
@@ -341,7 +341,7 @@ export function withCodeReposApi<TBase extends Constructor<HttpCore>>(
             headers: this.headers(),
           }),
         ),
-        "harness install",
+        "engine install",
       );
     }
 
@@ -358,7 +358,7 @@ export function withCodeReposApi<TBase extends Constructor<HttpCore>>(
             headers: this.headers(),
           }),
         ),
-        "harness doctor",
+        "coding engines",
       );
     }
 
@@ -370,7 +370,7 @@ export function withCodeReposApi<TBase extends Constructor<HttpCore>>(
             headers: this.headers(),
           }),
         ),
-        "harness doctor",
+        "coding engines",
       );
     }
   };

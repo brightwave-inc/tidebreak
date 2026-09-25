@@ -298,7 +298,7 @@ const CODE_ONBOARDING_STEPS = [
   },
   {
     icon: Sparkles,
-    title: "Start the work",
+    title: "Start a task",
     description: "Choose a coding agent and hand it a concrete task.",
   },
 ];

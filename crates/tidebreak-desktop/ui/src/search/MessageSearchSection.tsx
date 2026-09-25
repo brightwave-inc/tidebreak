@@ -168,7 +168,7 @@ function MessageHitRow({
 }) {
   const Icon = hit.kind === "chat" ? MessageSquare : SquareTerminal;
   const title = hitTitle(hit);
-  const kind = hit.kind === "chat" ? "Chat" : "Code";
+  const kind = hit.kind === "chat" ? "Work" : "Code";
   const when = relativeWhen(hit.created_at, now);
   const segments = snippetSegments(hit.snippet, hit.ranges);
   return (

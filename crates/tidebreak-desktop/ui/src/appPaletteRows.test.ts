@@ -44,10 +44,10 @@ function chatRows(overrides: Partial<Chat> = {}) {
 describe("palette rows for the chat on screen", () => {
   it("renames, exports, finds, and deletes through the app's own actions", () => {
     const { actions, pick } = chatRows();
-    pick("Rename this work");
-    pick("Export this work");
+    pick("Rename this conversation");
+    pick("Export this conversation");
     pick("Find in this conversation");
-    pick("Delete this work");
+    pick("Delete this conversation");
     expect(actions.onRename).toHaveBeenCalledOnce();
     expect(actions.onExport).toHaveBeenCalledOnce();
     expect(actions.onFind).toHaveBeenCalledOnce();
@@ -81,7 +81,7 @@ describe("palette rows for the chat on screen", () => {
   it("is found by what the reader types", () => {
     const { rows } = chatRows();
     const groups = rankPaletteRows(rows, "export");
-    expect(groups[0]?.rows[0]?.label).toBe("Export this work");
+    expect(groups[0]?.rows[0]?.label).toBe("Export this conversation");
   });
 });
 

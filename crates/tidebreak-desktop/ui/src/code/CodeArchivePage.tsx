@@ -290,7 +290,8 @@ function CodeArchiveBody() {
               )}
             </div>
             <p className="mt-0.5 text-sm text-muted-foreground">
-              Search old work, inspect its pull request, or restore it.
+              Search archived workspaces, inspect their pull requests, or
+              restore one.
             </p>
           </div>
           <Button
@@ -405,7 +406,7 @@ function CodeArchiveBody() {
               </EmptyMedia>
               <EmptyTitle>Searching conversations</EmptyTitle>
               <EmptyDescription>
-                Checking archived session history for this search.
+                Checking archived conversations for this search.
               </EmptyDescription>
             </EmptyHeader>
           </Empty>

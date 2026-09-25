@@ -688,7 +688,7 @@ export function CodeSessionPane({
           trailingNotice={
             historyItems ? (
               <EarlierHistoryNotice
-                label="This is an earlier part of the session. Newer activity is not shown here."
+                label="This is an earlier part of the conversation. Newer activity is not shown here."
                 onLeave={() => {
                   transcriptSearch.leaveHistory();
                   follow.armFollow(followScrollBehavior(false));

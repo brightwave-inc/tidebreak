@@ -230,7 +230,7 @@ describe("WebSearchPanel", () => {
 
     expect(await screen.findByText(/Built-in search only/)).toBeTruthy();
     expect(
-      screen.getByText(/searches through the model it is running on/),
+      screen.getByText(/searches through the conversation's model/),
     ).toBeTruthy();
   });
 

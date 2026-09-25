@@ -383,8 +383,8 @@ export const HomeManagedNoModel: Story = {
 };
 
 /**
- * New work started from a project: the composer names the project the work
- * will be filed in, and the conversation waits for the first message.
+ * A new conversation started from a project: the composer names the project
+ * it will be filed in, and the conversation waits for the first message.
  */
 export const HomeInProject: Story = {
   args: { scenario: "home-project" },

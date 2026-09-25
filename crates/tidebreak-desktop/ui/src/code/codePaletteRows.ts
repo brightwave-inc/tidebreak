@@ -289,7 +289,7 @@ export function codeNavigationPaletteRows(input: {
     {
       id: "navigate:chat",
       section: "navigate",
-      label: "Go to chat",
+      label: "Go to Work",
       keywords: "work conversations",
       icon: MessageSquare,
       onSelect: () => input.navigate("/"),

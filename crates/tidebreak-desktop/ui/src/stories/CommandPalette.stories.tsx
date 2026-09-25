@@ -63,7 +63,7 @@ const actionRows: PaletteRow[] = [
   {
     id: "action:new-session",
     section: "actions",
-    label: "New session",
+    label: "New conversation",
     icon: Plus,
     onSelect: fn(),
   },
@@ -150,7 +150,7 @@ const navigateRows: PaletteRow[] = [
   {
     id: "navigate:chat",
     section: "navigate",
-    label: "Go to chat",
+    label: "Go to Work",
     onSelect: fn(),
   },
 ];
@@ -191,7 +191,7 @@ const chatRows: PaletteRow[] = [
   {
     id: "navigate:new-chat",
     section: "actions",
-    label: "Start new work",
+    label: "Start a new conversation",
     icon: Plus,
     shortcut: "new-chat",
     onSelect: fn(),

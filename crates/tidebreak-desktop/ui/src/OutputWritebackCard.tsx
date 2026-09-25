@@ -27,8 +27,8 @@ export function OutputWritebackCard({
     ? "Replace an existing file?"
     : "Write a file to a connected folder?";
   const subtitle = replacing
-    ? "The agent wants to replace a file in a folder connected to this work. The native desktop will verify the connected folder, destination, and current output revision before writing."
-    : "The agent wants to write one of this work's outputs into a folder connected to this work. The native desktop will verify the connected folder, destination, and current output revision before writing.";
+    ? "The agent wants to replace a file in a folder connected to this conversation. The native desktop will verify the connected folder, destination, and current output revision before writing."
+    : "The agent wants to write one of this conversation's outputs into a connected folder. The native desktop will verify the connected folder, destination, and current output revision before writing.";
   const allowLabel = replacing ? "Allow replacement" : "Allow write";
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const choices = [

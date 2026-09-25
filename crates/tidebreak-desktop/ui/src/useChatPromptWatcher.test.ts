@@ -196,7 +196,7 @@ describe("useChatPromptWatcher", () => {
 
     await waitFor(() => expect(presentNeedsYou).toHaveBeenCalledTimes(1));
     expect(presentNeedsYou.mock.calls[0]![0]).toMatchObject({
-      name: "New work",
+      name: "New conversation",
       viewing: true,
     });
   });

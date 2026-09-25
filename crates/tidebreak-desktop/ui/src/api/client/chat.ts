@@ -197,13 +197,15 @@ export function withChatApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
         headers: this.headers(),
       });
       if (!Array.isArray(body)) {
-        throw new Error("pending chat prompt response is not an array");
+        throw new Error("pending conversation prompt response is not an array");
       }
       const prompts = new Map<string, PendingChatPrompt>();
       for (const item of body) {
         const prompt = parsePendingChatPrompt(item);
         if (!prompt || prompts.has(prompt.chatId)) {
-          throw new Error("pending chat prompt response contains invalid data");
+          throw new Error(
+            "pending conversation prompt response contains invalid data",
+          );
         }
         prompts.set(prompt.chatId, prompt);
       }

@@ -97,10 +97,10 @@ export function RecentChatRow({
   onArchive: () => void;
   onDelete: () => void;
 }) {
-  const title = chat.title?.trim() || "New work";
+  const title = chat.title?.trim() || "New conversation";
   // A name the server just derived is typed out, so the row visibly stops being
-  // "New work" instead of silently having always been something else. A name that
-  // was already there when this mounted appears at once.
+  // "New conversation" instead of silently having always been something else.
+  // A name that was already there when this mounted appears at once.
   const justNamed = useChatListStore(
     (state) => state.derivedTitleChatId === chat.id,
   );
@@ -115,7 +115,7 @@ export function RecentChatRow({
       <Input
         className="h-auto px-2 py-1.5 text-sm"
         autoFocus
-        aria-label="Work title"
+        aria-label="Conversation title"
         value={renameDraft}
         disabled={savingTitle}
         onChange={(event) => onRenameDraftChange(event.target.value)}

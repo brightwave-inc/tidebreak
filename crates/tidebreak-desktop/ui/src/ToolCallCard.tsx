@@ -605,7 +605,7 @@ export function toolApprovalPresentation(
   if (kind === "exec_may_run_networked_command") {
     return {
       summary:
-        "Allow Tidebreak to run a command that leaves this work's workspace and may reach the network?",
+        "Allow Tidebreak to run a command that leaves this conversation's workspace and may reach the network?",
       canApprove: true,
       canRemember: true,
     };
@@ -622,7 +622,7 @@ export function toolApprovalPresentation(
   if (kind === "workspace_may_modify_files") {
     return {
       summary:
-        "Allow Tidebreak to create or modify files in this work's workspace?",
+        "Allow Tidebreak to create or modify files in this conversation's workspace?",
       canApprove: true,
       // The standing "yes" for workspace edits is the chat's Auto permission
       // mode, not a per-tool grant.
@@ -632,7 +632,7 @@ export function toolApprovalPresentation(
   if (kind === "delegate_may_run_background_agent") {
     return {
       summary:
-        "Allow a background agent to work on this on its own, reaching the network under this work's policy?",
+        "Allow a background agent to work on this on its own, reaching the network under this conversation's policy?",
       canApprove: true,
       // Consent is for the whole run, so it is worth remembering: a run's own
       // calls never come back to be asked about individually.

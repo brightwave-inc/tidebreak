@@ -34,7 +34,7 @@ export function useChatMemoryPresence(
 /** Phrase the memory snapshot for one conversation. */
 export function memorySummary(facts: MemoryFacts, incognito: boolean): string {
   if (!facts.settings.enabled) return "Off";
-  if (incognito) return "Off for this chat";
+  if (incognito) return "Off for this conversation";
   const count = facts.digest.record_count;
   if (count === 0) return "On · nothing approved yet";
   return count === 1 ? "1 record in context" : `${count} records in context`;

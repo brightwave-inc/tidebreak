@@ -41,7 +41,7 @@ async function openMenu() {
     </AppContextProvider>,
     { initialUrl: "/c/chat-1" },
   );
-  await user.click(screen.getByRole("button", { name: "Work menu" }));
+  await user.click(screen.getByRole("button", { name: "Conversation menu" }));
 }
 
 describe("ChatHeaderTitle diagnostics", () => {

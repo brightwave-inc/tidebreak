@@ -43,7 +43,7 @@ const rows: PaletteRow[] = [
   {
     id: "navigate:new-chat",
     section: "actions",
-    label: "Start new work",
+    label: "Start a new conversation",
     icon: Plus,
     shortcut: "new-chat",
     onSelect: fn(),

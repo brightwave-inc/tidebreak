@@ -117,7 +117,7 @@ describe("individually stopped sessions", () => {
       />,
     );
     expect(
-      screen.getByText("Computer control is stopped for 1 session"),
+      screen.getByText("Computer control is stopped for 1 conversation"),
     ).toBeTruthy();
     expect(screen.queryByText("Computer control is stopped")).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Resume" }));
@@ -145,11 +145,11 @@ describe("individually stopped sessions", () => {
     );
     expect(screen.getByText("Computer use: Editor")).toBeTruthy();
     expect(
-      screen.getByText("2 sessions have stopped computer control."),
+      screen.getByText("2 conversations have stopped computer control."),
     ).toBeTruthy();
     expect(screen.queryByText("Computer control is stopped")).toBeNull();
     await userEvent.click(
-      screen.getByRole("button", { name: "Resume stopped sessions" }),
+      screen.getByRole("button", { name: "Resume stopped conversations" }),
     );
     expect(resume).toHaveBeenCalledOnce();
     expect(stop).not.toHaveBeenCalled();
@@ -178,7 +178,7 @@ it("keeps emergency Stop available while Resume waits for native approval", asyn
     />,
   );
   await userEvent.click(
-    screen.getByRole("button", { name: "Resume stopped sessions" }),
+    screen.getByRole("button", { name: "Resume stopped conversations" }),
   );
   expect(resume).toHaveBeenCalledOnce();
   const stopButton = screen.getByRole("button", {

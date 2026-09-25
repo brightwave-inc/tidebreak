@@ -52,7 +52,7 @@ const KIND_PRESENTATION: Record<
   },
   folder_access: {
     label: "Folder access",
-    description: "A folder needs connecting before the work can go on.",
+    description: "A folder needs connecting before the conversation can go on.",
     icon: FolderOpen,
     iconClass: "text-icon-amber",
   },
@@ -156,7 +156,7 @@ function InboxRow({
   const kind = entry.items[0]?.kind;
   const presentation = kind ? KIND_PRESENTATION[kind] : undefined;
   const Icon = presentation?.icon ?? ShieldQuestion;
-  const title = entry.title?.trim() || "New work";
+  const title = entry.title?.trim() || "New conversation";
   const label = presentation?.label ?? attentionLabel(entry.attention);
   const description =
     presentation?.description ?? attentionLabel(entry.attention);
