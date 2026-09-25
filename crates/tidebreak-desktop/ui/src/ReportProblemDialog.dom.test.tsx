@@ -13,7 +13,7 @@ const FACTS: ProblemReportFacts = {
 };
 
 const ISSUE =
-  "https://github.com/brightwave-inc/tidebreak/issues/new?template=bug-report.yml&version=0.117.0&os=macOS+15.6&arch=arm64";
+  "https://github.com/naingthet/tidebreak/issues/new?template=bug-report.yml&version=0.117.0&os=macOS+15.6&arch=arm64";
 
 afterEach(cleanup);
 

@@ -131,7 +131,7 @@ describe("uneff me prompt", () => {
     expect(prompt).toContain("Fix login");
     expect(prompt).toContain("tidebreak/fix-login");
     expect(prompt).toContain("Start by asking the user what went wrong");
-    expect(prompt).toContain("gh issue create --repo brightwave-inc/tidebreak");
+    expect(prompt).toContain("gh issue create --repo naingthet/tidebreak");
     expect(prompt).toContain("open the pull request against main");
     expect(prompt).toContain("gh repo fork --remote");
     expect(prompt).toContain("Never paste the whole report");
@@ -163,7 +163,7 @@ describe("uneff me prompt", () => {
       inTidebreakCheckout: false,
     });
     expect(prompt).toContain("not a Tidebreak checkout");
-    expect(prompt).toContain("gh issue create --repo brightwave-inc/tidebreak");
+    expect(prompt).toContain("gh issue create --repo naingthet/tidebreak");
     expect(prompt).toContain("clone it only after they say yes");
     expect(prompt).toContain("Do not clone anything without asking");
     expect(prompt).toContain("adding the Tidebreak repository to Code");
