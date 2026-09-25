@@ -2777,9 +2777,22 @@ test("the packaged updater trusts the production signing key and endpoint", () =
     Buffer.from(updater.pubkey, "base64").toString("utf8"),
     /minisign public key/,
   );
-  assert.deepEqual(updater.endpoints, [
-    "https://downloads.brightwave.io/tidebreak/latest.json",
-  ]);
+  // Tidebreak's home moves to github.com/naingthet/tidebreak, and the
+  // packaged updater follows its release feed. Either feed passes while the
+  // move lands; nothing else does.
+  const allowed = [
+    ["https://downloads.brightwave.io/tidebreak/latest.json"],
+    [
+      "https://github.com/naingthet/tidebreak/releases/latest/download/latest.json",
+    ],
+  ];
+  assert.ok(
+    allowed.some(
+      (endpoints) =>
+        JSON.stringify(endpoints) === JSON.stringify(updater.endpoints),
+    ),
+    `unexpected updater endpoints: ${JSON.stringify(updater.endpoints)}`,
+  );
 });
 
 test("staging desktop publishes only under the staging prefix", () => {
