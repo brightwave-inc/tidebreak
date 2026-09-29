@@ -62,7 +62,7 @@
     "@tanstack/react-virtual": "3.14.13",
     "@tauri-apps/api": "2.11.1",
     "@univerjs/core": "0.25.1",
-    "@univerjs/engine-formula": "0.25.1",
+    "@univerjs/engine-formula": "1.0.2",
     "@univerjs/preset-sheets-core": "0.25.1",
     "@univerjs/presets": "0.25.1",
     "@univerjs/rpc": "0.25.1",
