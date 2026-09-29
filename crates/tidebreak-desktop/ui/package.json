@@ -65,7 +65,7 @@
     "@univerjs/engine-formula": "0.25.1",
     "@univerjs/preset-sheets-core": "0.25.1",
     "@univerjs/presets": "0.25.1",
-    "@univerjs/rpc": "0.25.1",
+    "@univerjs/rpc": "1.0.2",
     "@univerjs/sheets": "0.25.1",
     "@univerjs/sheets-formula": "0.25.1",
     "@xterm/addon-fit": "0.11.0",
