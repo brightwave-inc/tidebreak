@@ -63,7 +63,7 @@
     "@tauri-apps/api": "2.11.1",
     "@univerjs/core": "0.25.1",
     "@univerjs/engine-formula": "0.25.1",
-    "@univerjs/preset-sheets-core": "0.25.1",
+    "@univerjs/preset-sheets-core": "1.0.2",
     "@univerjs/presets": "0.25.1",
     "@univerjs/rpc": "0.25.1",
     "@univerjs/sheets": "0.25.1",
