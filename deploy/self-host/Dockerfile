@@ -51,7 +51,7 @@ RUN pnpm build
 # does not trust the mutable tag: this is rust:1-bookworm as of 2026-08-10.
 # Update the digest deliberately alongside toolchain bumps
 # (`docker buildx imagetools inspect rust:1-bookworm` prints the current one).
-FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
+FROM rust:1-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS build
 WORKDIR /src
 
 # Copy the whole workspace. A dependency-only pre-build cache layer is a later
