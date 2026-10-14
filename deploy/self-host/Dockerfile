@@ -89,7 +89,7 @@ RUN set -eu; \
 # ---- runtime ---------------------------------------------------------------
 # Digest-pinned like the build stage: this is debian:bookworm-slim as of
 # 2026-08-10.
-FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime-base
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime-base
 
 # ca-certificates: the binary's TLS stack is rustls (no OpenSSL anywhere in
 # the lockfile), but parts of the graph resolve platform roots, so the system
