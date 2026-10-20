@@ -121,7 +121,7 @@ portable-pty = "=0.9.0"
 # Compares worktree paths the way a disk that folds Unicode normalization
 # does, so an undo never touches one file through two spellings. Already in
 # Cargo.lock; making it direct leaves resolution unchanged.
-unicode-normalization = "=0.1.25"
+unicode-normalization = "=0.1.26"
 
 [target.'cfg(unix)'.dependencies]
 # Effective-uid account lookup (getpwuid_r) for the macOS managed-preferences

@@ -48,14 +48,14 @@ fancy-regex = "=0.19.2"
 serde = { version = "=1.0.229", features = ["derive"] }
 # `unbounded_depth` matches what tauri-build already enables in the desktop
 # graph, so every build selection resolves one serde_json instead of two.
-serde_json = { version = "=1.0.151", features = ["unbounded_depth"] }
+serde_json = { version = "=1.0.154", features = ["unbounded_depth"] }
 # Parses the same `$CODEX_HOME/config.toml` the Codex engine parses, so
 # auth-override detection and the engine child-env filter agree with the
 # engine (and each other) about what the config declares. A substring scan
 # cannot tell a declared provider from a comment, and the filter must
 # forward exactly the env keys the declared providers name.
 toml = "=1.1.6"
-schemars = { version = "=1.2.2", features = ["uuid1"] }
+schemars = { version = "=1.2.3", features = ["uuid1"] }
 # Validates tool-call arguments against the advertised input_schema at
 # dispatch. No resolvers: schemas come from the registry or a mounted MCP
 # server, so nothing is fetched over the network or read from disk.
@@ -65,10 +65,10 @@ cap-std = "=4.0.3"
 cap-fs-ext = "=4.0.3"
 futures = "=0.3.34"
 futures-timer = "=3.0.4"
-thiserror = "=2.0.20"
-uuid = { version = "=1.26.1", features = ["v4", "serde"] }
+thiserror = "=2.0.21"
+uuid = { version = "=1.28.0", features = ["v4", "serde"] }
 unicode-general-category = "=1.1.0"
-unicode-normalization = "=0.1.25"
+unicode-normalization = "=0.1.26"
 chrono = { version = "=0.4.45", features = ["serde"] }
 # Generates the renderer's TypeScript wire types from these serde definitions.
 # `serde-compat` is what makes the output trustworthy: ts-rs reads the same
@@ -82,8 +82,8 @@ chrono = { version = "=0.4.45", features = ["serde"] }
 # pinned by a test rather than left to coincidence.
 ts-rs = { version = "=12.0.1", features = ["chrono-impl", "uuid-impl", "no-serde-warnings"] }
 windows-sys = "=0.61.2"
-sea-orm = { version = "=2.0.3", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
-sea-orm-migration = { version = "=2.0.3", default-features = false, features = ["runtime-tokio-rustls"] }
+sea-orm = { version = "=2.0.4", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
+sea-orm-migration = { version = "=2.0.4", default-features = false, features = ["runtime-tokio-rustls"] }
 # One unified feature set for every build selection, so `-p` builds, the
 # `--workspace` lanes, and the release sidecar/desktop builds all share the
 # same compiled tokio (and everything above it) instead of resolving
@@ -93,7 +93,7 @@ sea-orm-migration = { version = "=2.0.3", default-features = false, features = [
 # is only paused-clock test plumbing, but it is behavior-neutral unless
 # `pause()` is called, and carrying it here keeps `cargo build` and
 # `cargo test` on one tokio artifact.
-tokio = { version = "=1.53.1", features = [
+tokio = { version = "=1.53.3", features = [
     "fs",
     "io-std",
     "io-util",
@@ -107,7 +107,7 @@ tokio = { version = "=1.53.1", features = [
     "test-util",
     "time",
 ] }
-tokio-util = { version = "=0.7.19", features = ["io-util"] }
+tokio-util = { version = "=0.7.20", features = ["io-util"] }
 # Use rustls for WebSockets; the loopback chat socket itself is plain ws://.
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 # Share reqwest with tauri-plugin-updater. In reqwest 0.13, `rustls` enables
@@ -116,12 +116,12 @@ tokio-tungstenite = { version = "=0.30.0", default-features = false, features = 
 reqwest = { version = "=0.13.5", default-features = false, features = ["json", "multipart", "stream", "query", "form", "rustls"] }
 oauth2 = { version = "=5.0.0", default-features = false }
 jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["aws_lc_rs"] }
-sha2 = "=0.11.0"
+sha2 = "=0.11.1"
 symphonia = { version = "=0.6.1", default-features = false, features = ["aac", "alac", "isomp4", "mkv"] }
 opus-decoder = "=0.1.1"
 base64 = "=0.23.1"
 minisign-verify = "=0.2.5"
-libc = "=0.2.189"
+libc = "=0.2.191"
 async-stream = "=0.3.6"
 object_store = { version = "=0.14.2", default-features = false, features = ["aws", "fs"] }
 axum = { version = "=0.8.9", features = ["ws"] }
