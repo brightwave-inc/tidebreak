@@ -130,7 +130,7 @@ jobs:
       # events an app causes trigger workflows, unlike GITHUB_TOKEN, and the
       # label job listens on the label events it emits.
       - id: app_token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         with:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -172,7 +172,7 @@ jobs:
             attempt=$((attempt + 1))
           done
       - id: release_drafter
-        uses: release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9 # v7
+        uses: release-drafter/release-drafter@978bb0b30c5ee8cdd332ced253758157150d43f0 # v7
         env:
           GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
       - name: Keep exactly one native release draft
