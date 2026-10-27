@@ -183,7 +183,7 @@ jobs:
             exit 1
           }
       - name: Retain the release draft snapshot
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tidebreak-release-${{ steps.release.outputs.release_id }}-snapshot
           path: ${{ runner.temp }}/release-snapshot.json
@@ -215,7 +215,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.18.3
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: pnpm
@@ -244,7 +244,7 @@ jobs:
               > "$RUNNER_TEMP/tidebreak-docs-$RELEASE_TAG.sha256"
           )
       - name: Transfer inert prebuilt documentation
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tidebreak-docs-${{ needs.validate.outputs.tag }}-prebuilt
           path: .vercel/output
@@ -252,7 +252,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Retain the static-content digest manifest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tidebreak-docs-${{ needs.validate.outputs.tag }}-manifest
           path: ${{ runner.temp }}/tidebreak-docs-${{ needs.validate.outputs.tag }}.sha256
@@ -290,7 +290,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: .github/vercel-cli
           sparse-checkout-cone-mode: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
       # pnpm/action-setup installs a bootstrap release and then self-updates it.
@@ -304,12 +304,12 @@ jobs:
       - name: Install the locked deployment client
         run: pnpm --dir .github/vercel-cli install --frozen-lockfile --ignore-scripts
       - name: Download the inert prebuilt documentation
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-docs-${{ needs.validate.outputs.tag }}-prebuilt
           path: .vercel/output
       - name: Download the documentation digest manifest
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-docs-${{ needs.validate.outputs.tag }}-manifest
           path: ${{ runner.temp }}/docs-manifest
@@ -723,7 +723,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.18.3
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: pnpm
@@ -826,7 +826,7 @@ jobs:
           )
 
       - name: Upload prepared macOS inputs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tidebreak-prepared-macos-${{ matrix.target }}-${{ github.run_id }}
           path: |
@@ -853,13 +853,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download prepared aarch64 macOS inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-prepared-macos-aarch64-apple-darwin-${{ github.run_id }}
           path: ${{ runner.temp }}/prepared-macos-aarch64-apple-darwin-download
 
       - name: Download prepared x86_64 macOS inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-prepared-macos-x86_64-apple-darwin-${{ github.run_id }}
           path: ${{ runner.temp }}/prepared-macos-x86_64-apple-darwin-download
@@ -960,7 +960,7 @@ jobs:
           shasum -a 256 prepared-macos.tar > prepared-macos.tar.sha256
 
       - name: Upload prepared universal macOS inputs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tidebreak-prepared-macos-universal-${{ github.run_id }}
           path: |
@@ -1000,7 +1000,7 @@ jobs:
           ref: ${{ needs.validate.outputs.sha }}
 
       - name: Download prepared macOS inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-prepared-macos-universal-${{ github.run_id }}
           path: ${{ runner.temp }}/prepared-macos-download
@@ -1057,7 +1057,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.18.3
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: pnpm
@@ -1366,7 +1366,7 @@ jobs:
           find "$output_dir" -type f -print
 
       - name: Upload verified macOS artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tidebreak-macos-universal-${{ needs.validate.outputs.version }}
           path: dist/macos/universal/
@@ -1546,7 +1546,7 @@ jobs:
           )
 
       - name: Upload prepared Windows sidecars
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tidebreak-prepared-windows-sidecars-${{ matrix.arch }}-${{ github.run_id }}
           path: |
@@ -1671,7 +1671,7 @@ jobs:
           cache-targets: false
           save-if: true
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
       - name: Enable pinned pnpm
@@ -1753,7 +1753,7 @@ jobs:
           )
 
       - name: Upload prepared Windows desktop
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tidebreak-prepared-windows-desktop-${{ matrix.arch }}-${{ github.run_id }}
           path: |
@@ -1805,13 +1805,13 @@ jobs:
           ref: ${{ needs.validate.outputs.sha }}
 
       - name: Download prepared Windows sidecars
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-prepared-windows-sidecars-${{ matrix.arch }}-${{ github.run_id }}
           path: ${{ runner.temp }}/prepared-windows-sidecars-download
 
       - name: Download prepared Windows desktop
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-prepared-windows-desktop-${{ matrix.arch }}-${{ github.run_id }}
           path: ${{ runner.temp }}/prepared-windows-desktop-download
@@ -1886,7 +1886,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.18.3
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: pnpm
@@ -1986,7 +1986,7 @@ jobs:
           find "$output_dir" -type f -print
 
       - name: Upload verified Windows artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tidebreak-windows-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
           path: dist/windows/${{ matrix.arch }}/
@@ -2079,7 +2079,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.18.3
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
       - name: Install UI dependencies
@@ -2184,7 +2184,7 @@ jobs:
           find "$output_dir" -type f -print
 
       - name: Upload verified Linux artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tidebreak-linux-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
           path: dist/linux/${{ matrix.arch }}/
@@ -2214,7 +2214,7 @@ jobs:
         run: mkdir -p source-sbom
 
       - name: Generate the source-scoped release SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: release-source
           format: spdx-json
@@ -2233,7 +2233,7 @@ jobs:
           printf '%s  %s\n' "$sbom_digest" "$sbom_name" > "$sbom.sha256"
 
       - name: Upload the checksummed source SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tidebreak-source-sbom-${{ needs.validate.outputs.version }}
           path: source-sbom/
@@ -2314,7 +2314,7 @@ jobs:
             needs.validate.outputs.draft == 'true'
             && needs.inspect_hosted.outputs.exists != 'true'
           }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-macos-universal-${{ needs.validate.outputs.version }}
           path: dist/macos/universal
@@ -2326,7 +2326,7 @@ jobs:
             && needs.validate.outputs.draft == 'true'
             && needs.inspect_hosted.outputs.exists != 'true'
           }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-windows-x86_64-${{ needs.validate.outputs.version }}
           path: dist/windows/x86_64
@@ -2338,7 +2338,7 @@ jobs:
             && needs.validate.outputs.draft == 'true'
             && needs.inspect_hosted.outputs.exists != 'true'
           }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-windows-aarch64-${{ needs.validate.outputs.version }}
           path: dist/windows/aarch64
@@ -2350,7 +2350,7 @@ jobs:
             && needs.validate.outputs.draft == 'true'
             && needs.inspect_hosted.outputs.exists != 'true'
           }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-linux-x86_64-${{ needs.validate.outputs.version }}
           path: dist/linux/x86_64
@@ -2362,7 +2362,7 @@ jobs:
             && needs.validate.outputs.draft == 'true'
             && needs.inspect_hosted.outputs.exists != 'true'
           }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-linux-aarch64-${{ needs.validate.outputs.version }}
           path: dist/linux/aarch64
@@ -2452,7 +2452,7 @@ jobs:
             needs.validate.outputs.draft == 'true'
             && needs.inspect_hosted.outputs.exists != 'true'
           }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-source-sbom-${{ needs.validate.outputs.version }}
           path: dist
@@ -2667,42 +2667,42 @@ jobs:
     steps:
       - name: Download the verified macOS build
         if: ${{ needs.validate.outputs.draft == 'true' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-macos-universal-${{ needs.validate.outputs.version }}
           path: release-artifacts/macos
 
       - name: Download the verified x86_64 Windows build
         if: ${{ inputs.platforms == 'all' && needs.validate.outputs.draft == 'true' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-windows-x86_64-${{ needs.validate.outputs.version }}
           path: release-artifacts/windows/x86_64
 
       - name: Download the verified ARM64 Windows build
         if: ${{ inputs.platforms == 'all' && needs.validate.outputs.draft == 'true' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-windows-aarch64-${{ needs.validate.outputs.version }}
           path: release-artifacts/windows/aarch64
 
       - name: Download the verified x86_64 Linux build
         if: ${{ inputs.platforms == 'all' && needs.validate.outputs.draft == 'true' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-linux-x86_64-${{ needs.validate.outputs.version }}
           path: release-artifacts/linux/x86_64
 
       - name: Download the verified ARM64 Linux build
         if: ${{ inputs.platforms == 'all' && needs.validate.outputs.draft == 'true' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-linux-aarch64-${{ needs.validate.outputs.version }}
           path: release-artifacts/linux/aarch64
 
       - name: Download the checksummed source SBOM
         if: ${{ needs.validate.outputs.draft == 'true' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-source-sbom-${{ needs.validate.outputs.version }}
           path: release-artifacts/sbom
@@ -2960,7 +2960,7 @@ jobs:
     steps:
       - name: Download the frozen release metadata
         if: ${{ needs.validate.outputs.draft == 'true' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: tidebreak-release-${{ needs.validate.outputs.release_id }}-snapshot
           path: ${{ runner.temp }}/release-snapshot
