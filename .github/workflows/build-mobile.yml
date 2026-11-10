@@ -127,10 +127,10 @@ jobs:
       # node-version-file), so the pnpm version comes from
       # mobile/package.json's `packageManager` pin and Node is set
       # explicitly. Keep the two mobile workflows in step.
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           version: 10.18.3
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: pnpm
@@ -139,7 +139,7 @@ jobs:
       - name: Install locked dependencies
         run: pnpm --dir mobile install --frozen-lockfile
 
-      - uses: expo/expo-github-action@eab7a230208c952974db8c3245cfd78402c7b385 # v9
+      - uses: expo/expo-github-action@5273c2136bd09c2a341fe3340d3e767ce5a13015 # v9
         with:
           eas-version: 18.8.1
           token: ${{ secrets.EXPO_TOKEN }}
