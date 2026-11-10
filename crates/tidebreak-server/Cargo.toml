@@ -88,7 +88,7 @@ infer = { version = "=0.22.0", default-features = false }
 # Managed-preferences (MDM) plist decoding for the macOS policy reader. A
 # regular dependency, not a macOS-only one, so the extraction stays
 # unit-testable on every OS.
-plist = "=1.10.1"
+plist = "=1.10.3"
 # Managed-policy resolution deliberately projects authority failures into a
 # minimal misconfigured state; these warnings are the admin's field
 # diagnostic for what exactly is broken.
@@ -102,12 +102,12 @@ tracing-subscriber = { version = "=0.3.23", default-features = false, features =
 # on the disk from a runtime worker.
 tracing-appender = "=0.2.5"
 # Bounded unified diffs for the post-turn connected-folder change summary.
-similar = "=3.2.0"
+similar = "=3.2.1"
 # Private, automatically removed inputs and outputs for ephemeral document previews.
 tempfile = { workspace = true }
 # Pinned source archives accepted by the plugin importer. These versions are
 # already present in Cargo.lock; making them direct leaves resolution unchanged.
-flate2 = "=1.1.10"
+flate2 = "=1.1.11"
 tar = "=0.4.46"
 url = { workspace = true }
 # Readability + HTML parse stack for native page extraction.
@@ -121,7 +121,7 @@ portable-pty = "=0.9.0"
 # Compares worktree paths the way a disk that folds Unicode normalization
 # does, so an undo never touches one file through two spellings. Already in
 # Cargo.lock; making it direct leaves resolution unchanged.
-unicode-normalization = "=0.1.25"
+unicode-normalization = "=0.1.26"
 
 [target.'cfg(unix)'.dependencies]
 # Effective-uid account lookup (getpwuid_r) for the macOS managed-preferences
@@ -129,7 +129,7 @@ unicode-normalization = "=0.1.25"
 libc = { workspace = true }
 # Extended attributes an undo saves and writes back with a file. Already in
 # Cargo.lock through tar; making it direct leaves resolution unchanged.
-xattr = "=1.6.1"
+xattr = "=1.7.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes"] }
